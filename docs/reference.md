@@ -203,6 +203,9 @@ cannot be closed.
 | The file tree | `Cmd-Shift-E` |
 | Agents | `Cmd-Shift-A` |
 
+These are the default keys; [Keyboard shortcuts](#keyboard-shortcuts) has
+every key and how to change it.
+
 ## Timeline
 
 Conversation is the item's description, what was said about it, and what was
@@ -526,9 +529,12 @@ the original database in place.
 
 `Cmd-,` (`Ctrl-,` off macOS), **Settings…** in the Perch menu, or the gear
 at the foot of the sidebar opens Settings over the window: General,
-Appearance, Agents, Work, Repositories and Language servers. The search box
-finds a setting in any section. `Escape` clears the search, then closes
-Settings, as do `Cmd-[` and `Cmd-W`.
+Appearance, Keyboard shortcuts, Agents, Work, Repositories and Language
+servers. The search box finds a setting in any section. `Escape` clears the
+search, then closes Settings, as do `Cmd-[` and `Cmd-W`, or the keys
+`back` and `close` are on. Keyboard shortcuts has a row for each action a
+key runs, where its keys can be changed: see
+[Keyboard shortcuts](#keyboard-shortcuts).
 
 Settings is a view of `config.toml`, which stays the one place settings
 live. Each control writes its own key and leaves the rest of the file as it
@@ -549,6 +555,184 @@ finish and holds new ones until there is room. Turning off **Start language
 servers without asking** sends servers on code no longer trusted back to
 asking. Zoom, code font size and the code font apply after a restart;
 Settings marks the ones waiting and offers to restart Perch.
+
+## Keyboard shortcuts
+
+Every key below can be changed, in `[keybindings]` in `config.toml` or in
+Settings' Keyboard shortcuts section. Each action has an id; give it a key
+as a string, several as a list, or none as `""` or `[]`. Keys you give an
+action take the place of its defaults, so a list that leaves a default out
+drops it.
+
+```toml
+[keybindings]
+go_to_file = "super+t"          # Go to File on Cmd-T, and no longer on Cmd-P
+pin = ""                        # no key; [] does the same
+refresh = ["super+r", "f5"]     # two keys for one action
+toggle_sidebar = 'super+\'     # a backslash in single quotes, or "super+\\"
+```
+
+A key is written as its modifiers, then the key, joined by `+`, in any
+case:
+
+- Modifiers: `super` (also `cmd`, `command` or `meta`), `ctrl` (or
+  `control`), `alt` (or `option`) and `shift`. `super` is the command key:
+  Cmd on macOS, Ctrl elsewhere, so off macOS `ctrl+p` and `super+p` are the
+  same key.
+- Keys: a letter, a digit, punctuation as a US keyboard has it
+  (`` [ ] \ / , . ; ' = - ` ``), `enter`, `escape`, `tab`, `space`,
+  `backspace`, `delete`, `up`, `down`, `left`, `right`, `pageup`,
+  `pagedown`, `home`, `end`, `f1` to `f20`, or a key's code as floem names
+  it, such as `KeyH` or `NumpadEnter`. Keys are physical: `shift+]` is the
+  key a US keyboard writes `}` with, wherever your layout puts it.
+- A backslash is an escape in a TOML string in double quotes, so write
+  `super+\` as `"super+\\"`, or as `'super+\'` in single quotes. `"super+\"`
+  leaves the string open, and Perch can't read any of `config.toml` then.
+
+The modifiers must be the ones held, no more: `super+g` doesn't run on
+Cmd-Shift-G. An id Perch doesn't have, or a key it can't read, is left out
+with a notice, and the rest of the table still applies.
+
+A key with no Cmd, Ctrl or Alt that types something, a letter, a digit,
+punctuation or the space bar, Shift or not, is a bare key. A bare key never
+runs an action while the keyboard is in a box: the sidebar's search, a
+composer, Review's form, a find bar or any other text field. There it types,
+so `/` searches the sidebar from anywhere else and is a `/` in a comment.
+
+Two actions heard in the same place shouldn't share a key: only one of them
+would run. Settings says when they do. The composer's keys are heard only in
+a composer, so they can share a key with most of the window's: `super+g`
+suggests a change in a comment and finds the next match everywhere else. Not
+with the window keys that work from a composer too, such as New Work, Close,
+Go to File or Toggle Files: the window hears those first, so the composer's
+action would never run.
+
+On macOS, New Window, Open… and Settings… in the Perch menu show their
+action's first key, unless it is bare; the other keys work in the window.
+Menus that show keys, such as the bar's menu and the right-click menu in the
+code, show the first key of the action they do.
+
+These stay as they are: `Escape`, `Enter`, the arrows and `Tab` inside
+menus, Go to File, pickers, dialogs and the find bar; the text keys of boxes
+and the editor, `Cmd-C`, `Cmd-A` and the like; `Cmd-Enter`, which sends or
+submits; `Cmd-click` on a symbol; the mouse's back and forward buttons; the
+single letters of an open item menu; and the keys macOS keeps, `Cmd-Q`,
+`Cmd-H`, `Cmd-Opt-H`, `Cmd-M`, `` Cmd-` `` and `Cmd-Tab`. Settings won't take
+these macOS keys for an action. An action given `Cmd-Q`, `Cmd-H`,
+`Cmd-Opt-H` or `Cmd-Tab` by hand never runs, as macOS has them first, and
+Settings says so on its row.
+
+Settings' Keyboard shortcuts section has a row for each action, in the
+groups below. Click its keys, or press `Enter` or `Space` on them, then
+press the new key: it replaces every key the action had. `Escape` stops
+without a change, and a key macOS keeps is refused. macOS acts on `Cmd-Q`,
+`Cmd-H`, `Cmd-Opt-H` and `Cmd-Tab` before Perch hears them, so pressing one
+there does what it always does. The × beside the keys
+takes them all away, and the reset arrow puts the defaults back. Several
+keys for one action are written in the file.
+
+Each action's id, its default keys and what it does, grouped as Settings
+groups them:
+
+**General**
+
+| Action | Default | What it does |
+|---|---|---|
+| `new_work` | `super+n` | Opens New Work, to start an agent on a new branch |
+| `new_window` | `super+shift+n` | Opens another window |
+| `open` | `super+o` | Opens a pull request or issue from its link or number |
+| `settings` | `super+,` | Opens Settings |
+| `close` | `super+w` | Closes the open file, else the open item, else the window; closes Settings too |
+| `back` | `super+[` | Closes the open item or New Work, back to the sidebar; closes Settings too |
+| `history_back` | `ctrl+-` | Goes back to where you were |
+| `history_forward` | `ctrl+shift+-` | Goes forward again after going back |
+| `toggle_agents` | `super+shift+a` | Opens or shuts the agents running across Perch |
+| `send_feedback` | none | Opens or shuts Send Feedback |
+
+**Sidebar**
+
+| Action | Default | What it does |
+|---|---|---|
+| `toggle_sidebar` | `super+\` | Shows or hides the sidebar |
+| `focus_search` | `super+1`, `/` | Puts the keyboard in the sidebar's search, opening the sidebar if it is shut |
+| `inbox` | none | Shows the Inbox, opening the sidebar if it is shut |
+| `worktrees` | none | Shows Worktrees, opening the sidebar if it is shut |
+| `browse` | none | Shows Browse, opening the sidebar if it is shut |
+| `next_item` | `j` | Opens the row after the open one in the sidebar's list, or the first; a notification that opens in the browser is passed over |
+| `previous_item` | `k` | Opens the row before the open one |
+| `mark_done` | `e` | Marks the Inbox row under the pointer done, else the open item's row |
+| `mark_unread` | `shift+u` | Marks the Inbox row under the pointer unread, else the open item |
+| `pin` | `p` | Pins or unpins the row under the pointer, else the open one |
+
+**Item**
+
+| Action | Default | What it does |
+|---|---|---|
+| `show_conversation` | `super+shift+1` | Shows the open item's Conversation |
+| `show_code` | `super+shift+2` | Shows the open item's Code |
+| `next_tab` | `super+shift+]` | Goes to the next file tab, `Cmd-}` on a US keyboard |
+| `previous_tab` | `super+shift+[` | Goes to the file tab before, `Cmd-{` |
+| `refresh` | `super+r` | Fetches the open item from GitHub again |
+| `open_on_github` | `super+shift+o` | Opens the row under the pointer, else the open item, in the browser |
+| `copy_link` | `super+shift+c` | Copies the open item's link |
+| `copy_branch_name` | none | Copies the open item's branch name |
+| `start_work` | none | Starts work on the open item |
+| `toggle_review` | `super+shift+r` | Opens or shuts the Review box, where the bar has Review |
+| `toggle_merge` | `super+shift+m` | Opens or shuts the Merge box, where the bar has Merge |
+
+**Conversation & Code**
+
+| Action | Default | What it does |
+|---|---|---|
+| `comment` | `a` | Comments on the selected lines on Code, or on the item as a whole on Conversation |
+| `page_up` | `pageup` | Scrolls up a page |
+| `page_down` | `pagedown` | Scrolls down a page |
+| `scroll_to_top` | `super+up` | Scrolls to the top |
+| `scroll_to_end` | `super+down` | Scrolls to the end |
+
+**Code**
+
+| Action | Default | What it does |
+|---|---|---|
+| `go_to_file` | `super+p` | Opens Go to File; again while it is up, picks the next file |
+| `toggle_files` | `super+shift+e` | Opens or shuts the file tree |
+| `next_change` | `]` | Goes to the next change in the file |
+| `previous_change` | `[` | Goes to the change before |
+| `toggle_viewed` | `v` | Marks the open file viewed, or not viewed |
+| `next_unviewed` | `shift+]` | Goes to the next file not yet viewed |
+| `previous_unviewed` | `shift+[` | Goes to the file before not yet viewed |
+| `toggle_wrap` | none | Turns Word wrap on or off |
+| `go_to_definition` | `f12` | Goes to where the symbol at the caret is defined |
+| `go_to_type_definition` | none | Goes to where the symbol's type is defined |
+| `go_to_implementations` | `super+f12` | Lists what implements the symbol |
+| `find_references` | `shift+f12` | Lists where the symbol is used |
+| `call_hierarchy` | `alt+shift+h` | Shows what calls the function, and what it calls |
+
+**Find**
+
+| Action | Default | What it does |
+|---|---|---|
+| `find` | `super+f` | Opens the find bar on the code or Conversation |
+| `find_next` | `super+g` | Goes to the next match |
+| `find_previous` | `super+shift+g` | Goes to the match before |
+| `find_match_case` | `alt+super+c` | Turns match case on or off, while the bar is up |
+| `find_whole_word` | `alt+super+w` | Turns whole word on or off, while the bar is up |
+| `find_regex` | `alt+super+r` | Turns regular expressions on or off, while the bar is up |
+
+**Composer**, heard only in a composer:
+
+| Action | Default | What it does |
+|---|---|---|
+| `bold` | `super+b` | Makes the selection bold |
+| `italic` | `super+i` | Makes the selection italic |
+| `code` | `super+e` | Makes the selection code |
+| `link` | `super+k` | Makes the selection a link |
+| `quote` | `super+shift+.` | Quotes the selected lines |
+| `numbered_list` | `super+shift+7` | Makes the selected lines a numbered list |
+| `bullet_list` | `super+shift+8` | Makes the selected lines a list |
+| `task_list` | `super+shift+l` | Makes the selected lines a task list |
+| `suggest` | `super+g` | Adds a suggestion, in a comment on lines of code |
+| `toggle_preview` | `super+shift+p` | Switches between Write and Preview |
 
 ## Starting work
 
@@ -1139,6 +1323,10 @@ files is kept for each item until Perch quits.
 | Open | `Enter` |
 | Close | `Escape`, or a click outside it |
 
+`Cmd-P` is `go_to_file`, which can be put on another key: see
+[Keyboard shortcuts](#keyboard-shortcuts). The key it is on walks down the
+list. The others are the palette's own.
+
 ## Code navigation
 
 Code reads like an IDE when rust-analyzer is installed. Rest the pointer on
@@ -1167,6 +1355,9 @@ naming the symbol it acts on; on whitespace the menu is Copy alone.
 | Back, Forward | `Ctrl--`, `Ctrl-Shift--` |
 | Close the panel | `Escape` |
 
+Each but `Cmd-click` and `Escape` can be put on another key, and Go to Type
+Definition given one: see [Keyboard shortcuts](#keyboard-shortcuts).
+
 One location opens; several open the panel and the reader picks. The call
 hierarchy is a tree: a chevron on a row asks for that row's callers, and a
 toggle in the panel's header turns it to callees. The caret resting on an
@@ -1192,6 +1383,9 @@ stacked layout.
 | Next match, previous match | `Enter`, `Shift-Enter`, or `Cmd-G`, `Cmd-Shift-G` |
 | Match case, whole word, regular expression | `Alt-Cmd-C`, `Alt-Cmd-W`, `Alt-Cmd-R` |
 | Close the bar | `Escape` |
+
+The bar's own `Enter`, `Shift-Enter` and `Escape` stay; the other keys can
+be changed: see [Keyboard shortcuts](#keyboard-shortcuts).
 
 `Page Up` and `Page Down` scroll the open file or Conversation by a page, keeping a line of the last in sight, and leave the
 caret where it is. They work from the code, the page or a composer. `Cmd-Up` and `Cmd-Down` go to the

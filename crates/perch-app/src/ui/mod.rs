@@ -20,6 +20,7 @@ pub mod update;
 pub mod usage;
 pub mod widgets;
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
@@ -29,6 +30,7 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
+use crate::keymap::{self, Action};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
@@ -395,12 +397,47 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // macOS's scroll bar setting, read again whenever it changes.
     let scroller_style = floem::ext_event::create_trigger();
     crate::scrollers::watch(scroller_style);
+    // The view with the keyboard. A key that types goes only to the view
+    // with the keyboard, so with none it reaches nothing, not even the
+    // window's keys: `j` would do nothing as a window opens, or once Open…
+    // or Go to File has gone and let the keyboard go. floem also leaves
+    // the keyboard with a view it takes away: `j` that opened the next
+    // item, taking the code editor the reader had clicked in with the
+    // last one, would leave the next `j` doing nothing. So with nobody
+    // holding the keyboard, or the view that held it gone, the window has
+    // it, unless a box has taken it meanwhile.
+    let keyboard: Rc<Cell<Option<floem::ViewId>>> = Rc::default();
+    let (gained, lost, gone) = (keyboard.clone(), keyboard.clone(), keyboard);
+    // Nobody was found holding the keyboard at the last layout. The window
+    // takes it at the next, by when a view that asked for it in the same
+    // layout, as a box made with the window does, has it.
+    let unheld: Rc<Cell<bool>> = Rc::default();
     root
         // The window's width, for the drawer on the right to know whether
         // it can be docked. Read off the root's own layout, which is the
         // window's size, after every layout; written only when it changes,
         // and a change restyles the drawer within the same update.
-        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        .on_event_cont(el::UpdatePhaseLayout, move |cx, _| {
+            if gone.get().is_none_or(|id| !id.is_valid()) {
+                // A menu or a picker is laid over the window rather than
+                // in it, so its view with the keyboard is found by looking,
+                // not heard of on the way down.
+                match focused_descendant(cx, root_id.root()) {
+                    Some(holder) => {
+                        gone.set(Some(holder));
+                        unheld.set(false);
+                    }
+                    None if unheld.get() => {
+                        gone.set(Some(root_id));
+                        unheld.set(false);
+                        root_id.request_focus();
+                    }
+                    None => {
+                        unheld.set(true);
+                        root_id.request_layout();
+                    }
+                }
+            }
             let width = root_id.get_layout_rect().width();
             if width > 0.0 && state.window_width.get_untracked() != width {
                 state.window_width.set(width);
@@ -416,14 +453,58 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 state.main_pane.set((pane.x0, pane.x1));
             }
         })
+        // Which view has the keyboard, for the window to have it back once
+        // that view has gone. Caught on the way down, as a text box stops
+        // its focus events.
+        .on_event_with_config(
+            el::FocusGained,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE_AND_TARGET,
+            },
+            move |cx, _| {
+                gained.set(focus_target(cx));
+                EventPropagation::Continue
+            },
+        )
+        .on_event_with_config(
+            el::FocusLost,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE_AND_TARGET,
+            },
+            move |cx, _| {
+                if lost.get() == focus_target(cx) {
+                    lost.set(None);
+                    // Looked at again after the next layout, by when a
+                    // view the keyboard went on to has said so.
+                    root_id.request_layout();
+                }
+                EventPropagation::Continue
+            },
+        )
         // Whether the reader can see the window: a run that ends on the
         // open item isn't news while they can.
         .on_event_cont(el::WindowGainedFocus, move |_, _| {
             focus_backend.set_window_key(true)
         })
         .on_event_cont(el::WindowLostFocus, move |_, _| {
+            // A key given to a shortcut, still down, comes up elsewhere.
+            state.settings.let_go();
             blur_backend.set_window_key(false)
         })
+        // A key given to a shortcut coming up, wherever the keyboard is
+        // now: the Perch menu has its keys back.
+        .on_event_with_config(
+            el::KeyUp,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE_AND_TARGET,
+            },
+            move |_, key: &KeyboardEvent| {
+                if state.settings.held.get_untracked() == Some(key.code) {
+                    state.settings.let_go();
+                }
+                EventPropagation::Continue
+            },
+        )
         // A press outside one of the bar's popovers shuts
         // it, and goes on to whatever it landed on. Caught on the way down,
         // as most controls stop their presses.
@@ -461,13 +542,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // clicking in it, so they are caught on the way down to it rather
         // than on the way back up. Target as well, for when nothing has focus
         // and floem hands the key straight to whoever listens. Nothing here
-        // runs while a text box has the keyboard.
+        // runs while a text box has the keyboard. Which keys are which
+        // action's is the keymap's to say.
         .on_event_with_config(
             el::KeyDown,
             floem::context::EventCallbackConfig {
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
-            move |cx, key: &KeyboardEvent| {
+            alone(move |cx, key: &KeyboardEvent| {
                 let key_backend = &capture_backend;
                 // Cmd-P's palette is modal: while it is up, its keys are
                 // its own, whatever has the keyboard, and the rest are its
@@ -481,10 +563,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 if state.start_work_confirm.with(Option::is_some) {
                     return crate::review::start_work::key(state, key_backend, key);
                 }
+                // A key that types is a box's while one has the keyboard,
+                // whatever action it is bound to.
+                let in_box = typing_key(state, review, cx, root_id, key);
                 // Settings covers the window: none of the window's keys
                 // reach what is under it.
                 if state.settings.open.get() {
-                    return settings::key(state, cx, key);
+                    return settings::key(state, cx, key, in_box);
                 }
                 // Escape puts a run's raw output away, from wherever the
                 // keyboard is, before it reaches a popover under it.
@@ -496,40 +581,36 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     return EventPropagation::Stop;
                 }
                 // Cmd-N opens the new-work view, from anywhere.
-                if key.code == Code::KeyN && key.modifiers == OS_MOD {
+                if keymap::pressed(Action::NewWork, key, in_box) {
                     new_work::open(state, key_backend);
                     return EventPropagation::Stop;
                 }
                 // New Window, Open… and Settings… are the Perch menu's on
-                // macOS. Off it there is no menu to hold them, so their
-                // keys are here.
-                if !cfg!(target_os = "macos") {
-                    if key.code == Code::KeyN && key.modifiers == OS_MOD | Modifiers::SHIFT {
-                        crate::windows::open_new();
-                        return EventPropagation::Stop;
-                    }
-                    if key.code == Code::KeyO && key.modifiers == OS_MOD {
-                        open_box::show(state, focused_descendant(cx, root_id));
-                        return EventPropagation::Stop;
-                    }
-                    if key.code == Code::Comma && key.modifiers == OS_MOD {
-                        settings::show(state, focused_descendant(cx, root_id));
-                        return EventPropagation::Stop;
-                    }
+                // macOS, which holds a key for each. Off it there is no
+                // menu to hold them, so their keys are here, as are the
+                // keys the menu can't hold.
+                if crate::app_menu::pressed_in_window(Action::NewWindow, key, in_box) {
+                    crate::windows::open_new();
+                    return EventPropagation::Stop;
+                }
+                if crate::app_menu::pressed_in_window(Action::Open, key, in_box) {
+                    open_box::show(state, focused_descendant(cx, root_id));
+                    return EventPropagation::Stop;
+                }
+                if crate::app_menu::pressed_in_window(Action::Settings, key, in_box) {
+                    settings::show(state, focused_descendant(cx, root_id));
+                    return EventPropagation::Stop;
                 }
                 // Cmd-[ shuts it, with what was typed kept, from its
                 // message box too.
-                if key.code == Code::BracketLeft
-                    && key.modifiers == OS_MOD
-                    && state.new_work.open.get_untracked()
+                if keymap::pressed(Action::Back, key, in_box) && state.new_work.open.get_untracked()
                 {
                     state.new_work.open.set(false);
                     return EventPropagation::Stop;
                 }
                 // Cmd-P puts it up, app-wide, as the tree's key is; Escape
                 // gives the keyboard back to whatever had it.
-                if key.code == Code::KeyP
-                    && key.modifiers == OS_MOD
+                if keymap::pressed(Action::GoToFile, key, in_box)
                     && crate::review::go_to::available(review)
                 {
                     crate::review::go_to::open(review, focused_descendant(cx, root_id));
@@ -538,7 +619,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Cmd-Shift-A opens the Agents dropdown from the bar, and
                 // shuts it, from anywhere; whatever had the keyboard gets it
                 // back as it shuts.
-                if key.modifiers == OS_MOD | Modifiers::SHIFT && key.code == Code::KeyA {
+                if keymap::pressed(Action::ToggleAgents, key, in_box) {
                     let opener = (!review.agents_dropdown_open.get_untracked())
                         .then(|| focused_descendant(cx, root_id))
                         .flatten();
@@ -551,8 +632,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // item without files has none. Whatever had the keyboard
                 // gets it back when the tree shuts, so it is noted as it
                 // opens.
-                if key.modifiers == OS_MOD | Modifiers::SHIFT
-                    && key.code == Code::KeyE
+                if keymap::pressed(Action::ToggleFiles, key, in_box)
                     && review.is_open()
                     && review.has_files()
                 {
@@ -607,13 +687,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     || review.review_open.get()
                     || review.find_focused.get();
                 use crate::review::model::Paging;
-                let paging = match key.code {
-                    Code::PageUp if key.modifiers.is_empty() => Some(Paging::Up),
-                    Code::PageDown if key.modifiers.is_empty() => Some(Paging::Down),
-                    Code::ArrowUp if key.modifiers == OS_MOD => Some(Paging::Top),
-                    Code::ArrowDown if key.modifiers == OS_MOD => Some(Paging::End),
-                    _ => None,
-                }
+                let paging = [
+                    (Action::PageUp, Paging::Up),
+                    (Action::PageDown, Paging::Down),
+                    (Action::ScrollToTop, Paging::Top),
+                    (Action::ScrollToEnd, Paging::End),
+                ]
+                .into_iter()
+                .find(|(action, _)| keymap::pressed(*action, key, in_box))
+                .map(|(_, paging)| paging)
                 .filter(|p| {
                     matches!(p, Paging::Up | Paging::Down)
                         || !(review.composer_focused.get() || text_box_focused(cx, root_id))
@@ -662,52 +744,119 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     None => false,
                 };
                 if let Some(pane) = finding {
-                    let cmd = key.modifiers == OS_MOD;
-                    let cmd_shift = key.modifiers == OS_MOD | Modifiers::SHIFT;
-                    let alt_cmd = key.modifiers == OS_MOD | Modifiers::ALT && find_open;
-                    match key.code {
-                        Code::KeyF if cmd => {
-                            crate::review::find::open(review, pane, true);
-                            return EventPropagation::Stop;
+                    let pressed = |action| keymap::pressed(action, key, in_box);
+                    if pressed(Action::Find) {
+                        crate::review::find::open(review, pane, true);
+                        return EventPropagation::Stop;
+                    }
+                    let next = pressed(Action::FindNext);
+                    if next || pressed(Action::FindPrevious) {
+                        if !find_open {
+                            crate::review::find::open(review, pane, false);
                         }
-                        Code::KeyG if cmd || cmd_shift => {
-                            if !find_open {
-                                crate::review::find::open(review, pane, false);
+                        crate::review::find::walk(review, pane, next);
+                        return EventPropagation::Stop;
+                    }
+                    if find_open {
+                        type Flag = fn(&mut crate::review::find::Options) -> &mut bool;
+                        let toggles: [(Action, Flag); 3] = [
+                            (Action::FindMatchCase, |o| &mut o.match_case),
+                            (Action::FindWholeWord, |o| &mut o.whole_word),
+                            (Action::FindRegex, |o| &mut o.regex),
+                        ];
+                        for (action, flag) in toggles {
+                            if pressed(action) {
+                                review.find_options.update(|o| {
+                                    let flag = flag(o);
+                                    *flag = !*flag;
+                                });
+                                return EventPropagation::Stop;
                             }
-                            crate::review::find::walk(review, pane, cmd);
-                            return EventPropagation::Stop;
                         }
-                        Code::KeyC if alt_cmd => {
-                            review.find_options.update(|o| o.match_case = !o.match_case);
-                            return EventPropagation::Stop;
-                        }
-                        Code::KeyW if alt_cmd => {
-                            review.find_options.update(|o| o.whole_word = !o.whole_word);
-                            return EventPropagation::Stop;
-                        }
-                        Code::KeyR if alt_cmd => {
-                            review.find_options.update(|o| o.regex = !o.regex);
-                            return EventPropagation::Stop;
-                        }
-                        _ => {}
                     }
                 }
                 // Ctrl-- goes back and Ctrl-Shift-- forward, as in VS Code:
                 // from anywhere, a box being typed in or the empty pane too,
                 // since neither key types anything.
-                if key.code == Code::Minus
-                    && (key.modifiers == Modifiers::CONTROL
-                        || key.modifiers == Modifiers::CONTROL | Modifiers::SHIFT)
-                {
-                    let back = !key.modifiers.shift();
+                let back = keymap::pressed(Action::HistoryBack, key, in_box);
+                if back || keymap::pressed(Action::HistoryForward, key, in_box) {
                     history::travel(state, review, key_backend, back);
+                    return EventPropagation::Stop;
+                }
+                // The sidebar's keys, from anywhere, the code and the empty
+                // pane too: Done and Mark Unread on the row under the
+                // pointer, else the open item, the next and previous rows,
+                // the tabs, and Open on GitHub. Each only where its button
+                // or menu row would do something; elsewhere the key goes on.
+                let pressed = |action| keymap::pressed(action, key, in_box);
+                if pressed(Action::MarkDone) && notifications::done_by_key(state, key_backend) {
+                    return EventPropagation::Stop;
+                }
+                if pressed(Action::MarkUnread)
+                    && notifications::mark_unread_by_key(state, key_backend)
+                {
+                    return EventPropagation::Stop;
+                }
+                let next_item = pressed(Action::NextItem);
+                if (next_item || pressed(Action::PreviousItem))
+                    && sidebar::step(state, review, key_backend, next_item)
+                {
+                    return EventPropagation::Stop;
+                }
+                use crate::items::SidebarTab;
+                for (action, tab) in [
+                    (Action::Inbox, SidebarTab::Inbox),
+                    (Action::Worktrees, SidebarTab::Worktrees),
+                    (Action::Browse, SidebarTab::Browse),
+                ] {
+                    if pressed(action) {
+                        sidebar::show_tab(state, tab);
+                        return EventPropagation::Stop;
+                    }
+                }
+                if pressed(Action::OpenOnGithub) {
+                    if let Some(url) = notifications::github_url_by_key(state) {
+                        widgets::open_in_browser(&url);
+                        return EventPropagation::Stop;
+                    }
+                }
+                // Review, Merge and Send Feedback open and shut from
+                // anywhere, a box in one of them too, where the button is
+                // showing, not under new work; whatever had the keyboard
+                // gets it back as each shuts.
+                let bar_shown = review.is_open() && !state.new_work.open.get_untracked();
+                if pressed(Action::ToggleReview)
+                    && bar_shown
+                    && crate::review::header::offers_review(review)
+                {
+                    if review.review_open.get_untracked() {
+                        crate::review::review_menu::cancel(review, true);
+                    } else {
+                        crate::review::review_menu::open(review, focused_descendant(cx, root_id));
+                    }
+                    return EventPropagation::Stop;
+                }
+                if pressed(Action::ToggleMerge)
+                    && bar_shown
+                    && crate::review::merge_button::toggle_by_key(
+                        review,
+                        focused_descendant(cx, root_id),
+                    )
+                {
+                    return EventPropagation::Stop;
+                }
+                if pressed(Action::SendFeedback) {
+                    let opener = (!review.feedback_open.get_untracked())
+                        .then(|| focused_descendant(cx, root_id))
+                        .flatten();
+                    feedback::toggle(state, review, opener);
                     return EventPropagation::Stop;
                 }
                 // Any box that takes typing keeps the keys below: `a` typed
                 // in the close-as-issue title is an `a`, not a composer.
                 let typing = typing || review.find_focused.get() || text_box_focused(cx, root_id);
                 if typing || !review.is_open() {
-                    if key.code == Code::KeyW && key.modifiers == OS_MOD {
+                    if keymap::pressed(Action::Close, key, in_box) {
                         close_item_or_window(state, review, key_backend, root_id);
                         return EventPropagation::Stop;
                     }
@@ -717,54 +866,76 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // switch in the bar does. Here rather than with the other Cmd
                 // keys because they are pressed from the code as often as
                 // from anywhere.
-                if key.modifiers == OS_MOD | Modifiers::SHIFT {
-                    match key.code {
-                        Code::Digit1 => {
-                            review.show_tab(crate::review::model::ItemTab::Conversation);
-                            return EventPropagation::Stop;
-                        }
-                        Code::Digit2 => {
-                            if review.has_files() {
-                                review.show_tab(crate::review::model::ItemTab::Code);
-                            }
-                            return EventPropagation::Stop;
-                        }
-                        _ => {}
+                if keymap::pressed(Action::ShowConversation, key, in_box) {
+                    review.show_tab(crate::review::model::ItemTab::Conversation);
+                    return EventPropagation::Stop;
+                }
+                if keymap::pressed(Action::ShowCode, key, in_box) {
+                    if review.has_files() {
+                        review.show_tab(crate::review::model::ItemTab::Code);
                     }
+                    return EventPropagation::Stop;
                 }
                 // Cmd-} and Cmd-{ step through the tabs, wrapping at the
                 // ends, as in Safari and Xcode. Cmd-[ stays the way back
                 // to the sidebar.
-                if key.modifiers == OS_MOD | Modifiers::SHIFT
-                    && matches!(key.code, Code::BracketLeft | Code::BracketRight)
-                    && crate::review::tabs::step_tab(
-                        review,
-                        key_backend,
-                        key.code == Code::BracketRight,
-                    )
+                let next_tab = keymap::pressed(Action::NextTab, key, in_box);
+                if (next_tab || keymap::pressed(Action::PreviousTab, key, in_box))
+                    && crate::review::tabs::step_tab(review, key_backend, next_tab)
                 {
+                    return EventPropagation::Stop;
+                }
+                // The item's keys, as the news pill, the bar's menu and the
+                // view menu have them.
+                if pressed(Action::Refresh) && crate::review::refresh(state, review, key_backend) {
+                    return EventPropagation::Stop;
+                }
+                if pressed(Action::CopyLink) {
+                    if let Some(url) = crate::review::header::page(review) {
+                        widgets::copy_to_clipboard(url);
+                        return EventPropagation::Stop;
+                    }
+                }
+                if pressed(Action::CopyBranchName) {
+                    if let Some(branch) = crate::review::header::open_branch_name(review) {
+                        widgets::copy_to_clipboard(branch);
+                        return EventPropagation::Stop;
+                    }
+                }
+                if pressed(Action::StartWork) && crate::review::header::start_work(state, review) {
+                    return EventPropagation::Stop;
+                }
+                if pressed(Action::ToggleWrap) && crate::review::tabs::toggle_wrap(state, review) {
                     return EventPropagation::Stop;
                 }
                 // The navigation keys, VS Code's: F12 goes to the definition
                 // of the caret's symbol, Cmd-F12 to its implementations,
                 // Shift-F12 asks for its references and Shift-Alt-H for its
-                // call hierarchy.
-                if key.code == Code::F12 && key.modifiers.is_empty() {
+                // call hierarchy. Its type definition has a key only when
+                // the keymap gives it one.
+                if keymap::pressed(Action::GoToDefinition, key, in_box) {
                     crate::review::navigation::definition_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
                 }
-                if key.code == Code::F12 && key.modifiers == OS_MOD {
+                if keymap::pressed(Action::GoToTypeDefinition, key, in_box) {
+                    crate::review::navigation::type_definition_at_cursor(
+                        review,
+                        &references_backend,
+                    );
+                    return EventPropagation::Stop;
+                }
+                if keymap::pressed(Action::GoToImplementations, key, in_box) {
                     crate::review::navigation::implementations_at_cursor(
                         review,
                         &references_backend,
                     );
                     return EventPropagation::Stop;
                 }
-                if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
+                if keymap::pressed(Action::FindReferences, key, in_box) {
                     crate::review::references::find_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
                 }
-                if key.code == Code::KeyH && key.modifiers == Modifiers::SHIFT | Modifiers::ALT {
+                if keymap::pressed(Action::CallHierarchy, key, in_box) {
                     crate::review::hierarchy::show_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
                 }
@@ -805,39 +976,37 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // no file is open. Caught on the way down for the same reason as
                 // Shift-F12: the code editor keeps every key once it has focus,
                 // and `a` is pressed right after selecting lines in it.
+                if keymap::pressed(Action::Comment, key, in_box) {
+                    // On Conversation the composer is laid in place over
+                    // the timeline, about the item as a whole: `a` opens
+                    // it, or takes the keyboard back to it.
+                    if review.tab.get() == crate::review::model::ItemTab::Conversation {
+                        match review
+                            .composer_box
+                            .get()
+                            .filter(|_| review.composer.with(Option::is_some))
+                        {
+                            Some(id) => {
+                                id.scroll_to(None);
+                                id.request_focus();
+                            }
+                            // A composer open in the code is gone back
+                            // to rather than replaced.
+                            None => review.ask_on_page(crate::review::threads::defaults(state)),
+                        }
+                        return EventPropagation::Stop;
+                    }
+                    let anchor = review.anchor_from_selection();
+                    review.open_composer(
+                        None,
+                        anchor,
+                        String::new(),
+                        crate::review::threads::defaults(state),
+                    );
+                    return EventPropagation::Stop;
+                }
                 if key.modifiers.is_empty() {
                     match key.code {
-                        Code::KeyA => {
-                            // On Conversation the composer is laid in place over
-                            // the timeline, about the item as a whole: `a` opens
-                            // it, or takes the keyboard back to it.
-                            if review.tab.get() == crate::review::model::ItemTab::Conversation {
-                                match review
-                                    .composer_box
-                                    .get()
-                                    .filter(|_| review.composer.with(Option::is_some))
-                                {
-                                    Some(id) => {
-                                        id.scroll_to(None);
-                                        id.request_focus();
-                                    }
-                                    // A composer open in the code is gone back
-                                    // to rather than replaced.
-                                    None => {
-                                        review.ask_on_page(crate::review::threads::defaults(state))
-                                    }
-                                }
-                                return EventPropagation::Stop;
-                            }
-                            let anchor = review.anchor_from_selection();
-                            review.open_composer(
-                                None,
-                                anchor,
-                                String::new(),
-                                crate::review::threads::defaults(state),
-                            );
-                            return EventPropagation::Stop;
-                        }
                         // Put the close menu away, or step back out of its search.
                         Code::Escape if review.close_menu.with(Option::is_some) => {
                             crate::review::close_menu::back(review);
@@ -874,66 +1043,61 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Files only. The braces are shifted brackets: the physical codes with Shift alone, so Cmd-{
                 // steps through the tabs.
                 if review.tab.get() == crate::review::model::ItemTab::Code {
-                    let shifted = key.modifiers == Modifiers::SHIFT;
-                    match key.code {
-                        Code::KeyW if key.modifiers == OS_MOD => {
-                            if let Some(path) = review.active.get() {
-                                review.close_tab(&path);
-                                return EventPropagation::Stop;
-                            }
-                        }
-                        Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {
-                            crate::review::tabs::jump_to_change(
-                                review,
-                                key.code == Code::BracketRight,
-                            );
+                    let pressed = |action| keymap::pressed(action, key, in_box);
+                    if pressed(Action::Close) {
+                        if let Some(path) = review.active.get() {
+                            review.close_tab(&path);
                             return EventPropagation::Stop;
                         }
-                        Code::KeyV if key.modifiers.is_empty() => {
-                            let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
-                            let file = review.active.get().and_then(|path| {
-                                review
-                                    .changed_files
-                                    .with(|f| f.iter().find(|f| f.path == path).cloned())
-                            });
-                            if let (Some(item_id), Some(file)) = (item_id, file) {
-                                if let Some(key) = file.viewed_key() {
-                                    key_backend.set_viewed(
-                                        &item_id,
-                                        &file.path,
-                                        key,
-                                        !review.is_viewed(&file),
-                                    );
-                                }
+                    }
+                    let next_change = pressed(Action::NextChange);
+                    if next_change || pressed(Action::PreviousChange) {
+                        crate::review::tabs::jump_to_change(review, next_change);
+                        return EventPropagation::Stop;
+                    }
+                    if pressed(Action::ToggleViewed) {
+                        let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
+                        let file = review.active.get().and_then(|path| {
+                            review
+                                .changed_files
+                                .with(|f| f.iter().find(|f| f.path == path).cloned())
+                        });
+                        if let (Some(item_id), Some(file)) = (item_id, file) {
+                            if let Some(key) = file.viewed_key() {
+                                key_backend.set_viewed(
+                                    &item_id,
+                                    &file.path,
+                                    key,
+                                    !review.is_viewed(&file),
+                                );
                             }
-                            return EventPropagation::Stop;
                         }
-                        Code::BracketRight | Code::BracketLeft if shifted => {
-                            let active = review.active.get();
-                            let forward = key.code == Code::BracketRight;
-                            if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
-                                // The same path a click in the rail takes.
-                                if review.open_tab(&path) {
-                                    key_backend.open_file(&path);
-                                }
-                                review.show_in_tree(&path);
+                        return EventPropagation::Stop;
+                    }
+                    let forward = pressed(Action::NextUnviewed);
+                    if forward || pressed(Action::PreviousUnviewed) {
+                        let active = review.active.get();
+                        if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
+                            // The same path a click in the rail takes.
+                            if review.open_tab(&path) {
+                                key_backend.open_file(&path);
                             }
-                            return EventPropagation::Stop;
+                            review.show_in_tree(&path);
                         }
-                        _ => {}
+                        return EventPropagation::Stop;
                     }
                 }
                 // Cmd-W with no file to close closes the item, as the X does.
-                if key.code == Code::KeyW && key.modifiers == OS_MOD {
+                if keymap::pressed(Action::Close, key, in_box) {
                     close_item_or_window(state, review, key_backend, root_id);
                     return EventPropagation::Stop;
                 }
                 EventPropagation::Continue
-            },
+            }),
         )
         // Window-level shortcuts. Key events bubble from whatever has focus, so
         // a handler on the root view catches them wherever the reader is.
-        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        .on_event(el::KeyDown, move |cx, key: &KeyboardEvent| {
             // None of these while Cmd-P's palette, Open…, Start work's
             // confirmation or Settings is up: they are modal.
             if review.go_to.open.get()
@@ -956,15 +1120,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
             }
 
+            let in_box = typing_key(state, review, cx, root_id, key);
             // `p` pins the sidebar row under the pointer, else the selected
             // row, or unpins it.
-            if key.modifiers.is_empty()
-                && !state.search_focused.get()
-                && !review.composer_focused.get()
-                && !review.review_open.get()
-                && !review.find_focused.get()
-                && key.code == Code::KeyP
-            {
+            if keymap::pressed(Action::Pin, key, in_box) {
                 let target = state
                     .hovered_item
                     .get()
@@ -976,51 +1135,42 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
             }
 
-            if !key.modifiers.contains(OS_MOD) {
-                return EventPropagation::Continue;
+            // Show or hide the sidebar drawer.
+            if keymap::pressed(Action::ToggleSidebar, key, in_box) {
+                state.toggle_sidebar();
+                return EventPropagation::Stop;
             }
-            // Physical key codes, so the shortcuts hold on any keyboard layout.
-            match key.code {
-                // Show or hide the sidebar drawer.
-                Code::Backslash => {
-                    if !key.modifiers.contains(Modifiers::SHIFT) {
-                        state.toggle_sidebar();
-                        EventPropagation::Stop
-                    } else {
-                        EventPropagation::Continue
-                    }
-                }
-                // Back to the sidebar. Not Cmd-{, which steps through the
-                // tabs and reaches here too when the root is its target.
-                Code::BracketLeft if !key.modifiers.contains(Modifiers::SHIFT) => {
-                    if review.is_showing() {
-                        let navigation_id = key_backend.close_review();
-                        state.begin_close(review, navigation_id);
-                        return EventPropagation::Stop;
-                    }
-                    EventPropagation::Continue
-                }
-                // Cmd-1 is the sidebar's search. With the drawer shut it opens
-                // the drawer, and the box takes the keyboard once it is built.
-                // Not Cmd-Shift-1, which is Conversation's, and reaches here
-                // too when the root is its target.
-                Code::Digit1 if !key.modifiers.contains(Modifiers::SHIFT) => {
-                    if state.sidebar_open.get() {
-                        if let Some(id) = state.search_box.get() {
-                            id.request_focus();
-                        }
-                    } else {
-                        state.focus_search.set(true);
-                        state.show_sidebar(true);
-                    }
-                    EventPropagation::Stop
-                }
-                _ => EventPropagation::Continue,
+            // Back to the sidebar.
+            if keymap::pressed(Action::Back, key, in_box) && review.is_showing() {
+                let navigation_id = key_backend.close_review();
+                state.begin_close(review, navigation_id);
+                return EventPropagation::Stop;
             }
+            // Cmd-1 is the sidebar's search. With the drawer shut it opens
+            // the drawer, and the box takes the keyboard once it is built.
+            if keymap::pressed(Action::FocusSearch, key, in_box) {
+                if state.sidebar_open.get() {
+                    if let Some(id) = state.search_box.get() {
+                        id.request_focus();
+                    }
+                } else {
+                    state.focus_search.set(true);
+                    state.show_sidebar(true);
+                }
+                return EventPropagation::Stop;
+            }
+            EventPropagation::Continue
         })
         .style(move |s| {
             scroller_style.track();
             s.size_full()
+                // A press on anything that takes no keyboard of its own,
+                // a sidebar row or the page, gives the window the
+                // keyboard, so a key that types, `j` or `e`, reaches the
+                // window's keys rather than nothing: floem hands such a
+                // key only to whatever has the keyboard. Focusable only,
+                // so Tab never stops on the window.
+                .focusable()
                 .flex_col()
                 .position(floem::style::Position::Relative)
                 .font_family(theme::FONT_STACK.to_string())
@@ -1187,6 +1337,56 @@ pub(crate) fn focused_descendant(
     root.children()
         .into_iter()
         .find_map(|child| focused_descendant(cx, child))
+}
+
+/// The view a focus event is for, from any phase of it.
+fn focus_target(cx: &floem::context::EventCx<'_>) -> Option<floem::ViewId> {
+    cx.dispatch
+        .as_deref()?
+        .iter()
+        .find(|step| step.phase == floem::event::Phase::Target)
+        .map(|step| step.owning_id)
+}
+
+/// A window key handler that, once it stops a key, stops it for the
+/// root's other handlers too. With nothing focused the root is the key's
+/// target, and every handler on it hears the key even once one has
+/// stopped it, so Cmd-[ that shut new work would close the item under it
+/// as well.
+fn alone(
+    mut handler: impl FnMut(&mut floem::context::EventCx, &KeyboardEvent) -> EventPropagation + 'static,
+) -> impl FnMut(&mut floem::context::EventCx, &KeyboardEvent) -> EventPropagation + 'static {
+    move |cx, key| {
+        let result = handler(cx, key);
+        if result.is_stop() {
+            cx.stop_immediate_propagation();
+        }
+        result
+    }
+}
+
+/// Whether `key` types and a box has the keyboard to type it in: the
+/// sidebar's search, a composer, Review's form, a find bar or any other
+/// text box. A key that types is the box's then, whatever it is bound to.
+/// The focused view is looked for only for such a key, as that walks the
+/// window.
+fn typing_key(
+    state: AppState,
+    review: ReviewState,
+    cx: &floem::context::EventCx<'_>,
+    root: floem::ViewId,
+    key: &KeyboardEvent,
+) -> bool {
+    let shortcut = crate::ui::menu::Shortcut {
+        modifiers: key.modifiers,
+        code: key.code,
+    };
+    shortcut.is_bare()
+        && (state.search_focused.get_untracked()
+            || review.composer_focused.get_untracked()
+            || review.review_open.get_untracked()
+            || review.find_focused.get_untracked()
+            || text_box_focused(cx, root))
 }
 
 /// Whether the keyboard is in a box that takes typing: a one-line box, or
@@ -1669,6 +1869,19 @@ mod tests {
 
     /// The window on Code with one changed file open in the editor.
     fn window_with_a_file_open() -> (HeadlessHarness, ReviewState) {
+        let (harness, _, review) = window_and_state_with_a_file_open();
+        (harness, review)
+    }
+
+    /// The same, with the window's state.
+    fn window_and_state_with_a_file_open() -> (HeadlessHarness, AppState, ReviewState) {
+        window_with_a_file_open_on(Rc::new(Backend::detached()))
+    }
+
+    /// The same, on `backend`.
+    fn window_with_a_file_open_on(
+        backend: Rc<Backend>,
+    ) -> (HeadlessHarness, AppState, ReviewState) {
         use crate::review::model::{ItemTab, Phase};
         use perch_github::{Item, ItemCheckout};
         use std::sync::Arc;
@@ -1708,11 +1921,11 @@ mod tests {
         review.open_tab("src/x.rs");
         review.finish_load("src/x.rs", file);
 
-        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let view = app_view(state, review, backend);
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
         harness.paint();
-        (harness, review)
+        (harness, state, review)
     }
 
     /// A key as the window receives it.
@@ -2265,5 +2478,632 @@ mod tests {
         );
         assert!(harness.is_focused(editor), "the box lost the keyboard");
         assert_eq!(review.review_launcher_instructions.get(), "Please");
+    }
+
+    /// A window key a user binds to a letter is the window's from the
+    /// code, and a letter in a box that has the keyboard; the key it had
+    /// before does nothing.
+    #[test]
+    fn a_window_key_bound_to_a_bare_letter_is_typed_in_a_box_that_has_the_keyboard() {
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings("toggle_agents = \"t\""));
+        let (mut harness, review) = window_with_a_file_open();
+        // A key that types reaches the window only through a view with
+        // the keyboard: the code, here.
+        let code = named(harness.root_id(), "tinted editor")
+            .expect("no editor in the window")
+            .get_visual_rect_no_clip();
+        harness.click(code.x0 + 200.0, code.y0 + 40.0);
+        harness.rebuild();
+        harness.paint();
+        let press = |harness: &mut HeadlessHarness, code: Code, ch: &str, modifiers: Modifiers| {
+            harness.dispatch_event(key(code, Key::Character(ch.into()), modifiers));
+            harness.rebuild();
+            harness.paint();
+        };
+        press(&mut harness, Code::KeyT, "t", Modifiers::empty());
+        assert!(review.agents_dropdown_open.get(), "`t` is the Agents key");
+        press(&mut harness, Code::KeyT, "t", Modifiers::empty());
+        assert!(!review.agents_dropdown_open.get(), "`t` again shuts it");
+        press(&mut harness, Code::KeyA, "a", OS_MOD | Modifiers::SHIFT);
+        assert!(!review.agents_dropdown_open.get(), "Cmd-Shift-A is not");
+
+        let control = named(harness.root_id(), "review-control")
+            .expect("no Review in the bar")
+            .get_visual_rect_no_clip();
+        harness.click(control.center().x, control.center().y);
+        harness.rebuild();
+        harness.paint();
+        let rect = named(harness.root_id(), "review-instructions")
+            .expect("no instructions box")
+            .get_visual_rect_no_clip();
+        harness.click(rect.center().x, rect.center().y);
+        harness.rebuild();
+        harness.paint();
+        press(&mut harness, Code::KeyT, "t", Modifiers::empty());
+        assert!(
+            !review.agents_dropdown_open.get(),
+            "`t` in the box was taken"
+        );
+        assert_eq!(review.review_launcher_instructions.get(), "t");
+    }
+
+    /// Cmd-[ with new work over an item, and nothing focused so the root
+    /// is the key's target, shuts new work and leaves the item showing.
+    #[test]
+    fn cmd_left_bracket_over_an_item_shuts_new_work_alone() {
+        let (mut harness, state, review) = window_and_state_with_a_file_open();
+        state.new_work.open.set(true);
+        harness.rebuild();
+        harness.paint();
+        // New work's box takes the keyboard; give it up.
+        harness.root_id().clear_focus();
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
+        harness.rebuild();
+        assert!(!state.new_work.open.get(), "new work is still up");
+        assert!(review.is_showing(), "the item closed with new work");
+    }
+
+    /// A notification about issue `number` of org/repo.
+    fn issue_thread(id: &str, number: u64, unread: bool) -> perch_github::Thread {
+        use perch_github::{Reason, Repository, Subject, SubjectKind};
+        perch_github::Thread {
+            id: id.into(),
+            unread,
+            local_unread: false,
+            local_read: false,
+            restored_at: None,
+            reason: Reason::Mention,
+            updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),
+            subject: Subject {
+                title: format!("Issue {number}"),
+                kind: SubjectKind::Issue,
+                url: Some(format!(
+                    "https://api.github.com/repos/org/repo/issues/{number}"
+                )),
+                latest_comment_url: None,
+            },
+            repository: Repository {
+                full_name: "org/repo".into(),
+                owner_avatar_url: String::new(),
+            },
+            subject_snapshot: None,
+            run_snapshot: None,
+            snoozed_until: None,
+        }
+    }
+
+    /// Issue `number` of org/repo as an item.
+    fn issue_item(number: u64) -> perch_github::Item {
+        let at = "2026-09-19T12:00:00Z".parse().unwrap();
+        let mut item = perch_github::Item::new("org/repo", at);
+        item.id = format!("org/repo#{number}");
+        item.subject = Some(perch_github::ItemSubject::Issue(perch_github::Issue {
+            viewer_can_update: false,
+            node_id: String::new(),
+            reactions: Default::default(),
+            number,
+            title: format!("Issue {number}"),
+            body: String::new(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: "u".into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            repo_full_name: "org/repo".into(),
+            comments: 0,
+            created_at: Some(at),
+            updated_at: at,
+        }));
+        item
+    }
+
+    /// The commands sent since the last call.
+    fn sent(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::backend::Command>,
+    ) -> Vec<crate::backend::Command> {
+        std::iter::from_fn(|| commands.try_recv().ok()).collect()
+    }
+
+    /// A window with nothing open on a recording backend, the window with
+    /// the keyboard after a press on the empty pane, as a key that types
+    /// needs a view that has it.
+    fn empty_window(
+        state: AppState,
+        review: ReviewState,
+    ) -> (
+        HeadlessHarness,
+        tokio::sync::mpsc::UnboundedReceiver<crate::backend::Command>,
+    ) {
+        let (backend, commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let pane = named(harness.root_id(), "pane-body")
+            .expect("no empty pane")
+            .get_visual_rect_no_clip()
+            .center();
+        harness.click(pane.x, pane.y);
+        harness.rebuild();
+        harness.paint();
+        (harness, commands)
+    }
+
+    fn press(harness: &mut HeadlessHarness, code: Code, ch: &str, modifiers: Modifiers) {
+        harness.dispatch_event(key(code, Key::Character(ch.into()), modifiers));
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// `e` marks the inbox row under the pointer Done, and Shift-U marks
+    /// it unread, but not one unread already; with the pointer elsewhere
+    /// they are for the open item's notification. Typed in the sidebar's
+    /// search, `e` is an `e`.
+    #[test]
+    fn e_and_shift_u_mark_the_hovered_row_or_the_open_item() {
+        use crate::backend::Command;
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.notifications.set(vec![
+            issue_thread("1", 1, false),
+            issue_thread("2", 2, true),
+        ]);
+        let (mut harness, mut commands) = empty_window(state, review);
+
+        state.hovered_row.set(Some("thread:1".into()));
+        press(&mut harness, Code::KeyE, "e", Modifiers::empty());
+        let done = sent(&mut commands);
+        assert!(
+            matches!(&done[..], [Command::DoneNotification { thread_id, .. }] if thread_id == "1"),
+            "{done:?}"
+        );
+        press(&mut harness, Code::KeyU, "U", Modifiers::SHIFT);
+        let unread = sent(&mut commands);
+        assert!(
+            matches!(&unread[..], [Command::MarkNotificationUnread { thread_id }] if thread_id == "1"),
+            "{unread:?}"
+        );
+        state.hovered_row.set(Some("thread:2".into()));
+        press(&mut harness, Code::KeyU, "U", Modifiers::SHIFT);
+        assert!(sent(&mut commands).is_empty(), "unread already");
+
+        // The pointer off the list: the open item's notification.
+        state.hovered_row.set(None);
+        press(&mut harness, Code::KeyE, "e", Modifiers::empty());
+        assert!(sent(&mut commands).is_empty(), "nothing open, nothing done");
+        review.item.set(Some(std::sync::Arc::new(issue_item(2))));
+        press(&mut harness, Code::KeyE, "e", Modifiers::empty());
+        let done = sent(&mut commands);
+        assert!(
+            done.iter().any(
+                |c| matches!(c, Command::DoneNotification { thread_id, .. } if thread_id == "2")
+            ),
+            "{done:?}"
+        );
+
+        let search = state.search_box.get().expect("no sidebar search");
+        search.request_focus();
+        harness.rebuild();
+        harness.paint();
+        press(&mut harness, Code::KeyE, "e", Modifiers::empty());
+        assert!(sent(&mut commands).is_empty(), "`e` was typed");
+        assert_eq!(state.item_query.get(), "e");
+    }
+
+    /// `j` opens the first row with none open, then the row after the open
+    /// one, and `k` the one before; past either end they do nothing.
+    #[test]
+    fn j_and_k_open_the_next_and_previous_rows() {
+        use crate::backend::Command;
+        use crate::items::SidebarTab;
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let item = |id: &str, minute: u32| {
+            let at = format!("2026-09-18T10:{minute:02}:00Z").parse().unwrap();
+            let mut item = perch_github::Item::new("slatedb/slatedb", at);
+            item.id = id.into();
+            item.checkout = Some(perch_github::ItemCheckout {
+                branch: id.into(),
+                base_ref: "main".into(),
+                head_sha: "h".into(),
+                path: std::path::PathBuf::from(format!("/tmp/{id}")),
+                owned: true,
+                on_disk: true,
+                churn: None,
+                last_seen_head: None,
+                divergence: None,
+                source: None,
+            });
+            item
+        };
+        state.items.set(vec![item("a", 2), item("b", 1)]);
+        crate::ui::sidebar::set_filters(state, |f| f.tab = SidebarTab::Worktrees);
+        let order: Vec<String> = state.visible_items().into_iter().map(|i| i.id).collect();
+        assert_eq!(order.len(), 2);
+        let (mut harness, mut commands) = empty_window(state, review);
+        let opened = |commands: &mut _| -> Vec<String> {
+            sent(commands)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::OpenItem { id, .. } => Some(id),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[0].clone()]);
+        assert_eq!(state.open_item.get().as_ref(), Some(&order[0]));
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[1].clone()]);
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert!(opened(&mut commands).is_empty(), "past the last row");
+        press(&mut harness, Code::KeyK, "k", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[0].clone()]);
+        press(&mut harness, Code::KeyK, "k", Modifiers::empty());
+        assert!(opened(&mut commands).is_empty(), "past the first row");
+    }
+
+    /// `j` works as a window opens, before any click, and after the
+    /// keyboard has been let go, as Open… and Go to File let it go as they
+    /// shut: the window has it whenever nobody does.
+    #[test]
+    fn j_works_with_nothing_holding_the_keyboard() {
+        use crate::backend::Command;
+        use crate::items::SidebarTab;
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let item = |id: &str, minute: u32| {
+            let at = format!("2026-09-18T10:{minute:02}:00Z").parse().unwrap();
+            let mut item = perch_github::Item::new("slatedb/slatedb", at);
+            item.id = id.into();
+            item.checkout = Some(perch_github::ItemCheckout {
+                branch: id.into(),
+                base_ref: "main".into(),
+                head_sha: "h".into(),
+                path: std::path::PathBuf::from(format!("/tmp/{id}")),
+                owned: true,
+                on_disk: true,
+                churn: None,
+                last_seen_head: None,
+                divergence: None,
+                source: None,
+            });
+            item
+        };
+        state.items.set(vec![item("a", 2), item("b", 1)]);
+        crate::ui::sidebar::set_filters(state, |f| f.tab = SidebarTab::Worktrees);
+        let order: Vec<String> = state.visible_items().into_iter().map(|i| i.id).collect();
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let opened = |commands: &mut _| -> Vec<String> {
+            sent(commands)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::OpenItem { id, .. } => Some(id),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[0].clone()]);
+        harness.root_id().clear_focus();
+        harness.rebuild();
+        harness.paint();
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[1].clone()]);
+    }
+
+    /// Open… up as a window opens, as the Perch menu's Open… with no window
+    /// has it, keeps the keyboard: the window takes it only when nobody
+    /// has asked for it.
+    #[test]
+    fn a_box_made_with_the_window_keeps_the_keyboard() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        open_box::show(state, None);
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+        let text = named(harness.root_id(), "open-box-text").expect("no box");
+        assert!(harness.is_focused(text), "the window took the keyboard");
+    }
+
+    /// The view with the keyboard under `id`, if any.
+    fn focused_under(harness: &HeadlessHarness, id: floem::ViewId) -> Option<floem::ViewId> {
+        if harness.is_focused(id) {
+            return Some(id);
+        }
+        id.children()
+            .into_iter()
+            .find_map(|child| focused_under(harness, child))
+    }
+
+    /// `j` from a control on the item that Tab moved the keyboard to opens
+    /// the next row, taking the control with the item, and the next `j`
+    /// goes on: the window takes the keyboard after Tab as after a click.
+    #[test]
+    fn j_goes_on_after_tab_left_the_keyboard_on_the_item() {
+        use crate::backend::Command;
+        use crate::items::SidebarTab;
+        let (backend, mut commands) = Backend::recording();
+        let (mut harness, state, review) = window_with_a_file_open_on(Rc::new(backend));
+        let item = |id: &str, minute: u32| {
+            let at = format!("2026-09-18T10:{minute:02}:00Z").parse().unwrap();
+            let mut item = perch_github::Item::new("slatedb/slatedb", at);
+            item.id = id.into();
+            item.checkout = Some(perch_github::ItemCheckout {
+                branch: id.into(),
+                base_ref: "main".into(),
+                head_sha: "h".into(),
+                path: std::path::PathBuf::from(format!("/tmp/{id}")),
+                owned: true,
+                on_disk: true,
+                churn: None,
+                last_seen_head: None,
+                divergence: None,
+                source: None,
+            });
+            item
+        };
+        state.items.set(vec![item("a", 2), item("b", 1)]);
+        crate::ui::sidebar::set_filters(state, |f| f.tab = SidebarTab::Worktrees);
+        let order: Vec<String> = state.visible_items().into_iter().map(|i| i.id).collect();
+        // Conversation, as the code editor keeps Tab for itself.
+        review.show_tab(crate::review::model::ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        let pane = harness.root_id();
+        let mut on = None;
+        for _ in 0..200 {
+            harness.dispatch_event(key(
+                Code::Tab,
+                Key::Named(NamedKey::Tab),
+                Modifiers::empty(),
+            ));
+            harness.rebuild();
+            harness.paint();
+            // A control on the item, which goes with it: not the
+            // sidebar's, nor a box.
+            on = focused_under(&harness, pane).filter(|id| {
+                let names: Vec<String> = std::iter::successors(Some(*id), floem::ViewId::parent)
+                    .map(|v| v.debug_name())
+                    .collect();
+                !names.iter().any(|n| {
+                    n.contains("TextInput") || n.contains("Editor View") || n.contains("drawer")
+                }) && *id != harness.root_id()
+            });
+            if on.is_some() {
+                break;
+            }
+        }
+        let on = on.expect("Tab never reached a control on the item");
+        sent(&mut commands);
+
+        let opened = |commands: &mut _| -> Vec<String> {
+            sent(commands)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::OpenItem { id, .. } => Some(id),
+                    _ => None,
+                })
+                .collect()
+        };
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[0].clone()]);
+        assert!(!on.is_valid(), "the control stayed");
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[1].clone()]);
+    }
+
+    /// `j` from the code editor opens the next row, taking the editor that
+    /// had the keyboard with the item, and the window has the keyboard
+    /// then, so the next `j` goes on to the row after.
+    #[test]
+    fn j_goes_on_after_the_view_with_the_keyboard_has_gone() {
+        use crate::backend::Command;
+        use crate::items::SidebarTab;
+        let (backend, mut commands) = Backend::recording();
+        let (mut harness, state, _review) = window_with_a_file_open_on(Rc::new(backend));
+        let item = |id: &str, minute: u32| {
+            let at = format!("2026-09-18T10:{minute:02}:00Z").parse().unwrap();
+            let mut item = perch_github::Item::new("slatedb/slatedb", at);
+            item.id = id.into();
+            item.checkout = Some(perch_github::ItemCheckout {
+                branch: id.into(),
+                base_ref: "main".into(),
+                head_sha: "h".into(),
+                path: std::path::PathBuf::from(format!("/tmp/{id}")),
+                owned: true,
+                on_disk: true,
+                churn: None,
+                last_seen_head: None,
+                divergence: None,
+                source: None,
+            });
+            item
+        };
+        state.items.set(vec![item("a", 2), item("b", 1)]);
+        crate::ui::sidebar::set_filters(state, |f| f.tab = SidebarTab::Worktrees);
+        let order: Vec<String> = state.visible_items().into_iter().map(|i| i.id).collect();
+        assert_eq!(order.len(), 2);
+        harness.rebuild();
+        harness.paint();
+
+        let code = named(harness.root_id(), "tinted editor").expect("no editor in the window");
+        let rect = code.get_visual_rect_no_clip();
+        let (x, y) = (rect.x0 + 200.0, rect.y0 + 40.0);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        let editor = harness
+            .element_id_at(x, y)
+            .expect("nothing under the click");
+        assert!(
+            harness.is_focused(editor.owning_id()),
+            "the editor has no keyboard"
+        );
+        sent(&mut commands);
+
+        let opened = |commands: &mut _| -> Vec<String> {
+            sent(commands)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::OpenItem { id, .. } => Some(id),
+                    _ => None,
+                })
+                .collect()
+        };
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[0].clone()]);
+        assert!(!editor.owning_id().is_valid(), "the editor stayed");
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec![order[1].clone()]);
+    }
+
+    /// `j` in the inbox opens notifications as their rows do, passing over
+    /// one that opens in the browser, and goes on from the one opening.
+    #[test]
+    fn j_in_the_inbox_passes_over_a_row_that_opens_in_the_browser() {
+        use crate::backend::Command;
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let mut release = issue_thread("r", 9, true);
+        release.subject.kind = perch_github::SubjectKind::Release;
+        state.notifications.set(vec![
+            issue_thread("1", 1, true),
+            release,
+            issue_thread("2", 2, true),
+        ]);
+        let (mut harness, mut commands) = empty_window(state, review);
+        let opened = |commands: &mut _| -> Vec<String> {
+            sent(commands)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::OpenNotification { thread, .. } => Some(thread.id),
+                    _ => None,
+                })
+                .collect()
+        };
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec!["1".to_string()]);
+        // Still opening: the pane has no item to say which row it is.
+        assert!(review.opening.get());
+        press(&mut harness, Code::KeyJ, "j", Modifiers::empty());
+        assert_eq!(opened(&mut commands), vec!["2".to_string()]);
+        assert!(crate::ui::widgets::opened().is_empty(), "no browser");
+    }
+
+    /// Cmd-R fetches the open item again; Cmd-Shift-C copies its link and
+    /// Cmd-Shift-O opens it, or the inbox row under the pointer; Cmd-Shift-R
+    /// opens and shuts Review.
+    #[test]
+    fn the_item_keys_refresh_copy_open_and_review() {
+        use crate::backend::Command;
+        let (backend, mut commands) = Backend::recording();
+        let (mut harness, state, review) = window_with_a_file_open_on(Rc::new(backend));
+        sent(&mut commands);
+
+        press(&mut harness, Code::KeyR, "r", OS_MOD);
+        let refreshed = sent(&mut commands);
+        assert!(
+            matches!(&refreshed[..], [Command::RefreshOpenItem { item_id }] if item_id == "wt"),
+            "{refreshed:?}"
+        );
+
+        // A worktree of the reader's own is nowhere on GitHub.
+        crate::ui::widgets::copied();
+        crate::ui::widgets::opened();
+        press(&mut harness, Code::KeyC, "c", OS_MOD | Modifiers::SHIFT);
+        assert!(crate::ui::widgets::copied().is_empty());
+        state.notifications.set(vec![issue_thread("1", 1, true)]);
+        state.hovered_row.set(Some("thread:1".into()));
+        press(&mut harness, Code::KeyO, "o", OS_MOD | Modifiers::SHIFT);
+        assert_eq!(
+            crate::ui::widgets::opened(),
+            vec!["https://github.com/org/repo/issues/1".to_string()]
+        );
+        state.hovered_row.set(None);
+        let mut item = (*review.item.get().unwrap()).clone();
+        item.subject = issue_item(5).subject;
+        review.item.set(Some(std::sync::Arc::new(item)));
+        press(&mut harness, Code::KeyC, "c", OS_MOD | Modifiers::SHIFT);
+        assert_eq!(
+            crate::ui::widgets::copied(),
+            vec!["https://github.com/org/repo/issues/5".to_string()]
+        );
+        press(&mut harness, Code::KeyO, "o", OS_MOD | Modifiers::SHIFT);
+        assert_eq!(
+            crate::ui::widgets::opened(),
+            vec!["https://github.com/org/repo/issues/5".to_string()]
+        );
+
+        press(&mut harness, Code::KeyR, "r", OS_MOD | Modifiers::SHIFT);
+        assert!(review.review_open.get(), "Cmd-Shift-R opens Review");
+        press(&mut harness, Code::KeyR, "r", OS_MOD | Modifiers::SHIFT);
+        assert!(!review.review_open.get(), "and shuts it");
+    }
+
+    /// The actions with no key do what their buttons and menu rows do
+    /// once config.toml gives them one.
+    #[test]
+    fn the_actions_without_a_default_key_work_once_bound() {
+        use crate::items::SidebarTab;
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings(
+            r#"
+            toggle_wrap = "alt+z"
+            copy_branch_name = "super+alt+b"
+            send_feedback = "super+alt+f"
+            worktrees = "ctrl+2"
+            browse = "ctrl+3"
+            inbox = "ctrl+1"
+            start_work = "super+alt+s"
+            "#,
+        ));
+        let (mut harness, state, review) = window_and_state_with_a_file_open();
+
+        let wrap = review.wrap.get();
+        press(&mut harness, Code::KeyZ, "z", Modifiers::ALT);
+        assert_eq!(review.wrap.get(), !wrap);
+
+        crate::ui::widgets::copied();
+        press(&mut harness, Code::KeyB, "b", OS_MOD | Modifiers::ALT);
+        assert_eq!(
+            crate::ui::widgets::copied(),
+            vec!["perch/pr-812".to_string()]
+        );
+
+        let tab = || state.item_filters.with(|f| f.tab);
+        press(&mut harness, Code::Digit2, "2", Modifiers::CONTROL);
+        assert_eq!(tab(), SidebarTab::Worktrees);
+        press(&mut harness, Code::Digit3, "3", Modifiers::CONTROL);
+        assert_eq!(tab(), SidebarTab::Browse);
+        press(&mut harness, Code::Digit1, "1", Modifiers::CONTROL);
+        assert_eq!(tab(), SidebarTab::Inbox);
+
+        press(&mut harness, Code::KeyF, "f", OS_MOD | Modifiers::ALT);
+        assert!(review.feedback_open.get(), "the feedback dropdown is up");
+        press(&mut harness, Code::KeyF, "f", OS_MOD | Modifiers::ALT);
+        assert!(!review.feedback_open.get());
+
+        press(&mut harness, Code::KeyS, "s", OS_MOD | Modifiers::ALT);
+        assert!(
+            state.start_work_confirm.with(Option::is_some),
+            "Start work asks"
+        );
     }
 }

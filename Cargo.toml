@@ -197,11 +197,14 @@ incremental = true
 # copy of its pixels, so on Linux a window that another had covered
 # showed what had been on the screen there until something in it
 # changed. Then one that adds zoom-in and zoom-out cursors, which
-# winit draws and floem's `CursorStyle` had no names for. Last, one that
+# winit draws and floem's `CursorStyle` had no names for. Then one that
 # keeps the style cache's maps at their addresses. The cache knew a class context
 # by its map's address, and glibc gives a freed map's address to the next
 # one of its size, so on Linux a sidebar row's face ring kept its light
-# colour when the system went dark.
+# colour when the system went dark. Last, one that lets `request_focus`
+# reach a view that is only `.focusable()` after Tab has been pressed.
+# floem then looked only for views in the Tab order, so the window could
+# not take the keyboard back, and `j` and `e` did nothing until a click.
 # Drop a patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,

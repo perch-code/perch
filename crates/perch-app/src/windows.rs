@@ -179,11 +179,12 @@ fn deliver(window: WindowId, event: Event) {
     let Some(app) = app() else {
         return;
     };
-    // `[ui] appearance` is the whole app's, so it is taken up once here
-    // rather than by each window's state.
+    // `[ui] appearance` and `[keybindings]` are the whole app's, so they
+    // are taken up once here rather than by each window's state.
     if let Event::Settings(file) = &event {
         if let Some(config) = &file.config {
             crate::theme::choose(config.ui.appearance);
+            crate::keymap::take_up(&config.keybindings);
         }
     }
     // A copy, so a window closing while the event is applied does not find
@@ -309,6 +310,7 @@ pub fn view(
         }
     })
     .on_event_cont(floem::event::listener::WindowClosed, move |_, _| {
+        state.settings.window_closed();
         if let Some(app) = app() {
             app.windows.borrow_mut().retain(|w| w.id != id);
         }

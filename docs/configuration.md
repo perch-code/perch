@@ -26,6 +26,7 @@ repository's `github` and `root`.
 | `[agent.gemini] models` | `agy`'s own list | Gemini models the picker offers |
 | `[work] branch_prefix` | `""` | Put before branch names Perch fills in, such as `"chris/"` |
 | `[work] approvals` | `"auto"` | Who answers a Work run's requests outside its sandbox: `"auto"` (the CLI's auto-reviewer, then you) or `"ask"` (you) |
+| `[keybindings]` *action* | the action's keys | Keys for an action by its id: a string such as `"super+t"`, a list of them, or `""` for none; see [Keyboard shortcuts](reference.md#keyboard-shortcuts) |
 | `[ui] appearance` | `"system"` | `"light"`, `"dark"` or `"system"` |
 | `[ui] code_font` | none | Code font off macOS; on macOS code is always SF Mono; applies after a restart |
 | `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |

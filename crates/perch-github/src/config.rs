@@ -35,6 +35,12 @@ pub struct Config {
     /// `[ui]`: how the window looks.
     #[serde(default)]
     pub ui: UiConfig,
+    /// `[keybindings]`: an action's id to the keys that run it, a string or
+    /// a list of strings, `""` or `[]` for none. Kept as raw values and read
+    /// by the app, which knows the actions and how keys are written, so one
+    /// bad entry is a warning there rather than a refused file here.
+    #[serde(default)]
+    pub keybindings: BTreeMap<String, toml::Value>,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
     /// by name: with no field for it, toml would drop the table without a
     /// word and the reader would see an empty sidebar and no reason.
@@ -1148,6 +1154,7 @@ impl Config {
             lsp: LspConfig::default(),
             display: DisplayConfig::default(),
             ui: UiConfig::default(),
+            keybindings: BTreeMap::new(),
             project: Vec::new(),
             warnings: Vec::new(),
         }
@@ -1426,6 +1433,24 @@ network = ["index.crates.io"]
         let c: Config = toml::from_str("[ui]\nappearance = \"light\"").unwrap();
         assert_eq!(c.ui.appearance, Appearance::Light);
         assert!(toml::from_str::<Config>("[ui]\nappearance = \"dim\"").is_err());
+    }
+
+    #[test]
+    fn keybindings_are_read_as_raw_values_whatever_they_hold() {
+        assert!(Config::fallback().keybindings.is_empty());
+        assert!(Config::parse("").unwrap().keybindings.is_empty());
+        let c = Config::parse(
+            "[keybindings]\ngo_to_file = \"super+t\"\nfocus_search = [\"super+1\", \"/\"]\npin = \"\"\nmystery = 3\n",
+        )
+        .unwrap();
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.keybindings.len(), 4);
+        assert_eq!(c.keybindings["go_to_file"].as_str(), Some("super+t"));
+        assert_eq!(
+            c.keybindings["focus_search"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(c.keybindings["mystery"].as_integer(), Some(3));
     }
 
     #[test]

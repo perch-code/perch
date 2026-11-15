@@ -668,12 +668,8 @@ pub fn view_menu(app: AppState, state: ReviewState) -> Menu {
     menu = menu.item("Word wrap", |i| {
         i.icon(SidebarIcon::Wrap)
             .checked(state.wrap.get_untracked())
-            .toggle(move |wrap| {
-                state.wrap.set(wrap);
-                let value = if wrap { "on" } else { "off" };
-                app.pending_meta
-                    .set(Some(("review.wrap".into(), value.into())));
-            })
+            .accelerator_for(crate::keymap::Action::ToggleWrap)
+            .toggle(move |wrap| set_wrap(app, state, wrap))
     });
     if change {
         let folded = state
@@ -686,6 +682,24 @@ pub fn view_menu(app: AppState, state: ReviewState) -> Menu {
         });
     }
     menu
+}
+
+/// Word wrap on or off, remembered for the next launch.
+fn set_wrap(app: AppState, state: ReviewState, wrap: bool) {
+    state.wrap.set(wrap);
+    let value = if wrap { "on" } else { "off" };
+    app.pending_meta
+        .set(Some(("review.wrap".into(), value.into())));
+}
+
+/// The word wrap key: flip Word wrap where the view menu is, on Code.
+/// False elsewhere.
+pub(crate) fn toggle_wrap(app: AppState, state: ReviewState) -> bool {
+    if !floem::reactive::Effect::untrack(|| on_file(state)) {
+        return false;
+    }
+    set_wrap(app, state, !state.wrap.get_untracked());
+    true
 }
 
 fn set_layout(app: AppState, state: ReviewState, layout: Layout) {

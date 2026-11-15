@@ -421,6 +421,13 @@ pub struct AppState {
     /// The item the pointer is over, so a row can show its buttons and a
     /// bare keystroke knows what it means.
     pub hovered_item: RwSignal<Option<String>>,
+    /// The Inbox row the pointer is over, by its `InboxRow::key`: what the
+    /// inbox's keys, Done and Mark Unread, act on before the open item.
+    pub hovered_row: RwSignal<Option<String>>,
+    /// The sidebar row the next and previous item keys last opened, by
+    /// its key, for the moment while it opens and the pane has no item
+    /// to say which row it is.
+    pub stepped_to: RwSignal<Option<String>>,
     /// The sidebar's filter menu settings and search.
     pub item_filters: RwSignal<crate::items::ItemFilters>,
     /// The item whose title is a text box right now.
@@ -551,6 +558,8 @@ impl AppState {
             usage: RwSignal::new(Default::default()),
             update: RwSignal::new(crate::update::UpdateStatus::Current),
             hovered_item: RwSignal::new(None),
+            hovered_row: RwSignal::new(None),
+            stepped_to: RwSignal::new(None),
             item_filters: RwSignal::new(crate::items::ItemFilters::default()),
             renaming: RwSignal::new(None),
             confirm_delete: RwSignal::new(None),

@@ -38,7 +38,7 @@ impl AgentBackend {
 
 /// One key the Settings page can write. `None`, an empty string or an
 /// empty list takes the key out of the file, which resets it to its
-/// default.
+/// default, except for a keybinding, where an empty list means no keys.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Setting {
     PollIntervalSecs(Option<u64>),
@@ -61,6 +61,13 @@ pub enum Setting {
     Zoom(Option<f64>),
     CodeFontSize(Option<f32>),
     LspMaxMemoryMb(Option<u64>),
+    /// `[keybindings] <action>`: None takes it out, back to the action's
+    /// default keys; an empty list writes `[]`, no keys at all; one key is
+    /// written as a string and several as a list.
+    Keybinding {
+        action: &'static str,
+        keys: Option<Vec<String>>,
+    },
     /// A key of the `[[repo]]` whose identity this is, compared without
     /// regard to case.
     Repo {
@@ -313,6 +320,10 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             top(&["lsp"], "max_memory_mb"),
             integer(*mb, "max_memory_mb")?,
         ),
+        Setting::Keybinding { action, keys } => (
+            top(&["keybindings"], action),
+            keys.as_deref().map(keybinding),
+        ),
         Setting::Repo { identity, change } => {
             let (tables, key, value): (&'static [&'static str], _, _) = match change {
                 RepoSetting::Name(name) => (&[], "name", string(name)),
@@ -365,6 +376,20 @@ fn list(items: &[String]) -> Option<Value> {
         .filter(|s| !s.is_empty())
         .collect();
     (!items.is_empty()).then(|| Value::Array(items.into_iter().collect::<Array>()))
+}
+
+/// A keybinding's keys, each trimmed and the empty ones dropped: one as a
+/// string, otherwise a list, which can be empty.
+fn keybinding(keys: &[String]) -> Value {
+    let keys: Vec<&str> = keys
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    match keys.as_slice() {
+        [one] => Value::from(*one),
+        _ => Value::Array(keys.into_iter().collect::<Array>()),
+    }
 }
 
 fn integer(value: Option<u64>, key: &str) -> Result<Option<Value>, String> {
@@ -1145,6 +1170,10 @@ mod tests {
             Setting::Zoom(Some(0.9)),
             Setting::CodeFontSize(Some(11.0)),
             Setting::LspMaxMemoryMb(Some(4096)),
+            Setting::Keybinding {
+                action: "go_to_file",
+                keys: Some(vec!["super+t".into()]),
+            },
         ];
         let (text, c) = edit_text("", &changes, &[]).unwrap();
         assert!(c.warnings.is_empty(), "{:?}", c.warnings);
@@ -1163,6 +1192,7 @@ mod tests {
         assert_eq!(c.display.zoom, 0.9);
         assert_eq!(c.display.code_font_size, 11.0);
         assert_eq!(c.lsp.max_memory_mb, 4096);
+        assert_eq!(c.keybindings["go_to_file"].as_str(), Some("super+t"));
 
         let keys = present_keys(&text, &[]);
         for key in [
@@ -1181,10 +1211,65 @@ mod tests {
             "display.zoom",
             "display.code_font_size",
             "lsp.max_memory_mb",
+            "keybindings.go_to_file",
         ] {
             assert!(keys.contains(key), "{key} missing from {keys:?}");
         }
-        assert_eq!(keys.len(), 15, "{keys:?}");
+        assert_eq!(keys.len(), 16, "{keys:?}");
+    }
+
+    fn keybinding(action: &'static str, keys: Option<&[&str]>) -> Setting {
+        Setting::Keybinding {
+            action,
+            keys: keys.map(|keys| keys.iter().map(|k| k.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn a_keybinding_is_one_string_or_a_list() {
+        let out = edit("", &[keybinding("go_to_file", Some(&["super+t"]))]);
+        assert_eq!(out, "[keybindings]\ngo_to_file = \"super+t\"\n");
+        let out = edit(
+            &out,
+            &[keybinding("go_to_file", Some(&["super+t", " super+p "]))],
+        );
+        assert_eq!(
+            out,
+            "[keybindings]\ngo_to_file = [\"super+t\", \"super+p\"]\n"
+        );
+        let c = Config::parse_text(&out).unwrap();
+        assert_eq!(
+            c.keybindings["go_to_file"].as_array().map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn an_empty_keybinding_is_written_as_no_keys() {
+        let out = edit(
+            "[keybindings]\npin = \"p\"\n",
+            &[keybinding("pin", Some(&[]))],
+        );
+        assert_eq!(out, "[keybindings]\npin = []\n");
+        assert!(present_keys(&out, &[]).contains("keybindings.pin"));
+        let out = edit("", &[keybinding("comment", Some(&[""]))]);
+        assert_eq!(out, "[keybindings]\ncomment = []\n");
+    }
+
+    #[test]
+    fn taking_a_keybinding_out_puts_its_defaults_back() {
+        let text =
+            "[ui]\nappearance = \"dark\"\n\n[keybindings]\npin = []\n# mine\ncomment = \"c\"\n";
+        let out = edit(text, &[keybinding("pin", None)]);
+        assert_eq!(
+            out,
+            "[ui]\nappearance = \"dark\"\n\n[keybindings]\n# mine\ncomment = \"c\"\n"
+        );
+        let out = edit(
+            "[ui]\nappearance = \"dark\"\n\n[keybindings]\ncomment = \"c\"\n",
+            &[keybinding("comment", None)],
+        );
+        assert_eq!(out, "[ui]\nappearance = \"dark\"\n");
     }
 
     const REPOS: &str = "[[repo]]\ngithub = \"a/one\"\n\n# notes\n[[repo]]\nroot = \"/srv/notes\"\n\n[[repo]]\ngithub = \"a/two\"\nbase = \"main\"\n[repo.work]\napprovals = \"ask\"\n\n[agent]\nmodel = \"opus\"\n";

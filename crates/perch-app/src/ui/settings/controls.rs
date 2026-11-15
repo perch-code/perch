@@ -18,12 +18,14 @@ use super::{Page, Row};
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip;
 use crate::theme;
-use crate::ui::menu::{Menu, MenuExt};
+use crate::ui::menu::{Menu, MenuExt, Shortcut};
 use crate::ui::widgets::{action_button, clickable, sidebar_glyph, DISABLED_ALPHA};
 
 /// How wide a row's dropdown or box is.
 pub(crate) const CONTROL_WIDTH: f64 = 220.0;
 const CONTROL_HEIGHT: f64 = 30.0;
+/// How wide a shortcut's button is: room for two keys, ⌘1, /.
+const SHORTCUT_WIDTH: f64 = 140.0;
 const SWITCH_WIDTH: f64 = 36.0;
 const SWITCH_HEIGHT: f64 = 20.0;
 const KNOB: f64 = 16.0;
@@ -497,6 +499,307 @@ pub(crate) fn setting_text(
                 .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
                 .set_disabled(!writable.writable())
         })
+}
+
+/// The keys macOS keeps for itself: Quit, Hide and Hide Others, which the
+/// app menu holds, and the app switcher. They never reach Perch.
+const TAKEN: [&str; 4] = ["super+q", "super+h", "alt+super+h", "super+tab"];
+
+/// Keys macOS apps leave to macOS, Minimize and the next window. Perch
+/// hears them, but the button refuses them, as a reader expects them to
+/// do what they do everywhere.
+const LEFT_TO_MACOS: [&str; 2] = ["super+m", "super+`"];
+
+fn one_of(list: &[&str], keys: Shortcut) -> bool {
+    cfg!(target_os = "macos") && list.iter().any(|r| Shortcut::parse(r) == Some(keys))
+}
+
+/// Whether macOS takes `keys` before Perch hears them, so an action
+/// bound to them by hand never runs.
+pub(crate) fn taken(keys: Shortcut) -> bool {
+    one_of(&TAKEN, keys)
+}
+
+/// Whether the button refuses `keys` as macOS's own.
+fn reserved(keys: Shortcut) -> bool {
+    taken(keys) || one_of(&LEFT_TO_MACOS, keys)
+}
+
+/// Why `keys` can't be a shortcut, or None when it can.
+fn refused(keys: Shortcut) -> Option<String> {
+    if reserved(keys) {
+        return Some(format!("macOS keeps {} for itself", keys.label()));
+    }
+    // Off macOS the logo key has no name in config.toml.
+    if Shortcut::parse(&keys.to_config()) != Some(keys) {
+        return Some(format!("Perch can't write {}", keys.label()));
+    }
+    None
+}
+
+/// Whether `code` is a modifier on its own, which waits for the key it
+/// goes with.
+fn modifier_only(code: Code) -> bool {
+    matches!(
+        code,
+        Code::ShiftLeft
+            | Code::ShiftRight
+            | Code::ControlLeft
+            | Code::ControlRight
+            | Code::AltLeft
+            | Code::AltRight
+            | Code::MetaLeft
+            | Code::MetaRight
+            | Code::Fn
+            | Code::FnLock
+            | Code::CapsLock
+            | Code::NumLock
+    )
+}
+
+/// Whether `key` presses a button that has the keyboard: Enter or Space
+/// going down, with no modifiers, and not repeating. floem sends the
+/// button a Click as well as the key comes up, and as it repeats, which
+/// the button ignores, so a press is heard once.
+fn activates(key: &KeyboardEvent) -> bool {
+    matches!(key.code, Code::Enter | Code::NumpadEnter | Code::Space)
+        && key.modifiers.is_empty()
+        && !key.repeat
+}
+
+/// Whether a Click is the one floem sends for Enter or Space.
+fn by_keyboard(cx: &floem::context::EventCx<'_>) -> bool {
+    cx.triggered_by.is_some_and(|e| e.is_keyboard_trigger())
+}
+
+/// A shortcut's keys, as a button that shows them, or "None". A click,
+/// Enter or Space sets it waiting for keys; the next key pressed with its
+/// modifiers, Tab and Cmd-W included, goes to `write`, and Escape on its
+/// own stops waiting with no change. So does the keyboard going
+/// elsewhere. While it waits, the Perch menu lets its keys through, so
+/// Cmd-O is a key for it rather than Open…. A key macOS keeps is refused
+/// with a note under the button, and the button goes on waiting; Cmd-Q,
+/// Cmd-H, Cmd-Opt-H and Cmd-Tab never reach it, as macOS has them first.
+/// The key written, held down, repeats into `held` rather than the page.
+/// The × beside it takes every key away.
+pub(crate) fn shortcut(
+    settings: super::SettingsState,
+    keys: impl Fn() -> Vec<Shortcut> + 'static,
+    enabled: impl Fn() -> bool + 'static,
+    write: impl Fn(Option<Shortcut>) + 'static,
+    debug: &str,
+) -> AnyView {
+    let (capturing, held) = (settings.capturing, settings.held);
+    let keys: Rc<dyn Fn() -> Vec<Shortcut>> = Rc::new(keys);
+    let enabled: Rc<dyn Fn() -> bool> = Rc::new(enabled);
+    let write: Rc<dyn Fn(Option<Shortcut>)> = Rc::new(write);
+    let note: RwSignal<Option<String>> = RwSignal::new(None);
+    // The button's id, for its label to know when the wait is its; set
+    // as soon as the button is made.
+    let own: Rc<Cell<Option<floem::ViewId>>> = Rc::new(Cell::new(None));
+    let label_own = own.clone();
+    let label_keys = keys.clone();
+    let label = Label::derived(move || {
+        let keys = label_keys();
+        let now = capturing.get();
+        if now.is_some() && now == label_own.get() {
+            "Press keys…".to_string()
+        } else if keys.is_empty() {
+            "None".to_string()
+        } else {
+            keys.iter()
+                .map(Shortcut::label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    });
+    let label = label.style(|s| s.text_ellipsis().min_width(0.0).pointer_events_none());
+    let button = Container::new(label);
+    let id = button.view_id();
+    own.set(Some(id));
+    let waiting = move || capturing.get() == Some(id);
+    // Stops the wait. The menu has its keys back unless a key just given
+    // is still down, which has them back as it comes up.
+    let stop: Rc<dyn Fn()> = Rc::new(move || {
+        if capturing.try_get_untracked() == Some(Some(id)) {
+            capturing.set(None);
+        }
+        if note.try_get_untracked().flatten().is_some() {
+            note.set(None);
+        }
+        if held.try_get_untracked().flatten().is_none() {
+            settings.let_menu_keys_back();
+        }
+    });
+    let start: Rc<dyn Fn()> = {
+        let enabled = enabled.clone();
+        Rc::new(move || {
+            if enabled() {
+                note.set(None);
+                capturing.set(Some(id));
+                id.request_focus();
+                if settings.menu_keys.with_untracked(Option::is_none) {
+                    settings
+                        .menu_keys
+                        .set(Some(crate::app_menu::let_keys_through()));
+                }
+            }
+        })
+    };
+    // A button that can't be pressed hears no keys, Escape included, so a
+    // wait it can no longer end ends as it stops being enabled: when
+    // config.toml no longer reads, say.
+    {
+        let (enabled, stop) = (enabled.clone(), stop.clone());
+        Effect::new(move |_| {
+            if !enabled() && capturing.get_untracked() == Some(id) {
+                stop();
+            }
+        });
+    }
+    let click = start.clone();
+    let (click_stop, key_stop, lost_stop) = (stop.clone(), stop.clone(), stop.clone());
+    let key_write = write.clone();
+    let style_enabled = enabled.clone();
+    let button = button
+        .on_event_stop(el::Click, move |cx, _| {
+            // Enter or Space did what it does as it went down.
+            if by_keyboard(cx) {
+                return;
+            }
+            if capturing.get_untracked() == Some(id) {
+                click_stop();
+            } else {
+                click();
+            }
+        })
+        .on_event(el::KeyDown, move |cx, key: &KeyboardEvent| {
+            if capturing.get_untracked() != Some(id) {
+                if activates(key) {
+                    start();
+                    return EventPropagation::Stop;
+                }
+                return EventPropagation::Continue;
+            }
+            // Every key is the button's while it waits, Tab included. A
+            // key repeating is the one that started the wait, still down.
+            cx.prevent_default();
+            if key.is_composing || key.repeat || modifier_only(key.code) {
+                return EventPropagation::Stop;
+            }
+            let modifiers = key.modifiers
+                & (Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::META);
+            if key.code == Code::Escape && modifiers.is_empty() {
+                key_stop();
+                return EventPropagation::Stop;
+            }
+            let keys = Shortcut {
+                modifiers,
+                code: key.code,
+            };
+            if let Some(why) = refused(keys) {
+                note.set(Some(why));
+                return EventPropagation::Stop;
+            }
+            held.set(Some(key.code));
+            key_stop();
+            key_write(Some(keys));
+            EventPropagation::Stop
+        })
+        .on_event_cont(el::FocusLost, move |_, _| lost_stop())
+        // A key given and still down as the button goes, as search rows
+        // can go with a write, is let go by the window as it comes up.
+        .on_cleanup(move || stop())
+        .debug_name(format!("settings-shortcut:{debug}"))
+        .style(move |s| {
+            let available = style_enabled();
+            let waiting = waiting();
+            let color = if waiting {
+                theme::fg_muted()
+            } else {
+                theme::fg()
+            };
+            clickable(s)
+                .items_center()
+                .width(SHORTCUT_WIDTH)
+                .height(CONTROL_HEIGHT)
+                .padding_horiz(10.0)
+                .font_size(theme::TEXT_META)
+                .color(if available {
+                    color
+                } else {
+                    color.with_alpha(DISABLED_ALPHA)
+                })
+                .background(theme::canvas())
+                .border(1.0)
+                .border_color(if waiting {
+                    theme::accent()
+                } else {
+                    theme::border()
+                })
+                .border_radius(theme::RADIUS)
+                .keyboard_navigable()
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                .set_disabled(!available)
+                .apply_if(!available, |s| s.cursor(floem::style::CursorStyle::Default))
+                .apply_if(available, |s| {
+                    s.hover(|s| s.background(theme::canvas_hover()))
+                })
+        });
+    let clear_keys = keys.clone();
+    let clear_enabled = enabled.clone();
+    let clear_write = write;
+    let clear_action = move || {
+        if clear_enabled() {
+            clear_write(None);
+        }
+    };
+    let clear_key = clear_action.clone();
+    let clear = Container::new(
+        sidebar_glyph(SidebarIcon::Close, theme::fg_subtle)
+            .style(|s| s.size(12.0, 12.0).pointer_events_none()),
+    )
+    .on_event_stop(el::Click, move |cx, _| {
+        if !by_keyboard(cx) {
+            clear_action();
+        }
+    })
+    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        if activates(key) {
+            clear_key();
+            EventPropagation::Stop
+        } else {
+            EventPropagation::Continue
+        }
+    })
+    .debug_name(format!("settings-shortcut-clear:{debug}"))
+    .style(move |s| {
+        let shown = enabled() && !clear_keys().is_empty();
+        clickable(s)
+            .size(22.0, 22.0)
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .justify_center()
+            .border_radius(theme::RADIUS)
+            .keyboard_navigable()
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()))
+            .apply_if(!shown, |s| s.hide())
+    });
+    let note_label = Label::derived(move || note.get().unwrap_or_default())
+        .debug_name(format!("settings-shortcut-note:{debug}"))
+        .style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::notice_fg())
+                .apply_if(note.with(Option::is_none), |s| s.hide())
+        });
+    Stack::vertical((
+        Stack::horizontal((tip(clear, "Remove the keys".to_string()), button))
+            .style(|s| s.items_center().gap(6.0)),
+        note_label,
+    ))
+    .style(|s| s.flex_col().items_end().gap(4.0))
+    .into_any()
 }
 
 /// A small outlined button, for a row's actions.

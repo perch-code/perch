@@ -259,21 +259,46 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
     let row = Container::new(content)
         .debug_name(format!("browse row:{repo}#{number}"))
         .on_event_stop(el::Click, move |_, _| {
-            let navigation_id = backend.open_subject(&open_repo, kind, number);
-            state.begin_open(
-                match kind {
-                    ItemKind::PullRequest => "Reading the pull request",
-                    ItemKind::Issue => "Reading the issue",
-                },
-                navigation_id,
-            );
-            crate::review::notified::follow_subject(state, &open_repo, kind, number);
+            open_hit(state, &backend, &open_repo, kind, number)
         })
         .right_click_menu(move || {
             search_menu(state, menu_backend.clone(), &repo, kind, number, &url)
         })
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
+}
+
+/// Open a result, as a click on its row does.
+pub(crate) fn open_hit(
+    state: AppState,
+    backend: &Backend,
+    repo: &str,
+    kind: ItemKind,
+    number: u64,
+) {
+    let navigation_id = backend.open_subject(repo, kind, number);
+    state.begin_open(
+        match kind {
+            ItemKind::PullRequest => "Reading the pull request",
+            ItemKind::Issue => "Reading the issue",
+        },
+        navigation_id,
+    );
+    crate::review::notified::follow_subject(state, repo, kind, number);
+}
+
+/// The results the list shows: the view's so far, under the search box.
+pub(crate) fn visible_hits(state: AppState) -> Vec<SearchHit> {
+    let Some(query) = state.browse_query() else {
+        return Vec::new();
+    };
+    let hits = state
+        .browse
+        .with(|all| all.get(&query).map(|page| page.hits.clone()))
+        .unwrap_or_default();
+    state
+        .item_query
+        .with(|q| crate::items::search_hits(&hits, q))
 }
 
 /// A result's menu: Move to Inbox while its notification is Done or

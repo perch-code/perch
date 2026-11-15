@@ -308,6 +308,7 @@ pub(super) async fn take_up_whole_config(ctx: &Ctx, path: &Path) -> Result<Confi
         }
     };
     crate::repos::resolve(&mut file, &Git::new(None)).await;
+    crate::keymap::add_warnings(&mut file);
 
     let before = ctx.config();
     let rediscover = held.swap_file_agent(&file.agent);

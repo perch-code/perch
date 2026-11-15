@@ -19,6 +19,7 @@ use crate::items::{
     BrowseView, Direction, InboxView, ItemFilters, ItemSort, Order, SidebarTab, StateFilter,
     WorktreeView,
 };
+use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
@@ -354,6 +355,122 @@ pub(crate) fn set_filters(state: AppState, edit: impl FnOnce(&mut crate::items::
         "item_filters".into(),
         state.item_filters.get_untracked().to_meta(),
     )));
+}
+
+/// Show `tab` in the drawer, as its tab does, opening the drawer when it
+/// is shut.
+pub(crate) fn show_tab(state: AppState, tab: SidebarTab) {
+    if state.item_filters.with_untracked(|f| f.tab) != tab {
+        set_filters(state, move |f| f.tab = tab);
+    }
+    if !state.sidebar_open.get_untracked() {
+        state.show_sidebar(true);
+    }
+}
+
+/// A row of the drawer's list, as the next and previous item keys see it.
+enum Row {
+    Thread(Box<perch_github::Thread>),
+    Item(Box<Item>),
+    Hit(perch_github::SearchHit),
+}
+
+impl Row {
+    fn key(&self) -> String {
+        match self {
+            Row::Thread(thread) => format!("thread:{}", thread.id),
+            Row::Item(item) => format!("item:{}", item.id),
+            Row::Hit(hit) => format!("hit:{}#{}", hit.repo_full_name, hit.number),
+        }
+    }
+
+    /// Whether the main pane has the row open, or is opening it.
+    fn is_open(&self, state: AppState, review: ReviewState) -> bool {
+        match self {
+            Row::Thread(thread) => state.is_viewing_thread(thread),
+            Row::Item(item) => state
+                .open_item
+                .with_untracked(|open| open.as_deref() == Some(item.id.as_str())),
+            Row::Hit(hit) => review.item.with_untracked(|open| {
+                open.as_ref()
+                    .and_then(|item| item.subject.as_ref())
+                    .is_some_and(|subject| {
+                        subject.repo_full_name() == hit.repo_full_name
+                            && subject.kind() == hit.kind
+                            && subject.number() == hit.number
+                    })
+            }),
+        }
+    }
+}
+
+/// Open the row after the open one in the list the drawer shows, or the
+/// one before it, as a click on it does; the first row while none is
+/// open. A notification that opens in the browser is passed over, as
+/// there would be no open row to go on from. False at either end, or
+/// with the drawer shut and no row to click.
+pub(crate) fn step(
+    state: AppState,
+    review: ReviewState,
+    backend: &Rc<Backend>,
+    forward: bool,
+) -> bool {
+    if !state.sidebar_open.get_untracked() {
+        return false;
+    }
+    let tab = state.item_filters.with_untracked(|f| f.tab);
+    let rows: Vec<Row> = floem::reactive::Effect::untrack(|| match tab {
+        SidebarTab::Inbox => state
+            .visible_inbox()
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::inbox::InboxRow::Thread(thread) => {
+                    crate::ui::notifications::opens_inside(&thread)
+                        .then(|| Row::Thread(Box::new(thread)))
+                }
+                crate::inbox::InboxRow::Local { item, .. } => Some(Row::Item(Box::new(item))),
+            })
+            .collect(),
+        SidebarTab::Worktrees => state
+            .visible_items()
+            .into_iter()
+            .map(|item| Row::Item(Box::new(item)))
+            .collect(),
+        SidebarTab::Browse => crate::ui::browse::visible_hits(state)
+            .into_iter()
+            .map(Row::Hit)
+            .collect(),
+    });
+    // While a notification opens the pane has no item yet: the row it
+    // is for is the one last stepped to.
+    let at = rows
+        .iter()
+        .position(|row| row.is_open(state, review))
+        .or_else(|| {
+            let stepped = state.stepped_to.get_untracked()?;
+            let opening =
+                review.opening.get_untracked() && review.item.with_untracked(Option::is_none);
+            opening
+                .then(|| rows.iter().position(|row| row.key() == stepped))
+                .flatten()
+        });
+    let next = match at {
+        Some(at) if forward => Some(at + 1),
+        Some(at) => at.checked_sub(1),
+        None => Some(0),
+    };
+    let Some(row) = next.and_then(|next| rows.get(next)) else {
+        return false;
+    };
+    state.stepped_to.set(Some(row.key()));
+    match row {
+        Row::Thread(thread) => crate::ui::notifications::open_thread(state, backend, thread),
+        Row::Item(item) => crate::ui::open_item(state, review, backend, item),
+        Row::Hit(hit) => {
+            crate::ui::browse::open_hit(state, backend, &hit.repo_full_name, hit.kind, hit.number)
+        }
+    }
+    true
 }
 
 /// The search box and the filter button. On Browse, Enter opens what the

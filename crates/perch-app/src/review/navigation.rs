@@ -392,6 +392,14 @@ pub fn go_to_type_definition(state: ReviewState, backend: &Backend, symbol: &Sym
     );
 }
 
+/// The type definition of the symbol at the caret, for a key the keymap
+/// gives it; it has none by default.
+pub fn type_definition_at_cursor(state: ReviewState, backend: &Backend) {
+    if let Some(symbol) = references::symbol_at_cursor(state) {
+        go_to_type_definition(state, backend, &symbol);
+    }
+}
+
 /// Ask for the impls of a trait, or of a trait method. One opens; several
 /// open the panel as "Implementations of".
 pub fn go_to_implementations(state: ReviewState, backend: &Backend, symbol: &Symbol) {
@@ -465,7 +473,7 @@ impl Entry {
         }
     }
 
-    /// The key that does the same, as a menu accelerator: VS Code's keys.
+    /// The key that does the same by default, VS Code's.
     pub fn accelerator(self) -> Option<&'static str> {
         match self {
             Entry::Definition => Some("F12"),
@@ -474,6 +482,30 @@ impl Entry {
             Entry::References => Some("shift+F12"),
             Entry::CallHierarchy => Some("shift+alt+KeyH"),
             Entry::Copy => Some("super+KeyC"),
+        }
+    }
+
+    /// The keymap's action for it. Copy is the editor's own key.
+    fn action(self) -> Option<crate::keymap::Action> {
+        use crate::keymap::Action;
+        match self {
+            Entry::Definition => Some(Action::GoToDefinition),
+            Entry::TypeDefinition => Some(Action::GoToTypeDefinition),
+            Entry::Implementations => Some(Action::GoToImplementations),
+            Entry::References => Some(Action::FindReferences),
+            Entry::CallHierarchy => Some(Action::CallHierarchy),
+            Entry::Copy => None,
+        }
+    }
+
+    /// The key that does the same now, as a menu accelerator: the
+    /// keymap's first for the action.
+    pub fn shortcut(self) -> Option<crate::ui::menu::Shortcut> {
+        match self.action() {
+            Some(action) => crate::keymap::current().keys(action).first().copied(),
+            None => self
+                .accelerator()
+                .and_then(crate::ui::menu::Shortcut::parse),
         }
     }
 }
@@ -497,10 +529,7 @@ fn symbol_menu(
         let ed = ed.clone();
         let symbol = symbol.clone();
         menu = menu.item(label, move |item| {
-            let keys = entry
-                .accelerator()
-                .and_then(crate::ui::menu::Shortcut::parse);
-            let item = match keys {
+            let item = match entry.shortcut() {
                 Some(accelerator) => item.accelerator(accelerator),
                 None => item,
             };
@@ -1499,6 +1528,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_key_given_to_the_type_definition_asks_for_it_at_the_caret() {
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings(
+            "go_to_type_definition = \"shift+f2\"",
+        ));
+        let (mut harness, state, mut commands) = recording_harness();
+        let doc = stacked_doc(state);
+        editor().cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(2) + 4,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
+        harness.rebuild();
+
+        harness.dispatch_event(key(Code::F2, Key::Named(NamedKey::F2), Modifiers::SHIFT));
+        harness.rebuild();
+        let mut asked = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let Command::TypeDefinition {
+                path,
+                line,
+                character,
+                ..
+            } = command
+            {
+                asked.push((path, line, character));
+            }
+        }
+        assert_eq!(asked, vec![("src/x.rs".to_string(), 1, 3)]);
+        let ask = state.goto.get().expect("the type definition is on its way");
+        assert_eq!((ask.symbol.as_str(), ask.noun), ("beta", "type definition"));
+    }
+
+    #[test]
     fn cmd_f12_asks_for_the_implementations_of_the_symbol_at_the_caret() {
         let (mut harness, state, mut commands) = recording_harness();
         let doc = stacked_doc(state);
@@ -1624,6 +1689,38 @@ pub(crate) mod tests {
             }]),
         );
         assert_eq!(state.pending_jump.get(), Some(("src/y.rs".into(), 9, 11)));
+    }
+
+    /// The menu's accelerators are the keymap's, which by default are the
+    /// keys the entries name.
+    #[test]
+    fn the_menu_s_accelerators_follow_the_keymap() {
+        use crate::ui::menu::Shortcut;
+        let entries = [
+            Entry::Definition,
+            Entry::TypeDefinition,
+            Entry::Implementations,
+            Entry::References,
+            Entry::CallHierarchy,
+            Entry::Copy,
+        ];
+        for entry in entries {
+            assert_eq!(
+                entry.shortcut(),
+                entry.accelerator().and_then(Shortcut::parse),
+                "{entry:?}"
+            );
+        }
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings(
+            "go_to_definition = \"f2\"\ngo_to_type_definition = \"shift+f2\"\nfind_references = []",
+        ));
+        assert_eq!(Entry::Definition.shortcut(), Shortcut::parse("f2"));
+        assert_eq!(
+            Entry::TypeDefinition.shortcut(),
+            Shortcut::parse("shift+f2")
+        );
+        assert_eq!(Entry::References.shortcut(), None);
+        assert_eq!(Entry::Copy.shortcut(), Shortcut::parse("super+c"));
     }
 
     #[test]

@@ -21,6 +21,7 @@ use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
 use crate::inbox::{self, InboxRow};
 use crate::items::InboxView;
+use crate::keymap::Action;
 use crate::review::start_work;
 use crate::snooze;
 use crate::state::AppState;
@@ -211,11 +212,17 @@ fn local_row(
             .min_width(0.0)
             .pointer_events_none()
     });
+    let row_key = format!("item:{}", item.id);
     let row = Container::new(content)
         .debug_name(format!("notification row:item:{}", item.id))
         .on_event_stop(el::Click, move |_, _| on_open(&open_item))
-        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
-        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+        .on_event_cont(el::PointerEnter, {
+            let row_key = row_key.clone();
+            move |_, _| hover(state, hovered, &row_key, true)
+        })
+        .on_event_cont(el::PointerLeave, move |_, _| {
+            hover(state, hovered, &row_key, false)
+        })
         .right_click_menu(move || local_menu(menu_backend.clone(), &menu_item, unread))
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
@@ -272,6 +279,7 @@ fn local_menu(backend: Rc<Backend>, item: &Item, unread: bool) -> Menu {
             let item = done_item.clone();
             entry
                 .icon(SidebarIcon::Check)
+                .accelerator_for(Action::MarkDone)
                 .action(move || local_done(&backend, &item))
         })
         .item("Mark Unread", move |entry| {
@@ -280,6 +288,7 @@ fn local_menu(backend: Rc<Backend>, item: &Item, unread: bool) -> Menu {
             entry
                 .icon(SidebarIcon::Unread)
                 .enabled(!unread)
+                .accelerator_for(Action::MarkUnread)
                 .action(move || backend.mark_item_activity_unread(&id))
         })
 }
@@ -302,13 +311,10 @@ fn notification_row(
     let hovered = RwSignal::new(false);
     let unread = thread.unread;
     let title = thread.subject.title.clone();
-    let open_thread = thread.clone();
+    let opened = thread.clone();
     let open_backend = backend.clone();
     let url = github_url(&thread);
-    let opens_inside = matches!(
-        &thread.subject.kind,
-        SubjectKind::PullRequest | SubjectKind::Issue
-    ) && thread.number_hint().is_some();
+    let opens_inside = opens_inside(&thread);
     let menu_thread = thread.clone();
     let menu_backend = backend.clone();
     let action_thread = thread.clone();
@@ -330,30 +336,170 @@ fn notification_row(
             .pointer_events_none()
     });
 
+    let row_key = format!("thread:{}", thread.id);
     let row = Container::new(content)
         .debug_name(format!("notification row:{}", thread.id))
         .on_event_stop(el::Click, move |_, _| {
-            let navigation_id = open_backend.open_notification(&open_thread);
             if opens_inside {
-                if let Some(navigation_id) = navigation_id {
-                    state.begin_open("Reading the notification", navigation_id);
-                    if let Some(review) = state.review.get_untracked() {
-                        crate::review::notified::follow(review, &open_thread);
-                    }
-                }
+                open_thread(state, &open_backend, &opened);
             } else {
+                open_backend.open_notification(&opened);
                 if let Some(url) = &url {
                     open_in_browser(url);
                 }
             }
         })
-        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
-        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+        .on_event_cont(el::PointerEnter, {
+            let row_key = row_key.clone();
+            move |_, _| hover(state, hovered, &row_key, true)
+        })
+        .on_event_cont(el::PointerLeave, move |_, _| {
+            hover(state, hovered, &row_key, false)
+        })
         .right_click_menu(move || {
             notification_menu(state, menu_backend.clone(), &menu_thread, away)
         })
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
+}
+
+/// The pointer coming onto the row with `key`, or leaving it: the row's
+/// own buttons, and the inbox's keys, follow it.
+fn hover(state: AppState, hovered: RwSignal<bool>, key: &str, on: bool) {
+    hovered.set(on);
+    if on {
+        state.hovered_row.set(Some(key.to_string()));
+    } else {
+        state.hovered_row.update(|h| {
+            if h.as_deref() == Some(key) {
+                *h = None;
+            }
+        });
+    }
+}
+
+/// Whether the thread's subject opens in Perch, a pull request or an
+/// issue, rather than in the browser.
+pub(crate) fn opens_inside(thread: &Thread) -> bool {
+    matches!(
+        &thread.subject.kind,
+        SubjectKind::PullRequest | SubjectKind::Issue
+    ) && thread.number_hint().is_some()
+}
+
+/// Open a thread that opens inside, as a click on its row does.
+pub(crate) fn open_thread(state: AppState, backend: &Backend, thread: &Thread) {
+    if let Some(navigation_id) = backend.open_notification(thread) {
+        state.begin_open("Reading the notification", navigation_id);
+        if let Some(review) = state.review.get_untracked() {
+            crate::review::notified::follow(review, thread);
+        }
+    }
+}
+
+/// What the inbox's keys act on.
+pub(crate) enum KeyTarget {
+    /// A row of GitHub's, and whether it is in Done or Snoozed, where
+    /// its one action is Move to Inbox.
+    Thread(Thread, bool),
+    /// A row of a worktree's, for the activity it has.
+    Local(Item, ItemActivity),
+    /// A Worktrees row, or the open item.
+    Item(Item),
+}
+
+/// The row under the pointer, on the tab the drawer shows, else the open
+/// item. Browse's rows have no buttons of their own, so over one it is
+/// the open item too.
+pub(crate) fn key_target(state: AppState) -> Option<KeyTarget> {
+    let (tab, away) = state
+        .item_filters
+        .with_untracked(|f| (f.tab, f.inbox.view.is_put_away()));
+    match tab {
+        crate::items::SidebarTab::Inbox => {
+            if let Some(key) = state.hovered_row.get_untracked() {
+                let row = floem::reactive::Effect::untrack(|| state.visible_inbox())
+                    .into_iter()
+                    .find(|row| row.key() == key);
+                match row {
+                    Some(InboxRow::Thread(thread)) => return Some(KeyTarget::Thread(thread, away)),
+                    Some(InboxRow::Local { activity, item }) => {
+                        return Some(KeyTarget::Local(item, activity))
+                    }
+                    None => {}
+                }
+            }
+        }
+        crate::items::SidebarTab::Worktrees => {
+            let hovered = state.hovered_item.get_untracked();
+            if let Some(item) = hovered.and_then(|id| state.item(&id)) {
+                return Some(KeyTarget::Item(item));
+            }
+        }
+        crate::items::SidebarTab::Browse => {}
+    }
+    let review = state.review.get_untracked()?;
+    let item = review.item.get_untracked()?;
+    Some(KeyTarget::Item((*item).clone()))
+}
+
+/// The inbox's row about `item`: a notification about its pull request or
+/// issue, or the row for its last run. The whole inbox, filters aside.
+fn inbox_row_of(state: AppState, item: &Item) -> Option<InboxRow> {
+    let rows = floem::reactive::Effect::untrack(|| state.inbox_rows(InboxView::Inbox));
+    rows.into_iter().find(|row| match row {
+        InboxRow::Thread(thread) => item.subject.as_ref().is_some_and(|subject| {
+            thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
+        }),
+        InboxRow::Local { item: local, .. } => local.id == item.id,
+    })
+}
+
+/// Done on what the key is for, as its row's check does. False when it
+/// has none: a row in Done or Snoozed, or an item with no row in the
+/// inbox.
+pub(crate) fn done_by_key(state: AppState, backend: &Backend) -> bool {
+    let row = match key_target(state) {
+        Some(KeyTarget::Thread(_, true)) | None => return false,
+        Some(KeyTarget::Thread(thread, false)) => InboxRow::Thread(thread),
+        Some(KeyTarget::Local(item, activity)) => InboxRow::Local { activity, item },
+        Some(KeyTarget::Item(item)) => match inbox_row_of(state, &item) {
+            Some(row) => row,
+            None => return false,
+        },
+    };
+    match row {
+        InboxRow::Thread(thread) => done(state, backend, &thread),
+        InboxRow::Local { item, .. } => local_done(backend, &item),
+    }
+    true
+}
+
+/// Mark Unread on what the key is for, as its row's menu does, or for an
+/// item the item menu's. False where that is greyed: the row is unread
+/// already, or in Done or Snoozed.
+pub(crate) fn mark_unread_by_key(state: AppState, backend: &Backend) -> bool {
+    match key_target(state) {
+        Some(KeyTarget::Thread(thread, false)) if !thread.unread => {
+            backend.mark_notification_unread(&thread.id);
+            true
+        }
+        Some(KeyTarget::Local(item, activity)) if !activity.is_unread() => {
+            backend.mark_item_activity_unread(&item.id);
+            true
+        }
+        Some(KeyTarget::Item(item)) => crate::ui::items::mark_unread(state, backend, &item),
+        _ => false,
+    }
+}
+
+/// The page on github.com of what the key is for, as its row's or the
+/// bar's Open on GitHub goes to.
+pub(crate) fn github_url_by_key(state: AppState) -> Option<String> {
+    match key_target(state)? {
+        KeyTarget::Thread(thread, _) => github_url(&thread),
+        KeyTarget::Local(item, _) | KeyTarget::Item(item) => crate::ui::items::github_url(&item),
+    }
 }
 
 /// The glyph GitHub's inbox draws for the subject: a pull request or an
@@ -628,6 +774,7 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, awa
         let backend = done_backend.clone();
         let thread = done_thread.clone();
         item.icon(SidebarIcon::Check)
+            .accelerator_for(Action::MarkDone)
             .action(move || done(state, &backend, &thread))
     })
     .submenu("Snooze", move |_| {
@@ -638,6 +785,7 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, awa
         let id = unread_id.clone();
         item.icon(SidebarIcon::Unread)
             .enabled(!unread)
+            .accelerator_for(Action::MarkUnread)
             .action(move || backend.mark_notification_unread(&id))
     })
     .item("Unsubscribe", move |item| {

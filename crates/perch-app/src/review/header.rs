@@ -21,7 +21,8 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::review::cards::{tip, tip_with};
+use crate::keymap::Action;
+use crate::review::cards::tip_with;
 use crate::review::model::{Phase, ReviewState};
 use crate::review::summary::subject_state;
 use crate::state::AppState;
@@ -201,7 +202,8 @@ fn more_button(app: AppState, state: ReviewState) -> impl IntoView {
 
 /// The bar's menu: the pull request's or the issue's page on github.com
 /// and its link, the branch's name, and Start work. A worktree of the
-/// reader's own is nowhere on GitHub, and has the last two.
+/// reader's own is nowhere on GitHub, and has the last two. Each row
+/// shows the window's key for it.
 fn more_menu(app: AppState, state: ReviewState) -> Menu {
     let Some(item) = state.item.get_untracked() else {
         return Menu::new();
@@ -212,21 +214,19 @@ fn more_menu(app: AppState, state: ReviewState) -> Menu {
         menu = menu
             .item("Open on GitHub", move |i| {
                 i.icon(SidebarIcon::External)
+                    .accelerator_for(Action::OpenOnGithub)
                     .action(move || open_in_browser(&url))
             })
             .item("Copy Link", move |i| {
                 i.icon(SidebarIcon::Link)
+                    .accelerator_for(Action::CopyLink)
                     .action(move || copy_to_clipboard(link.clone()))
             });
     }
-    let branch = item
-        .pull_request()
-        .map(|pull| pull.head_ref.clone())
-        .or_else(|| item.checkout.as_ref().map(|c| c.branch.clone()))
-        .filter(|branch| !branch.is_empty());
-    if let Some(branch) = branch {
+    if let Some(branch) = branch_name(&item) {
         menu = menu.item("Copy Branch Name", move |i| {
             i.icon(SidebarIcon::Copy)
+                .accelerator_for(Action::CopyBranchName)
                 .action(move || copy_to_clipboard(branch.clone()))
         });
     }
@@ -235,10 +235,54 @@ fn more_menu(app: AppState, state: ReviewState) -> Menu {
         let id = item.id.clone();
         menu = menu.separator().item("Start Work", move |i| {
             i.icon(SidebarIcon::Branch)
+                .accelerator_for(Action::StartWork)
                 .action(move || ask(app, Pending::Item(id.clone())))
         });
     }
     menu
+}
+
+/// The open item's page on github.com, as the bar's menu opens and
+/// copies it. None for a worktree of the reader's own.
+pub(crate) fn page(state: ReviewState) -> Option<String> {
+    state
+        .item
+        .with_untracked(|item| item.as_deref().and_then(github_url))
+}
+
+/// The name Copy Branch Name copies: the pull request's head, or the
+/// checkout's branch.
+fn branch_name(item: &perch_github::Item) -> Option<String> {
+    item.pull_request()
+        .map(|pull| pull.head_ref.clone())
+        .or_else(|| item.checkout.as_ref().map(|c| c.branch.clone()))
+        .filter(|branch| !branch.is_empty())
+}
+
+/// The open item's branch, as the bar's menu copies it.
+pub(crate) fn open_branch_name(state: ReviewState) -> Option<String> {
+    state
+        .item
+        .with_untracked(|item| item.as_deref().and_then(branch_name))
+}
+
+/// Start work on the open item, as the bar's menu does. False where the
+/// menu has no Start Work.
+pub(crate) fn start_work(app: AppState, state: ReviewState) -> bool {
+    let Some(id) = state.item.with_untracked(|item| {
+        item.as_deref()
+            .filter(|item| crate::review::start_work::can_start_work(item))
+            .map(|item| item.id.clone())
+    }) else {
+        return false;
+    };
+    crate::review::start_work::ask(app, crate::review::start_work::Pending::Item(id));
+    true
+}
+
+/// Whether the bar shows Review: for anything with files, not an issue.
+pub(crate) fn offers_review(state: ReviewState) -> bool {
+    state.item.with_untracked(Option::is_some) && state.phase.get_untracked() != Phase::Issue
 }
 
 /// Review for anything with files: a pull request, or a worktree of the
@@ -257,7 +301,7 @@ fn review_control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> im
 
 /// Close the item, as Cmd-[ does, and leave the main area empty.
 fn close_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    tip(
+    tip_with(
         icon_button(
             || SidebarIcon::Close,
             theme::fg_muted,
@@ -266,10 +310,7 @@ fn close_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl
                 app.begin_close(state, navigation_id);
             },
         ),
-        format!(
-            "Close ({})",
-            crate::ui::menu::Shortcut::label_of("super+BracketLeft")
-        ),
+        || crate::keymap::tip("Close", Action::Back),
     )
     .debug_name("close button")
     .style(control)

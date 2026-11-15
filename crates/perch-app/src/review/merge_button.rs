@@ -72,6 +72,12 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             state.merge_open.set(false);
         }
     });
+    Effect::new(move |_| {
+        let offered = kind.get() == Kind::Merge;
+        if state.merge_offered.get_untracked() != offered {
+            state.merge_offered.set(offered);
+        }
+    });
     // Another of the bar's popovers opening puts this one away. They shut
     // each other as they open, but know nothing of this one.
     Effect::new(move |_| {
@@ -90,6 +96,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         let open = state.merge_open.get();
         if was == Some(true) && !open {
             quiet.set(false);
+            state.merge_opener.set(None);
             merge.cancel();
             if !state.merge_pending.get_untracked() {
                 state.merge_error.set(None);
@@ -196,6 +203,34 @@ pub(crate) fn open(state: ReviewState) {
 /// Shut the merge box.
 pub(crate) fn close(state: ReviewState) {
     state.merge_open.set(false);
+}
+
+/// The merge key: open or shut the box, as the bar's Merge does. False
+/// while the bar has no Merge. `focused` has the keyboard: it is noted as
+/// the box opens, and has the keyboard back if the box shuts with the
+/// keyboard in it, as Escape gives it back, since the view that had it
+/// goes with the box.
+pub(crate) fn toggle_by_key(state: ReviewState, focused: Option<floem::ViewId>) -> bool {
+    if !state.merge_offered.get_untracked() || state.item.with_untracked(Option::is_none) {
+        return false;
+    }
+    if !state.merge_open.get_untracked() {
+        state.merge_opener.set(focused);
+        open(state);
+        return true;
+    }
+    let opener = state.merge_opener.get_untracked();
+    close(state);
+    let anchor = state.merge_anchor.get_untracked();
+    let inside = focused.is_some_and(|focused| {
+        std::iter::successors(Some(focused), floem::ViewId::parent).any(|id| Some(id) == anchor)
+    });
+    if inside {
+        if let Some(opener) = opener.filter(floem::ViewId::is_valid) {
+            opener.request_focus();
+        }
+    }
+    true
 }
 
 fn toggle(state: ReviewState) {
@@ -552,6 +587,57 @@ mod tests {
             repeat: false,
             is_composing: false,
         })
+    }
+
+    /// Cmd-Shift-M opens the merge box and shuts it, as the bar's Merge
+    /// does, giving the keyboard back as it shuts, and does nothing on an
+    /// issue, which has no Merge; nor does Cmd-Shift-R, as an issue has no
+    /// Review either.
+    #[test]
+    fn cmd_shift_m_opens_and_shuts_the_box() {
+        let cmd_shift = |code: Code, ch: &str| {
+            floem::event::Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key: Key::Character(ch.into()),
+                code,
+                location: Default::default(),
+                modifiers: crate::ui::OS_MOD | Modifiers::SHIFT,
+                repeat: false,
+                is_composing: false,
+            })
+        };
+        let cmd_shift_m = || cmd_shift(Code::KeyM, "m");
+        let (mut harness, _app, state) = window(pull_request(812), Some(overview()));
+        harness.dispatch_event(cmd_shift_m());
+        settle(&mut harness);
+        assert!(state.merge_open.get_untracked(), "Cmd-Shift-M opens it");
+        assert!(shown(&harness, "merge-popover"));
+        harness.dispatch_event(cmd_shift_m());
+        settle(&mut harness);
+        assert!(!state.merge_open.get_untracked(), "and shuts it");
+
+        // The box takes the keyboard as it opens, and shut by the key with
+        // the keyboard in it, gives it back to what had it, as Escape does.
+        let main = named(harness.root_id(), "merge-button").unwrap();
+        main.request_focus();
+        settle(&mut harness);
+        assert!(harness.is_focused(main));
+        harness.dispatch_event(cmd_shift_m());
+        settle(&mut harness);
+        let close = named(harness.root_id(), "merge-close").unwrap();
+        assert!(harness.is_focused(close), "the box has the keyboard");
+        harness.dispatch_event(cmd_shift_m());
+        settle(&mut harness);
+        assert!(!state.merge_open.get_untracked());
+        assert!(harness.is_focused(main), "the keyboard is not back");
+
+        let (mut harness, _app, state) = issue_harness();
+        harness.dispatch_event(cmd_shift_m());
+        settle(&mut harness);
+        assert!(!state.merge_open.get_untracked());
+        harness.dispatch_event(cmd_shift(Code::KeyR, "r"));
+        settle(&mut harness);
+        assert!(!state.review_open.get_untracked());
     }
 
     /// A press on the page shuts the merge box and the Review popover; a

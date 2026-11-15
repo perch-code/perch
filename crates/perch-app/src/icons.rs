@@ -284,6 +284,17 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <circle cx="5" cy="4.85" r="0.9" fill="{c}"/>
                <circle cx="5" cy="11.15" r="0.9" fill="{c}"/>"#
         ),
+        // A keyboard: its outline, two rows of keys and the space bar.
+        SidebarIcon::Keyboard => format!(
+            r#"<rect x="1.6" y="3.8" width="12.8" height="8.4" rx="1.6" fill="none" stroke="{c}"
+                     stroke-width="1.4"/>
+               <circle cx="4.4" cy="6.4" r="0.8" fill="{c}"/>
+               <circle cx="6.8" cy="6.4" r="0.8" fill="{c}"/>
+               <circle cx="9.2" cy="6.4" r="0.8" fill="{c}"/>
+               <circle cx="11.6" cy="6.4" r="0.8" fill="{c}"/>
+               <path d="M5.4 9.6 H10.6" stroke="{c}" stroke-width="1.4"
+                     stroke-linecap="round"/>"#
+        ),
         // Two rules, a knob on each: the settings of a view.
         SidebarIcon::View => format!(
             r#"<path d="M2.5 5 H7.6 M12 5 H13.5 M2.5 11 H4 M8.4 11 H13.5" stroke="{c}"
@@ -781,16 +792,20 @@ pub enum SidebarIcon {
     Palette,
     /// Two rack units: Settings' Language servers section.
     Server,
+    /// A keyboard's outline, its keys and space bar: Settings' Keyboard
+    /// shortcuts section.
+    Keyboard,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 82] = [
+    pub const ALL: [SidebarIcon; 83] = [
         SidebarIcon::Gear,
         SidebarIcon::Palette,
         SidebarIcon::Server,
+        SidebarIcon::Keyboard,
         SidebarIcon::View,
         SidebarIcon::Shield,
         SidebarIcon::Coins,

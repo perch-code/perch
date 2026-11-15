@@ -392,6 +392,14 @@ impl Item {
         self
     }
 
+    /// The keymap's first key for `action` as the row's accelerator, for
+    /// a row that does what the window's key does; none while the action
+    /// has no key.
+    pub fn accelerator_for(mut self, action: crate::keymap::Action) -> Self {
+        self.shortcut = crate::keymap::current().keys(action).first().copied();
+        self
+    }
+
     /// Words shown at the row's end, where a shortcut would be.
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
@@ -479,13 +487,20 @@ impl Shortcut {
         }
     }
 
-    /// Keys written as `super+shift+KeyH` or `F12`: modifiers first,
-    /// joined by `+`, then the key's code. `super` is the platform's
-    /// command key, as in VS Code's keybindings: Cmd on macOS, Ctrl
-    /// elsewhere.
+    /// Keys as config.toml writes them: modifiers first, joined by `+`,
+    /// then the key, as in `super+shift+e`, `ctrl+-` or `F12`. `super` is
+    /// the platform's command key, as in VS Code's keybindings: Cmd on
+    /// macOS, Ctrl elsewhere. Case doesn't matter.
+    ///
+    /// The key is a letter, a digit, punctuation as a US keyboard has it
+    /// (`[ ] \ / , . ; ' = - \``), a name (`enter`, `escape`, `tab`,
+    /// `space`, `backspace`, `delete`, `up`, `down`, `left`, `right`,
+    /// `pageup`, `pagedown`, `home`, `end`, `f1` to `f20`), or a key's code
+    /// as floem names it, such as `KeyH` or `BracketLeft`. Keys are
+    /// physical, so `shift+]` is what a US keyboard calls `}`.
     pub fn parse(keys: &str) -> Option<Self> {
-        let mut parts: Vec<&str> = keys.split('+').collect();
-        let code = Code::from_str(parts.pop()?).ok()?;
+        let mut parts: Vec<&str> = keys.trim().split('+').map(str::trim).collect();
+        let code = key_code(parts.pop()?)?;
         let mut modifiers = Modifiers::empty();
         for part in parts {
             modifiers |= match part.to_ascii_lowercase().as_str() {
@@ -499,8 +514,54 @@ impl Shortcut {
         Some(Shortcut { modifiers, code })
     }
 
+    /// How config.toml writes it, the form `parse` reads back: lowercase,
+    /// modifiers in the order `ctrl+alt+shift+super+`, then the key in its
+    /// short form, as in `super+shift+e`, `ctrl+-` or `pageup`. A key with
+    /// no short form keeps its code's name, `NumpadEnter` say.
+    ///
+    /// Off macOS `super` is Ctrl, so Ctrl is written as `ctrl`, and the
+    /// logo key, which no spelling names there, is left out.
+    pub fn to_config(self) -> String {
+        let names: [(Modifiers, &str); 4] = if cfg!(target_os = "macos") {
+            [
+                (Modifiers::CONTROL, "ctrl+"),
+                (Modifiers::ALT, "alt+"),
+                (Modifiers::SHIFT, "shift+"),
+                (Modifiers::META, "super+"),
+            ]
+        } else {
+            [
+                (Modifiers::CONTROL, "ctrl+"),
+                (Modifiers::ALT, "alt+"),
+                (Modifiers::SHIFT, "shift+"),
+                (Modifiers::empty(), ""),
+            ]
+        };
+        let mut out = String::new();
+        for (flag, name) in names {
+            if !flag.is_empty() && self.modifiers.contains(flag) {
+                out.push_str(name);
+            }
+        }
+        match short_name(self.code) {
+            Some(name) => out.push_str(&name),
+            None => out.push_str(&self.code.to_string()),
+        }
+        out
+    }
+
+    /// Whether it types: no Ctrl, Alt or Cmd, on a key that writes a
+    /// character. Such a key belongs to a box being typed in.
+    pub fn is_bare(&self) -> bool {
+        !self
+            .modifiers
+            .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
+            && types_a_character(self.code)
+    }
+
     /// The written form of keys `parse` reads, `super+KeyP` as ⌘P on
     /// macOS and Ctrl+P elsewhere; the keys themselves if they don't parse.
+    #[cfg(test)]
     pub fn label_of(keys: &str) -> String {
         Shortcut::parse(keys).map_or_else(|| keys.to_string(), |s| s.label())
     }
@@ -548,6 +609,10 @@ impl Shortcut {
             Code::Comma => ",".to_string(),
             Code::Period => ".".to_string(),
             Code::Slash => "/".to_string(),
+            Code::Backslash => "\\".to_string(),
+            Code::Semicolon => ";".to_string(),
+            Code::Quote => "'".to_string(),
+            Code::Backquote => "`".to_string(),
             _ => code
                 .strip_prefix("Key")
                 .or_else(|| code.strip_prefix("Digit"))
@@ -558,9 +623,150 @@ impl Shortcut {
         out
     }
 
-    fn matches(&self, key: &KeyboardEvent) -> bool {
+    pub(crate) fn matches(&self, key: &KeyboardEvent) -> bool {
         key.code == self.code && key.modifiers == self.modifiers
     }
+}
+
+/// Punctuation as a US keyboard writes it on each key, the spelling
+/// config.toml uses for it.
+const PUNCTUATION: [(char, Code); 11] = [
+    ('[', Code::BracketLeft),
+    (']', Code::BracketRight),
+    ('\\', Code::Backslash),
+    ('/', Code::Slash),
+    (',', Code::Comma),
+    ('.', Code::Period),
+    (';', Code::Semicolon),
+    ('\'', Code::Quote),
+    ('=', Code::Equal),
+    ('-', Code::Minus),
+    ('`', Code::Backquote),
+];
+
+/// Keys config.toml names by a word.
+const NAMED: [(&str, Code); 14] = [
+    ("enter", Code::Enter),
+    ("escape", Code::Escape),
+    ("tab", Code::Tab),
+    ("space", Code::Space),
+    ("backspace", Code::Backspace),
+    ("delete", Code::Delete),
+    ("up", Code::ArrowUp),
+    ("down", Code::ArrowDown),
+    ("left", Code::ArrowLeft),
+    ("right", Code::ArrowRight),
+    ("pageup", Code::PageUp),
+    ("pagedown", Code::PageDown),
+    ("home", Code::Home),
+    ("end", Code::End),
+];
+
+/// The names of the keys floem has a code for beyond the short forms:
+/// letters, digits and F1 to F20 are read by those, and the legacy
+/// Hyper, Super and Turbo are left out.
+const CODE_NAMES: &str = "\
+    Backquote Backslash BracketLeft BracketRight Comma Equal IntlBackslash IntlRo IntlYen \
+    Minus Period Quote Semicolon Slash AltLeft AltRight Backspace CapsLock ContextMenu \
+    ControlLeft ControlRight Enter MetaLeft MetaRight ShiftLeft ShiftRight Space Tab Convert \
+    KanaMode Lang1 Lang2 Lang3 Lang4 Lang5 NonConvert Delete End Help Home Insert PageDown \
+    PageUp ArrowDown ArrowLeft ArrowRight ArrowUp NumLock Numpad0 Numpad1 Numpad2 Numpad3 \
+    Numpad4 Numpad5 Numpad6 Numpad7 Numpad8 Numpad9 NumpadAdd NumpadBackspace NumpadClear \
+    NumpadClearEntry NumpadComma NumpadDecimal NumpadDivide NumpadEnter NumpadEqual \
+    NumpadHash NumpadMemoryAdd NumpadMemoryClear NumpadMemoryRecall NumpadMemoryStore \
+    NumpadMemorySubtract NumpadMultiply NumpadParenLeft NumpadParenRight NumpadStar \
+    NumpadSubtract Escape Fn FnLock PrintScreen ScrollLock Pause BrowserBack \
+    BrowserFavorites BrowserForward BrowserHome BrowserRefresh BrowserSearch BrowserStop \
+    Eject LaunchApp1 LaunchApp2 LaunchMail MediaPlayPause MediaSelect MediaStop \
+    MediaTrackNext MediaTrackPrevious Power Sleep AudioVolumeDown AudioVolumeMute \
+    AudioVolumeUp WakeUp Abort Resume Suspend Again Copy Cut Find Open Paste Props Select \
+    Undo Hiragana Katakana F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31 F32 F33 F34 F35 \
+    BrightnessDown BrightnessUp DisplayToggleIntExt KeyboardLayoutSelect LaunchAssistant \
+    LaunchControlPanel LaunchScreenSaver MailForward MailReply MailSend MediaFastForward \
+    MediaPause MediaPlay MediaRecord MediaRewind MicrophoneMuteToggle PrivacyScreenToggle \
+    KeyboardBacklightToggle SelectTask ShowAllWindows ZoomToggle";
+
+/// The key a written key names: its short form or its code's own name,
+/// in any case.
+fn key_code(name: &str) -> Option<Code> {
+    let lower = name.to_ascii_lowercase();
+    let mut chars = lower.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if c.is_ascii_lowercase() {
+            return Code::from_str(&format!("Key{}", c.to_ascii_uppercase())).ok();
+        }
+        if c.is_ascii_digit() {
+            return Code::from_str(&format!("Digit{c}")).ok();
+        }
+        if let Some((_, code)) = PUNCTUATION.iter().find(|(p, _)| *p == c) {
+            return Some(*code);
+        }
+    }
+    if let Some((_, code)) = NAMED.iter().find(|(n, _)| *n == lower) {
+        return Some(*code);
+    }
+    if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
+        if (1..=20).contains(&n) {
+            return Code::from_str(&format!("F{n}")).ok();
+        }
+    }
+    let letter = lower.strip_prefix("key").map(str::to_ascii_uppercase);
+    if let Some(Ok(code)) = letter.map(|l| Code::from_str(&format!("Key{l}"))) {
+        return Some(code);
+    }
+    if let Some(Ok(code)) = lower
+        .strip_prefix("digit")
+        .map(|d| Code::from_str(&format!("Digit{d}")))
+    {
+        return Some(code);
+    }
+    Code::from_str(name).ok().or_else(|| {
+        CODE_NAMES
+            .split_whitespace()
+            .find(|known| known.eq_ignore_ascii_case(name))
+            .and_then(|known| Code::from_str(known).ok())
+    })
+}
+
+/// The short form `key_code` reads, for a key that has one.
+fn short_name(code: Code) -> Option<String> {
+    if let Some((c, _)) = PUNCTUATION.iter().find(|(_, k)| *k == code) {
+        return Some(c.to_string());
+    }
+    if let Some((name, _)) = NAMED.iter().find(|(_, k)| *k == code) {
+        return Some(name.to_string());
+    }
+    let name = code.to_string();
+    if let Some(letter) = name.strip_prefix("Key").filter(|l| l.len() == 1) {
+        return Some(letter.to_ascii_lowercase());
+    }
+    if let Some(digit) = name.strip_prefix("Digit").filter(|d| d.len() == 1) {
+        return Some(digit.to_string());
+    }
+    if let Some(n) = name.strip_prefix('F').and_then(|n| n.parse::<u8>().ok()) {
+        if (1..=20).contains(&n) {
+            return Some(format!("f{n}"));
+        }
+    }
+    None
+}
+
+/// Whether a key writes a character when pressed alone or with Shift:
+/// a letter, a digit, punctuation or the space bar.
+fn types_a_character(code: Code) -> bool {
+    if code == Code::Space
+        || code == Code::IntlBackslash
+        || PUNCTUATION.iter().any(|(_, k)| *k == code)
+    {
+        return true;
+    }
+    let name = code.to_string();
+    name.strip_prefix("Key").is_some_and(|l| l.len() == 1)
+        || name.strip_prefix("Digit").is_some_and(|d| d.len() == 1)
+        || name.strip_prefix("Numpad").is_some_and(|d| {
+            d.len() == 1 && d.chars().all(|c| c.is_ascii_digit())
+                || matches!(d, "Add" | "Subtract" | "Multiply" | "Divide" | "Decimal")
+        })
 }
 
 /// Codex's menu, in its measures: a 4px gutter inside a 16px corner, rows
@@ -1806,6 +2012,161 @@ mod tests {
         assert_eq!(parse("alt+super+KeyR").label(), "Ctrl+Alt+R");
         assert_eq!(Shortcut::label_of("super+BracketLeft"), "Ctrl+[");
         assert!(Shortcut::parse("hyper+KeyA").is_none());
+        assert_eq!(parse("super+p"), parse("ctrl+p"));
+        assert_eq!(parse("super+shift+e").to_config(), "ctrl+shift+e");
+    }
+
+    #[test]
+    fn keys_are_read_in_short_forms_and_code_names_alike() {
+        let parse = |s: &str| Shortcut::parse(s).unwrap();
+        let os = crate::ui::OS_MOD;
+        let with = |modifiers: Modifiers, code: Code| Shortcut { modifiers, code };
+        assert_eq!(parse("super+p"), with(os, Code::KeyP));
+        assert_eq!(parse("Cmd+P"), with(os, Code::KeyP));
+        assert_eq!(parse("super+KeyP"), with(os, Code::KeyP));
+        assert_eq!(
+            parse("SHIFT+Super+E"),
+            with(os | Modifiers::SHIFT, Code::KeyE)
+        );
+        assert_eq!(parse("ctrl+-"), with(Modifiers::CONTROL, Code::Minus));
+        assert_eq!(
+            parse("control+shift+-"),
+            with(Modifiers::CONTROL | Modifiers::SHIFT, Code::Minus)
+        );
+        assert_eq!(parse("super+\\"), with(os, Code::Backslash));
+        assert_eq!(parse("super+,"), with(os, Code::Comma));
+        assert_eq!(parse("super+1"), with(os, Code::Digit1));
+        assert_eq!(parse("/"), Shortcut::key(Code::Slash));
+        assert_eq!(parse("shift+]"), with(Modifiers::SHIFT, Code::BracketRight));
+        assert_eq!(
+            parse("option+super+c"),
+            with(os | Modifiers::ALT, Code::KeyC)
+        );
+        assert_eq!(parse("pageup"), Shortcut::key(Code::PageUp));
+        assert_eq!(parse("PageDown"), Shortcut::key(Code::PageDown));
+        assert_eq!(parse("super+up"), with(os, Code::ArrowUp));
+        assert_eq!(parse("f12"), Shortcut::key(Code::F12));
+        assert_eq!(parse("F12"), Shortcut::key(Code::F12));
+        assert_eq!(parse("f20"), Shortcut::key(Code::F20));
+        assert_eq!(
+            parse("shift+alt+KeyH"),
+            with(Modifiers::SHIFT | Modifiers::ALT, Code::KeyH)
+        );
+        assert_eq!(parse(" super + n "), with(os, Code::KeyN));
+        assert_eq!(parse("NumpadEnter"), Shortcut::key(Code::NumpadEnter));
+        // A code's name is read in any case too.
+        assert_eq!(parse("super+keyp"), with(os, Code::KeyP));
+        assert_eq!(parse("KEYP"), Shortcut::key(Code::KeyP));
+        assert_eq!(parse("digit7"), Shortcut::key(Code::Digit7));
+        assert_eq!(parse("NUMPADENTER"), Shortcut::key(Code::NumpadEnter));
+        assert_eq!(parse("numpadenter"), Shortcut::key(Code::NumpadEnter));
+        assert_eq!(parse("super+bracketleft"), with(os, Code::BracketLeft));
+        assert_eq!(parse("intlbackslash"), Shortcut::key(Code::IntlBackslash));
+        assert_eq!(parse("F24"), Shortcut::key(Code::F24));
+        assert_eq!(parse("f21"), Shortcut::key(Code::F21));
+        assert_eq!(parse("numpadenter").to_config(), "NumpadEnter");
+        for bad in [
+            "",
+            "super+",
+            "hyper+a",
+            "f0",
+            "super+shift",
+            "ab",
+            "super+é",
+            "key1",
+            "digitx",
+            "keyé",
+            "super",
+            "turbo",
+        ] {
+            assert!(Shortcut::parse(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_key_written_for_config_reads_back_as_itself() {
+        let mut codes: Vec<Code> = Vec::new();
+        for c in 'a'..='z' {
+            codes.push(Code::from_str(&format!("Key{}", c.to_ascii_uppercase())).unwrap());
+        }
+        for d in 0..=9 {
+            codes.push(Code::from_str(&format!("Digit{d}")).unwrap());
+        }
+        for n in 1..=20 {
+            codes.push(Code::from_str(&format!("F{n}")).unwrap());
+        }
+        codes.extend(PUNCTUATION.iter().map(|(_, code)| *code));
+        codes.extend(NAMED.iter().map(|(_, code)| *code));
+        // Every code named by its own name, each its floem name.
+        for name in CODE_NAMES.split_whitespace() {
+            let code = Code::from_str(name).unwrap_or_else(|_| panic!("{name} is no code"));
+            assert_eq!(code.to_string(), name);
+            assert_eq!(key_code(&name.to_ascii_lowercase()), Some(code), "{name}");
+            codes.push(code);
+        }
+        let os = crate::ui::OS_MOD;
+        let modifiers = [
+            Modifiers::empty(),
+            os,
+            Modifiers::SHIFT,
+            Modifiers::CONTROL,
+            Modifiers::ALT,
+            os | Modifiers::SHIFT,
+            os | Modifiers::ALT,
+            Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | os,
+        ];
+        for code in codes {
+            for modifiers in modifiers {
+                let shortcut = Shortcut { modifiers, code };
+                let written = shortcut.to_config();
+                assert_eq!(Shortcut::parse(&written), Some(shortcut), "{written}");
+                let short = written.rsplit('+').next().unwrap();
+                if short.len() > 1 && short.chars().any(|c| c.is_ascii_uppercase()) {
+                    assert!(code.to_string() == short, "{written} has no short form");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn keys_are_written_for_config_in_one_order_and_their_short_form() {
+        let write = |s: &str| Shortcut::parse(s).unwrap().to_config();
+        assert_eq!(write("shift+super+KeyE"), "shift+super+e");
+        assert_eq!(write("super+shift+alt+ctrl+KeyE"), "ctrl+alt+shift+super+e");
+        assert_eq!(write("CONTROL+Minus"), "ctrl+-");
+        assert_eq!(write("shift+F12"), "shift+f12");
+        assert_eq!(write("PageUp"), "pageup");
+        assert_eq!(write("cmd+BracketLeft"), "super+[");
+        assert_eq!(write("super+Backslash"), "super+\\");
+        assert_eq!(write("super+Comma"), "super+,");
+        assert_eq!(write("shift+alt+KeyH"), "alt+shift+h");
+        assert_eq!(write("super+ArrowUp"), "super+up");
+        assert_eq!(Shortcut::label_of("super+\\"), "⌘\\");
+        assert_eq!(Shortcut::label_of("super+;"), "⌘;");
+    }
+
+    #[test]
+    fn a_key_is_bare_when_it_types_with_no_command_modifier() {
+        let bare = |s: &str| Shortcut::parse(s).unwrap().is_bare();
+        for key in ["a", "shift+u", "/", "]", "shift+[", "1", "space", "`", "'"] {
+            assert!(bare(key), "{key}");
+        }
+        for key in [
+            "super+a",
+            "ctrl+a",
+            "alt+a",
+            "f12",
+            "shift+f12",
+            "pageup",
+            "escape",
+            "enter",
+            "tab",
+            "up",
+            "super+/",
+        ] {
+            assert!(!bare(key), "{key}");
+        }
     }
 
     #[test]

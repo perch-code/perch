@@ -16,7 +16,7 @@ use perch_git::BaseBranch;
 
 use crate::backend::{Backend, FirstRun, NewWork};
 use crate::icons::SidebarIcon;
-use crate::review::cards::tip;
+use crate::review::cards::tip_with;
 use crate::review::model::AgentChoice;
 use crate::review::review_launch::{action_button, menu_button};
 use crate::review::timeline::short_sha;
@@ -447,16 +447,13 @@ pub fn bar_title() -> impl IntoView {
 
 /// Shut the view, with what was typed kept, as Escape and Cmd-[ do.
 pub fn close_button(state: AppState) -> impl IntoView {
-    tip(
+    tip_with(
         icon_button(
             || SidebarIcon::Close,
             theme::fg_muted,
             move || state.new_work.open.set(false),
         ),
-        format!(
-            "Close ({})",
-            crate::ui::menu::Shortcut::label_of("super+BracketLeft")
-        ),
+        || crate::keymap::tip("Close", crate::keymap::Action::Back),
     )
     .debug_name("new-work-close")
     .style(|s| s.flex_shrink(0.0_f32).pointer_events_auto())

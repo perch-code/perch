@@ -49,7 +49,6 @@ use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::clickable;
-use crate::ui::OS_MOD;
 
 /// The most rows a section lists. The rows are built again for every
 /// letter typed, and a query that matches thousands is one to type on.
@@ -1104,10 +1103,11 @@ pub fn accept(state: ReviewState, open_file: &OpenFile, index: usize) {
 }
 
 /// The palette's keys, from the window while it is up: Escape, Enter,
-/// the arrows, Ctrl-N and Ctrl-P, the page keys, and Cmd-P again, which
-/// walks down the list as VS Code's does. Off macOS the command key is
-/// Ctrl, so Ctrl-P is Cmd-P's and walks down, as it does in VS Code there,
-/// and only the arrows and Page Up walk up. The rest are the box's.
+/// the arrows, Ctrl-N and Ctrl-P, the page keys, and Cmd-P again, or
+/// whatever key puts the palette up, which walks down the list as VS
+/// Code's does. Off macOS the command key is Ctrl, so Ctrl-P is Cmd-P's
+/// and walks down, as it does in VS Code there, and only the arrows and
+/// Page Up walk up. The rest are the box's.
 pub fn key(state: ReviewState, open_file: &OpenFile, key: &KeyboardEvent) -> EventPropagation {
     // A key an input method is composing with is the method's: Enter
     // takes what it composed.
@@ -1121,7 +1121,8 @@ pub fn key(state: ReviewState, open_file: &OpenFile, key: &KeyboardEvent) -> Eve
         Code::Enter if plain => accept(state, open_file, state.go_to.selected.get_untracked()),
         Code::ArrowDown if plain => step(state, 1),
         Code::ArrowUp if plain => step(state, -1),
-        Code::KeyP if key.modifiers == OS_MOD => step(state, 1),
+        // The palette's box has the keyboard, so a key that types is its.
+        _ if crate::keymap::pressed(crate::keymap::Action::GoToFile, key, true) => step(state, 1),
         Code::KeyN if ctrl => step(state, 1),
         Code::KeyP if ctrl && cfg!(target_os = "macos") => step(state, -1),
         Code::PageDown if plain => page(state, true),
@@ -2280,6 +2281,36 @@ mod window {
             "shown in the tree"
         );
         assert_eq!(state.recent(), ["src/lib/config.rs", "src/x.rs"]);
+    }
+
+    /// With Go to File on another key, that key puts the palette up and
+    /// walks down it, and Cmd-P does neither.
+    #[test]
+    fn go_to_file_on_another_key_puts_the_palette_up_on_that_key_alone() {
+        let _keymap =
+            crate::keymap::install(crate::keymap::with_bindings("go_to_file = \"super+t\""));
+        let (mut harness, state) = harness();
+        let cmd_t = |harness: &mut HeadlessHarness| {
+            harness.dispatch_event(key(
+                Code::KeyT,
+                Key::Character("t".into()),
+                crate::ui::OS_MOD,
+            ));
+            settle(harness);
+        };
+        cmd_p(&mut harness);
+        assert!(!state.go_to.open.get(), "Cmd-P is not Go to File's now");
+
+        cmd_t(&mut harness);
+        assert!(state.go_to.open.get());
+        typed(&mut harness, "s");
+        assert_eq!(state.go_to.selected.get(), 0);
+        cmd_t(&mut harness);
+        assert_eq!(state.go_to.selected.get(), 1, "Cmd-T walks down");
+        cmd_p(&mut harness);
+        assert_eq!(state.go_to.selected.get(), 1, "Cmd-P does not");
+        assert!(state.go_to.open.get());
+        assert_eq!(state.go_to.query.get(), "s");
     }
 
     /// Ctrl-N walks down. Ctrl-P walks up on a Mac, as Emacs's keys do in

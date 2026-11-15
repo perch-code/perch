@@ -159,7 +159,13 @@ pub fn editor_pane(
                     let preview = path
                         .as_deref()
                         .is_some_and(|path| state.as_preview.with(|p| p.contains(path)));
-                    (path, state.editor_epoch.get(), state.layout.get(), source, preview)
+                    (
+                        path,
+                        state.editor_epoch.get(),
+                        state.layout.get(),
+                        source,
+                        preview,
+                    )
                 },
                 move |(path, epoch, layout, source, preview)| {
                     // Whatever editor stood here is going with its documents;
@@ -170,14 +176,14 @@ pub fn editor_pane(
                             centered_message(
                                 SidebarIcon::Search,
                                 || "No changes".to_string(),
-                                || format!("Pick a file from the tree, or press {} to go to one by name.", crate::ui::menu::Shortcut::label_of("super+KeyP")),
+                                pick_a_file,
                             )
                             .into_any()
                         }
                         None => centered_message(
                             SidebarIcon::Search,
                             || "No file open".to_string(),
-                            || format!("Pick a file from the tree, or press {} to go to one by name.", crate::ui::menu::Shortcut::label_of("super+KeyP")),
+                            pick_a_file,
                         )
                         .into_any(),
                         Some(path) => match state.file(&path) {
@@ -318,6 +324,15 @@ impl Memos {
 /// The columns an editor of `layout` is built wrapping at, while lines
 /// wrap: the last such editor's. Its own width is not known until it has
 /// been laid out, and the window is seldom another width by then.
+/// What the pane with no file open says, with the key that goes to one
+/// by name while there is one.
+fn pick_a_file() -> String {
+    match crate::keymap::label(crate::keymap::Action::GoToFile) {
+        Some(key) => format!("Pick a file from the tree, or press {key} to go to one by name."),
+        None => "Pick a file from the tree.".to_string(),
+    }
+}
+
 fn first_columns(state: ReviewState, layout: Layout) -> Option<usize> {
     if !state.wrap.get_untracked() {
         return None;

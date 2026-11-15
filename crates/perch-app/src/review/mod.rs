@@ -199,6 +199,28 @@ fn showing_code(state: ReviewState) -> bool {
 /// at, unless it is the one a dirty worktree was already left behind by,
 /// which opening again would not change. None while the files are still
 /// on their way. Tracked.
+/// Fetch the open item again, as the news pill does: a moved head is
+/// opened again, which checks the new head out; otherwise the item is only
+/// fetched. False with no item open.
+pub(crate) fn refresh(app: AppState, state: ReviewState, backend: &Backend) -> bool {
+    let Some(item_id) = state
+        .item
+        .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+    else {
+        return false;
+    };
+    let moved = floem::reactive::Effect::untrack(|| moved_head(state)).is_some();
+    state.upstream_changed.set(false);
+    state.head_moved.set(None);
+    if moved {
+        let navigation_id = backend.open_item(&item_id);
+        app.begin_item_review(state, "Reading the pull request", &item_id, navigation_id);
+    } else {
+        backend.refresh_open_item(&item_id);
+    }
+    true
+}
+
 fn moved_head(state: ReviewState) -> Option<String> {
     let head = state.head_moved.get()?;
     let behind = state.item.with(|item| {
@@ -279,26 +301,7 @@ fn item_view(
             },
             move || moved_head(state).is_some() || state.upstream_changed.get(),
             move || {
-                let Some(item_id) = state
-                    .item
-                    .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
-                else {
-                    return;
-                };
-                let moved = moved_head(state).is_some();
-                state.upstream_changed.set(false);
-                state.head_moved.set(None);
-                if moved {
-                    let navigation_id = refresh_backend.open_item(&item_id);
-                    app.begin_item_review(
-                        state,
-                        "Reading the pull request",
-                        &item_id,
-                        navigation_id,
-                    );
-                } else {
-                    refresh_backend.refresh_open_item(&item_id);
-                }
+                refresh(app, state, &refresh_backend);
             },
         ),
     ))

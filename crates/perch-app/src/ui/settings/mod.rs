@@ -13,6 +13,7 @@ mod agents;
 mod appearance;
 pub(crate) mod controls;
 mod general;
+mod keyboard;
 mod language_servers;
 mod repositories;
 mod work;
@@ -60,6 +61,18 @@ pub struct SettingsState {
     /// The setting's text box the keyboard is in. Escape there puts back
     /// what the box held, rather than shutting the page.
     pub(crate) editing: RwSignal<Option<floem::ViewId>>,
+    /// The shortcut control waiting for keys to be pressed. Every key is
+    /// its while it waits, Tab, Escape and Cmd-W too.
+    pub(crate) capturing: RwSignal<Option<floem::ViewId>>,
+    /// The key a shortcut was just given, until another key goes down. Held
+    /// past the wait, it repeats, and its repeats are not keys for the
+    /// page: a Cmd-W given to a shortcut doesn't then shut it.
+    pub(crate) held: RwSignal<Option<Code>>,
+    /// The Perch menu's keys, let through from the moment a shortcut
+    /// waits until the key it was given comes back up, so neither the key
+    /// nor its repeats run a menu item. Kept here rather than in the
+    /// control so that a window shut while one waits gives them back.
+    pub(crate) menu_keys: RwSignal<Option<crate::app_menu::KeysLetThrough>>,
     search_box: RwSignal<Option<floem::ViewId>>,
     /// The page while it is up, for Tab to go round its controls only.
     page: RwSignal<Option<floem::ViewId>>,
@@ -79,8 +92,41 @@ impl SettingsState {
             query: RwSignal::new(String::new()),
             opener: RwSignal::new(None),
             editing: RwSignal::new(None),
+            capturing: RwSignal::new(None),
+            held: RwSignal::new(None),
+            menu_keys: RwSignal::new(None),
             search_box: RwSignal::new(None),
             page: RwSignal::new(None),
+        }
+    }
+
+    /// The key given to a shortcut is up, or another went down: its
+    /// repeats are over, and the menu has its keys back.
+    pub(crate) fn let_go(&self) {
+        if self.held.get_untracked().is_some() {
+            self.held.set(None);
+        }
+        self.let_menu_keys_back();
+    }
+
+    /// The window is shutting: no shortcut waits in it any more, and the
+    /// Perch menu, which outlives it, has its keys back. floem takes no
+    /// view away as a window shuts, so the controls can't say so.
+    pub(crate) fn window_closed(&self) {
+        if self.capturing.try_get_untracked().flatten().is_some() {
+            self.capturing.set(None);
+        }
+        self.let_go();
+    }
+
+    /// The Perch menu holds its keys again, unless a shortcut is waiting.
+    pub(crate) fn let_menu_keys_back(&self) {
+        if self.capturing.try_get_untracked().flatten().is_none()
+            && self
+                .menu_keys
+                .try_with_untracked(|k| k.is_some_and(Option::is_some))
+        {
+            self.menu_keys.set(None);
         }
     }
 }
@@ -90,6 +136,7 @@ impl SettingsState {
 pub enum Section {
     General,
     Appearance,
+    KeyboardShortcuts,
     Agents,
     Work,
     Repositories,
@@ -97,9 +144,10 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 7] = [
         Section::General,
         Section::Appearance,
+        Section::KeyboardShortcuts,
         Section::Agents,
         Section::Work,
         Section::Repositories,
@@ -110,6 +158,7 @@ impl Section {
         match self {
             Section::General => "General",
             Section::Appearance => "Appearance",
+            Section::KeyboardShortcuts => "Keyboard shortcuts",
             Section::Agents => "Agents",
             Section::Work => "Work",
             Section::Repositories => "Repositories",
@@ -121,6 +170,7 @@ impl Section {
         match self {
             Section::General => SidebarIcon::Gear,
             Section::Appearance => SidebarIcon::Palette,
+            Section::KeyboardShortcuts => SidebarIcon::Keyboard,
             Section::Agents => SidebarIcon::Agents,
             Section::Work => SidebarIcon::Branch,
             Section::Repositories => SidebarIcon::Repository,
@@ -135,6 +185,7 @@ impl Section {
         match self {
             Section::General => general::groups(page),
             Section::Appearance => appearance::groups(page),
+            Section::KeyboardShortcuts => keyboard::groups(page),
             Section::Agents => agents::groups(page),
             Section::Work => work::groups(page),
             Section::Repositories => repositories::groups(page),
@@ -236,7 +287,7 @@ pub(crate) struct Row {
     /// found, or what the file holds.
     pub description: Rc<dyn Fn() -> String>,
     /// Other words the row is found by, such as its key in the file.
-    pub keywords: &'static [&'static str],
+    pub keywords: Vec<&'static str>,
     /// The key the reset arrow takes out of the file, and the setting
     /// that does it. The arrow shows while the file sets the key.
     pub reset: Option<Reset>,
@@ -263,15 +314,16 @@ impl Row {
             name: name.into(),
             title: title.into(),
             description: Rc::new(description),
-            keywords: &[],
+            keywords: Vec::new(),
             reset: None,
             restart: None,
             control: Rc::new(control),
         }
     }
 
-    pub(crate) fn keywords(mut self, keywords: &'static [&'static str]) -> Self {
-        self.keywords = keywords;
+    /// Words to be found by, on top of any already given.
+    pub(crate) fn keywords(mut self, keywords: &[&'static str]) -> Self {
+        self.keywords.extend_from_slice(keywords);
         self
     }
 
@@ -405,19 +457,35 @@ pub fn close(state: AppState, restore_focus: bool) {
 }
 
 /// The page's keys, from the window while it is up: Escape clears the
-/// search, then shuts the page; Cmd-[ and Cmd-W shut it; Tab and Shift-Tab
-/// go round the page's own controls. Everything else is for whatever has
-/// the keyboard on the page.
+/// search, then shuts the page; Cmd-[ and Cmd-W, or whatever the keymap
+/// gives back and close, shut it; Tab and Shift-Tab go round the page's
+/// own controls. Everything else is for whatever has the keyboard on the
+/// page. While a shortcut waits for keys, every key is its. `typing` is
+/// whether a key that types goes into a box.
 pub fn key(
     state: AppState,
     cx: &mut floem::context::EventCx<'_>,
     key: &KeyboardEvent,
+    typing: bool,
 ) -> EventPropagation {
-    // A menu hung from a control has keys of its own.
-    if key.is_composing || crate::ui::menu::is_open() {
+    let settings = state.settings;
+    // A menu hung from a control has keys of its own, and a shortcut
+    // waiting for keys takes every one.
+    if key.is_composing
+        || crate::ui::menu::is_open()
+        || settings.capturing.get_untracked().is_some()
+    {
         return EventPropagation::Continue;
     }
-    let settings = state.settings;
+    if let Some(code) = settings.held.get_untracked() {
+        if key.repeat && key.code == code {
+            cx.prevent_default();
+            return EventPropagation::Stop;
+        }
+        if !key.repeat {
+            settings.let_go();
+        }
+    }
     if key.code == Code::Tab && (key.modifiers.is_empty() || key.modifiers == Modifiers::SHIFT) {
         if let Some(page) = settings.page.get_untracked() {
             tab(cx, page, key.modifiers == Modifiers::SHIFT);
@@ -436,16 +504,14 @@ pub fn key(
         }
         return EventPropagation::Stop;
     }
-    if key.modifiers == crate::ui::OS_MOD {
-        match key.code {
-            Code::BracketLeft | Code::KeyW => {
-                close(state, true);
-                return EventPropagation::Stop;
-            }
-            // Already open.
-            Code::Comma => return EventPropagation::Stop,
-            _ => {}
-        }
+    use crate::keymap::{pressed, Action};
+    if pressed(Action::Back, key, typing) || pressed(Action::Close, key, typing) {
+        close(state, true);
+        return EventPropagation::Stop;
+    }
+    // Already open.
+    if pressed(Action::Settings, key, typing) {
+        return EventPropagation::Stop;
     }
     EventPropagation::Continue
 }

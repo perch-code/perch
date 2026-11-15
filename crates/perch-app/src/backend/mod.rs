@@ -4154,6 +4154,7 @@ async fn run(
     // declared list. No token is needed: the scan reads the root's own
     // config and fetches nothing.
     crate::repos::resolve(&mut config, &perch_git::cmd::Git::new(None)).await;
+    crate::keymap::add_warnings(&mut config);
     tracing::info!(poll = config.poll_interval_secs, repos = ?config.declared(), "config loaded");
     let settings_file = match (&config_file, config_text, config_error) {
         (Some(path), Some(text), _) => Some(SettingsFile::read(path, &text, &config)),

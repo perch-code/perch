@@ -179,6 +179,54 @@ fn unread(state: AppState, item: &Item) -> impl Fn() -> bool + Clone + 'static {
 /// The notifications about the item's subject that GitHub has as read:
 /// what Mark Unread puts the reminder back on. None on a branch, or on a
 /// subject the inbox has nothing about.
+/// What Mark Unread puts the unread reminder back on: the subject's
+/// read notifications, and the inbox's row for the item's last run while
+/// that is read, the way the Inbox's row does.
+#[derive(Clone)]
+struct Unread {
+    threads: Vec<String>,
+    activity: bool,
+}
+
+impl Unread {
+    fn of(state: AppState, item: &Item) -> Self {
+        let activity = item.pull_request().is_none()
+            && state.item_activity.with_untracked(|all| {
+                all.get(&item.id)
+                    .is_some_and(|a| a.is_visible() && !a.is_unread())
+            });
+        Unread {
+            threads: read_threads(state, item),
+            activity,
+        }
+    }
+
+    /// Whether there is anything to put it on: greyed while there is
+    /// neither, or both are still unread.
+    fn possible(&self) -> bool {
+        !self.threads.is_empty() || self.activity
+    }
+
+    fn mark(&self, backend: &Backend, item_id: &str) {
+        if self.activity {
+            backend.mark_item_activity_unread(item_id);
+        }
+        for thread_id in &self.threads {
+            backend.mark_notification_unread(thread_id);
+        }
+    }
+}
+
+/// Mark Unread on `item`, as its menu does. False where the menu greys it.
+pub(crate) fn mark_unread(state: AppState, backend: &Backend, item: &Item) -> bool {
+    let unread = Unread::of(state, item);
+    if !unread.possible() {
+        return false;
+    }
+    unread.mark(backend, &item.id);
+    true
+}
+
 fn read_threads(state: AppState, item: &Item) -> Vec<String> {
     let Some(subject) = item.subject.as_ref() else {
         return Vec::new();
@@ -500,31 +548,15 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         });
     }
     {
-        // Put the unread reminder back on the subject's notification and
-        // on the inbox's row for the item's last run, the way the Inbox's
-        // row does. Greyed while there is neither to put it on, or both
-        // are still unread.
-        let read = read_threads(state, &item);
-        let activity_read = item.pull_request().is_none()
-            && state.item_activity.with_untracked(|all| {
-                all.get(&item.id)
-                    .is_some_and(|a| a.is_visible() && !a.is_unread())
-            });
+        let unread = Unread::of(state, &item);
         let b = backend.clone();
         let activity_id = item.id.clone();
         menu = menu.item("Mark Unread", move |m| {
-            let (b, read, activity_id) = (b.clone(), read.clone(), activity_id.clone());
+            let (b, unread, activity_id) = (b.clone(), unread.clone(), activity_id.clone());
             m.icon(SidebarIcon::Unread)
-                .enabled(!read.is_empty() || activity_read)
+                .enabled(unread.possible())
                 .accelerator(key(Code::KeyU))
-                .action(move || {
-                    if activity_read {
-                        b.mark_item_activity_unread(&activity_id);
-                    }
-                    for thread_id in &read {
-                        b.mark_notification_unread(thread_id);
-                    }
-                })
+                .action(move || unread.mark(&b, &activity_id))
         });
     }
     {

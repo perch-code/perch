@@ -1711,8 +1711,14 @@ pub struct ReviewState {
     pub merge_error: RwSignal<Option<String>>,
     /// Whether the merge box hangs open under the bar's Merge.
     pub merge_open: RwSignal<bool>,
+    /// Whether the bar shows Merge, which opens the box: where the merge
+    /// key does too.
+    pub merge_offered: RwSignal<bool>,
     /// The button and box together, so a press anywhere else shuts it.
     pub merge_anchor: RwSignal<Option<floem::ViewId>>,
+    /// Whatever had the keyboard when the merge key opened the box, to have
+    /// it back when the key shuts it.
+    pub merge_opener: RwSignal<Option<floem::ViewId>>,
     /// Latest merge mutation observed for the displayed checkout. Every event
     /// also carries the item and pull-request identity, so checkout resets can
     /// clear this without letting a different subject settle the new view.
@@ -2230,7 +2236,9 @@ impl ReviewState {
             merge_pending: RwSignal::new(false),
             merge_error: RwSignal::new(None),
             merge_open: RwSignal::new(false),
+            merge_offered: RwSignal::new(false),
             merge_anchor: RwSignal::new(None),
+            merge_opener: RwSignal::new(None),
             merge_attempt_id: RwSignal::new(None),
             pull_readiness: RwSignal::new(None),
             pull_bases: RwSignal::new(None),

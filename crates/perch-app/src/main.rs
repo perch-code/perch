@@ -13,6 +13,7 @@ mod icons;
 mod inbox;
 mod items;
 mod items_cli;
+mod keymap;
 mod log_file;
 mod reference;
 mod repos;
@@ -109,6 +110,7 @@ fn main() {
     theme::install_symbol_fallbacks();
     let preferred = theme::Appearance::chosen(ui.appearance);
     theme::prefer(preferred);
+    keymap::take_up(&config.keybindings);
 
     windows::load_frame();
     let (backend, events) = backend::spawn();

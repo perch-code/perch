@@ -22,7 +22,8 @@ use floem::views::editor::Editor;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Scroll, Stack};
 
 use crate::icons::SidebarIcon;
-use crate::review::cards::tip;
+use crate::keymap::{self, Action};
+use crate::review::cards::tip_with;
 use crate::review::model::ReviewState;
 use crate::review::suggestion::{self, Original};
 use crate::theme;
@@ -57,19 +58,38 @@ impl Format {
         }
     }
 
-    /// What the button's tip says, with GitHub's key for it where it
-    /// has one.
-    fn tip(self) -> &'static str {
-        match self {
+    /// What the button's tip says, with the key for it where it has one:
+    /// by default GitHub's, with Cmd for Ctrl.
+    fn tip(self) -> String {
+        let text = match self {
             Format::Heading => "Heading",
-            Format::Bold => "Bold (\u{2318}B)",
-            Format::Italic => "Italic (\u{2318}I)",
-            Format::Quote => "Quote (\u{2318}\u{21e7}.)",
-            Format::Code => "Code (\u{2318}E)",
-            Format::Link => "Link (\u{2318}K)",
-            Format::NumberedList => "Numbered list (\u{2318}\u{21e7}7)",
-            Format::BulletList => "Unordered list (\u{2318}\u{21e7}8)",
-            Format::TaskList => "Task list (\u{2318}\u{21e7}L)",
+            Format::Bold => "Bold",
+            Format::Italic => "Italic",
+            Format::Quote => "Quote",
+            Format::Code => "Code",
+            Format::Link => "Link",
+            Format::NumberedList => "Numbered list",
+            Format::BulletList => "Unordered list",
+            Format::TaskList => "Task list",
+        };
+        match self.action() {
+            Some(action) => keymap::tip(text, action),
+            None => text.to_string(),
+        }
+    }
+
+    /// The keymap's action for it, for a style that has a key.
+    fn action(self) -> Option<Action> {
+        match self {
+            Format::Heading => None,
+            Format::Bold => Some(Action::Bold),
+            Format::Italic => Some(Action::Italic),
+            Format::Quote => Some(Action::Quote),
+            Format::Code => Some(Action::Code),
+            Format::Link => Some(Action::Link),
+            Format::NumberedList => Some(Action::NumberedList),
+            Format::BulletList => Some(Action::BulletList),
+            Format::TaskList => Some(Action::TaskList),
         }
     }
 
@@ -87,28 +107,25 @@ impl Format {
         }
     }
 
-    /// The style a key asks for: GitHub's keys, with Cmd for Ctrl.
+    /// The style a key asks for, in a box that has the keyboard: by
+    /// default GitHub's keys, with Cmd for Ctrl.
     fn of_key(key: &KeyboardEvent) -> Option<Format> {
-        let os = crate::ui::OS_MOD;
-        if key.modifiers == os {
-            return match key.code {
-                Code::KeyB => Some(Format::Bold),
-                Code::KeyI => Some(Format::Italic),
-                Code::KeyE => Some(Format::Code),
-                Code::KeyK => Some(Format::Link),
-                _ => None,
-            };
-        }
-        if key.modifiers == os | Modifiers::SHIFT {
-            return match key.code {
-                Code::Period => Some(Format::Quote),
-                Code::Digit7 => Some(Format::NumberedList),
-                Code::Digit8 => Some(Format::BulletList),
-                Code::KeyL => Some(Format::TaskList),
-                _ => None,
-            };
-        }
-        None
+        [
+            Format::Bold,
+            Format::Italic,
+            Format::Code,
+            Format::Link,
+            Format::Quote,
+            Format::NumberedList,
+            Format::BulletList,
+            Format::TaskList,
+        ]
+        .into_iter()
+        .find(|style| {
+            style
+                .action()
+                .is_some_and(|action| keymap::pressed(action, key, true))
+        })
     }
 }
 
@@ -487,11 +504,12 @@ impl Tabs {
     /// The keys the bar answers to while the box has the keyboard: a
     /// style's, Cmd-G for a suggestion as github.com has it, where there
     /// are lines to suggest on, Cmd-Shift-P between Write and Preview,
-    /// and Escape from Preview back to Write. Whether one was taken. In
-    /// Preview the styles' keys do nothing, as there is nothing to style.
+    /// and Escape from Preview back to Write, the keymap saying which keys
+    /// but Escape. Whether one was taken. In Preview the styles' keys do
+    /// nothing, as there is nothing to style.
     pub fn key(&self, key: &KeyboardEvent) -> bool {
         let previewing = self.previewing;
-        if key.modifiers == crate::ui::OS_MOD && key.code == Code::KeyG {
+        if keymap::pressed(Action::Suggest, key, true) {
             if let Some(original) = self.original_now() {
                 if !previewing.get_untracked() {
                     suggest(&self.editor, &original);
@@ -499,7 +517,7 @@ impl Tabs {
                 return true;
             }
         }
-        if key.modifiers == crate::ui::OS_MOD | Modifiers::SHIFT && key.code == Code::KeyP {
+        if keymap::pressed(Action::TogglePreview, key, true) {
             previewing.update(|p| *p = !*p);
             focus(&self.editor);
             return true;
@@ -634,8 +652,11 @@ fn bar(
                     .apply_if(!on, |s| s.hover(|s| s.color(theme::fg())))
             })
     };
-    let icon = |glyph: SidebarIcon, name: String, tip_text: &str, action: Box<dyn Fn()>| {
-        tip(
+    let icon = |glyph: SidebarIcon,
+                name: String,
+                tip_text: Rc<dyn Fn() -> String>,
+                action: Box<dyn Fn()>| {
+        tip_with(
             Container::new(icon_in(
                 move || crate::icons::sidebar_icon(glyph, theme::fg_muted()),
                 theme::fg_muted,
@@ -650,7 +671,7 @@ fn bar(
                     .border_radius(6.0)
                     .hover(|s| s.background(theme::badge_bg()))
             }),
-            tip_text.to_string(),
+            move || tip_text(),
         )
     };
     let button = move |style: Format| {
@@ -658,7 +679,7 @@ fn bar(
         icon(
             style.glyph(),
             format!("composer-format:{}", style.name()),
-            style.tip(),
+            Rc::new(move || style.tip()),
             Box::new(move || format(&editor, style)),
         )
     };
@@ -671,7 +692,7 @@ fn bar(
     let suggest_button = Container::new(icon(
         SidebarIcon::Suggest,
         "composer-suggest".to_string(),
-        "Add a suggestion (\u{2318}G)",
+        Rc::new(|| keymap::tip("Add a suggestion", Action::Suggest)),
         Box::new(move || {
             let lines = original.as_ref().and_then(|o| Effect::untrack(|| o()));
             if let Some(lines) = lines {
@@ -782,6 +803,45 @@ fn preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn press(keys: &str) -> KeyboardEvent {
+        let shortcut = crate::ui::menu::Shortcut::parse(keys).unwrap();
+        KeyboardEvent {
+            state: floem::ui_events::keyboard::KeyState::Down,
+            key: Key::Character(String::new()),
+            code: shortcut.code,
+            location: Default::default(),
+            modifiers: shortcut.modifiers,
+            repeat: false,
+            is_composing: false,
+        }
+    }
+
+    /// A style's tip names the key the keymap gives it, and the key does
+    /// the style; a style with no key has a tip with none.
+    #[test]
+    fn a_style_s_tip_and_key_follow_the_keymap() {
+        let label = crate::ui::menu::Shortcut::label_of;
+        assert_eq!(Format::Heading.tip(), "Heading");
+        assert_eq!(Format::Bold.tip(), format!("Bold ({})", label("super+b")));
+        if cfg!(target_os = "macos") {
+            assert_eq!(Format::Bold.tip(), "Bold (\u{2318}B)");
+        }
+        assert_eq!(Format::of_key(&press("super+b")), Some(Format::Bold));
+
+        let _keymap = keymap::install(keymap::with_bindings(
+            "bold = \"super+shift+b\"\nitalic = []",
+        ));
+        assert_eq!(
+            Format::Bold.tip(),
+            format!("Bold ({})", label("super+shift+b"))
+        );
+        assert_eq!(Format::Italic.tip(), "Italic");
+        assert_eq!(Format::of_key(&press("super+shift+b")), Some(Format::Bold));
+        assert_eq!(Format::of_key(&press("super+b")), None);
+        assert_eq!(Format::of_key(&press("super+i")), None);
+        assert_eq!(Format::of_key(&press("super+k")), Some(Format::Link));
+    }
 
     /// `text` with `[` and `]` for the selection, or `|` for a caret,
     /// after `format`.

@@ -40,7 +40,7 @@ use floem::views::{
 };
 
 use crate::icons::SidebarIcon;
-use crate::review::cards::tip;
+use crate::review::cards::{tip, tip_with};
 use crate::review::conversation_find;
 use crate::review::doc::Doc;
 use crate::review::editor;
@@ -728,7 +728,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
             "Aa",
             Face::Text,
             "Match case",
-            "alt+super+KeyC",
+            crate::keymap::Action::FindMatchCase,
             "find-match-case",
             |o| &mut o.match_case,
         ),
@@ -737,7 +737,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
             "ab",
             Face::Underlined,
             "Match whole word",
-            "alt+super+KeyW",
+            crate::keymap::Action::FindWholeWord,
             "find-whole-word",
             |o| &mut o.whole_word,
         ),
@@ -746,7 +746,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
             ".*",
             Face::Code,
             "Use regular expression",
-            "alt+super+KeyR",
+            crate::keymap::Action::FindRegex,
             "find-regex",
             |o| &mut o.regex,
         ),
@@ -776,7 +776,7 @@ fn toggle_tile(
     letters: &'static str,
     face: Face,
     tip_text: &'static str,
-    keys: &'static str,
+    action: crate::keymap::Action,
     name: &'static str,
     flag: fn(&mut Options) -> &mut bool,
 ) -> impl IntoView {
@@ -817,10 +817,7 @@ fn toggle_tile(
                 base.hover(|s| s.background(theme::canvas_hover()))
             }
         });
-    tip(
-        tile,
-        format!("{tip_text} ({})", crate::ui::menu::Shortcut::label_of(keys)),
-    )
+    tip_with(tile, move || crate::keymap::tip(tip_text, action))
 }
 
 /// "3 of 8", "? of 8" before the bar has walked to one, "No results",
