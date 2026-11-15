@@ -212,3 +212,14 @@ incremental = true
 [patch."https://github.com/lapce/floem"]
 floem = { git = "https://github.com/perch-code/floem", branch = "perch" }
 floem_renderer = { git = "https://github.com/perch-code/floem", branch = "perch" }
+
+# vger-rs, which floem's vger renderer pulls from lapce by git, from
+# perch-code's fork: branch `perch`, off the rev floem pins. It blends
+# a paint's alpha as "over" (One, OneMinusSrcAlpha) where vger blended
+# it like colour, so every translucent paint lowered the frame's alpha.
+# A Metal layer is opaque, and macOS showed those pixels lighter than
+# their colour: the 56 faded layers over a cut description drew a pale
+# band in dark mode. `cargo update -p floem-vger` takes the branch's new
+# head.
+[patch."https://github.com/lapce/vger-rs"]
+floem-vger = { git = "https://github.com/perch-code/vger-rs", branch = "perch" }

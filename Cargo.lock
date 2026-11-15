@@ -1179,7 +1179,7 @@ dependencies = [
 [[package]]
 name = "floem-vger"
 version = "0.3.2"
-source = "git+https://github.com/lapce/vger-rs?rev=54ab8135d9d870a4ac2b84fc6b9846b3b03ec919#54ab8135d9d870a4ac2b84fc6b9846b3b03ec919"
+source = "git+https://github.com/perch-code/vger-rs?branch=perch#b0604fe8fc52ec920f1afb836360177197b9271b"
 dependencies = [
  "euclid",
  "fontdue",
