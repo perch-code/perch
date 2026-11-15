@@ -249,14 +249,20 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M4.5 11.5 L11.5 4.5 M5.8 4.5 H11.5 V10.2" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
-        // A cog: a ring with eight teeth round a hub. Settings.
+        // A cog round a hub: one outline, six flat-topped teeth on the rim
+        // (tips on r6.9, roots on r4.9). Separate spokes on a ring read as a
+        // ship's wheel at 16px. Settings.
         SidebarIcon::Gear => format!(
-            r#"<circle cx="8" cy="8" r="4.3" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="8" cy="8" r="1.6" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M8 1.6 V3.4 M8 12.6 V14.4 M1.6 8 H3.4 M12.6 8 H14.4
-                       M3.5 3.5 L4.8 4.8 M11.2 11.2 L12.5 12.5 M3.5 12.5 L4.8 11.2
-                       M11.2 4.8 L12.5 3.5" fill="none" stroke="{c}" stroke-width="1.9"
-                     stroke-linecap="round"/>"#
+            r#"<path d="M6.4 3.37 L6.57 1.25 A6.9 6.9 0 0 1 9.43 1.25 L9.6 3.37
+                       A4.9 4.9 0 0 1 11.21 4.3 L13.13 3.38 A6.9 6.9 0 0 1 14.56 5.87
+                       L12.81 7.07 A4.9 4.9 0 0 1 12.81 8.93 L14.56 10.13
+                       A6.9 6.9 0 0 1 13.13 12.62 L11.21 11.7 A4.9 4.9 0 0 1 9.6 12.63
+                       L9.43 14.75 A6.9 6.9 0 0 1 6.57 14.75 L6.4 12.63
+                       A4.9 4.9 0 0 1 4.79 11.7 L2.87 12.62 A6.9 6.9 0 0 1 1.44 10.13
+                       L3.19 8.93 A4.9 4.9 0 0 1 3.19 7.07 L1.44 5.87
+                       A6.9 6.9 0 0 1 2.87 3.38 L4.79 4.3 A4.9 4.9 0 0 1 6.4 3.37 Z"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <circle cx="8" cy="8" r="1.9" fill="none" stroke="{c}" stroke-width="1.4"/>"#
         ),
         // A painter's palette with its thumb notch and three dabs of paint:
         // how Perch looks.
