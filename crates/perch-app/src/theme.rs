@@ -466,8 +466,10 @@ pub fn avatar_tints() -> [Color; 6] {
 /// display.
 pub const TEXT_TITLE: f32 = 14.0;
 pub const TEXT_SECTION_TITLE: f32 = 16.0;
-/// The item's title at the head of its description, the page's heading.
-pub const TEXT_ITEM_TITLE: f32 = 20.0;
+/// The item's title at the head of its description, the page's heading:
+/// a step over anything else on the page, so the description's own
+/// headings stay under it.
+pub const TEXT_ITEM_TITLE: f32 = 24.0;
 pub const TEXT_BODY: f32 = 14.0;
 pub const TEXT_META: f32 = 13.0;
 pub const TEXT_BADGE: f32 = 12.0;
@@ -1008,10 +1010,45 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
 // The item view: the summary's rows and pills, and Conversation's cards
 // ---------------------------------------------------------------------------
 
-/// The state pill on the summary's line: the state's colour as
-/// text on a wash of the same colour.
-pub const STATE_PILL_HEIGHT: f64 = 20.0;
-pub const STATE_WASH: f32 = 0.12;
+/// The description's properties bar: controls as a Mac toolbar draws
+/// them, a faint fill of the ink with a ring a step stronger, the state's
+/// pop-up button and the status's group of three side by side. See
+/// `summary::properties_bar`.
+pub const PROPERTY_HEIGHT: f64 = 26.0;
+pub const PROPERTY_RADIUS: f64 = 7.0;
+/// Between a property's glyph and its word, and at a property's sides.
+pub const PROPERTY_GLYPH_GAP: f64 = 6.0;
+pub const PROPERTY_PADDING: f64 = 9.0;
+/// Between the bar's controls, and between a wrapped bar's lines.
+pub const PROPERTY_GAP: f64 = 8.0;
+/// The description's head: the title, the byline under it, the bar under
+/// that, and the text under the bar.
+pub const DESCRIPTION_BYLINE_GAP: f64 = 6.0;
+pub const DESCRIPTION_BAR_GAP: f64 = 16.0;
+pub const DESCRIPTION_BODY_GAP: f64 = 24.0;
+/// The room under the description, over the hairline that ends it.
+pub const DESCRIPTION_FOOT: f64 = 20.0;
+/// The byline's avatar.
+pub const DESCRIPTION_AVATAR: f64 = 18.0;
+/// The bar's meter of lines added against lines removed.
+pub const CHURN_METER_WIDTH: f64 = 32.0;
+pub const CHURN_METER_HEIGHT: f64 = 4.0;
+
+/// A property's fill, its ring, its fill under the pointer, and the
+/// hairline between two properties of a group: the ink, faint, so they
+/// read the same on GitHub's white and in either appearance.
+pub fn property_fill() -> Color {
+    pick(rgba(0x252523, 0x0b), rgba(0xffffff, 0x0e))
+}
+pub fn property_ring() -> Color {
+    pick(rgba(0x252523, 0x12), rgba(0xffffff, 0x12))
+}
+pub fn property_hover() -> Color {
+    pick(rgba(0x252523, 0x16), rgba(0xffffff, 0x1a))
+}
+pub fn property_divider() -> Color {
+    pick(rgba(0x252523, 0x1a), rgba(0xffffff, 0x1a))
+}
 /// A row of the summary under Conversation's title: its name in a column
 /// at the left, then its value. A value that wraps, reviewers or labels
 /// past the column's edge, makes its row taller; the name stays on the

@@ -1494,10 +1494,12 @@ fn quote_reply(state: ReviewState, body: &str) {
 // GitHub's cards
 // ---------------------------------------------------------------------
 
-/// The pull request's or issue's own text, with the reactions on it under.
-/// It is headed by the item's title, then the summary's line as its
-/// strip, what the item is and who opened it, with the card's actions
-/// before the line's status glyphs.
+/// The pull request's or issue's own text, with the reactions on it under,
+/// drawn as the page's document rather than a box: the item's title, with
+/// the card's actions at its right under the pointer, a byline, and the
+/// properties bar (see `summary::card_head`), then the text, set as a
+/// document (see `markdown::render_document`), and a hairline at its foot
+/// that ends it, over the composer and the timeline.
 pub fn description_card(
     app: AppState,
     state: ReviewState,
@@ -1513,7 +1515,7 @@ pub fn description_card(
             .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_subtle()))
             .into_any()
     } else {
-        markdown::render_linked(&body, state).into_any()
+        markdown::render_document(&body, state).into_any()
     };
     let scope = description.id();
     let more = More {
@@ -1533,15 +1535,23 @@ pub fn description_card(
         .into_any();
     let shown = edited_in_card(app, state, backend.clone(), node_id, shown);
     track_hover(
-        card(
-            crate::review::summary::card_line(
+        Stack::vertical((
+            crate::review::summary::card_head(
                 app,
                 state,
                 backend.clone(),
                 actions(state, backend, hovered, react, more),
             ),
-            Some(shown),
-        ),
+            Container::new(shown).style(|s| s.width_full().margin_top(theme::DESCRIPTION_BODY_GAP)),
+            // Where the description ends: a hairline, not another box.
+            Empty::new().debug_name("description foot").style(|s| {
+                s.width_full()
+                    .height(1.0)
+                    .margin_top(theme::DESCRIPTION_FOOT)
+                    .background(theme::border_muted())
+            }),
+        ))
+        .style(|s| s.flex_col().width_full()),
         hovered,
     )
 }

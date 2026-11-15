@@ -1,15 +1,16 @@
 //! The summary at the top of Conversation, and the details in the bar.
 //!
-//! The summary is one line: at its left what the item is, its state, its
-//! repository and number, who opened it and its churn; at its right
-//! whether it can go in, as three glyphs each in a place of its own: the
-//! checks, the review, and whether it merges cleanly. Each is green,
-//! yellow or red, and says the rest under the pointer. The checks' glyph
-//! lists every check in its menu, and the bar's Merge has the rest.
-//! On a pull request or an issue the line is the description card's
-//! strip, under the item's title.
+//! On a pull request or an issue the description heads the page, and its
+//! head says what the item is: the title, a byline of who opened it, when
+//! and where, and the properties bar, the state's pop-up button, whether
+//! it can go in as one group of the checks, the review and the merge, each
+//! its glyph and its word, and the churn with its meter. See `card_head`.
+//! The checks list every check in their menu, and the item bar's Merge
+//! has the rest. A worktree of the reader's own has no description, and
+//! has the summary's one line instead: its repository, who opened it, its
+//! churn, and the checks at its end.
 //! The notices, and the way back from a retained snapshot, sit over the
-//! line; on Code the notice is in the tab bar and the way back in the
+//! head; on Code the notice is in the tab bar and the way back in the
 //! rail, since the summary is Conversation's alone.
 //!
 //! Everything else is `details`, rows of a name and a value in the
@@ -41,31 +42,30 @@ use crate::ui::widgets::{
     worktree_menu, Name,
 };
 
-/// Whether the line is the description card's strip rather than the
-/// summary's: a pull request and an issue have a description, and a
+/// Whether the description's head says what the item is, rather than the
+/// summary's line: a pull request and an issue have a description, and a
 /// worktree of the reader's own has none.
-fn line_in_card(state: ReviewState) -> bool {
+fn head_in_description(state: ReviewState) -> bool {
     state.pull_request.with(Option::is_some) || state.issue.with(Option::is_some)
 }
 
 /// The block at the top of the page: the notices, then the line, unless
-/// the description card has it. Hidden rather than empty when there is
-/// nothing to say, so what follows it starts at the top.
+/// the item has a description, whose head says it. Hidden rather than
+/// empty when there is nothing to say, so what follows it starts at the
+/// top.
 pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let author = Memo::new(move |_| github_data(app, state).author);
-    let in_card = Memo::new(move |_| line_in_card(state));
+    let in_card = Memo::new(move |_| head_in_description(state));
     let shown = Memo::new(move |_| {
         state.historical_review.with(Option::is_some)
             || notice_text(state).is_some()
             || (!in_card.get()
-                && (subject_state(state).is_some()
-                    || !repo_of(state).is_empty()
+                && (!repo_of(state).is_empty()
                     || churn_of(state).is_some()
                     || author.with(Option::is_some)))
     });
     // Asked as the item opens, so the details have them when they open.
     ask(app, state, &backend);
-    let line_backend = backend.clone();
     Stack::vertical((
         notices(app, state, backend),
         dyn_container(
@@ -74,7 +74,7 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 if in_card {
                     Empty::new().into_any()
                 } else {
-                    line(app, state, line_backend.clone(), author, None).into_any()
+                    line(app, state, author).into_any()
                 }
             },
         )
@@ -82,8 +82,8 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     ))
     .debug_name("item summary")
     .style(move |s| {
-        // Over a card, a notice is a card's gap from it; the line alone
-        // heads the page, and keeps a title's room under it.
+        // Over the description, a notice is a card's gap from it; the
+        // line alone heads the page, and keeps a title's room under it.
         let under = if in_card.get() {
             theme::CARD_GAP
         } else {
@@ -96,11 +96,12 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     })
 }
 
-/// The description card's head: the item's title, then the line as the
-/// card's strip. The card's `actions`, drawn under the pointer, come
-/// before the status glyphs, which then stay where they are at the
-/// line's end.
-pub fn card_line(
+/// The description's head, as a document's: the item's title with the
+/// card's `actions` at its right, drawn under the pointer; a quiet byline
+/// under it, who opened it, when, and where; then the properties bar,
+/// the state's pop-up button, the status as a group of three that each
+/// say their word, and the churn. See `properties_bar`.
+pub fn card_head(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
@@ -108,11 +109,34 @@ pub fn card_line(
 ) -> impl IntoView {
     let author = Memo::new(move |_| github_data(app, state).author);
     Stack::vertical((
-        item_title(state),
-        line(app, state, backend, author, Some(actions)),
+        Stack::horizontal((
+            item_title(state),
+            // The actions' room is kept while they are hidden, so the title
+            // wraps the same whether or not the pointer is on the
+            // description.
+            Container::new(actions).style(|s| {
+                s.height(TITLE_LINE)
+                    .min_width(ACTIONS_WIDTH)
+                    .items_center()
+                    .justify_end()
+                    .flex_shrink(0.0_f32)
+            }),
+        ))
+        .debug_name("title row")
+        .style(|s| s.items_start().width_full().min_width(0.0).col_gap(16.0)),
+        card_byline(app, state, author),
+        properties_bar(app, state, backend),
     ))
+    .debug_name("description head")
     .style(|s| s.flex_col().width_full().min_width(0.0))
 }
+
+/// The title's line box: a third over its size, as a heading's.
+const TITLE_LINE: f64 = 32.0;
+
+/// The card's actions at their widest: the reaction picker and the `⋯`,
+/// each 24 across, 4 apart, the `⋯` pulled 4 into the edge.
+const ACTIONS_WIDTH: f64 = 48.0;
 
 /// The pull request's or the issue's title, whole, wrapped over as many
 /// lines as it takes.
@@ -128,13 +152,13 @@ fn item_title(state: ReviewState) -> impl IntoView {
         .debug_name("item heading")
         .style(move |s| {
             s.font_size(theme::TEXT_ITEM_TITLE)
-                .font_weight(theme::weight_emphasis())
-                .line_height(1.3)
+                .font_weight(theme::weight_strong())
+                .line_height((TITLE_LINE / theme::TEXT_ITEM_TITLE as f64) as f32)
                 .color(theme::fg())
                 .text_wrap()
-                .width_full()
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
                 .min_width(0.0)
-                .padding_top(6.0)
                 .apply_if(title().is_empty(), |s| s.hide())
         })
 }
@@ -444,48 +468,26 @@ fn dyn_row<T: Clone + PartialEq + 'static, V: IntoView + 'static>(
     )
 }
 
-/// The one line under the title. At its left, what the item is: Open,
-/// Draft, Merged, Closed as the pill, the repository and number as the
-/// sidebar's rows say them, who opened it, and the lines added and
-/// removed. At its right, whether it can go in: the status glyphs.
-/// Merging is the bar's, and the rest of what there is to say is in the
-/// bar's details. A worktree of the reader's own has no state, and starts
-/// at its repository; one with no GitHub remote has its churn alone.
+/// The summary's one line, on a worktree of the reader's own, which has
+/// no description to say what it is: its repository, who opened it, and
+/// the lines added and removed, then at its end the checks, as the
+/// description's status group says them. The rest of what there is to say
+/// is in the item bar's details. One with no GitHub remote has its churn
+/// alone.
 fn line(
     app: AppState,
     state: ReviewState,
-    backend: Rc<Backend>,
     author: Memo<Option<(String, String, Option<jiff::Timestamp>)>>,
-    actions: Option<floem::AnyView>,
 ) -> impl IntoView {
     let present = move || {
-        subject_state(state).is_some()
-            || !repo_of(state).is_empty()
-            || churn_of(state).is_some()
-            || author.with(Option::is_some)
+        !repo_of(state).is_empty() || churn_of(state).is_some() || author.with(Option::is_some)
     };
     Stack::horizontal((
-        state_pill(app, state, backend),
-        Label::derived(move || repo_of(state))
-            .debug_name("repository line")
-            .on_event_stop(el::Click, move |_, _| {
-                if let Some(url) = url_of(state) {
-                    open_in_browser(&url);
-                }
-            })
-            .style(move |s| {
-                let opens = url_of(state).is_some();
-                s.font_size(theme::TEXT_META)
-                    .color(theme::fg_muted())
-                    .selectable(false)
-                    .apply_if(repo_of(state).is_empty(), |s| s.hide())
-                    // Underlined under the pointer, as a name is.
-                    .apply_if(opens, crate::ui::widgets::underlined_link)
-            }),
+        repo_label(state),
         dyn_container(
             move || author.get(),
             move |author| match author {
-                Some(author) => author_view(app, author).into_any(),
+                Some(author) => author_view(app, author, false).into_any(),
                 None => Empty::new().into_any(),
             },
         )
@@ -494,10 +496,9 @@ fn line(
                 .apply_if(author.with(Option::is_none), |s| s.hide())
         }),
         churn(state),
-        // What is left of the line, so the glyphs end it.
+        // What is left of the line, so the checks end it.
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        actions.unwrap_or_else(|| Empty::new().into_any()),
-        status_glyphs(state),
+        status_group(state),
     ))
     .debug_name("summary line")
     .style(move |s| {
@@ -508,6 +509,163 @@ fn line(
             .flex_wrap(floem::taffy::FlexWrap::Wrap)
             .col_gap(theme::SUMMARY_GAP)
             .apply_if(!present(), |s| s.hide())
+    })
+}
+
+/// The repository and number, which open the item on GitHub when it has
+/// a page there.
+fn repo_label(state: ReviewState) -> impl IntoView {
+    Label::derived(move || repo_of(state))
+        .debug_name("repository line")
+        .on_event_stop(el::Click, move |_, _| {
+            if let Some(url) = url_of(state) {
+                open_in_browser(&url);
+            }
+        })
+        .style(move |s| {
+            let opens = url_of(state).is_some();
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .selectable(false)
+                .flex_shrink(0.0_f32)
+                .apply_if(repo_of(state).is_empty(), |s| s.hide())
+                // Underlined under the pointer, as a name is.
+                .apply_if(opens, crate::ui::widgets::underlined_link)
+        })
+}
+
+/// Who opened the item, when, and where, on one quiet line under the
+/// title: the avatar, the login and how long ago, then past a dot the
+/// repository and number. It wraps under itself in a narrow column.
+fn card_byline(
+    app: AppState,
+    state: ReviewState,
+    author: Memo<Option<(String, String, Option<jiff::Timestamp>)>>,
+) -> impl IntoView {
+    let has_author = Memo::new(move |_| author.with(Option::is_some));
+    let has_repo = Memo::new(move |_| !repo_of(state).is_empty());
+    Stack::horizontal((
+        dyn_container(
+            move || author.get(),
+            move |author| match author {
+                Some(author) => author_view(app, author, true).into_any(),
+                None => Empty::new().into_any(),
+            },
+        )
+        .style(move |s| s.min_width(0.0).apply_if(!has_author.get(), |s| s.hide())),
+        Empty::new().debug_name("byline dot").style(move |s| {
+            s.size(2.0, 2.0)
+                .border_radius(1.0)
+                .flex_shrink(0.0_f32)
+                .margin_horiz(2.0)
+                .background(theme::fg_subtle())
+                .apply_if(!has_author.get() || !has_repo.get(), |s| s.hide())
+        }),
+        repo_label(state),
+    ))
+    .debug_name("description byline")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .min_width(0.0)
+            .min_height(20.0)
+            .flex_wrap(floem::taffy::FlexWrap::Wrap)
+            .col_gap(6.0)
+            .row_gap(4.0)
+            .margin_top(theme::DESCRIPTION_BYLINE_GAP)
+            .apply_if(!has_author.get() && !has_repo.get(), |s| s.hide())
+    })
+}
+
+/// The properties bar under the byline, as a Mac toolbar's controls: the
+/// state as a pop-up button, whose menu changes it; whether the pull
+/// request can go in, as one group of the checks, the review and the
+/// merge, each its glyph and its word; then the lines added and removed,
+/// with a meter of the two. It wraps in a narrow column. An issue has its
+/// state alone.
+fn properties_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let present = Memo::new(move |_| {
+        subject_state(state).is_some()
+            || churn_of(state).is_some()
+            || checks_line_now(state).is_some()
+    });
+    Stack::horizontal((
+        state_pill(app, state, backend),
+        status_group(state),
+        churn_with_meter(state),
+    ))
+    .debug_name("properties bar")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .min_width(0.0)
+            .flex_wrap(floem::taffy::FlexWrap::Wrap)
+            .col_gap(theme::PROPERTY_GAP)
+            .row_gap(theme::PROPERTY_GAP)
+            .margin_top(theme::DESCRIPTION_BAR_GAP)
+            .apply_if(!present.get(), |s| s.hide())
+    })
+}
+
+/// The churn, and its meter after it.
+fn churn_with_meter(state: ReviewState) -> impl IntoView {
+    let has_churn = Memo::new(move |_| churn_of(state).is_some());
+    Stack::horizontal((churn(state), churn_meter(state)))
+        .debug_name("lines added and removed")
+        .style(move |s| {
+            s.items_center()
+                .col_gap(6.0)
+                .padding_horiz(4.0)
+                .flex_shrink(0.0_f32)
+                .apply_if(!has_churn.get(), |s| s.hide())
+        })
+}
+
+/// The meter's two bars, the lines added and the lines removed, as
+/// widths that share `CHURN_METER_WIDTH` in proportion, a pixel apart.
+/// Each side that has any lines keeps a pixel of its own. None with no
+/// lines either way.
+fn meter_split(additions: u32, deletions: u32) -> Option<(f64, f64)> {
+    let whole = theme::CHURN_METER_WIDTH;
+    match (additions, deletions) {
+        (0, 0) => None,
+        (_, 0) => Some((whole, 0.0)),
+        (0, _) => Some((0.0, whole)),
+        (a, d) => {
+            let room = whole - 1.0;
+            let added = (room * a as f64 / (a as f64 + d as f64))
+                .round()
+                .clamp(1.0, room - 1.0);
+            Some((added, room - added))
+        }
+    }
+}
+
+/// Lines added against lines removed, as two short bars in their colours.
+fn churn_meter(state: ReviewState) -> impl IntoView {
+    let split = Memo::new(move |_| churn_of(state).and_then(|(a, d)| meter_split(a, d)));
+    let bar = move |pick: fn((f64, f64)) -> f64, ink: fn() -> floem::peniko::Color| {
+        Empty::new().style(move |s| {
+            let width = split.get().map(pick).unwrap_or(0.0);
+            s.width(width)
+                .height(theme::CHURN_METER_HEIGHT)
+                .border_radius(1.0)
+                .background(ink())
+                .apply_if(width == 0.0, |s| s.hide())
+        })
+    };
+    Stack::horizontal((
+        bar(|(added, _)| added, theme::status_added),
+        bar(|(_, removed)| removed, theme::status_deleted),
+    ))
+    .debug_name("lines meter")
+    .style(move |s| {
+        s.items_center()
+            .col_gap(1.0)
+            .width(theme::CHURN_METER_WIDTH)
+            .height(theme::CHURN_METER_HEIGHT)
+            .flex_shrink(0.0_f32)
+            .apply_if(split.with(Option::is_none), |s| s.hide())
     })
 }
 
@@ -761,10 +919,11 @@ fn state_menu(
     menu
 }
 
-/// Open, Draft, Merged, Closed: the state's icon and its word, in the
-/// state's colour on a wash of it. A branch has no state, and no pill.
-/// It opens a menu of what the state can become, when the reader may
-/// change it: see `state_menu`.
+/// Open, Draft, Merged, Closed, as a Mac pop-up button: the state's icon
+/// in the state's colour, its word, and the pop-up's chevrons when the
+/// reader may change it, on the bar's faint fill. A branch has no state,
+/// and no button. Its menu is what the state can become: see
+/// `state_menu`.
 fn state_pill(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // The overview, and the write access it says the reader has, is read
     // again on each refresh. What it said is kept meanwhile, so the menu
@@ -801,19 +960,20 @@ fn state_pill(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
                     floem::views::svg(move || icons::state_icon(subject)).style(move |s| {
                         s.size(14.0, 14.0)
                             .color(color())
-                            .margin_right(5.0)
+                            .flex_shrink(0.0_f32)
+                            .margin_right(theme::PROPERTY_GLYPH_GAP)
                             .pointer_events_none()
                     }),
                     Label::derived(move || state_word(subject).to_string()).style(move |s| {
-                        s.font_size(theme::TEXT_SECTION)
+                        s.font_size(theme::TEXT_BADGE)
                             .font_weight(theme::weight_emphasis())
-                            .color(color())
+                            .color(theme::fg_muted())
                             .selectable(false)
                             .pointer_events_none()
                     }),
-                    sidebar_glyph(SidebarIcon::ChevronDown, color).style(move |s| {
-                        s.size(10.0, 10.0)
-                            .margin_left(5.0)
+                    sidebar_glyph(SidebarIcon::ChevronUpDown, theme::fg_subtle).style(move |s| {
+                        s.size(12.0, 12.0)
+                            .margin_left(4.0)
                             .flex_shrink(0.0_f32)
                             .pointer_events_none()
                             .apply_if(!changes, |s| s.hide())
@@ -822,15 +982,21 @@ fn state_pill(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
                 .debug_name("state pill")
                 .style(move |s| {
                     s.items_center()
-                        .height(theme::STATE_PILL_HEIGHT)
-                        .padding_left(7.0)
-                        .padding_right(if changes { 8.0 } else { 9.0 })
-                        .background(color().with_alpha(theme::STATE_WASH))
-                        .border_radius(theme::STATE_PILL_HEIGHT / 2.0)
+                        .height(theme::PROPERTY_HEIGHT)
+                        .padding_left(8.0)
+                        .padding_right(if changes {
+                            6.0
+                        } else {
+                            theme::PROPERTY_PADDING
+                        })
+                        .background(theme::property_fill())
+                        .border(1.0)
+                        .border_color(theme::property_ring())
+                        .border_radius(theme::PROPERTY_RADIUS)
                         .flex_shrink(0.0_f32)
                         .apply_if(changes, |s| {
                             s.hover(|s| {
-                                s.background(color().with_alpha(theme::STATE_WASH * 2.0))
+                                s.background(theme::property_hover())
                                     .cursor(CursorStyle::Pointer)
                             })
                         })
@@ -944,7 +1110,8 @@ fn checks_line_now(state: ReviewState) -> Option<ChecksLine> {
 /// fifteen checks, which most heads have fewer than.
 const CHECKS_MENU_HEIGHT: f64 = 440.0;
 
-/// How one of the line's status glyphs stands: green, yellow or red.
+/// How one of the status group's properties stands: green, yellow or
+/// red.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Tone {
     Good,
@@ -962,8 +1129,8 @@ impl Tone {
     }
 }
 
-/// What a status glyph shows: its colour, and its words under the
-/// pointer.
+/// What a status shows: its colour, and the whole of its words, which
+/// are under the pointer where the bar says the short of them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Standing {
     tone: Tone,
@@ -1039,37 +1206,16 @@ fn merge_standing(state: ReviewState) -> Option<Standing> {
     }
 }
 
-/// The side of a status glyph's box, and of the glyph in it.
-const STATUS_BOX: f64 = 22.0;
+/// A status's glyph.
 const STATUS_GLYPH: f64 = 14.0;
 
-/// One status glyph in its box, in its tone's colour. One that takes a
-/// press lights under the pointer and takes the keyboard.
-fn status_box(icon: SidebarIcon, tone: Tone, pressable: bool) -> Container {
-    Container::new(
-        sidebar_glyph(icon, tone.ink())
-            .style(|s| s.size(STATUS_GLYPH, STATUS_GLYPH).pointer_events_none()),
-    )
-    .style(move |s| {
-        s.size(STATUS_BOX, STATUS_BOX)
-            .items_center()
-            .justify_center()
-            .flex_shrink(0.0_f32)
-            .border_radius(theme::RADIUS)
-            .apply_if(pressable, |s| {
-                clickable(s)
-                    .keyboard_navigable()
-                    .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-                    .hover(|s| s.background(theme::canvas_hover()))
-            })
-    })
-}
-
-/// A place on the line for one status glyph: built again when how it
-/// stands changes, and gone, with its place, when there is nothing to
-/// say.
+/// A place in the status group for one property: built again when how
+/// it stands changes, and gone, with its place, when there is nothing to
+/// say. One that `gives_way` shrinks with what it holds in a narrow
+/// column.
 fn status_slot<T: Clone + PartialEq + 'static>(
     standing: Memo<Option<T>>,
+    gives_way: bool,
     glyph: impl Fn(T) -> floem::AnyView + 'static,
 ) -> impl IntoView {
     dyn_container(
@@ -1080,23 +1226,113 @@ fn status_slot<T: Clone + PartialEq + 'static>(
         },
     )
     .style(move |s| {
-        s.flex_shrink(0.0_f32)
+        s.flex_shrink(if gives_way { 1.0_f32 } else { 0.0 })
+            .apply_if(gives_way, |s| s.min_width(0.0))
             .apply_if(standing.with(Option::is_none), |s| s.hide())
     })
 }
 
-/// Whether the item can go in, as three glyphs at the line's end, each
-/// always in the same place: the checks, the review, and whether it
-/// merges cleanly. Green is well, yellow is waiting, red blocks; the
-/// words are under the pointer. A press on the checks opens the menu of
-/// every check. Conflicts, for a reader the bar offers Merge, open the
-/// merge box, where they are resolved. The review and the merge are an
-/// open pull request's, once the live overview has come; the checks are
-/// there as soon as something has been fetched.
-fn status_glyphs(state: ReviewState) -> impl IntoView {
-    // Memos, so a glyph is built again when what it says changes and not
-    // on each refresh of the overview.
-    let checks = Memo::new(move |_| checks_line_now(state).map(|line| checks_standing(&line)));
+/// One property in the bar's status group: its glyph in its tone's
+/// colour, then its word. One that takes a press lights under the pointer,
+/// as `hot` says, and takes the keyboard. One whose word `gives_way`
+/// shrinks to an ellipsis rather than run past a narrow column; the whole
+/// of it is under the pointer. `divided` draws a hairline at its left,
+/// between it and the property before it in the group.
+fn property(
+    icon: SidebarIcon,
+    ink: fn() -> floem::peniko::Color,
+    word: String,
+    pressable: bool,
+    gives_way: bool,
+    hot: RwSignal<bool>,
+    divided: impl Fn() -> bool + 'static,
+) -> Stack {
+    // Inside the group's ring, which takes a pixel each side.
+    let height = theme::PROPERTY_HEIGHT - 2.0;
+    Stack::horizontal((
+        Empty::new().debug_name("property divider").style(move |s| {
+            s.absolute()
+                .inset_left(0.0)
+                .inset_top((height - DIVIDER_HEIGHT) / 2.0)
+                .width(1.0)
+                .height(DIVIDER_HEIGHT)
+                .background(theme::property_divider())
+                .pointer_events_none()
+                .apply_if(!divided(), |s| s.hide())
+        }),
+        sidebar_glyph(icon, ink).style(|s| {
+            s.size(STATUS_GLYPH, STATUS_GLYPH)
+                .flex_shrink(0.0_f32)
+                .pointer_events_none()
+        }),
+        Label::derived(move || word.clone()).style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::fg_muted())
+                .selectable(false)
+                .pointer_events_none()
+                .apply_if(gives_way, |s| {
+                    s.min_width(0.0).flex_shrink(1.0_f32).text_ellipsis()
+                })
+        }),
+    ))
+    .on_event_cont(el::PointerEnter, move |_, _| {
+        if pressable {
+            hot.set(true);
+        }
+    })
+    .on_event_cont(el::PointerLeave, move |_, _| {
+        if hot.get_untracked() {
+            hot.set(false);
+        }
+    })
+    .style(move |s| {
+        s.items_center()
+            .height(height)
+            .padding_horiz(theme::PROPERTY_PADDING)
+            .col_gap(theme::PROPERTY_GLYPH_GAP)
+            .border_radius(theme::PROPERTY_RADIUS - 1.0)
+            .flex_shrink(if gives_way { 1.0_f32 } else { 0.0 })
+            .apply_if(gives_way, |s| s.min_width(0.0))
+            .apply_if(pressable, |s| {
+                clickable(s)
+                    .keyboard_navigable()
+                    .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                    .hover(|s| s.background(theme::property_hover()))
+            })
+    })
+}
+
+/// The hairline between two properties of the status group.
+const DIVIDER_HEIGHT: f64 = 14.0;
+
+/// The bar's word for how the merge stands; the whole of it, which names
+/// the base, is under the pointer.
+fn merge_word(tone: Tone) -> &'static str {
+    if tone == Tone::Bad {
+        "Conflicts"
+    } else {
+        "No conflicts"
+    }
+}
+
+/// Whether the item can go in, as one group of three, always in the same
+/// order and each its glyph and its word: the checks, the review, and
+/// whether it merges cleanly. Green is well, yellow is waiting, red
+/// blocks. A press on the checks opens the menu of every check;
+/// conflicts, for a reader the item bar offers Merge, open the merge box.
+/// The checks' word is the short of it, `clippy failed`, and gives way to
+/// an ellipsis in a narrow column; the whole, with how many passed beside
+/// it, is under the pointer, as the merge's base is. The review and the
+/// merge are an open pull request's, once the live overview has come; the
+/// checks are there as soon as something has been fetched, a worktree's
+/// own too. The group is gone while none of the three has anything to
+/// say. The hairline between two goes while either is under the pointer,
+/// so it does not cut into the one lit.
+fn status_group(state: ReviewState) -> impl IntoView {
+    let checks = Memo::new(move |_| {
+        checks_line_now(state).map(|line| (checks_standing(&line), line.text.clone()))
+    });
     let review = kept_while_reading(state, move || review_standing(state));
     let merge = kept_while_reading(state, move || {
         let resolves = crate::review::merge::may_merge(state)
@@ -1105,32 +1341,95 @@ fn status_glyphs(state: ReviewState) -> impl IntoView {
                 .with(|pull| pull.as_ref().is_some_and(|pull| pull.draft));
         merge_standing(state).map(|standing| (standing, resolves))
     });
+    let has_checks = Memo::new(move |_| checks.with(Option::is_some));
+    let has_review = Memo::new(move |_| review.with(Option::is_some));
+    let any =
+        Memo::new(move |_| has_checks.get() || has_review.get() || merge.with(Option::is_some));
+    let (checks_hot, review_hot, merge_hot) = (
+        RwSignal::new(false),
+        RwSignal::new(false),
+        RwSignal::new(false),
+    );
     Stack::horizontal((
-        status_slot(checks, move |(icon, standing): (SidebarIcon, Standing)| {
-            let glyph = status_box(icon, standing.tone, true)
+        status_slot(
+            checks,
+            true,
+            move |((icon, standing), word): ((SidebarIcon, Standing), String)| {
+                let item = property(
+                    icon,
+                    standing.tone.ink(),
+                    word,
+                    true,
+                    true,
+                    checks_hot,
+                    || false,
+                )
                 .dropdown(move || checks_menu(state))
                 .debug_name("checks status");
-            tip(glyph, standing.says).into_any()
+                tip(item, standing.says)
+                    .style(|s| s.min_width(0.0))
+                    .into_any()
+            },
+        ),
+        status_slot(review, false, move |standing: Standing| {
+            // Its word is the whole of what it says.
+            property(
+                SidebarIcon::Unread,
+                standing.tone.ink(),
+                standing.says,
+                false,
+                false,
+                review_hot,
+                move || has_checks.get() && !checks_hot.get() && !review_hot.get(),
+            )
+            .debug_name("review status")
+            .into_any()
         }),
-        status_slot(review, |standing: Standing| {
-            let glyph =
-                status_box(SidebarIcon::Unread, standing.tone, false).debug_name("review status");
-            tip(glyph, standing.says).into_any()
-        }),
-        status_slot(merge, move |(standing, resolves): (Standing, bool)| {
-            let opens = resolves && standing.tone == Tone::Bad;
-            let glyph = status_box(SidebarIcon::Merge, standing.tone, opens)
+        status_slot(
+            merge,
+            false,
+            move |(standing, resolves): (Standing, bool)| {
+                let opens = resolves && standing.tone == Tone::Bad;
+                let item = property(
+                    SidebarIcon::Merge,
+                    standing.tone.ink(),
+                    merge_word(standing.tone).to_string(),
+                    opens,
+                    false,
+                    merge_hot,
+                    move || {
+                        let before = if has_review.get() {
+                            Some(review_hot.get())
+                        } else if has_checks.get() {
+                            Some(checks_hot.get())
+                        } else {
+                            None
+                        };
+                        before.is_some_and(|lit| !lit) && !merge_hot.get()
+                    },
+                )
                 .debug_name("merge status")
                 .on_event_stop(el::Click, move |_, _| {
                     if opens {
                         crate::review::merge_button::open(state);
                     }
                 });
-            tip(glyph, standing.says).into_any()
-        }),
+                tip(item, standing.says).into_any()
+            },
+        ),
     ))
-    .debug_name("status glyphs")
-    .style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
+    .debug_name("status group")
+    .style(move |s| {
+        s.items_center()
+            .min_width(0.0)
+            .max_width_full()
+            .flex_shrink(1.0_f32)
+            .background(theme::property_fill())
+            .border(1.0)
+            .border_color(theme::property_ring())
+            .border_radius(theme::PROPERTY_RADIUS)
+            .apply_if(!any.get(), |s| s.hide())
+    })
 }
 
 /// Where a check comes in the menu: what failed first, then what is still
@@ -2159,11 +2458,18 @@ pub(crate) fn closes(body: &str) -> Vec<u64> {
     out
 }
 
-/// Avatar, login, and when it was opened, as the reviewers are drawn.
+/// Avatar, login, and when it was opened, as the reviewers are drawn; on
+/// the description's byline, a size up, the login a step stronger.
 fn author_view(
     app: AppState,
     (login, url, opened): (String, String, Option<jiff::Timestamp>),
+    byline: bool,
 ) -> impl IntoView {
+    let (text, face) = if byline {
+        (theme::TEXT_META, theme::DESCRIPTION_AVATAR)
+    } else {
+        (theme::TEXT_BADGE, theme::SUMMARY_AVATAR)
+    };
     let seed = login.clone();
     // A memo, so the label is set again only when its text changes, not
     // on every tick of the clock.
@@ -2173,16 +2479,20 @@ fn author_view(
             .unwrap_or_default()
     });
     Stack::horizontal((
-        avatar(app, move || url.clone(), theme::SUMMARY_AVATAR, seed)
-            .style(|s| s.margin_right(5.0)),
+        avatar(app, move || url.clone(), face, seed)
+            .style(move |s| s.margin_right(if byline { 6.0 } else { 5.0 })),
         name_label(
             move || Name::Login(login.clone()),
-            |s| s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()),
+            move |s| {
+                s.font_size(text)
+                    .color(theme::fg_muted())
+                    .apply_if(byline, |s| s.font_weight(theme::weight_emphasis()))
+            },
         ),
         Label::derived(move || opened_text.get())
             .debug_name("opened")
             .style(move |s| {
-                s.font_size(theme::TEXT_BADGE)
+                s.font_size(text)
                     .color(theme::fg_subtle())
                     .margin_left(6.0)
                     .selectable(false)
@@ -2580,10 +2890,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_summary_tops_the_page_in_a_line_and_only_on_conversation() {
+    fn the_description_heads_the_page_and_the_summary_is_conversation_s_alone() {
         let (mut harness, _, state) = pull_request_harness();
-        // With no notice over it, the description heads the page, and
-        // the line is its strip.
+        // With no notice over it, the description heads the page, with
+        // its title, its byline and its properties bar.
         let column = rect(&harness, "conversation column");
         let summary = rect(&harness, "card:description");
         assert_eq!(
@@ -2592,37 +2902,52 @@ pub(crate) mod tests {
             "the description at {summary:?} is not at the top of the page {column:?}"
         );
         assert_eq!(rect(&harness, "item summary").height(), 0.0);
-        // A pull request with a checkout and passing checks: the pill,
-        // the number, who opened it, the churn and the checks, on one
-        // line. The rest is in the bar's details.
+        // A pull request with a checkout and passing checks: the title,
+        // then who opened it and the number on the byline under it, then
+        // the bar: the state's button, the status group with the checks,
+        // and the churn, each centred on it. The rest is in the bar's
+        // details.
         assert!(rows_shown(&harness).is_empty());
-        let line = rect(&harness, "summary line");
-        assert_eq!(line.height(), theme::SUMMARY_ROW, "the line at {line:?}");
-        assert!(within(line, summary));
-        let mut last = line.x0;
-        for part in [
-            "state pill",
-            "repository line",
-            "author",
-            "churn",
-            "checks status",
-        ] {
+        let heading = rect(&harness, "item heading");
+        let byline = rect(&harness, "description byline");
+        let bar = rect(&harness, "properties bar");
+        assert!(within(heading, summary) && within(byline, summary) && within(bar, summary));
+        assert!(
+            heading.y1 <= byline.y0,
+            "{heading:?} is not over {byline:?}"
+        );
+        assert!(byline.y1 <= bar.y0, "{byline:?} is not over {bar:?}");
+        assert_eq!(heading.x0, summary.x0, "the title is in from the page");
+        let mut last = byline.x0;
+        for part in ["author", "repository line"] {
             let r = rect(&harness, part);
-            assert!(
-                within(r, line),
-                "{part} at {r:?} is not on the line {line:?}"
-            );
+            assert!(within(r, byline), "{part} at {r:?} is off the byline");
             assert!(
                 r.x0 >= last,
                 "{part} at {r:?} is not after what is before it"
             );
+            last = r.x1;
+        }
+        assert_eq!(bar.height(), theme::PROPERTY_HEIGHT, "the bar at {bar:?}");
+        let mut last = bar.x0;
+        for part in ["state pill", "status group", "checks status", "churn"] {
+            let r = rect(&harness, part);
+            assert!(within(r, bar), "{part} at {r:?} is not on the bar {bar:?}");
             assert!(
-                (r.center().y - line.center().y).abs() < 0.01,
-                "{part} at {r:?} is not centred on the line {line:?}"
+                r.x0 >= last || part == "checks status",
+                "{part} at {r:?} is not after what is before it"
+            );
+            assert!(
+                (r.center().y - bar.center().y).abs() < 0.01,
+                "{part} at {r:?} is not centred on the bar {bar:?}"
             );
             last = r.x1;
         }
-        assert_eq!(rect(&harness, "state pill").x0, line.x0);
+        assert_eq!(rect(&harness, "state pill").x0, bar.x0);
+        assert!(within(
+            rect(&harness, "checks status"),
+            rect(&harness, "status group")
+        ));
 
         // The details have the branches and the worktree, each a row a
         // line tall, its name in the column at the left and its value
@@ -2654,7 +2979,7 @@ pub(crate) mod tests {
         harness.rebuild();
         harness.paint();
         assert!(named(harness.root_id(), "item summary").is_none());
-        assert!(named(harness.root_id(), "summary line").is_none());
+        assert!(named(harness.root_id(), "properties bar").is_none());
         assert!(named(harness.root_id(), "branches").is_none());
     }
 
@@ -2723,9 +3048,14 @@ pub(crate) mod tests {
     #[test]
     fn an_issue_has_its_status_and_number_and_nothing_an_issue_cannot_have() {
         let (mut harness, _, state) = issue_harness();
-        let line = rect(&harness, "summary line");
-        assert!(within(rect(&harness, "repository line"), line));
-        assert!(within(rect(&harness, "author"), line));
+        let byline = rect(&harness, "description byline");
+        assert!(within(rect(&harness, "repository line"), byline));
+        assert!(within(rect(&harness, "author"), byline));
+        // The bar has the state alone: no checks, review or merge, and no
+        // churn.
+        let bar = rect(&harness, "properties bar");
+        assert!(within(rect(&harness, "state pill"), bar));
+        assert_eq!(rect(&harness, "status group").width(), 0.0);
         assert!(named(harness.root_id(), "checks status").is_none());
         assert!(named(harness.root_id(), "churn").is_none());
         // Nothing for the details to say: no branch, and no worktree.
@@ -2750,7 +3080,7 @@ pub(crate) mod tests {
         harness.paint();
         let notice = rect(&harness, "item notice");
         let summary = rect(&harness, "item summary");
-        let branch = rect(&harness, "summary line");
+        let branch = rect(&harness, "properties bar");
         assert!(
             within(notice, summary),
             "{notice:?} is not in the summary {summary:?}"
@@ -3456,7 +3786,7 @@ pub(crate) mod tests {
         ));
     }
 
-    /// The repository and number after the pill open the pull request on
+    /// The repository and number on the byline open the pull request on
     /// github.com.
     #[test]
     fn the_status_rows_number_opens_the_pull_request() {
@@ -3902,24 +4232,26 @@ pub(crate) mod tests {
         assert_eq!(line(&rollup(CheckState::Unknown)), None);
     }
 
-    /// The checks are one glyph at the line's end, with no row of their
-    /// own, reading the live overview's checks once they come over the
-    /// cached rollup, and nothing of merging in the summary: that is the
-    /// bar's.
+    /// The checks are the first of the bar's status group, with no row of
+    /// their own, reading the live overview's checks once they come over
+    /// the cached rollup; and none of Merge's controls in the head: they
+    /// are the item bar's.
     #[test]
-    fn the_checks_are_one_glyph_on_the_line_and_the_summary_has_no_merge() {
+    fn the_checks_lead_the_status_group_and_the_summary_has_no_merge() {
         let (mut harness, _, state) = pull_request_harness();
         assert!(named(harness.root_id(), "summary row Checks").is_none());
         assert_eq!(
             checks_say(state),
             Some((Tone::Good, "Checks passed".into()))
         );
-        let line = rect(&harness, "summary line");
+        let group = rect(&harness, "status group");
         let glyph = rect(&harness, "checks status");
-        assert_eq!((glyph.width(), glyph.height()), (STATUS_BOX, STATUS_BOX));
+        // Inside the group's ring.
+        assert_eq!(glyph.height(), theme::PROPERTY_HEIGHT - 2.0);
         assert_eq!(
-            glyph.x1, line.x1,
-            "{glyph:?} does not end the line {line:?}"
+            (glyph.x0, glyph.x1),
+            (group.x0 + 1.0, group.x1 - 1.0),
+            "{glyph:?} is not the whole of the group {group:?}"
         );
 
         // The overview brings the review and the merge after it.
@@ -3940,8 +4272,13 @@ pub(crate) mod tests {
             checks_say(state),
             Some((Tone::Bad, "clippy failed · 13 passed".into()))
         );
+        // The bar says the short of it; the rest is under the pointer.
+        assert_eq!(
+            checks_line_now(state).map(|line| line.text),
+            Some("clippy failed".into())
+        );
         // In the same place, whatever it says.
-        assert_eq!(rect(&harness, "checks status"), glyph);
+        assert_eq!(rect(&harness, "checks status").origin(), glyph.origin());
 
         let mut running = checks_of(&[], 2);
         running
@@ -3958,16 +4295,17 @@ pub(crate) mod tests {
             Some((Tone::Waiting, "Checks running".into()))
         );
 
-        // Merge is the bar's, and the checks' detail the glyph's menu:
-        // none of Merge's controls under the summary.
-        let summary = named(harness.root_id(), "item summary").expect("no summary");
+        // Merge is the item bar's, and the checks' detail their menu:
+        // the head says whether it merges cleanly, and has none of
+        // Merge's controls.
+        let head = named(harness.root_id(), "description head").expect("no head");
         for gone in [
             "merge-split",
             "merge-button",
             "merge-popover",
             "merge-action",
         ] {
-            assert!(named(summary, gone).is_none(), "{gone} is in the summary");
+            assert!(named(head, gone).is_none(), "{gone} is in the head");
         }
     }
 
@@ -4049,12 +4387,12 @@ pub(crate) mod tests {
         crate::ui::menu::close();
     }
 
-    /// The review and the merge each have a glyph of their own after the
-    /// checks, once the overview has come: green when the pull request
-    /// is approved and merges cleanly, yellow while a review is needed,
-    /// red for changes asked for or conflicts.
+    /// The review and the merge each have a place of their own after the
+    /// checks in the status group, once the overview has come: green when
+    /// the pull request is approved and merges cleanly, yellow while a
+    /// review is needed, red for changes asked for or conflicts.
     #[test]
-    fn the_review_and_the_merge_each_have_a_glyph_after_the_checks() {
+    fn the_review_and_the_merge_each_have_a_place_after_the_checks() {
         let (mut harness, app, state) = pull_request_harness();
         let gone = |harness: &floem::headless::HeadlessHarness, name: &str| {
             named(harness.root_id(), name).is_none()
@@ -4073,19 +4411,27 @@ pub(crate) mod tests {
             merge_standing(state),
             standing(Tone::Good, "No conflicts with main")
         );
-        let line = rect(&harness, "summary line");
-        let mut last = rect(&harness, "churn").x1;
+        let group = rect(&harness, "status group");
+        let mut last = group.x0 + 1.0;
         for part in ["checks status", "review status", "merge status"] {
             let r = rect(&harness, part);
-            assert!(within(r, line), "{part} at {r:?} is off the line {line:?}");
-            assert!(r.x0 >= last, "{part} at {r:?} is not after what is before");
+            assert!(
+                within(r, group),
+                "{part} at {r:?} is off the group {group:?}"
+            );
+            assert_eq!(r.x0, last, "{part} at {r:?} does not follow what is before");
             last = r.x1;
         }
-        assert_eq!(last, line.x1, "the glyphs do not end the line {line:?}");
-        let places = (
-            rect(&harness, "review status"),
-            rect(&harness, "merge status"),
+        assert_eq!(
+            last,
+            group.x1 - 1.0,
+            "the three do not fill the group {group:?}"
         );
+        assert!(
+            rect(&harness, "churn").x0 >= group.x1,
+            "the churn is not after the group"
+        );
+        let places = rect(&harness, "review status").origin();
 
         let mut waiting = overview(checks_of(&[], 1));
         waiting.review_decision = Some(perch_github::ReviewDecision::ReviewRequested);
@@ -4113,14 +4459,16 @@ pub(crate) mod tests {
             merge_standing(state),
             standing(Tone::Bad, "Conflicts with main")
         );
-        // Each in its place, whatever it says.
+        // In order whatever it says: the review where it was, the merge
+        // right after it.
+        assert_eq!(rect(&harness, "review status").origin(), places);
         assert_eq!(
-            (
-                rect(&harness, "review status"),
-                rect(&harness, "merge status")
-            ),
-            places
+            rect(&harness, "merge status").x0,
+            rect(&harness, "review status").x1
         );
+        // The merge's word is short; its base is under the pointer.
+        assert_eq!(merge_word(Tone::Bad), "Conflicts");
+        assert_eq!(merge_word(Tone::Good), "No conflicts");
 
         // No decision, where the repository asks for no review, and a
         // merge GitHub is still working out: neither has a glyph.
@@ -4198,6 +4546,252 @@ pub(crate) mod tests {
                     "{name} on a closed pull request, merged {merged}"
                 );
             }
+        }
+    }
+
+    /// The meter shares its width between the lines added and removed in
+    /// proportion, a pixel apart, and a side with any lines keeps a pixel
+    /// of its own however few they are.
+    #[test]
+    fn the_churn_meter_shares_its_width_in_proportion() {
+        let whole = theme::CHURN_METER_WIDTH;
+        assert_eq!(meter_split(0, 0), None);
+        assert_eq!(meter_split(5, 0), Some((whole, 0.0)));
+        assert_eq!(meter_split(0, 5), Some((0.0, whole)));
+        assert_eq!(meter_split(190, 107), Some((20.0, 11.0)));
+        assert_eq!(meter_split(10_000, 1), Some((whole - 2.0, 1.0)));
+        assert_eq!(meter_split(1, 10_000), Some((1.0, whole - 2.0)));
+        for (a, d) in [(1, 1), (3, 97), (42, 8), (1204, 388)] {
+            let (added, removed) = meter_split(a, d).unwrap();
+            assert_eq!(added + removed + 1.0, whole, "{a}/{d}");
+        }
+    }
+
+    /// The description is the page's document, not a box: no frame round
+    /// it, and a hairline at its foot that ends it.
+    #[test]
+    fn the_description_has_no_frame_and_a_hairline_at_its_foot() {
+        let (harness, _, _) = pull_request_harness();
+        let description = rect(&harness, "card:description");
+        let heading = rect(&harness, "item heading");
+        // The title starts at the page's edge, with no frame's padding
+        // before it.
+        assert_eq!(heading.x0, description.x0);
+        let foot = rect(&harness, "description foot");
+        assert_eq!(foot.height(), 1.0);
+        assert_eq!((foot.x0, foot.x1), (description.x0, description.x1));
+        assert_eq!(foot.y1, description.y1, "the hairline does not end it");
+    }
+
+    /// The width of a view, zero while it is hidden.
+    fn width_of(id: floem::ViewId) -> f64 {
+        id.get_visual_rect_no_clip().width()
+    }
+
+    /// The hairline at a property's left, inside the view named `name`.
+    fn divider_of(harness: &floem::headless::HeadlessHarness, name: &str) -> f64 {
+        let property = named(harness.root_id(), name).unwrap_or_else(|| panic!("no {name}"));
+        width_of(named(property, "property divider").expect("no divider"))
+    }
+
+    /// A hairline stands between two properties of the group, not before
+    /// the first, and goes while the one beside it is under the pointer.
+    /// With no checks the review leads the group, with none before it.
+    #[test]
+    fn a_hairline_parts_two_properties_and_goes_beside_the_one_lit() {
+        let (mut harness, _, state) = pull_request_harness();
+        let mut conflicting = overview(checks_of(&[], 1));
+        // Conflicts, for a reader who may merge, light under the pointer.
+        conflicting.mergeable = perch_github::MergeableState::Conflicting;
+        state
+            .pull_request_overview
+            .set(Some(Arc::new(conflicting.clone())));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(divider_of(&harness, "checks status"), 0.0);
+        assert_eq!(divider_of(&harness, "review status"), 1.0);
+        assert_eq!(divider_of(&harness, "merge status"), 1.0);
+
+        // The checks under the pointer: the hairline after them goes.
+        let lit = rect(&harness, "checks status").center();
+        harness.pointer_move(lit.x, lit.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(divider_of(&harness, "review status"), 0.0);
+        assert_eq!(divider_of(&harness, "merge status"), 1.0);
+        harness.pointer_move(0.0, 0.0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(divider_of(&harness, "review status"), 1.0);
+
+        // No checks: the review leads, the merge still follows a line.
+        state.checks.set(None);
+        let mut unchecked = conflicting;
+        unchecked.checks = Checks {
+            state: CheckState::Unknown,
+            url: None,
+            runs: Vec::new(),
+        };
+        state.pull_request_overview.set(Some(Arc::new(unchecked)));
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "checks status").is_none());
+        assert_eq!(divider_of(&harness, "review status"), 0.0);
+        assert_eq!(divider_of(&harness, "merge status"), 1.0);
+    }
+
+    /// The churn has its meter after it, as wide as the meter is, the
+    /// lines added and removed sharing it as `meter_split` says.
+    #[test]
+    fn the_churn_has_its_meter_after_it() {
+        let mut pull = pull_request(812);
+        (pull.additions, pull.deletions) = (190, 107);
+        let (harness, ..) = pull_request_harness_with(pull);
+        let both = rect(&harness, "lines added and removed");
+        let churn = rect(&harness, "churn");
+        let meter = rect(&harness, "lines meter");
+        assert!(
+            within(meter, both) && meter.x0 >= churn.x1,
+            "{churn:?} {meter:?}"
+        );
+        assert_eq!(meter.width(), theme::CHURN_METER_WIDTH);
+        let bars: Vec<f64> = named(harness.root_id(), "lines meter")
+            .unwrap()
+            .children()
+            .into_iter()
+            .map(width_of)
+            .collect();
+        let (added, removed) = meter_split(190, 107).unwrap();
+        assert_eq!(bars, [added, removed]);
+    }
+
+    /// A failing check with a long name gives way in the bar rather than
+    /// run the group past the column: its word ends in an ellipsis, and
+    /// the review and the merge stay on the bar.
+    #[test]
+    fn a_long_check_name_gives_way_rather_than_run_past_the_column() {
+        let (mut harness, _, state) = pull_request_harness();
+        let long = "test (ubuntu-latest, x86_64-unknown-linux-gnu, nightly, all features, no default features, miri, sanitizers) ".repeat(3);
+        state
+            .pull_request_overview
+            .set(Some(Arc::new(overview(checks_of(&[long.trim()], 3)))));
+        harness.rebuild();
+        harness.paint();
+        let bar = rect(&harness, "properties bar");
+        for part in [
+            "status group",
+            "checks status",
+            "review status",
+            "merge status",
+        ] {
+            let r = rect(&harness, part);
+            assert!(
+                r.x1 <= bar.x1 + 0.5,
+                "{part} at {r:?} runs past the bar {bar:?}"
+            );
+        }
+        assert!(rect(&harness, "merge status").width() > 0.0);
+    }
+
+    /// The title wraps the same whether or not the pointer is on the
+    /// description: the room for its actions is kept while they hide.
+    #[test]
+    fn the_title_keeps_its_lines_when_the_pointer_comes_onto_the_description() {
+        let mut pull = pull_request(812);
+        pull.title = "Read a partly cached block range in one GET, and say why the read-ahead window crossed so many gaps".into();
+        let (mut harness, ..) = pull_request_harness_with(pull);
+        let at_rest = rect(&harness, "item heading");
+        let description = rect(&harness, "card:description");
+        harness.pointer_move(description.center().x, description.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(rect(&harness, "item heading"), at_rest);
+        let row = rect(&harness, "title row");
+        assert!(
+            at_rest.x1 <= row.x1 - ACTIONS_WIDTH,
+            "the title at {at_rest:?} runs into the actions' room in {row:?}"
+        );
+    }
+
+    /// The description's text is set as a document: its headings have a
+    /// section's break over them rather than Codex's paragraph gap.
+    #[test]
+    fn the_description_is_set_as_a_document() {
+        let (mut harness, _, state) = pull_request_harness();
+        state
+            .discussion
+            .set(Some(Arc::new(perch_github::Discussion {
+                body: "## Summary\n\n## Changes".into(),
+                ..Default::default()
+            })));
+        harness.rebuild();
+        harness.paint();
+        let description = named(harness.root_id(), "card:description").expect("no description");
+        let heading = |level: &str| {
+            named(description, &format!("heading:{level}")).unwrap_or_else(|| panic!("no h{level}"))
+        };
+        let first = heading("2").get_visual_rect_no_clip();
+        let mut all = Vec::new();
+        fn walk(id: floem::ViewId, out: &mut Vec<Rect>) {
+            if id.debug_name().contains("heading:2") {
+                out.push(id.get_visual_rect_no_clip());
+            }
+            for child in id.children() {
+                walk(child, out);
+            }
+        }
+        walk(description, &mut all);
+        assert_eq!(all.len(), 2, "{all:?}");
+        let gap = all[1].y0 - first.y1;
+        assert!(
+            (gap - 7.0 * theme::TEXT_BODY as f64 / 4.0).abs() < 0.5,
+            "the gap over the second heading is {gap}"
+        );
+    }
+
+    /// A long description's cut fades into the page in either appearance:
+    /// every layer of the fade is the page's own colour after a switch to
+    /// dark, not the white it was built in.
+    #[test]
+    fn a_cut_description_fades_into_the_page_in_dark() {
+        use floem::style::Background;
+
+        let (mut harness, _, state) = pull_request_harness();
+        state
+            .discussion
+            .set(Some(Arc::new(perch_github::Discussion {
+                body: "A paragraph long enough to wrap. ".repeat(200),
+                ..Default::default()
+            })));
+        harness.rebuild();
+        harness.paint();
+        harness.rebuild();
+        harness.paint();
+        struct Light;
+        impl Drop for Light {
+            fn drop(&mut self) {
+                theme::set_appearance(theme::Appearance::Light);
+            }
+        }
+        let _light = Light;
+        theme::set_appearance(theme::Appearance::Dark);
+        harness.rebuild();
+        harness.paint();
+        let fade = named(harness.root_id(), "description-fade").expect("no fade");
+        assert!(width_of(fade) > 0.0, "the description is not cut");
+        let page = theme::canvas().to_rgba8();
+        for layer in fade.children() {
+            let Some(floem::peniko::Brush::Solid(color)) =
+                harness.get_computed_style(layer).get(Background)
+            else {
+                panic!("a layer has no colour");
+            };
+            let rgba = color.to_rgba8();
+            assert_eq!(
+                (rgba.r, rgba.g, rgba.b),
+                (page.r, page.g, page.b),
+                "a layer of the fade is {rgba:?} on a page of {page:?}"
+            );
         }
     }
 }

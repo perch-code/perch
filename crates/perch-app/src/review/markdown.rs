@@ -1879,24 +1879,40 @@ pub fn render_in(text: &str, repo: &str) -> impl IntoView {
 /// default branch it reads is here, is drawn again once they are, so the
 /// paths in it link then.
 pub fn render_linked(text: &str, state: ReviewState) -> AnyView {
+    render_linked_as(text, state, false)
+}
+
+/// The same, as a document: a description's text, under the item's own
+/// title. Its headings step up from the prose by a pixel or a few rather
+/// than by Codex's scale, so the title stays the one loud line, and its
+/// tables are rows ruled by hairlines with no box round them.
+pub fn render_document(text: &str, state: ReviewState) -> AnyView {
+    render_linked_as(text, state, true)
+}
+
+fn render_linked_as(text: &str, state: ReviewState, quiet: bool) -> AnyView {
     let linkable = move || state.files_root().is_some() && state.tree.with(|t| !t.is_empty());
     if floem::reactive::Effect::untrack(linkable) {
-        return linked_body(text, state);
+        return linked_body(text, state, quiet);
     }
     let text = text.to_string();
     let known = Memo::new(move |_| linkable());
-    floem::views::dyn_container(move || known.get(), move |_| linked_body(&text, state))
-        .style(|s| s.width_full())
-        .into_any()
+    floem::views::dyn_container(
+        move || known.get(),
+        move |_| linked_body(&text, state, quiet),
+    )
+    .style(|s| s.width_full())
+    .into_any()
 }
 
-fn linked_body(text: &str, state: ReviewState) -> AnyView {
+fn linked_body(text: &str, state: ReviewState, quiet: bool) -> AnyView {
     let ctx = Ctx {
         size: theme::TEXT_BODY,
         color: theme::fg,
         depth: 0,
         refs: Refs::of(state),
         foot: None,
+        quiet,
     };
     passage(review_body(text, state, move |blocks| stack(blocks, ctx))).into_any()
 }
@@ -1967,6 +1983,7 @@ pub fn render_marked(
         depth: 0,
         refs: Refs::of(state),
         foot: None,
+        quiet: false,
     };
     let repo = state
         .item
@@ -2011,7 +2028,7 @@ fn marked_stack(blocks: Vec<(Block, Mark)>, ctx: Ctx) -> AnyView {
         .chain(
             blocks
                 .windows(2)
-                .map(|pair| gap_before(&pair[0].0, &pair[1].0) * unit),
+                .map(|pair| gap_before(&pair[0].0, &pair[1].0, ctx.quiet) * unit),
         )
         .collect();
     let children: Vec<AnyView> = blocks
@@ -2093,6 +2110,7 @@ pub fn render_suggesting(
         depth: 0,
         refs: Refs::of(state),
         foot,
+        quiet: false,
     };
     passage(review_body(text, state, move |blocks| {
         stack(suggesting(blocks, &original), ctx)
@@ -2153,6 +2171,7 @@ pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
             depth: 0,
             refs: None,
             foot: None,
+            quiet: false,
         },
     ))
 }
@@ -2167,6 +2186,11 @@ struct Ctx {
     refs: Option<Refs>,
     /// What a suggested change has under it.
     foot: Option<Foot>,
+    /// A document's text, a description's under its title: its headings
+    /// a step or two over the prose rather than Codex's scale, which put a
+    /// description's `## Summary` beside the item's title, and its tables
+    /// ruled between the rows with no box. See `render_document`.
+    quiet: bool,
 }
 
 /// Codex's unit of vertical rhythm: a quarter of the prose size, 3.5px
@@ -2186,7 +2210,23 @@ fn small_size(size: f32) -> f32 {
 /// stands four off whatever precedes it and close over what it heads; a
 /// fenced block takes five each side and a rule seven; a list or a table
 /// follows its paragraph at one, and anything else at two.
-fn gap_before(prev: &Block, block: &Block) -> f64 {
+///
+/// A document's headings, at the prose's size or a pixel or a few over
+/// it, need room to read as headings: seven units over each, a section's
+/// break, and one under, close over what it heads.
+fn gap_before(prev: &Block, block: &Block, quiet: bool) -> f64 {
+    match (prev, block) {
+        (Block::Rule, _) | (_, Block::Rule) => 7.0,
+        (Block::Code { .. } | Block::Suggestion { .. }, _)
+        | (_, Block::Code { .. } | Block::Suggestion { .. }) => 5.0,
+        (_, Block::Heading { .. }) if quiet => 7.0,
+        (Block::Heading { .. }, _) if quiet => 1.0,
+        _ => codex_gap(prev, block),
+    }
+}
+
+/// Codex's margins, as `gap_before` has them outside a document.
+fn codex_gap(prev: &Block, block: &Block) -> f64 {
     match (prev, block) {
         (Block::Rule, _) | (_, Block::Rule) => 7.0,
         (Block::Code { .. } | Block::Suggestion { .. }, _)
@@ -2214,7 +2254,7 @@ fn stack(blocks: Vec<Block>, ctx: Ctx) -> AnyView {
         .chain(
             blocks
                 .windows(2)
-                .map(|pair| gap_before(&pair[0], &pair[1]) * unit),
+                .map(|pair| gap_before(&pair[0], &pair[1], ctx.quiet) * unit),
         )
         .collect();
     let children: Vec<AnyView> = blocks
@@ -2445,13 +2485,32 @@ fn prose_leading() -> LineHeightValue {
     LineHeightValue::Normal(theme::PROSE_LINE_HEIGHT)
 }
 
+/// A document's heading size: an h1 a quarter over the prose, an h2 a
+/// pixel over it, the rest at the prose's own size, told apart by weight.
+fn quiet_heading_size(level: u8, body: f32) -> f32 {
+    match level {
+        1 => (body * 1.25).round(),
+        2 => body + 1.0,
+        _ => body,
+    }
+}
+
 fn heading_view(level: u8, spans: Vec<Span>, ctx: Ctx) -> AnyView {
+    let (size, leading) = if ctx.quiet {
+        // Close over what it heads, on the prose's own leading.
+        (quiet_heading_size(level, ctx.size), prose_leading())
+    } else {
+        (
+            heading_size(level, ctx.size),
+            heading_leading(level, ctx.size),
+        )
+    };
     text_view(
         spans,
-        heading_size(level, ctx.size),
+        size,
         theme::weight_strong(),
         ctx.color,
-        heading_leading(level, ctx.size),
+        leading,
         ctx.refs,
     )
     .debug_name(format!("heading:{level}"))
@@ -2801,8 +2860,9 @@ fn table_view(
             cells.push(
                 cell_view(spans, align_of(col), ctx, kind)
                     .style(move |s| {
-                        // GitHub stripes every other row.
-                        if r % 2 == 1 {
+                        // GitHub stripes every other row; a document's
+                        // rows have only their rules.
+                        if r % 2 == 1 && !ctx.quiet {
                             s.background(theme::canvas_subtle())
                         } else {
                             s
@@ -2825,9 +2885,11 @@ fn table_view(
                 .grid_template_columns(template.clone())
                 .align_self(floem::taffy::AlignItems::FLEX_START)
                 .max_width_full()
-                .border(1.0)
-                .border_color(theme::border())
-                .border_radius(theme::RADIUS)
+                .apply_if(!ctx.quiet, |s| {
+                    s.border(1.0)
+                        .border_color(theme::border())
+                        .border_radius(theme::RADIUS)
+                })
         })
         .debug_name("table")
         .scroll()
@@ -2844,27 +2906,28 @@ enum Cell {
 }
 
 fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
-    let weight = if kind == Cell::Head {
-        theme::weight_strong()
-    } else {
-        theme::weight_body()
+    // A document's header row names its columns quietly, a step back in
+    // muted ink; the rows say what matters.
+    let (weight, color): (_, fn() -> Color) = match (kind, ctx.quiet) {
+        (Cell::Head, true) => (theme::weight_emphasis(), theme::fg_muted),
+        (Cell::Head, false) => (theme::weight_strong(), ctx.color),
+        _ => (theme::weight_body(), ctx.color),
     };
     // The text sizes to its words, and sits where the alignment puts it:
     // a width of its own, even a percentage, would throw the column's
     // measure off. A table is set a step under the prose, as Codex sets it.
     let size = small_size(ctx.size);
-    let text = prose_view(
-        spans,
-        size,
-        weight,
-        ctx.color,
-        prose_leading(),
-        ctx.refs,
-        false,
-    );
+    let text = prose_view(spans, size, weight, color, prose_leading(), ctx.refs, false);
+    let quiet = ctx.quiet;
     Container::new(text)
         .style(move |s| {
-            let s = s.padding_horiz(10.0).padding_vert(5.0);
+            // With no box, a document's first column starts where its
+            // prose does, and the room between columns is at their right.
+            let s = if quiet {
+                s.padding_left(0.0).padding_right(32.0).padding_vert(5.0)
+            } else {
+                s.padding_horiz(10.0).padding_vert(5.0)
+            };
             let s = match align {
                 Align::Left => s.justify_start(),
                 Align::Center => s.justify_center(),
@@ -2873,6 +2936,9 @@ fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
             match kind {
                 Cell::Head => s.border_bottom(1.0).border_color(theme::border()),
                 Cell::Body => s.border_bottom(1.0).border_color(theme::border_muted()),
+                // No box closes a document's table: its last row has a
+                // rule like the rest.
+                Cell::Last if quiet => s.border_bottom(1.0).border_color(theme::border_muted()),
                 Cell::Last => s,
             }
         })
@@ -4442,6 +4508,20 @@ mod tests {
     }
 
     #[test]
+    fn a_document_s_headings_stay_a_step_or_two_over_its_prose() {
+        let body = theme::TEXT_BODY;
+        assert_eq!(quiet_heading_size(1, body), 18.0);
+        assert_eq!(quiet_heading_size(2, body), 15.0);
+        for level in 3..=6 {
+            assert_eq!(quiet_heading_size(level, body), body);
+        }
+        // Each under the item's title, which heads the document.
+        for level in 1..=6 {
+            assert!(quiet_heading_size(level, body) < theme::TEXT_ITEM_TITLE);
+        }
+    }
+
+    #[test]
     fn heading_sizes_step_down_in_whole_pixels() {
         let sizes: Vec<f32> = (1..=6).map(|l| heading_size(l, 14.0)).collect();
         assert_eq!(sizes, vec![21.0, 18.0, 16.0, 14.0, 14.0, 14.0]);
@@ -5265,6 +5345,52 @@ mod tests {
             h.rebuild();
             h.paint();
             assert!(links_on_first_line(&mut h, 0).is_empty());
+        }
+
+        /// The markdown laid out as a document, a description's text, in
+        /// a column `WIDTH` wide.
+        fn document(markdown: &str) -> HeadlessHarness {
+            let root = TestRoot::new();
+            let ctx = Ctx {
+                size: theme::TEXT_BODY,
+                color: theme::fg,
+                depth: 0,
+                refs: None,
+                foot: None,
+                quiet: true,
+            };
+            let view = Container::new(passage(stack(parse(markdown), ctx)))
+                .style(|s| s.width(WIDTH).padding(0.0));
+            let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 2000.0);
+            harness.rebuild();
+            harness.paint();
+            harness
+        }
+
+        /// A document's headings sit a section's break under what is
+        /// before them, closer than Codex's tall headings would be, and
+        /// its table has no box: its first column starts where its prose
+        /// does, and the same table outside a document is inset by its
+        /// border and its padding.
+        #[test]
+        fn a_document_s_headings_have_room_over_them_and_its_table_no_box() {
+            let text = "# One\n\n## Two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
+            let (doc, codex) = (document(text), harness(text));
+            let gap = |h: &HeadlessHarness| rect(h, "heading:2").y0 - rect(h, "heading:1").y1;
+            let unit = space(theme::TEXT_BODY);
+            assert!((gap(&doc) - 7.0 * unit).abs() < 0.5, "{}", gap(&doc));
+            assert!((gap(&codex) - 4.0 * unit).abs() < 0.5, "{}", gap(&codex));
+            assert!(
+                rect(&doc, "heading:1").height() < rect(&codex, "heading:1").height() + 2.0,
+                "the document's h1 is as tall as Codex's"
+            );
+            let first = |h: &HeadlessHarness| rect(h, "cell:1:0").x0 - rect(h, "heading:1").x0;
+            assert_eq!(first(&doc), 0.0, "the document's table is inset");
+            assert!(first(&codex) >= 1.0, "Codex's table has its border");
+            // Every row of a document's table has its rule, the last too.
+            let last = rect(&doc, "cell:2:0");
+            let table = rect(&doc, "table");
+            assert!(last.y1 <= table.y1, "{last:?} {table:?}");
         }
 
         #[test]

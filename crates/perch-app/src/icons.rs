@@ -153,6 +153,11 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M3.6 6.2 L8 10.6 L12.4 6.2" fill="none" stroke="{c}"
                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        // A Mac pop-up button's mark: a chevron up over a chevron down.
+        SidebarIcon::ChevronUpDown => format!(
+            r#"<path d="M5 6 L8 3 L11 6 M5 10 L8 13 L11 10" fill="none" stroke="{c}"
+                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Branch => format!(
             r#"<circle cx="4.5" cy="3.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
                <circle cx="4.5" cy="12.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
@@ -647,6 +652,8 @@ pub enum SidebarIcon {
     ChevronRight,
     ChevronDown,
     ChevronUp,
+    /// A pop-up button's mark: the state's control on the description.
+    ChevronUpDown,
     Close,
     Search,
     Refresh,
@@ -801,7 +808,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 83] = [
+    pub const ALL: [SidebarIcon; 84] = [
         SidebarIcon::Gear,
         SidebarIcon::Palette,
         SidebarIcon::Server,
@@ -881,6 +888,7 @@ impl SidebarIcon {
         SidebarIcon::ChevronRight,
         SidebarIcon::ChevronDown,
         SidebarIcon::ChevronUp,
+        SidebarIcon::ChevronUpDown,
         SidebarIcon::Close,
         SidebarIcon::Search,
         SidebarIcon::Refresh,
