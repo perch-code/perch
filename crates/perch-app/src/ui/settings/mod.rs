@@ -683,15 +683,20 @@ fn search_box(state: AppState) -> impl IntoView {
                 settings.search_box.set(None);
             }
         });
-    let glyph = sidebar_glyph(SidebarIcon::Search, theme::nav_subtle).style(|s| {
-        s.size(15.0, 15.0)
-            .position(Position::Absolute)
-            .inset_left(12.0)
-            .pointer_events_none()
-    });
-    Stack::new((input, glyph)).style(|s| {
-        s.items_center()
-            .width_full()
+    let glyph = sidebar_glyph(SidebarIcon::Search, theme::nav_subtle)
+        .style(|s| {
+            s.size(15.0, 15.0)
+                .position(Position::Absolute)
+                .inset_left(10.0)
+                .pointer_events_none()
+        })
+        .debug_name("settings-search-glyph");
+    // The gutter sits on a wrapper: an absolute child's inset counts from
+    // its parent's padding edge, so padding on the glyph's own stack would
+    // put it on the box's border.
+    let field = Stack::horizontal((input, glyph)).style(|s| s.items_center().width_full());
+    Container::new(field).style(|s| {
+        s.width_full()
             .padding_horiz(theme::NAV_GUTTER)
             .flex_shrink(0.0_f32)
     })
@@ -1406,6 +1411,25 @@ mod tests {
 
         click(&mut harness, "settings-nav:Language servers");
         assert!(shown(&harness, "settings-row:lsp-memory"));
+    }
+
+    /// The search glyph sits inside the box, clear of its border and
+    /// centred on it, where the sidebar's search box has its own.
+    #[test]
+    fn the_search_glyph_sits_inside_the_box() {
+        let (mut harness, state, _commands) = window(1400.0, 900.0, "");
+        show(state, None);
+        settle(&mut harness);
+        let field = rect(&harness, "settings-search");
+        let glyph = rect(&harness, "settings-search-glyph");
+        assert!(
+            (glyph.x0 - field.x0 - 10.0).abs() < 0.5,
+            "{glyph:?} {field:?}"
+        );
+        assert!(
+            (glyph.center().y - field.center().y).abs() < 0.5,
+            "{glyph:?} {field:?}"
+        );
     }
 
     /// Searching lists the rows that match from every section; Escape
