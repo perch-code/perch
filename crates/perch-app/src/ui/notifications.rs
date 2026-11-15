@@ -854,6 +854,7 @@ mod tests {
         );
         let look = |state| SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: "rohan".into(),
             author_avatar_url: String::new(),
             state,

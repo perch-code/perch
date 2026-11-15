@@ -70,9 +70,10 @@ still GitHub's.
 - **Unsubscribe** ignores future activity on the thread, marks its current
   notification done, and remembers it the same way. Whatever has arrived on
   the thread goes with it.
-- A thread whose pull request was merged or closed, or whose issue was
+- A thread whose pull request you merged or closed, or whose issue you
   closed, with nothing on it since, is marked Done on its own, on GitHub
-  too. Perch waits a minute after the close first: GitHub sends the close's
+  too. A merge or close by anyone else stays in the inbox, read or not, so
+  you see it. Perch waits a minute after the close first: GitHub sends the close's
   own notification some twenty seconds late, and a Done before it would see
   the thread come back. A comment more than a minute after the close keeps
   the thread, or returns it; one inside that minute is taken for the close's

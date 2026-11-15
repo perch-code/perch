@@ -51,6 +51,9 @@ pub(crate) struct SubjectNode {
     is_draft: bool,
     #[serde(default)]
     closed_at: Option<Timestamp>,
+    /// The subject's latest close, a merge's included: who did it.
+    #[serde(default)]
+    closer: Option<Nodes<CloseNode>>,
     /// A pull request's counts; an issue has none.
     #[serde(default)]
     additions: Option<u32>,
@@ -84,6 +87,14 @@ pub(crate) struct ActNode {
     author: Option<ActorNode>,
     #[serde(default)]
     at: Option<Timestamp>,
+}
+
+/// A close, by whoever did it; GitHub names nobody for an account that
+/// is gone.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CloseNode {
+    #[serde(default)]
+    actor: Option<ActorNode>,
 }
 
 /// A commit, whose author is someone on GitHub only when their email is.
@@ -134,6 +145,7 @@ fragment subject on IssueOrPullRequest {
     issue_state: state
     state_reason: stateReason
     closed_at: closedAt
+    closer: timelineItems(itemTypes: [CLOSED_EVENT], last: 1) { nodes { ... on ClosedEvent { actor { login } } } }
     comments(last: 10) { nodes { author { login avatar_url: avatarUrl } at: createdAt } }
   }
   ... on PullRequest {
@@ -142,6 +154,7 @@ fragment subject on IssueOrPullRequest {
     pull_state: state
     is_draft: isDraft
     closed_at: closedAt
+    closer: timelineItems(itemTypes: [CLOSED_EVENT], last: 1) { nodes { ... on ClosedEvent { actor { login } } } }
     additions
     deletions
     review_requests: reviewRequests { total_count: totalCount }
@@ -316,6 +329,16 @@ impl SubjectLook {
                 .unwrap_or_default();
             let churn = node.additions.zip(node.deletions);
             let review_requested = node.review_requests.is_some_and(|r| r.total_count > 0);
+            // A merged pull request is closed too, by whoever merged it.
+            let closed_by = state.is_closed().then(|| {
+                node.closer
+                    .iter()
+                    .flat_map(|closer| closer.nodes.iter().flatten())
+                    .last()
+                    .and_then(|close| close.actor.as_ref())
+                    .map(|actor| actor.login.clone())
+                    .unwrap_or_default()
+            });
             for (id, at) in self.threads.get(&(repo, number)).into_iter().flatten() {
                 found.push((
                     id.clone(),
@@ -327,6 +350,7 @@ impl SubjectLook {
                         review_requested,
                         participants: Some(participants.clone()),
                         closed_at: node.closed_at,
+                        closed_by: closed_by.clone(),
                         at: *at,
                     },
                 ));
@@ -554,13 +578,15 @@ mod tests {
                   "is_draft": false,
                   "additions": 2799,
                   "deletions": 494,
-                  "review_requests": { "total_count": 0 }
+                  "review_requests": { "total_count": 0 },
+                  "closer": { "nodes": [{ "actor": { "login": "merger" } }] }
                 },
                 "n2097": {
                   "__typename": "Issue",
                   "author": null,
                   "issue_state": "CLOSED",
-                  "state_reason": "NOT_PLANNED"
+                  "state_reason": "NOT_PLANNED",
+                  "closer": { "nodes": [{ "actor": null }] }
                 },
                 "n2098": null
               },
@@ -589,6 +615,7 @@ mod tests {
                     "1".to_string(),
                     SubjectSnapshot {
                         closed_at: None,
+                        closed_by: Some("merger".into()),
                         author_login: "someone".into(),
                         author_avatar_url: "https://avatars/2".into(),
                         state: SubjectState::PrMerged,
@@ -602,6 +629,8 @@ mod tests {
                     "2".to_string(),
                     SubjectSnapshot {
                         closed_at: None,
+                        // GitHub names nobody for an account that is gone.
+                        closed_by: Some(String::new()),
                         author_login: String::new(),
                         author_avatar_url: String::new(),
                         state: SubjectState::IssueNotPlanned,
@@ -615,6 +644,7 @@ mod tests {
                     "4".to_string(),
                     SubjectSnapshot {
                         closed_at: None,
+                        closed_by: None,
                         author_login: "me".into(),
                         author_avatar_url: "https://avatars/1".into(),
                         state: SubjectState::PrDraft,

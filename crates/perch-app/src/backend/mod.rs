@@ -7171,8 +7171,8 @@ impl Ctx {
     /// close brings no new notification, and a poll may not see the thread
     /// move for it, so the look that set the row's state would not be
     /// taken again until someone else acts there. A row it finds
-    /// closed is looked at again, for when it closed, which
-    /// [`done_closed_notifications`] goes by.
+    /// closed is looked at again, for when it closed and who closed it,
+    /// which [`done_closed_notifications`] goes by.
     fn settle_notification_state(
         &self,
         repo_full_name: &str,
@@ -7200,6 +7200,7 @@ impl Ctx {
                 if let Some(snapshot) = thread.subject_snapshot.as_mut() {
                     snapshot.state = state;
                     snapshot.closed_at = None;
+                    snapshot.closed_by = None;
                 }
                 settled.push((thread.id.clone(), thread.updated_at));
             }
@@ -15268,29 +15269,34 @@ async fn done_notifications(
 
 /// How long after a merge or a close GitHub may still stamp the thread
 /// for it: the notification comes some twenty seconds after the event
-/// itself, unread when someone else closed it.
+/// itself.
 const CLOSE_NOTICE_SLACK: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
 
 /// Whether a look found the thread's pull request merged or closed, or
-/// its issue closed, with nothing on the thread since, and the close's
-/// own notice has had its time to come by `now`: the close is the last
-/// word, and the thread is done with. A comment more than
+/// its issue closed, by `viewer`, with nothing on the thread since, and
+/// the close's own notice has had its time to come by `now`: the reader's
+/// own close is the last word, and the thread is done with. Someone
+/// else's close is news the reader may not have seen, and stays; GitHub
+/// can list its notice read all the same. A comment more than
 /// [`CLOSE_NOTICE_SLACK`] after the close moves the thread past it and
 /// keeps it; one sooner cannot be told from the close's own notice, and
 /// goes with it.
 ///
-/// Marked Done any sooner, someone else's close sent its notice after
-/// the Done, unread: the row came back for a poll and was marked again.
-fn closed_and_quiet(thread: &Thread, now: Timestamp) -> bool {
+/// Marked Done any sooner, the close's notice came after the Done and
+/// moved the thread on: the row came back for a poll and was marked again.
+fn closed_and_quiet(thread: &Thread, viewer: &str, now: Timestamp) -> bool {
+    let Some(snapshot) = thread.subject_snapshot.as_ref() else {
+        return false;
+    };
     crate::inbox::closed(thread)
-        && thread
-            .subject_snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.closed_at)
-            .is_some_and(|closed_at| {
-                let settled = closed_at + CLOSE_NOTICE_SLACK;
-                thread.updated_at <= settled && settled <= now
-            })
+        && snapshot
+            .closed_by
+            .as_deref()
+            .is_some_and(|closer| !closer.is_empty() && closer.eq_ignore_ascii_case(viewer))
+        && snapshot.closed_at.is_some_and(|closed_at| {
+            let settled = closed_at + CLOSE_NOTICE_SLACK;
+            thread.updated_at <= settled && settled <= now
+        })
 }
 
 /// Whether the reader moved the thread back to the inbox with this close
@@ -15306,9 +15312,9 @@ fn kept_since_closing(thread: &Thread) -> bool {
     )
 }
 
-/// Mark Done on GitHub each notification whose pull request or issue was
-/// merged or closed with nothing after, so it leaves github.com's inbox as
-/// it leaves Perch's. Not until the close's notice has had time to come,
+/// Mark Done on GitHub each notification whose pull request or issue the
+/// reader merged or closed with nothing after, so it leaves github.com's
+/// inbox as it leaves Perch's. Someone else's close stays. Not until the close's notice has had time to come,
 /// so the one request takes it too, and not a row the reader has put back
 /// in the inbox since the close. Each is read first, and one with newer
 /// unread activity than the poll listed is left for the next. One GitHub
@@ -15316,6 +15322,9 @@ fn kept_since_closing(thread: &Thread) -> bool {
 /// out of reach or out of requests the rest wait for the next poll.
 async fn done_closed_notifications(ctx: &Ctx, now: Timestamp) {
     let Some(github) = ctx.github() else {
+        return;
+    };
+    let Some(viewer) = viewer_login(ctx).filter(|login| !login.is_empty()) else {
         return;
     };
     let refused = ctx
@@ -15329,7 +15338,9 @@ async fn done_closed_notifications(ctx: &Ctx, now: Timestamp) {
         .map(|threads| {
             threads
                 .iter()
-                .filter(|thread| closed_and_quiet(thread, now) && !kept_since_closing(thread))
+                .filter(|thread| {
+                    closed_and_quiet(thread, &viewer, now) && !kept_since_closing(thread)
+                })
                 .map(|thread| (thread.id.clone(), thread.updated_at))
                 .filter(|key| !refused.contains(key))
                 .collect()
@@ -22698,6 +22709,7 @@ mod tests {
                 // is on a plain thread.
                 thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
                     closed_at: None,
+                    closed_by: None,
                     author_login: "someone".into(),
                     author_avatar_url: String::new(),
                     state: perch_github::SubjectState::PrOpen,
@@ -23541,6 +23553,7 @@ mod tests {
         let looked = |mut thread: Thread| {
             thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
                 closed_at: None,
+                closed_by: None,
                 author_login: "someone".into(),
                 author_avatar_url: String::new(),
                 state: perch_github::SubjectState::PrOpen,
@@ -23612,6 +23625,7 @@ mod tests {
         about.subject.url = Some("https://api.github.com/repos/a/b/issues/7".into());
         about.subject_snapshot = Some(perch_github::SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: "rohan".into(),
             author_avatar_url: String::new(),
             state: perch_github::SubjectState::IssueOpen,
@@ -29919,6 +29933,7 @@ read eof || true
         let open = |mut thread: Thread| {
             thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
                 closed_at: None,
+                closed_by: None,
                 author_login: "someone".into(),
                 author_avatar_url: String::new(),
                 state: perch_github::SubjectState::PrOpen,
@@ -29979,17 +29994,19 @@ read eof || true
         )));
     }
 
-    /// A pull request merged or closed, or an issue closed, with nothing
-    /// after leaves github.com's inbox as well as Perch's. One with a
-    /// comment after the close stays, an open one stays, and one GitHub
-    /// won't mark Done is not asked again until it moves.
+    /// A pull request the reader merged or closed, or an issue they
+    /// closed, with nothing after leaves github.com's inbox as well as
+    /// Perch's. One someone else closed stays, one with a comment after the
+    /// close stays, an open one stays, and one GitHub won't mark Done is not
+    /// asked again until it moves.
     #[tokio::test]
     async fn a_closed_subject_with_nothing_after_is_marked_done() {
         let dir = tempfile::tempdir().unwrap();
-        // Every thread is stamped 18:00. 6 was merged then, 7 closed and
-        // 8 is an issue closed; 9 was merged too, but GitHub refuses it;
-        // 10 was merged an hour before a comment; 11 is open.
-        let pull = |state: &str, at: &str| {
+        // Every thread is stamped 18:00. The reader merged 6 then, closed
+        // 7 and closed the issue 8; 9 was merged too, but GitHub refuses
+        // it; 10 was merged an hour before a comment; 11 is open; someone
+        // else merged 12, and closed the issue 13.
+        let pull = |state: &str, at: &str, by: &str| {
             format!(
                 r#"{{
                   "__typename": "PullRequest",
@@ -29997,27 +30014,37 @@ read eof || true
                   "pull_state": "{state}",
                   "is_draft": false,
                   "closed_at": {at},
+                  "closer": {{ "nodes": [{by}] }},
                   "additions": 1,
                   "deletions": 1,
                   "review_requests": {{ "total_count": 0 }}
                 }}"#
             )
         };
-        let issue = r#"{
-          "__typename": "Issue",
-          "author": { "login": "someone", "avatar_url": "" },
-          "issue_state": "CLOSED",
-          "state_reason": "COMPLETED",
-          "closed_at": "2026-09-17T18:00:00Z"
-        }"#;
+        let issue = |by: &str| {
+            format!(
+                r#"{{
+                  "__typename": "Issue",
+                  "author": {{ "login": "someone", "avatar_url": "" }},
+                  "issue_state": "CLOSED",
+                  "state_reason": "COMPLETED",
+                  "closed_at": "2026-09-17T18:00:00Z",
+                  "closer": {{ "nodes": [{by}] }}
+                }}"#
+            )
+        };
+        let me = r#"{ "actor": { "login": "Me", "avatar_url": "" } }"#;
+        let them = r#"{ "actor": { "login": "them", "avatar_url": "" } }"#;
         let answer = format!(
-            r#"{{ "data": {{ "r0": {{ "n6": {}, "n7": {}, "n8": {}, "n9": {}, "n10": {}, "n11": {} }} }} }}"#,
-            pull("MERGED", r#""2026-09-17T17:59:58Z""#),
-            pull("CLOSED", r#""2026-09-17T18:00:00Z""#),
-            issue,
-            pull("MERGED", r#""2026-09-17T18:00:00Z""#),
-            pull("MERGED", r#""2026-09-17T17:00:00Z""#),
-            pull("OPEN", "null"),
+            r#"{{ "data": {{ "r0": {{ "n6": {}, "n7": {}, "n8": {}, "n9": {}, "n10": {}, "n11": {}, "n12": {}, "n13": {} }} }} }}"#,
+            pull("MERGED", r#""2026-09-17T17:59:58Z""#, me),
+            pull("CLOSED", r#""2026-09-17T18:00:00Z""#, me),
+            issue(me),
+            pull("MERGED", r#""2026-09-17T18:00:00Z""#, me),
+            pull("MERGED", r#""2026-09-17T17:00:00Z""#, me),
+            pull("OPEN", "null", ""),
+            pull("MERGED", r#""2026-09-17T18:00:00Z""#, them),
+            issue(them),
         );
         // Each is read before its Done, and GitHub holds it as listed.
         let (base, paths) = serve_by_method(move |method, path, _| {
@@ -30030,17 +30057,23 @@ read eof || true
             }
         });
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
-        let mut eight = thread("8", "eight");
-        eight.subject.kind = SubjectKind::Issue;
-        eight.subject.url = Some("https://api.github.com/repos/a/b/issues/8".into());
+        reader_is_me(&ctx);
+        let issue_thread = |id: &str, title: &str| {
+            let mut issue = thread(id, title);
+            issue.subject.kind = SubjectKind::Issue;
+            issue.subject.url = Some(format!("https://api.github.com/repos/a/b/issues/{id}"));
+            issue
+        };
         ctx.replace_notifications(
             vec![
                 thread("6", "six"),
                 thread("7", "seven"),
-                eight,
+                issue_thread("8", "eight"),
                 thread("9", "nine"),
                 thread("10", "ten"),
                 thread("11", "eleven"),
+                thread("12", "twelve"),
+                issue_thread("13", "thirteen"),
             ],
             Some("first"),
         );
@@ -30056,7 +30089,7 @@ read eof || true
                 .map(|t| t.id.clone())
                 .collect()
         };
-        assert_eq!(ids(), ["9", "10", "11"]);
+        assert_eq!(ids(), ["9", "10", "11", "12", "13"]);
         assert_eq!(
             paths.lock().unwrap().as_slice(),
             [
@@ -30085,8 +30118,15 @@ read eof || true
         assert_eq!(paths.lock().unwrap().len(), 9);
     }
 
-    /// A merged pull request's snapshot, for a thread set down already
-    /// looked at.
+    /// The signed-in reader is `me`, who closes what [`merged`] holds.
+    fn reader_is_me(ctx: &Ctx) {
+        ctx.with_cache(|c| c.set_meta("viewer.login", "me"))
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A merged pull request's snapshot, merged by the reader, for a
+    /// thread set down already looked at.
     fn merged(closed_at: Timestamp) -> perch_github::SubjectSnapshot {
         perch_github::SubjectSnapshot {
             author_login: "someone".into(),
@@ -30096,6 +30136,7 @@ read eof || true
             review_requested: false,
             participants: Some(vec![]),
             closed_at: Some(closed_at),
+            closed_by: Some("me".into()),
             at: closed_at,
         }
     }
@@ -30135,6 +30176,7 @@ read eof || true
         let answers = github_has.clone();
         let (base, asked) = serve_threads(move |_| answering(&answers.lock().unwrap()));
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        reader_is_me(&ctx);
         let mut seven = thread("7", "seven");
         seven.unread = false;
         seven.updated_at = after(-3_600);
@@ -30173,6 +30215,7 @@ read eof || true
         let dir = tempfile::tempdir().unwrap();
         let (base, sent) = takes_done();
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        reader_is_me(&ctx);
         let closed_at: Timestamp = "2026-09-17T18:00:00Z".parse().unwrap();
         let after = |secs: i64| closed_at + jiff::SignedDuration::from_secs(secs);
         let ids = || -> Vec<String> {
@@ -30232,6 +30275,7 @@ read eof || true
         let dir = tempfile::tempdir().unwrap();
         let (base, sent) = takes_done();
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        reader_is_me(&ctx);
         let closed_at: Timestamp = "2026-09-17T18:00:00Z".parse().unwrap();
         let after = |secs: i64| closed_at + jiff::SignedDuration::from_secs(secs);
         let listed = || ctx.notifications.lock().unwrap().clone();
@@ -30283,6 +30327,7 @@ read eof || true
         let dir = tempfile::tempdir().unwrap();
         let (base, sent) = takes_done();
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        reader_is_me(&ctx);
         let closed_at: Timestamp = "2026-09-17T18:00:00Z".parse().unwrap();
         let mut seven = thread("7", "seven");
         seven.unread = false;
@@ -30318,6 +30363,7 @@ read eof || true
         let dir = tempfile::tempdir().unwrap();
         let (base, sent) = takes_done();
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        reader_is_me(&ctx);
         let mut seven = thread("7", "seven");
         seven.unread = false;
         ctx.replace_notifications(vec![seven.clone()], Some("first"));
@@ -30336,8 +30382,9 @@ read eof || true
         assert!(ctx.notifications.lock().unwrap().is_empty());
     }
 
-    /// A closed snapshot from before the look asked when is taken again,
-    /// so a close already in the inbox gets its time.
+    /// A closed snapshot from before the look asked when, or by whom, is
+    /// taken again, so a close already in the inbox gets its time and its
+    /// closer. Only the reader's own close is done with.
     #[test]
     fn a_closed_snapshot_without_its_time_wants_a_look() {
         for state in [
@@ -30355,20 +30402,33 @@ read eof || true
                 review_requested: false,
                 participants: Some(vec![]),
                 closed_at: None,
+                closed_by: None,
                 at: closed.updated_at,
             });
             let closed_at = closed.updated_at;
             let settled = closed_at + CLOSE_NOTICE_SLACK;
             assert!(closed.wants_snapshot(), "{state:?}");
-            assert!(!closed_and_quiet(&closed, settled), "{state:?}");
-            assert!(!closed_and_quiet(&closed, Timestamp::MAX), "{state:?}");
+            assert!(!closed_and_quiet(&closed, "me", settled), "{state:?}");
+            assert!(
+                !closed_and_quiet(&closed, "me", Timestamp::MAX),
+                "{state:?}"
+            );
             closed.subject_snapshot.as_mut().unwrap().closed_at = Some(closed_at);
+            assert!(closed.wants_snapshot(), "{state:?}: not who closed it");
+            assert!(!closed_and_quiet(&closed, "me", settled), "{state:?}");
+            closed.subject_snapshot.as_mut().unwrap().closed_by = Some("me".into());
             assert!(!closed.wants_snapshot(), "{state:?}");
             // Its time is the close's, and the close's notice needs its
             // own before the thread is done with.
             let just_short = settled - jiff::SignedDuration::from_secs(1);
-            assert!(!closed_and_quiet(&closed, just_short), "{state:?}");
-            assert!(closed_and_quiet(&closed, settled), "{state:?}");
+            assert!(!closed_and_quiet(&closed, "me", just_short), "{state:?}");
+            assert!(closed_and_quiet(&closed, "me", settled), "{state:?}");
+            assert!(closed_and_quiet(&closed, "ME", settled), "{state:?}");
+            // Someone else's close stays, as does one by an account gone.
+            assert!(!closed_and_quiet(&closed, "you", settled), "{state:?}");
+            closed.subject_snapshot.as_mut().unwrap().closed_by = Some(String::new());
+            assert!(!closed.wants_snapshot(), "{state:?}: asked, nobody named");
+            assert!(!closed_and_quiet(&closed, "", settled), "{state:?}");
         }
     }
 
@@ -30409,6 +30469,7 @@ read eof || true
             threads[0].subject_snapshot,
             Some(perch_github::SubjectSnapshot {
                 closed_at: None,
+                closed_by: Some(String::new()),
                 author_login: "someone".into(),
                 author_avatar_url: String::new(),
                 state: perch_github::SubjectState::PrMerged,

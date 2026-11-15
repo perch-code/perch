@@ -475,6 +475,7 @@ mod tests {
             );
             thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
                 closed_at: None,
+                closed_by: None,
                 author_login: login.into(),
                 author_avatar_url: String::new(),
                 state: SubjectState::PrOpen,
@@ -526,6 +527,7 @@ mod tests {
         use crate::items::StateFilter;
         let snapshot = |state| perch_github::SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: String::new(),
             author_avatar_url: String::new(),
             state,
@@ -634,6 +636,7 @@ mod tests {
         );
         mentioned_on_mine.subject_snapshot = Some(perch_github::SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: "Reader".into(),
             author_avatar_url: String::new(),
             state: SubjectState::PrOpen,

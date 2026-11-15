@@ -91,7 +91,7 @@ impl Thread {
     /// with a number, whose snapshot is missing or was taken before the
     /// thread's latest activity. A pull request's snapshot from before
     /// the look asked for its churn is taken again too, and a closed one's
-    /// from before it asked when it closed.
+    /// from before it asked when it closed and who closed it.
     pub fn wants_snapshot(&self) -> bool {
         matches!(
             self.subject.kind,
@@ -101,7 +101,8 @@ impl Thread {
                 snapshot.at < self.updated_at
                     || snapshot.participants.is_none()
                     || (self.subject.kind == SubjectKind::PullRequest && snapshot.churn.is_none())
-                    || (snapshot.state.is_closed() && snapshot.closed_at.is_none())
+                    || (snapshot.state.is_closed()
+                        && (snapshot.closed_at.is_none() || snapshot.closed_by.is_none()))
             })
     }
 
@@ -149,6 +150,12 @@ pub struct SubjectSnapshot {
     /// or whose state Perch settled without a look.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "ts_opt")]
     pub closed_at: Option<Timestamp>,
+    /// Who merged or closed it last, by login: the actor of its latest
+    /// close. Empty when GitHub names nobody (the account is gone). `None`
+    /// while it is open, and on a snapshot taken before this was asked for
+    /// or whose state Perch settled without a look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<String>,
     /// The thread's `updated_at` when the look was taken. Activity since
     /// can have changed the state, so a thread newer than this is looked
     /// at again.
@@ -483,6 +490,7 @@ mod tests {
         // A look taken for this revision of the thread settles it.
         t.subject_snapshot = Some(SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::IssueOpen,
@@ -511,6 +519,7 @@ mod tests {
         t.subject.kind = SubjectKind::PullRequest;
         let mut snapshot = SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::PrOpen,
@@ -538,6 +547,7 @@ mod tests {
         let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/issues/9"));
         let mut snapshot = SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::IssueOpen,
@@ -560,6 +570,7 @@ mod tests {
         let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/9"));
         t.subject_snapshot = Some(SubjectSnapshot {
             closed_at: None,
+            closed_by: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::PrMerged,
