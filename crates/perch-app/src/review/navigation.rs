@@ -297,6 +297,7 @@ pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) 
         &symbol.path,
         symbol.line as u32,
         symbol.column as u32,
+        state.base_text_for(symbol),
     );
 }
 
@@ -389,6 +390,7 @@ pub fn go_to_type_definition(state: ReviewState, backend: &Backend, symbol: &Sym
         &symbol.path,
         symbol.line as u32,
         symbol.column as u32,
+        state.base_text_for(symbol),
     );
 }
 
@@ -418,6 +420,7 @@ pub fn go_to_implementations(state: ReviewState, backend: &Backend, symbol: &Sym
         &symbol.path,
         symbol.line as u32,
         symbol.column as u32,
+        state.base_text_for(symbol),
     );
 }
 
@@ -429,8 +432,8 @@ pub fn implementations_at_cursor(state: ReviewState, backend: &Backend) {
 }
 
 /// The entries of the right-click menu, in order, for the symbol under
-/// the pointer: each names what it acts on. `None` on nothing, whitespace
-/// or a removed line, where the menu is Copy alone.
+/// the pointer: each names what it acts on. `None` on nothing or
+/// whitespace, where the menu is Copy alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entry {
     Definition,
@@ -814,15 +817,27 @@ pub(crate) mod tests {
                 column: 3,
                 end: 7,
                 text: "beta".into(),
+                base: false,
             }),
             "pointer at ({x}, {y})"
         );
 
-        // On the `o` of the ghost's `old`: a removed line is nowhere.
+        // On the `o` of the ghost's `old`: base line 1.
         let (x, y) = point_of(doc.offset_of_row(1) + 3);
         harness.pointer_move(x, y);
         harness.rebuild();
-        assert_eq!(state.pointer_symbol.get(), None, "pointer at ({x}, {y})");
+        assert_eq!(
+            state.pointer_symbol.get(),
+            Some(Symbol {
+                path: "src/x.rs".into(),
+                line: 1,
+                column: 3,
+                end: 6,
+                text: "old".into(),
+                base: true,
+            }),
+            "pointer at ({x}, {y})"
+        );
 
         // On the `(` after `alpha` on row 0: punctuation.
         let (x, y) = point_of(doc.offset_of_row(0) + 8);
@@ -844,8 +859,8 @@ pub(crate) mod tests {
             state
                 .pointer_symbol
                 .get()
-                .map(|s| (s.text, s.line, s.column)),
-            Some(("alpha".into(), 2, 4))
+                .map(|s| (s.text, s.line, s.column, s.base)),
+            Some(("alpha".into(), 2, 4, false))
         );
         harness.pointer_move(5.0, 5.0);
         harness.rebuild();
@@ -865,6 +880,7 @@ pub(crate) mod tests {
             column: 3,
             end: 7,
             text: "beta".into(),
+            base: false,
         };
         let alpha = Symbol {
             path: "src/x.rs".into(),
@@ -872,6 +888,7 @@ pub(crate) mod tests {
             column: 3,
             end: 8,
             text: "alpha".into(),
+            base: false,
         };
         let backend = crate::backend::Backend::detached();
 
@@ -911,6 +928,7 @@ pub(crate) mod tests {
     /// came, and another server's readiness, ask nothing.
     #[test]
     fn what_came_back_empty_while_the_server_loaded_is_asked_again_once_ready() {
+        use crate::review::model::Highlights;
         let state = ReviewState::new();
         state.set_server_status(
             perch_lsp::ServerKind::RustAnalyzer,
@@ -922,6 +940,7 @@ pub(crate) mod tests {
             column: 3,
             end: 8,
             text: "alpha".into(),
+            base: false,
         };
         let (backend, mut commands) = crate::backend::Backend::recording();
         let mut sent = move || {
@@ -930,10 +949,8 @@ pub(crate) mod tests {
                     Command::Hover {
                         line, character, ..
                     } => format!("hover {line}:{character}"),
-                    Command::DocumentHighlight {
-                        line, character, ..
-                    } => {
-                        format!("highlight {line}:{character}")
+                    Command::DocumentHighlight { symbol, .. } => {
+                        format!("highlight {}:{}", symbol.line, symbol.column)
                     }
                     other => format!("{other:?}"),
                 })
@@ -943,7 +960,7 @@ pub(crate) mod tests {
         state.ask_hover(&backend, alpha.clone());
         state.ask_highlights(&backend, alpha.clone());
         let token = state.highlight_ask.get().unwrap().0;
-        state.finish_highlights(token, Vec::new());
+        state.finish_highlights(token, Highlights::default());
         assert_eq!(sent(), ["hover 0:3", "highlight 0:3"]);
 
         state.ask_again(&backend, perch_lsp::ServerKind::Gopls);
@@ -960,7 +977,13 @@ pub(crate) mod tests {
         assert_eq!(hover.symbol, alpha);
 
         // Answered this time: ready again asks nothing.
-        state.finish_highlights(state.highlight_ask.get().unwrap().0, vec![(0, 3, 8)]);
+        state.finish_highlights(
+            state.highlight_ask.get().unwrap().0,
+            Highlights {
+                head: vec![(0, 3, 8)],
+                base: vec![],
+            },
+        );
         state
             .hover
             .update(|h| h.as_mut().unwrap().markdown = "fn alpha()".into());
@@ -1034,22 +1057,39 @@ pub(crate) mod tests {
             "the caret is where the click was"
         );
         assert_eq!(state.last_position.get(), Some((1, 5)));
+        assert!(!state.last_position_base.get());
         assert!(
             harness.is_focused(content),
             "the press gave the editor the keyboard, as any press does"
         );
 
-        // On the ghost, the click is the editor's own: nothing is asked,
-        // and the editor places the caret there itself, which is nowhere
-        // in the head file.
-        let ghost = doc.offset_of_row(1) + 3;
+        // On the ghost (`old`, base line 1), Cmd-click asks for its
+        // definition against the base text and places the caret there.
+        let ghost = doc.offset_of_row(1) + 4;
         let (x, y) = point_of(ghost);
         cmd_click_at(&mut harness, x, y);
         harness.rebuild();
         harness.paint();
-        assert!(definitions_asked(&mut commands).is_empty());
+        let mut base_defs = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let Command::Definition {
+                path,
+                line,
+                character,
+                base_text,
+                ..
+            } = command
+            {
+                base_defs.push((path, line, character, base_text.map(|t| t.to_string())));
+            }
+        }
+        assert_eq!(
+            base_defs,
+            vec![("src/x.rs".into(), 1, 3, Some(BASE.into()))]
+        );
         assert_eq!(ed.cursor.get().offset(), ghost);
-        assert_eq!(state.last_position.get(), None);
+        assert_eq!(state.last_position.get(), Some((1, 4)));
+        assert!(state.last_position_base.get());
 
         // On the `(` after `alpha`: punctuation, so the editor's click too.
         let paren = doc.offset_of_row(0) + 8;
@@ -1312,6 +1352,7 @@ pub(crate) mod tests {
                 line: 1,
                 character: 3,
                 text: "fn alpha() {}".into(),
+                base: false,
             }]),
         );
         harness.rebuild();
@@ -1601,6 +1642,7 @@ pub(crate) mod tests {
             line,
             character: 0,
             text: "impl".into(),
+            base: false,
         };
         state.finish_goto(
             ask.token,
@@ -1670,6 +1712,7 @@ pub(crate) mod tests {
             column: 8,
             end: 12,
             text: "self".into(),
+            base: false,
         };
         go_to_type_definition(state, &backend, &symbol);
         assert!(matches!(
@@ -1686,6 +1729,7 @@ pub(crate) mod tests {
                 line: 10,
                 character: 11,
                 text: "pub struct Db".into(),
+                base: false,
             }]),
         );
         assert_eq!(state.pending_jump.get(), Some(("src/y.rs".into(), 9, 11)));
@@ -1731,6 +1775,7 @@ pub(crate) mod tests {
             column: 3,
             end: 8,
             text: "parse".into(),
+            base: false,
         };
         let entries = Entry::for_symbol(Some(&parse));
         assert_eq!(
@@ -1767,6 +1812,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_caret_resting_on_a_symbol_tints_its_uses_and_leaving_it_clears_them() {
+        use crate::review::model::Highlights;
         let (mut harness, state, _) = recording_harness();
         let (backend, mut commands) = crate::backend::Backend::recording();
         let doc = stacked_doc(state);
@@ -1784,23 +1830,39 @@ pub(crate) mod tests {
         harness.rebuild();
         let alpha = references::symbol_at_cursor(state).expect("the caret is on alpha");
         assert_eq!(
-            (alpha.text.as_str(), alpha.line, alpha.column),
-            ("alpha", 2, 4)
+            (alpha.text.as_str(), alpha.line, alpha.column, alpha.base),
+            ("alpha", 2, 4, false)
         );
         state.ask_highlights(&backend, alpha.clone());
         let token = state.highlight_ask.get().unwrap().0;
         assert!(matches!(
             commands.try_recv(),
-            Ok(Command::DocumentHighlight { path, line: 2, character: 4, .. }) if path == "src/x.rs"
+            Ok(Command::DocumentHighlight { symbol, .. })
+                if symbol.path == "src/x.rs" && symbol.line == 2 && symbol.column == 4 && !symbol.base
         ));
 
         // A stale answer is dropped; the right one lands.
-        state.finish_highlights(token + 1, vec![(9, 0, 1)]);
+        state.finish_highlights(
+            token + 1,
+            Highlights {
+                head: vec![(9, 0, 1)],
+                base: vec![],
+            },
+        );
         assert!(state.highlights.get().is_empty());
-        state.finish_highlights(token, vec![(0, 3, 8), (2, 4, 9)]);
+        state.finish_highlights(
+            token,
+            Highlights {
+                head: vec![(0, 3, 8), (2, 4, 9)],
+                base: vec![(0, 3, 8), (2, 4, 9)],
+            },
+        );
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.highlights.get().as_slice(), &[(0, 3, 8), (2, 4, 9)]);
+        assert_eq!(
+            state.highlights.get().head.as_slice(),
+            &[(0, 3, 8), (2, 4, 9)]
+        );
 
         // Along the word, the tint stays; off it, the tint clears.
         ed.cursor.update(|c| {
@@ -1812,7 +1874,7 @@ pub(crate) mod tests {
             )
         });
         harness.rebuild();
-        assert_eq!(state.highlights.get().len(), 2, "still on alpha");
+        assert_eq!(state.highlights.get().head.len(), 2, "still on alpha");
         ed.cursor
             .update(|c| c.set_offset(doc.offset_of_row(4), CursorAffinity::Backward, false, false));
         harness.rebuild();
@@ -1820,11 +1882,140 @@ pub(crate) mod tests {
         assert!(state.highlight_ask.get().is_none());
 
         // Another tab clears them too.
-        state.finish_highlights(token, vec![(0, 3, 8)]);
+        state.finish_highlights(
+            token,
+            Highlights {
+                head: vec![(0, 3, 8)],
+                base: vec![],
+            },
+        );
         state.highlight_ask.set(Some((token, alpha)));
-        state.finish_highlights(token, vec![(0, 3, 8)]);
+        state.finish_highlights(
+            token,
+            Highlights {
+                head: vec![(0, 3, 8)],
+                base: vec![],
+            },
+        );
         assert!(!state.highlights.get().is_empty());
         state.open_tab("src/y.rs");
         assert!(state.highlights.get().is_empty());
+    }
+
+    #[test]
+    fn a_deleted_symbol_is_asked_against_base_and_its_definition_lands_on_either_layout() {
+        let (mut harness, state, mut commands) = recording_harness();
+        let doc = stacked_doc(state);
+        let ed = editor();
+
+        // Caret on `old` in the ghost (row 1, base line 1).
+        ed.cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(1) + 4,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
+        harness.rebuild();
+        assert_eq!(state.last_position.get(), Some((1, 4)));
+        assert!(state.last_position_base.get());
+
+        // F12 asks for the definition against BASE.
+        harness.dispatch_event(key(
+            Code::F12,
+            Key::Named(NamedKey::F12),
+            Modifiers::empty(),
+        ));
+        harness.rebuild();
+        let mut def_asked = None;
+        while let Ok(command) = commands.try_recv() {
+            if let Command::Definition {
+                path,
+                line,
+                character,
+                base_text,
+                ..
+            } = command
+            {
+                def_asked = Some((path, line, character, base_text.map(|t| t.to_string())));
+            }
+        }
+        assert_eq!(
+            def_asked,
+            Some(("src/x.rs".into(), 1, 3, Some(BASE.into())))
+        );
+
+        // A definition answer on base line 2 (1-based) lands on the ghost row
+        // in Stacked view.
+        let ask = state.goto.get().unwrap();
+        ed.cursor
+            .update(|c| c.set_offset(0, CursorAffinity::Backward, false, false));
+        harness.rebuild();
+        state.finish_goto(
+            ask.token,
+            Ok(vec![crate::review::model::Located {
+                path: "src/x.rs".into(),
+                outside: None,
+                line: 2,
+                character: 3,
+                text: "fn old() {".into(),
+                base: true,
+            }]),
+        );
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(ed.cursor.get().offset(), doc.offset_of_row(1) + 3);
+        assert_eq!(state.last_position.get(), Some((1, 3)));
+        assert!(state.last_position_base.get());
+
+        // Shift-F12 on the ghost asks for references against BASE too.
+        harness.dispatch_event(key(Code::F12, Key::Named(NamedKey::F12), Modifiers::SHIFT));
+        harness.rebuild();
+        let mut ref_asked = None;
+        while let Ok(command) = commands.try_recv() {
+            if let Command::References {
+                path,
+                line,
+                character,
+                base_text,
+                ..
+            } = command
+            {
+                ref_asked = Some((path, line, character, base_text.map(|t| t.to_string())));
+            }
+        }
+        assert_eq!(
+            ref_asked,
+            Some(("src/x.rs".into(), 1, 3, Some(BASE.into())))
+        );
+        state.close_panel();
+
+        // In Split view, jumping to the same base location activates the left
+        // side and lands the caret on `old` there.
+        state.layout.set(crate::review::model::Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        state.open_located(&crate::review::model::Located {
+            path: "src/x.rs".into(),
+            outside: None,
+            line: 2,
+            character: 3,
+            text: "fn old() {".into(),
+            base: true,
+        });
+        harness.rebuild();
+        harness.paint();
+        let crate::review::model::LiveLayout::Split { left, active, .. } =
+            state.docs.get().unwrap().layout
+        else {
+            panic!("split layout");
+        };
+        assert_eq!(active.get(), crate::review::editor::Side::Base);
+        let left_row = left.doc.get().row_of_display(1).unwrap();
+        assert_eq!(
+            left.cursor.get().offset(),
+            left.doc.get().offset_of_row(left_row) + 3
+        );
     }
 }

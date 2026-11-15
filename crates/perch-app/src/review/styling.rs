@@ -27,7 +27,7 @@ use perch_syntax::Span;
 use crate::review::doc::{Doc, DocRow, Piece, Tint};
 use crate::review::editor::Side;
 use crate::review::find::Match;
-use crate::review::model::LiveFile;
+use crate::review::model::{Highlights, LiveFile};
 use crate::theme;
 
 pub struct PerchStyling {
@@ -41,10 +41,13 @@ pub struct PerchStyling {
     /// Set for one half of a split: the base side's document is over the
     /// base file, and its spans are that file's.
     side: Option<Side>,
-    /// The uses of the caret's symbol, as head positions. Read live: the
-    /// editor's layouts are dropped when they change, and rebuilt through
-    /// this.
-    highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+    /// Which side of a split owns the cursor, so an unchanged line's
+    /// current find match is marked on the active side alone.
+    active_side: Option<RwSignal<Side>>,
+    /// The uses of the caret's symbol, on each side of the diff. Read
+    /// live: the editor's layouts are dropped when they change, and
+    /// rebuilt through this.
+    highlights: RwSignal<Arc<Highlights>>,
     /// The find bar's matches, as display lines, and which of them the
     /// bar is on. Read live the same way.
     find: RwSignal<Arc<Vec<Match>>>,
@@ -60,7 +63,7 @@ impl PerchStyling {
     pub fn new(
         file: LiveFile,
         doc: RwSignal<Arc<Doc>>,
-        highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+        highlights: RwSignal<Arc<Highlights>>,
         find: RwSignal<Arc<Vec<Match>>>,
         find_current: RwSignal<Option<usize>>,
         id: u64,
@@ -69,6 +72,7 @@ impl PerchStyling {
             file,
             doc,
             side: None,
+            active_side: None,
             highlights,
             find,
             find_current,
@@ -78,52 +82,77 @@ impl PerchStyling {
     }
 
     /// One half of a split.
+    #[allow(clippy::too_many_arguments)]
     pub fn side(
         file: LiveFile,
         side: Side,
+        active_side: RwSignal<Side>,
         doc: RwSignal<Arc<Doc>>,
-        highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+        highlights: RwSignal<Arc<Highlights>>,
         find: RwSignal<Arc<Vec<Match>>>,
         find_current: RwSignal<Option<usize>>,
         id: u64,
     ) -> Self {
         Self {
             side: Some(side),
+            active_side: Some(active_side),
             ..Self::new(file, doc, highlights, find, find_current, id)
         }
     }
 
     /// The columns of the caret's symbol's uses on a row: those on the
-    /// row's head line, clamped to the part of the line the row shows. A
-    /// row that is no head line, a ghost or a base side's line, has none;
-    /// a use inside a fold is on no row, and is not drawn until a reveal
-    /// puts it on one.
+    /// row's head line or base line, clamped to the part of the line the
+    /// row shows. A row that is neither, a divider, filler or spacer, has
+    /// none; a use inside a fold is on no row until a reveal puts it on
+    /// one.
     fn highlights_for(&self, row: usize) -> Vec<(usize, usize)> {
-        let Some(head) = self.doc.with_untracked(|d| d.head_line(row)) else {
-            return Vec::new();
-        };
+        let (head, base) = self
+            .doc
+            .with_untracked(|d| (d.head_line(row), d.base_line(row)));
         let piece = self.piece(row);
         self.highlights.with_untracked(|h| {
-            h.iter()
-                .filter(|(line, _, _)| *line == head)
+            let (ranges, target) = if let Some(head) = head {
+                (&h.head, head)
+            } else if let Some(base) = base {
+                (&h.base, base)
+            } else {
+                return Vec::new();
+            };
+            ranges
+                .iter()
+                .filter(|(line, _, _)| *line == target)
                 .filter_map(|(_, start, end)| piece.clip(*start, *end))
                 .collect()
         })
     }
 
     /// The columns of the find bar's matches on a row, each with whether
-    /// it is the one the bar is on: those on the row's display line,
-    /// clamped to the part of the line the row shows. A match is a line of
-    /// the unified buffer, so a ghost's are drawn where the ghost is, and a
-    /// split's base side, whose lines are the base file's own, draws none.
-    /// A row that is no line has none, and a match inside a fold is on no
-    /// row.
+    /// it is the one the bar is on: those on the row's unified display
+    /// line, clamped to the part of the line the row shows. On a split's
+    /// base side the row's line is a base line, mapped to its ghost or its
+    /// aligned unchanged row in the unified buffer; an unchanged row's
+    /// current match is marked on the active side alone.
     fn matches_for(&self, row: usize) -> Vec<(usize, usize, bool)> {
-        if self.side == Some(Side::Base) {
+        let (Some(DocRow::Line { display, tint }) | Some(DocRow::Wrap { display, tint })) =
+            self.row(row)
+        else {
             return Vec::new();
-        }
-        let Some(display) = self.doc.with_untracked(|d| d.display_line(row)) else {
-            return Vec::new();
+        };
+        let display = match self.side {
+            Some(Side::Base) => match self.file.with_untracked(|f| f.display_of_base(display)) {
+                Some(d) => d,
+                None => return Vec::new(),
+            },
+            _ => display,
+        };
+        let mark_current = match (self.side, tint) {
+            (Some(Side::Base), Tint::Plain) => self
+                .active_side
+                .is_some_and(|a| a.get_untracked() == Side::Base),
+            (Some(Side::Head), Tint::Plain) => self
+                .active_side
+                .is_none_or(|a| a.get_untracked() == Side::Head),
+            _ => true,
         };
         let piece = self.piece(row);
         let current = self.find_current.get_untracked();
@@ -136,7 +165,7 @@ impl PerchStyling {
                 .enumerate()
                 .filter_map(|(i, m)| {
                     let (start, end) = piece.clip(m.start, m.end)?;
-                    Some((start, end, current == Some(first + i)))
+                    Some((start, end, mark_current && current == Some(first + i)))
                 })
                 .collect()
         })
@@ -338,7 +367,7 @@ mod tests {
         PerchStyling::new(
             RwSignal::new(file),
             doc,
-            RwSignal::new(Arc::new(Vec::new())),
+            RwSignal::new(Arc::new(Highlights::default())),
             RwSignal::new(Arc::new(Vec::new())),
             RwSignal::new(None),
             1,
@@ -351,13 +380,10 @@ mod tests {
         // Display lines 2 to 4 folded away: rows are lines 0, 1, a
         // divider, then 5 and 6.
         let styling = styling(text, vec![Run::new(2, 4, 2)]);
-        styling.highlights.set(Arc::new(vec![
-            (0, 4, 8),
-            (1, 8, 12),
-            (3, 8, 12),
-            (5, 8, 12),
-            (5, 40, 44),
-        ]));
+        styling.highlights.set(Arc::new(Highlights {
+            head: vec![(0, 4, 8), (1, 8, 12), (3, 8, 12), (5, 8, 12), (5, 40, 44)],
+            base: Vec::new(),
+        }));
 
         assert_eq!(styling.highlights_for(0), vec![(4, 8)]);
         assert_eq!(styling.highlights_for(1), vec![(8, 12)]);
@@ -409,9 +435,10 @@ mod tests {
             "    second_argument);"
         );
         // A use across the break is drawn on both rows, each its part.
-        styling
-            .highlights
-            .set(Arc::new(vec![(0, 9, 23), (0, 23, 31)]));
+        styling.highlights.set(Arc::new(Highlights {
+            head: vec![(0, 9, 23), (0, 23, 31)],
+            base: Vec::new(),
+        }));
         assert_eq!(styling.highlights_for(0), vec![(9, 23), (23, 25)]);
         assert_eq!(styling.highlights_for(1), vec![(4, 10)]);
         styling.find.set(Arc::new(vec![m(0, 25, 40)]));
@@ -459,18 +486,79 @@ mod tests {
         assert_eq!(styling.matches_for(5), vec![(8, 12, true)]);
         styling.find_current.set(None);
         assert_eq!(styling.matches_for(5), vec![(8, 12, false)]);
+    }
 
-        // A split's base side is over the base file, whose lines are not
-        // the unified buffer's: nothing is drawn there.
-        let base = PerchStyling {
-            side: Some(Side::Base),
-            ..styling
+    #[test]
+    fn base_uses_and_split_matches_draw_on_removed_and_unchanged_rows() {
+        let m = |display, start, end| Match {
+            display,
+            start,
+            end,
         };
-        assert!(base.matches_for(0).is_empty());
-        let head = PerchStyling {
-            side: Some(Side::Head),
-            ..base
-        };
-        assert_eq!(head.matches_for(0), vec![(4, 8, false)]);
+        let base_text = "let path = 1;\nlet old = path;\n";
+        let head_text = "let path = 1;\nlet now = path + 1;\n";
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            head_text.into(),
+            base_text.into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+        let live_file = RwSignal::new(file.clone());
+        let highlights = RwSignal::new(Arc::new(Highlights {
+            head: vec![(0, 4, 8), (1, 10, 14)],
+            base: vec![(0, 4, 8), (1, 10, 14)],
+        }));
+        // Unified display rows: 0 unchanged, 1 ghost (`old = path`), 2 modified (`now = path + 1`).
+        let find = RwSignal::new(Arc::new(vec![m(0, 4, 8), m(1, 10, 14), m(2, 10, 14)]));
+        let find_current = RwSignal::new(Some(0));
+
+        // Stacked: row 1 is the ghost, which draws its base highlight.
+        let stacked_doc = RwSignal::new(Arc::new(doc::build(&file.buffer, &[], &[], None)));
+        let stacked = PerchStyling::new(live_file, stacked_doc, highlights, find, find_current, 1);
+        assert_eq!(stacked.highlights_for(0), vec![(4, 8)]);
+        assert_eq!(stacked.highlights_for(1), vec![(10, 14)], "the ghost's use");
+        assert_eq!(stacked.highlights_for(2), vec![(10, 14)]);
+
+        // Split: both sides draw highlights and matches; on an unchanged
+        // row only the active side marks the current match.
+        let (left_doc, right_doc) =
+            doc::build_split(&file.alignment, base_text, &file.buffer, &[], &[], None);
+        let active = RwSignal::new(Side::Head);
+        let left = PerchStyling::side(
+            live_file,
+            Side::Base,
+            active,
+            RwSignal::new(Arc::new(left_doc)),
+            highlights,
+            find,
+            find_current,
+            2,
+        );
+        let right = PerchStyling::side(
+            live_file,
+            Side::Head,
+            active,
+            RwSignal::new(Arc::new(right_doc)),
+            highlights,
+            find,
+            find_current,
+            3,
+        );
+        assert_eq!(left.highlights_for(1), vec![(10, 14)]);
+        assert_eq!(right.highlights_for(1), vec![(10, 14)]);
+        assert_eq!(left.matches_for(0), vec![(4, 8, false)]);
+        assert_eq!(right.matches_for(0), vec![(4, 8, true)]);
+        active.set(Side::Base);
+        assert_eq!(left.matches_for(0), vec![(4, 8, true)]);
+        assert_eq!(right.matches_for(0), vec![(4, 8, false)]);
+        find_current.set(Some(1));
+        assert_eq!(
+            left.matches_for(1),
+            vec![(10, 14, true)],
+            "ghost match on left"
+        );
     }
 }

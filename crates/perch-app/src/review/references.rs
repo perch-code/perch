@@ -29,12 +29,13 @@ use crate::ui::widgets::{clickable, sidebar_glyph};
 // Asking
 // ---------------------------------------------------------------------
 
-/// The symbol on a head line of the active file: the one at `column` when
-/// given, else the first on the line. A column on nothing, such as a space
-/// or a bracket, is no symbol.
-pub fn symbol_on(state: ReviewState, head_line: usize, column: Option<usize>) -> Option<Symbol> {
-    let file = state.active_file()?;
-    let display_line = file.buffer.display_line(head_line)?;
+fn symbol_on_display(
+    file: &crate::review::model::LoadedFile,
+    display_line: usize,
+    line: usize,
+    base: bool,
+    column: Option<usize>,
+) -> Option<Symbol> {
     let text = file.buffer.text.lines().nth(display_line)?;
     let (start, symbol) = match column {
         Some(column) => identifier_at(text, column),
@@ -42,10 +43,11 @@ pub fn symbol_on(state: ReviewState, head_line: usize, column: Option<usize>) ->
     }?;
     Some(Symbol {
         path: file.path.clone(),
-        line: head_line,
+        line,
         column: start,
         end: start + symbol.len(),
         text: symbol.to_string(),
+        base,
     })
 }
 
@@ -53,16 +55,31 @@ pub fn symbol_on(state: ReviewState, head_line: usize, column: Option<usize>) ->
 /// that click was on the cursor's line, else the first on the line: the
 /// editor's own cursor column is not reachable from the window's key
 /// handler, and the change nav moves the line without a click. A removed
-/// line has no place in the head file and is no symbol.
+/// line or a split's base side resolves in the base file.
 pub fn symbol_at_cursor(state: ReviewState) -> Option<Symbol> {
     let file = state.active_file()?;
-    let head_line = file.buffer.head_line(state.cursor_line.get())?;
+    let display_line = state.cursor_line.get();
+    let on_base_pane =
+        state.last_position_base.get() || state.selection_base.with_untracked(Option::is_some);
+    let (line, base) = match file.buffer.row(display_line)? {
+        perch_git::Row::Deleted { base_line } => (base_line, true),
+        perch_git::Row::Head { head_line, .. } => {
+            if on_base_pane {
+                match file.base_of_display(display_line) {
+                    Some(base_line) => (base_line, true),
+                    None => (head_line, false),
+                }
+            } else {
+                (head_line, false)
+            }
+        }
+    };
     let column = state
         .last_position
         .get()
-        .filter(|(line, _)| *line == head_line)
+        .filter(|(l, _)| *l == line && state.last_position_base.get() == base)
         .map(|(_, column)| column);
-    symbol_on(state, head_line, column)
+    symbol_on_display(&file, display_line, line, base, column)
 }
 
 /// Ask where a symbol is: its references, or its implementations. The
@@ -87,10 +104,13 @@ pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locati
         asked: Some(symbol.clone()),
     });
     let (line, character) = (symbol.line as u32, symbol.column as u32);
+    let base_text = state.base_text_for(symbol);
     match kind {
-        Locations::Implementations => backend.implementation(token, &symbol.path, line, character),
+        Locations::Implementations => {
+            backend.implementation(token, &symbol.path, line, character, base_text)
+        }
         Locations::References | Locations::Definitions => {
-            backend.references(token, &symbol.path, line, character)
+            backend.references(token, &symbol.path, line, character, base_text)
         }
     }
 }
@@ -685,6 +705,7 @@ mod tests {
             line,
             character,
             text: text.into(),
+            base: false,
         }
     }
 
@@ -695,6 +716,7 @@ mod tests {
             line,
             character: 0,
             text: text.into(),
+            base: false,
         }
     }
 
@@ -931,6 +953,7 @@ mod tests {
                         path,
                         line,
                         character,
+                        ..
                     } => Some((token, path, line, character)),
                     _ => None,
                 })
@@ -942,6 +965,7 @@ mod tests {
             column: 4,
             end: 9,
             text: "alpha".into(),
+            base: false,
         };
         find(state, &backend, &symbol, Locations::References);
         let first = asked();
@@ -1121,6 +1145,7 @@ mod window {
             line,
             character: 0,
             text: text.into(),
+            base: false,
         };
         Arc::new(References {
             kind: Locations::References,
@@ -1135,6 +1160,7 @@ mod window {
                     line: 2,
                     character: 0,
                     text: "alpha".into(),
+                    base: false,
                 },
             ],
             pending: false,

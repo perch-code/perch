@@ -85,11 +85,21 @@ pub struct LoadedFile {
     /// The base side on its own, for the left of a split. `None` when the
     /// file is not in the changed list, or was added.
     pub base_buffer: Option<DisplayBuffer>,
+    /// The base side's text, shared so an ask to the language server about
+    /// a removed line does not copy the file.
+    pub base_text: Option<Arc<str>>,
     /// Which base line sits beside which head line, both 1-based, for a
     /// split: `(Some, Some)` is an unchanged or modified pair, `(Some,
     /// None)` a removed line, `(None, Some)` an added one. Empty for a
     /// file outside the changed list.
     pub alignment: Vec<(Option<usize>, Option<usize>)>,
+    /// Where each zero-based base line sits in `buffer`: its ghost row when
+    /// removed or rewritten, or its paired unchanged head row.
+    pub base_to_display: Vec<Option<usize>>,
+    /// Which zero-based base line each display line of `buffer` is: a
+    /// ghost's own, or an unchanged head row's aligned base line. `None`
+    /// for an added or rewritten head line.
+    pub display_to_base: Vec<Option<usize>>,
     /// The head blob, which the reveals are keyed by, as Viewed is: a new
     /// blob is new content and starts folded again. Empty for a file that
     /// has none: one outside the changed list, a deletion, or a working
@@ -126,8 +136,94 @@ pub struct Outline {
 }
 
 impl LoadedFile {
+    /// Build `base_to_display` and `display_to_base` from `buffer` and
+    /// `alignment` once when the file loads, so every row lookup is O(1).
+    pub fn base_maps(
+        buffer: &DisplayBuffer,
+        alignment: &[(Option<usize>, Option<usize>)],
+    ) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+        let mut base_to_display: Vec<Option<usize>> = Vec::new();
+        let mut display_to_base = vec![None; buffer.len()];
+        let mut set_base = |base: usize, display: usize| {
+            if base >= base_to_display.len() {
+                base_to_display.resize(base + 1, None);
+            }
+            base_to_display[base] = Some(display);
+        };
+        for &(base, head) in alignment {
+            let (Some(b), Some(h)) = (
+                base.and_then(|n| n.checked_sub(1)),
+                head.and_then(|n| n.checked_sub(1)),
+            ) else {
+                continue;
+            };
+            if let Some(display) = buffer.display_line(h) {
+                set_base(b, display);
+                if matches!(
+                    buffer.row(display),
+                    Some(Row::Head {
+                        status: perch_git::LineStatus::Unchanged,
+                        ..
+                    })
+                ) {
+                    display_to_base[display] = Some(b);
+                }
+            }
+        }
+        // A rewritten line has both an aligned head row and a ghost row
+        // above it; the base line itself lives on the ghost.
+        for (display, &row) in buffer.rows.iter().enumerate() {
+            if let Row::Deleted { base_line } = row {
+                set_base(base_line, display);
+                display_to_base[display] = Some(base_line);
+            }
+        }
+        (base_to_display, display_to_base)
+    }
+
     pub fn change_count(&self) -> usize {
         self.buffer.change_starts.len()
+    }
+
+    /// Where a zero-based base line sits in `buffer`.
+    pub fn display_of_base(&self, base_line: usize) -> Option<usize> {
+        self.base_to_display.get(base_line).copied().flatten()
+    }
+
+    /// Which zero-based base line a display line of `buffer` is, when it is
+    /// a ghost or an unchanged head line.
+    pub fn base_of_display(&self, display: usize) -> Option<usize> {
+        self.display_to_base.get(display).copied().flatten()
+    }
+
+    /// The zero-based head line an unchanged base line also is.
+    pub fn unchanged_head_of_base(&self, base_line: usize) -> Option<usize> {
+        self.buffer.head_line(self.display_of_base(base_line)?)
+    }
+
+    /// The zero-based base line an unchanged head line also is.
+    pub fn unchanged_base_of_head(&self, head_line: usize) -> Option<usize> {
+        self.base_of_display(self.buffer.display_line(head_line)?)
+    }
+
+    /// The zero-based head line paired with `base_line` in `alignment`,
+    /// unchanged or rewritten.
+    pub fn paired_head_of_base(&self, base_line: usize) -> Option<usize> {
+        let target = base_line + 1;
+        self.alignment
+            .iter()
+            .find_map(|&(base, head)| (base == Some(target)).then_some(head).flatten())
+            .and_then(|h| h.checked_sub(1))
+    }
+
+    /// The zero-based base line paired with `head_line` in `alignment`,
+    /// unchanged or rewritten.
+    pub fn paired_base_of_head(&self, head_line: usize) -> Option<usize> {
+        let target = head_line + 1;
+        self.alignment
+            .iter()
+            .find_map(|&(base, head)| (head == Some(target)).then_some(base).flatten())
+            .and_then(|b| b.checked_sub(1))
     }
 }
 
@@ -280,17 +376,34 @@ impl Layout {
     }
 }
 
-/// An identifier at a head position: what the pointer is over, and what
-/// the caret is on. `column` is where it starts on the line and `end`
-/// where it ends, both byte columns as the protocol counts them.
+/// An identifier at a position in the head or base file: what the pointer
+/// is over, and what the caret is on. `column` is where it starts on the
+/// line and `end` where it ends, both byte columns as the protocol counts
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Symbol {
     pub path: String,
-    /// 0-based head line.
+    /// 0-based line in the head file, or in the base file when `base` is true.
     pub line: usize,
     pub column: usize,
     pub end: usize,
     pub text: String,
+    /// True when `line` is counted in the file's base side rather than its head.
+    pub base: bool,
+}
+
+/// Every use in the file of the symbol the caret rests on, on each side of
+/// the diff, as zero-based line, start column and end column. Empty is none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Highlights {
+    pub head: Vec<(usize, usize, usize)>,
+    pub base: Vec<(usize, usize, usize)>,
+}
+
+impl Highlights {
+    pub fn is_empty(&self) -> bool {
+        self.head.is_empty() && self.base.is_empty()
+    }
 }
 
 /// What rust-analyzer said about a symbol, kept beside the symbol it
@@ -319,6 +432,8 @@ pub struct Located {
     pub character: usize,
     /// The line's text, trimmed of its indent.
     pub text: String,
+    /// True when `line` is counted in the file's base side rather than its head.
+    pub base: bool,
 }
 
 /// What a list of locations is a list of: the panel's heading and its
@@ -1359,25 +1474,35 @@ pub struct LiveDocs {
 pub enum LiveLayout {
     Stacked(LiveDoc),
     Split {
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "the view edits the base side through its own handle; only the tests read it here"
-            )
-        )]
         left: LiveDoc,
         right: LiveDoc,
+        active: RwSignal<crate::review::editor::Side>,
     },
 }
 
 impl LiveLayout {
     /// The document the folds are counted from: the stacked one, or the
     /// head side of a split, whose dividers the base side mirrors.
+    #[cfg(test)]
     pub fn head(&self) -> &LiveDoc {
         match self {
             LiveLayout::Stacked(live) => live,
             LiveLayout::Split { right, .. } => right,
+        }
+    }
+
+    /// The document whose cursor is currently the pane's.
+    pub fn active(&self) -> &LiveDoc {
+        match self {
+            LiveLayout::Stacked(live) => live,
+            LiveLayout::Split {
+                left,
+                right,
+                active,
+            } => match active.get_untracked() {
+                crate::review::editor::Side::Base => left,
+                crate::review::editor::Side::Head => right,
+            },
         }
     }
 }
@@ -2005,10 +2130,9 @@ pub struct ReviewState {
     pub pointer_symbol: RwSignal<Option<Symbol>>,
     /// The last hover asked for, and its answer once it lands.
     pub hover: RwSignal<Option<HoverAnswer>>,
-    /// Every other use in the file of the symbol the caret rests on, as
-    /// head line, start column and end column, tinted by the editor.
-    /// Empty is none.
-    pub highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+    /// Every other use in the file of the symbol the caret rests on, on
+    /// both sides of the diff, tinted by the editor. Empty is none.
+    pub highlights: RwSignal<Arc<Highlights>>,
     /// The document highlight asked for, with the symbol at the caret it
     /// is about, until the caret leaves the symbol.
     pub highlight_ask: RwSignal<Option<(u64, Symbol)>>,
@@ -2072,9 +2196,11 @@ pub struct ReviewState {
     /// tree, a definition or anywhere else. Kept for the life of the app,
     /// as `panes` is.
     pub recent_files: RwSignal<HashMap<String, Vec<String>>>,
-    /// A jump waiting to be made, as the file, the head line and the column
-    /// the caret lands on. The view with the file-opening closure takes it.
+    /// A jump waiting to be made, as the file, the line and the column the
+    /// caret lands on. The view with the file-opening closure takes it.
     pub pending_jump: RwSignal<Option<(String, usize, usize)>>,
+    /// True when `pending_jump` counts its line in the file's base side.
+    pub pending_jump_base: RwSignal<bool>,
     /// A file to open with no line to go to, as a link that names only the
     /// file opens it. Taken by the same view as `pending_jump`.
     pub pending_open: RwSignal<Option<String>>,
@@ -2103,9 +2229,12 @@ pub struct ReviewState {
     /// root view, which asks again what they answered with nothing while
     /// they loaded. See `ask_again`.
     pub pending_ready: RwSignal<Vec<perch_lsp::ServerKind>>,
-    /// A head line to scroll to once the file it belongs to is loaded.
+    /// A head line (or base line when `jump_base` is true) to scroll to
+    /// once the file it belongs to is loaded.
     pub jump_to_line: RwSignal<Option<usize>>,
-    /// Where the caret lands after `jump_to_line`, as the head line and a
+    /// True when `jump_to_line` and `jump_caret` name a base line.
+    pub jump_base: RwSignal<bool>,
+    /// Where the caret lands after `jump_to_line`, as the line and a
     /// column, when the jump is a navigation and not a scroll: a jump to a
     /// definition puts the caret on it, so the next jump remembers leaving
     /// from there. Read by the jump, and cleared by it.
@@ -2118,9 +2247,11 @@ pub struct ReviewState {
     /// Page Up, Page Down, Cmd-Up or Cmd-Down, pressed. Conversation or
     /// the open file's editor, whichever is showing, scrolls and clears it.
     pub paging: RwSignal<Option<Paging>>,
-    /// The head position the last request was made about, so the definition
-    /// button asks about the same symbol the panel is describing.
+    /// The position the last request was made about, so keyboard shortcuts
+    /// ask about the symbol the caret rests on.
     pub last_position: RwSignal<Option<(usize, usize)>>,
+    /// True when `last_position` is counted in the file's base side.
+    pub last_position_base: RwSignal<bool>,
     /// Directories open in the rail's tree. A checkout has thousands of
     /// entries, so only the way to each changed file starts open.
     pub expanded: RwSignal<std::collections::HashSet<String>>,
@@ -2334,7 +2465,7 @@ impl ReviewState {
             request_token: RwSignal::new(0),
             pointer_symbol: RwSignal::new(None),
             hover: RwSignal::new(None),
-            highlights: RwSignal::new(Arc::new(Vec::new())),
+            highlights: RwSignal::new(Arc::new(Highlights::default())),
             highlight_ask: RwSignal::new(None),
             symbols: RwSignal::new(HashMap::new()),
             find_open: RwSignal::new(false),
@@ -2355,6 +2486,7 @@ impl ReviewState {
             mentions: crate::review::mention::Mentions::new(),
             recent_files: RwSignal::new(HashMap::new()),
             pending_jump: RwSignal::new(None),
+            pending_jump_base: RwSignal::new(false),
             pending_open: RwSignal::new(None),
             opening_for_jump: RwSignal::new(false),
             names: RwSignal::new(HashMap::new()),
@@ -2365,10 +2497,12 @@ impl ReviewState {
             pending_server_starts: RwSignal::new(Vec::new()),
             pending_ready: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
+            jump_base: RwSignal::new(false),
             jump_caret: RwSignal::new(None),
             jump_through: RwSignal::new(None),
             paging: RwSignal::new(None),
             last_position: RwSignal::new(None),
+            last_position_base: RwSignal::new(false),
             expanded: RwSignal::new(std::collections::HashSet::new()),
             scroll_to_row: RwSignal::new(None),
         }
@@ -2511,6 +2645,8 @@ impl ReviewState {
         self.hierarchy_ask.set(None);
         self.pending_calls.set(Vec::new());
         self.pending_jump.set(None);
+        self.pending_jump_base.set(false);
+        self.jump_base.set(false);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));
         self.tabs.set(Vec::new());
@@ -2550,6 +2686,7 @@ impl ReviewState {
         self.clear_highlights();
         self.symbols.set(HashMap::new());
         self.last_position.set(None);
+        self.last_position_base.set(false);
         // The names were looked up in this checkout's worktree.
         self.names.set(HashMap::new());
         self.pending_names.set(Vec::new());
@@ -3361,6 +3498,14 @@ impl ReviewState {
         self.request_token.get()
     }
 
+    /// The base side's text for `symbol`, when `symbol` is counted in it.
+    pub fn base_text_for(&self, symbol: &Symbol) -> Option<Arc<str>> {
+        symbol
+            .base
+            .then(|| self.file(&symbol.path)?.base_text.clone())
+            .flatten()
+    }
+
     /// Ask about the symbol under the pointer. The answer's slot is taken
     /// at once, empty, so the tooltip can fill it in place when the answer
     /// lands with the same token; asking about a symbol whose answer is
@@ -3373,11 +3518,13 @@ impl ReviewState {
             return;
         }
         let token = self.next_token();
+        let base_text = self.base_text_for(&symbol);
         backend.hover(
             token,
             &symbol.path,
             symbol.line as u32,
             symbol.column as u32,
+            base_text,
         );
         self.hover.set(Some(HoverAnswer {
             symbol,
@@ -3390,14 +3537,15 @@ impl ReviewState {
     /// no tint, and no answer taken.
     pub fn clear_highlights(&self) {
         if !self.highlights.with_untracked(|h| h.is_empty()) {
-            self.highlights.set(Arc::new(Vec::new()));
+            self.highlights.set(Arc::new(Highlights::default()));
         }
         if self.highlight_ask.with_untracked(Option::is_some) {
             self.highlight_ask.set(None);
         }
     }
 
-    /// Ask for every use in the file of the symbol the caret rests on.
+    /// Ask for every use in the file of the symbol the caret rests on, on
+    /// both sides of the diff.
     pub fn ask_highlights(&self, backend: &crate::backend::Backend, symbol: Symbol) {
         if !self
             .lsp_status
@@ -3406,12 +3554,8 @@ impl ReviewState {
             return;
         }
         let token = self.next_token();
-        backend.document_highlight(
-            token,
-            &symbol.path,
-            symbol.line as u32,
-            symbol.column as u32,
-        );
+        let file = self.file(&symbol.path);
+        backend.document_highlight(token, symbol.clone(), file);
         self.highlight_ask.set(Some((token, symbol)));
     }
 
@@ -3480,7 +3624,7 @@ impl ReviewState {
 
     /// The uses arrived. Kept only for the ask still waiting: the caret
     /// may have moved on since.
-    pub fn finish_highlights(&self, token: u64, ranges: Vec<(usize, usize, usize)>) {
+    pub fn finish_highlights(&self, token: u64, ranges: Highlights) {
         if self
             .highlight_ask
             .with_untracked(|a| a.as_ref().is_some_and(|(t, _)| *t == token))
@@ -3514,11 +3658,33 @@ impl ReviewState {
                         // still be the last file's while this one opens.
                         // A file still loading is at its top.
                         let line = self.file(&path).and_then(|file| {
+                            let head_near = |display: usize| {
+                                file.buffer
+                                    .len()
+                                    .checked_sub(1)
+                                    .and_then(|last| {
+                                        (0..=display.min(last))
+                                            .rev()
+                                            .find_map(|d| file.buffer.head_line(d))
+                                    })
+                                    .or_else(|| {
+                                        (display..file.buffer.len())
+                                            .find_map(|d| file.buffer.head_line(d))
+                                    })
+                            };
                             self.file_places
                                 .with(|places| places.get(&path).and_then(|p| p.caret))
-                                .and_then(|(line, _)| file.buffer.head_line(line))
-                                .or_else(|| self.last_position.get().map(|(line, _)| line))
-                                .or_else(|| file.buffer.head_line(self.cursor_line.get()))
+                                .and_then(|(line, _)| head_near(line))
+                                .or_else(|| {
+                                    self.last_position.get().and_then(|(line, _)| {
+                                        if self.last_position_base.get() {
+                                            file.display_of_base(line).and_then(head_near)
+                                        } else {
+                                            Some(line)
+                                        }
+                                    })
+                                })
+                                .or_else(|| head_near(self.cursor_line.get()))
                         });
                         Spot::Line {
                             path,
@@ -3564,6 +3730,17 @@ impl ReviewState {
     /// caret lands at `column` on the line.
     pub fn navigate_to(&self, path: &str, line: usize, column: usize) {
         self.remember_here();
+        self.pending_jump_base.set(false);
+        self.pending_jump
+            .set(Some((path.to_string(), line, column)));
+    }
+
+    /// Jump to a zero-based base line of a file, remembering where the jump
+    /// left: lands on the removed ghost in the stacked layout, or on the
+    /// left side in a split.
+    pub fn navigate_to_base(&self, path: &str, line: usize, column: usize) {
+        self.remember_here();
+        self.pending_jump_base.set(true);
         self.pending_jump
             .set(Some((path.to_string(), line, column)));
     }
@@ -3620,6 +3797,7 @@ impl ReviewState {
                 }
             }
             Spot::Line { path, line } => {
+                self.pending_jump_base.set(false);
                 self.pending_jump.set(Some((path, line, 0)));
                 if self.tab.get_untracked() != ItemTab::Code {
                     self.tab.set(ItemTab::Code);
@@ -3631,11 +3809,19 @@ impl ReviewState {
     /// Open a location rust-analyzer named: the file, at the line, with
     /// the caret on the symbol.
     pub fn open_located(&self, located: &Located) {
-        self.navigate_to(
-            &located.path,
-            located.line.saturating_sub(1),
-            located.character,
-        );
+        if located.base {
+            self.navigate_to_base(
+                &located.path,
+                located.line.saturating_sub(1),
+                located.character,
+            );
+        } else {
+            self.navigate_to(
+                &located.path,
+                located.line.saturating_sub(1),
+                located.character,
+            );
+        }
     }
 
     /// Go to a file a comment or an answer names, on Code: at the head
@@ -3907,6 +4093,7 @@ impl ReviewState {
             line: root.selection_range.start.line as usize + 1,
             character: root.selection_range.start.character as usize,
             text: String::new(),
+            base: false,
         });
         let token = self.ask_calls(root.clone(), Direction::Callers);
         self.open_hierarchy(Hierarchy::new(root, place, Direction::Callers, token));
@@ -5915,20 +6102,7 @@ fn display_line_of_anchor_line(
 /// Where a zero-based base line appears in the unified display, as
 /// `display_line_of_anchor_line` maps the left side.
 pub(crate) fn display_line_of_base_line(file: &LoadedFile, line: usize) -> Option<usize> {
-    if let Some(display) = file
-        .buffer
-        .rows
-        .iter()
-        .position(|row| matches!(row, Row::Deleted { base_line } if *base_line == line))
-    {
-        return Some(display);
-    }
-    let base_line = line + 1;
-    let head_line = file
-        .alignment
-        .iter()
-        .find_map(|&(base, head)| (base == Some(base_line)).then_some(head).flatten())?;
-    file.buffer.display_line(head_line.checked_sub(1)?)
+    file.display_of_base(line)
 }
 
 /// The head ranges corresponding to a left-side anchor, for folds. Removed
@@ -8249,6 +8423,7 @@ mod tests {
             line,
             character: 4,
             text: "x".into(),
+            base: false,
         };
         let ask = |token| GotoAsk {
             token,

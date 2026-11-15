@@ -426,37 +426,42 @@ pub enum Command {
         path: String,
         line: u32,
         character: u32,
+        base_text: Option<Arc<str>>,
     },
     Definition {
         token: u64,
         path: String,
         line: u32,
         character: u32,
+        base_text: Option<Arc<str>>,
     },
     TypeDefinition {
         token: u64,
         path: String,
         line: u32,
         character: u32,
+        base_text: Option<Arc<str>>,
     },
     Implementation {
         token: u64,
         path: String,
         line: u32,
         character: u32,
+        base_text: Option<Arc<str>>,
     },
     References {
         token: u64,
         path: String,
         line: u32,
         character: u32,
+        base_text: Option<Arc<str>>,
     },
-    /// Every use in its file of the symbol at a position, as ranges.
+    /// Every use in its file of the symbol at a position, across both
+    /// sides of a diff, as ranges.
     DocumentHighlight {
         token: u64,
-        path: String,
-        line: u32,
-        character: u32,
+        symbol: crate::review::model::Symbol,
+        file: Option<Arc<crate::review::model::LoadedFile>>,
     },
     /// A file's outline, as the blocks its first lines pin over the code
     /// while the rest of them scrolls under. Opening a file asks for its
@@ -479,6 +484,7 @@ pub enum Command {
         path: String,
         line: u32,
         character: u32,
+        base_text: Option<Arc<str>>,
     },
     /// The callers of an item, or the functions it calls. The item goes
     /// back as the server gave it.
@@ -1743,11 +1749,11 @@ pub enum Event {
         token: u64,
         locations: Result<Vec<crate::review::model::Located>, String>,
     },
-    /// Every use in its file of a symbol: head line, start column, end
-    /// column, as the protocol counts them.
+    /// Every use in its file of a symbol, on both sides of a diff: line,
+    /// start column, end column, as the protocol counts them.
     LspDocumentHighlight {
         token: u64,
-        ranges: Vec<(usize, usize, usize)>,
+        ranges: crate::review::model::Highlights,
     },
     /// A file's outline, by its path.
     LspDocumentSymbols {
@@ -3342,21 +3348,33 @@ impl Backend {
         });
     }
 
-    pub fn references(&self, token: u64, path: &str, line: u32, character: u32) {
+    pub fn references(
+        &self,
+        token: u64,
+        path: &str,
+        line: u32,
+        character: u32,
+        base_text: Option<Arc<str>>,
+    ) {
         let _ = self.commands.send(Command::References {
             token,
             path: path.to_string(),
             line,
             character,
+            base_text,
         });
     }
 
-    pub fn document_highlight(&self, token: u64, path: &str, line: u32, character: u32) {
+    pub fn document_highlight(
+        &self,
+        token: u64,
+        symbol: crate::review::model::Symbol,
+        file: Option<Arc<crate::review::model::LoadedFile>>,
+    ) {
         let _ = self.commands.send(Command::DocumentHighlight {
             token,
-            path: path.to_string(),
-            line,
-            character,
+            symbol,
+            file,
         });
     }
 
@@ -3374,12 +3392,20 @@ impl Backend {
         });
     }
 
-    pub fn prepare_call_hierarchy(&self, token: u64, path: &str, line: u32, character: u32) {
+    pub fn prepare_call_hierarchy(
+        &self,
+        token: u64,
+        path: &str,
+        line: u32,
+        character: u32,
+        base_text: Option<Arc<str>>,
+    ) {
         let _ = self.commands.send(Command::PrepareCallHierarchy {
             token,
             path: path.to_string(),
             line,
             character,
+            base_text,
         });
     }
 
@@ -3952,39 +3978,71 @@ impl Backend {
         });
     }
 
-    pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
+    pub fn hover(
+        &self,
+        token: u64,
+        path: &str,
+        line: u32,
+        character: u32,
+        base_text: Option<Arc<str>>,
+    ) {
         let _ = self.commands.send(Command::Hover {
             token,
             path: path.to_string(),
             line,
             character,
+            base_text,
         });
     }
 
-    pub fn definition(&self, token: u64, path: &str, line: u32, character: u32) {
+    pub fn definition(
+        &self,
+        token: u64,
+        path: &str,
+        line: u32,
+        character: u32,
+        base_text: Option<Arc<str>>,
+    ) {
         let _ = self.commands.send(Command::Definition {
             token,
             path: path.to_string(),
             line,
             character,
+            base_text,
         });
     }
 
-    pub fn type_definition(&self, token: u64, path: &str, line: u32, character: u32) {
+    pub fn type_definition(
+        &self,
+        token: u64,
+        path: &str,
+        line: u32,
+        character: u32,
+        base_text: Option<Arc<str>>,
+    ) {
         let _ = self.commands.send(Command::TypeDefinition {
             token,
             path: path.to_string(),
             line,
             character,
+            base_text,
         });
     }
 
-    pub fn implementation(&self, token: u64, path: &str, line: u32, character: u32) {
+    pub fn implementation(
+        &self,
+        token: u64,
+        path: &str,
+        line: u32,
+        character: u32,
+        base_text: Option<Arc<str>>,
+    ) {
         let _ = self.commands.send(Command::Implementation {
             token,
             path: path.to_string(),
             line,
             character,
+            base_text,
         });
     }
 }
@@ -5648,6 +5706,7 @@ async fn run(
                 path,
                 line,
                 character,
+                base_text,
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
@@ -5657,7 +5716,14 @@ async fn run(
                     else {
                         return;
                     };
-                    if let Some(hover) = client.hover(&full, line, character).await {
+                    let hover = client
+                        .with_overlay(
+                            &full,
+                            base_text.as_deref(),
+                            client.hover(&full, line, character),
+                        )
+                        .await;
+                    if let Some(hover) = hover {
                         let markdown = render_hover(&hover);
                         if !markdown.trim().is_empty() {
                             let _ = events.send(Event::LspHover { token, markdown });
@@ -5749,6 +5815,7 @@ async fn run(
                 path,
                 line,
                 character,
+                base_text,
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
@@ -5763,44 +5830,37 @@ async fn run(
                         .ok()
                         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
                     let Some(worktree) = worktree else { return };
-                    let locations = match client.references(&full, line, character).await {
-                        Ok(found) => Ok(read_locations(&worktree, &found, Some(&client)).await),
-                        Err(e) => Err(e.to_string()),
-                    };
+                    let base_file = base_text.as_ref().map(|_| full.as_path());
+                    let locations = client
+                        .with_overlay(&full, base_text.as_deref(), async {
+                            match client.references(&full, line, character).await {
+                                Ok(found) => {
+                                    Ok(read_locations(&worktree, &found, Some(&client), base_file)
+                                        .await)
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        })
+                        .await;
                     let _ = events.send(Event::LspReferences { token, locations });
                 });
             }
             Command::DocumentHighlight {
                 token,
-                path,
-                line,
-                character,
+                symbol,
+                file,
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
+                    let Some((client, full)) =
+                        resolve(&checkout, &language_servers, &symbol.path).await
                     else {
                         return;
                     };
-                    // A range on one line is its columns; one that runs on
-                    // to another line is tinted to the end of its first,
-                    // which the editor clamps to the line.
-                    let ranges = client
-                        .document_highlight(&full, line, character)
-                        .await
-                        .into_iter()
-                        .map(|h| {
-                            let (start, end) = (h.range.start, h.range.end);
-                            let end_column = if end.line == start.line {
-                                end.character as usize
-                            } else {
-                                usize::MAX
-                            };
-                            (start.line as usize, start.character as usize, end_column)
-                        })
-                        .collect();
+                    let ranges =
+                        compute_document_highlights(&client, &full, &symbol, file.as_deref()).await;
                     let _ = events.send(Event::LspDocumentHighlight { token, ranges });
                 });
             }
@@ -5813,17 +5873,21 @@ async fn run(
                     else {
                         return;
                     };
-                    // A file opened before the server was there to be given
-                    // it is given it now, as the open would have. One the
-                    // open did give keeps what it was given.
-                    let text = match client.given(&full) {
-                        Some(given) => given.to_string(),
-                        None => {
-                            client.did_open(&full, &text).await;
-                            text
-                        }
-                    };
-                    send_outline(&client, &full, &text, path, &events).await;
+                    client
+                        .with_overlay(&full, None, async {
+                            // A file opened before the server was there to be given
+                            // it is given it now, as the open would have. One the
+                            // open did give keeps what it was given.
+                            let text = match client.given(&full) {
+                                Some(given) => given.to_string(),
+                                None => {
+                                    client.did_open(&full, &text).await;
+                                    text
+                                }
+                            };
+                            send_outline(&client, &full, &text, path, &events).await;
+                        })
+                        .await;
                 });
             }
             Command::RemovedSymbols { path, text } => {
@@ -5843,9 +5907,13 @@ async fn run(
                     }
                     // Given for as long as the outline takes, so the server
                     // is not left thinking the file is there.
-                    client.did_open(&full, &text).await;
-                    send_outline(&client, &full, &text, path, &events).await;
-                    client.did_close(&full).await;
+                    client
+                        .with_overlay(
+                            &full,
+                            Some(&text),
+                            send_outline(&client, &full, &text, path, &events),
+                        )
+                        .await;
                 });
             }
             Command::PrepareCallHierarchy {
@@ -5853,6 +5921,7 @@ async fn run(
                 path,
                 line,
                 character,
+                base_text,
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
@@ -5867,26 +5936,33 @@ async fn run(
                         .ok()
                         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
                     let Some(worktree) = worktree else { return };
-                    let items = client
-                        .prepare_call_hierarchy(&full, line, character)
-                        .await
-                        .map_err(|e| e.to_string());
-                    // Where the first item is, read as a location is, so the
-                    // root row has its path, line and text.
-                    let place = match items.as_deref().unwrap_or_default().first() {
-                        Some(item) => read_locations(
-                            &worktree,
-                            &[perch_lsp::lsp_types::Location {
-                                uri: item.uri.clone(),
-                                range: item.selection_range,
-                            }],
-                            Some(&client),
-                        )
-                        .await
-                        .into_iter()
-                        .next(),
-                        None => None,
-                    };
+                    let base_file = base_text.as_ref().map(|_| full.as_path());
+                    let (items, place) = client
+                        .with_overlay(&full, base_text.as_deref(), async {
+                            let items = client
+                                .prepare_call_hierarchy(&full, line, character)
+                                .await
+                                .map_err(|e| e.to_string());
+                            // Where the first item is, read as a location is, so the
+                            // root row has its path, line and text.
+                            let place = match items.as_deref().unwrap_or_default().first() {
+                                Some(item) => read_locations(
+                                    &worktree,
+                                    &[perch_lsp::lsp_types::Location {
+                                        uri: item.uri.clone(),
+                                        range: item.selection_range,
+                                    }],
+                                    Some(&client),
+                                    base_file,
+                                )
+                                .await
+                                .into_iter()
+                                .next(),
+                                None => None,
+                            };
+                            (items, place)
+                        })
+                        .await;
                     let _ = events.send(Event::LspCallHierarchy {
                         token,
                         items,
@@ -5930,6 +6006,7 @@ async fn run(
                 path,
                 line,
                 character,
+                base_text,
             } => {
                 spawn_goto(
                     Goto::Definition,
@@ -5937,6 +6014,7 @@ async fn run(
                     path,
                     line,
                     character,
+                    base_text,
                     checkout.clone(),
                     language_servers.clone(),
                     events.clone(),
@@ -5947,6 +6025,7 @@ async fn run(
                 path,
                 line,
                 character,
+                base_text,
             } => {
                 spawn_goto(
                     Goto::TypeDefinition,
@@ -5954,6 +6033,7 @@ async fn run(
                     path,
                     line,
                     character,
+                    base_text,
                     checkout.clone(),
                     language_servers.clone(),
                     events.clone(),
@@ -5964,6 +6044,7 @@ async fn run(
                 path,
                 line,
                 character,
+                base_text,
             } => {
                 spawn_goto(
                     Goto::Implementation,
@@ -5971,6 +6052,7 @@ async fn run(
                     path,
                     line,
                     character,
+                    base_text,
                     checkout.clone(),
                     language_servers.clone(),
                     events.clone(),
@@ -6022,6 +6104,7 @@ fn spawn_goto(
     path: String,
     line: u32,
     character: u32,
+    base_text: Option<Arc<str>>,
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     language_servers: Servers,
     events: EventSender<Event>,
@@ -6042,17 +6125,155 @@ fn spawn_goto(
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
         let Some(worktree) = worktree else { return };
-        let locations = match goto {
-            Goto::Definition => client.definition(&full, line, character).await,
-            Goto::TypeDefinition => client.type_definition(&full, line, character).await,
-            Goto::Implementation => client.implementation(&full, line, character).await,
-        };
-        let locations = match locations {
-            Ok(locations) => Ok(read_locations(&worktree, &locations, Some(&client)).await),
-            Err(e) => Err(e.to_string()),
-        };
+        let base_file = base_text.as_ref().map(|_| full.as_path());
+        let locations = client
+            .with_overlay(&full, base_text.as_deref(), async {
+                let locations = match goto {
+                    Goto::Definition => client.definition(&full, line, character).await,
+                    Goto::TypeDefinition => client.type_definition(&full, line, character).await,
+                    Goto::Implementation => client.implementation(&full, line, character).await,
+                };
+                match locations {
+                    Ok(locations) => {
+                        Ok(read_locations(&worktree, &locations, Some(&client), base_file).await)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            })
+            .await;
         let _ = events.send(answer(locations));
     });
+}
+
+/// Every use of `symbol` in its file across both sides of a diff: the
+/// side the caret is on is asked first, then bridged to the other side
+/// through an unchanged line or a paired hunk line so uses in both
+/// removed and added/unchanged code tint together.
+async fn compute_document_highlights(
+    client: &perch_lsp::Client,
+    full: &Path,
+    symbol: &crate::review::model::Symbol,
+    file: Option<&crate::review::model::LoadedFile>,
+) -> crate::review::model::Highlights {
+    let to_ranges = |items: Vec<perch_lsp::lsp_types::DocumentHighlight>| {
+        // A range on one line is its columns; one that runs on to another
+        // line is tinted to the end of its first, which the editor clamps.
+        items
+            .into_iter()
+            .map(|h| {
+                let (start, end) = (h.range.start, h.range.end);
+                let end_column = if end.line == start.line {
+                    end.character as usize
+                } else {
+                    usize::MAX
+                };
+                (start.line as usize, start.character as usize, end_column)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if !symbol.base {
+        let head = to_ranges(
+            client
+                .with_overlay(
+                    full,
+                    None,
+                    client.document_highlight(full, symbol.line as u32, symbol.column as u32),
+                )
+                .await,
+        );
+        let mut base = Vec::new();
+        if let Some((file, base_text)) = file.and_then(|f| Some((f, f.base_text.as_deref()?))) {
+            let bridge = file
+                .unchanged_base_of_head(symbol.line)
+                .map(|b| (b, symbol.column))
+                .or_else(|| {
+                    head.iter()
+                        .find_map(|&(h, start, _)| Some((file.unchanged_base_of_head(h)?, start)))
+                })
+                .or_else(|| {
+                    let b = file.paired_base_of_head(symbol.line)?;
+                    let line_str = base_text.lines().nth(b)?;
+                    Some((b, word_column_near(line_str, &symbol.text, symbol.column)?))
+                });
+            if let Some((b_line, b_col)) = bridge {
+                base = to_ranges(
+                    client
+                        .with_overlay(
+                            full,
+                            Some(base_text),
+                            client.document_highlight(full, b_line as u32, b_col as u32),
+                        )
+                        .await,
+                );
+            }
+        }
+        crate::review::model::Highlights { head, base }
+    } else {
+        let base = match file.and_then(|f| f.base_text.as_deref()) {
+            Some(base_text) => to_ranges(
+                client
+                    .with_overlay(
+                        full,
+                        Some(base_text),
+                        client.document_highlight(full, symbol.line as u32, symbol.column as u32),
+                    )
+                    .await,
+            ),
+            None => Vec::new(),
+        };
+        let mut head = Vec::new();
+        if let Some(file) = file.filter(|f| f.status != Some(perch_git::ChangeStatus::Deleted)) {
+            let bridge = file
+                .unchanged_head_of_base(symbol.line)
+                .map(|h| (h, symbol.column))
+                .or_else(|| {
+                    base.iter()
+                        .find_map(|&(b, start, _)| Some((file.unchanged_head_of_base(b)?, start)))
+                })
+                .or_else(|| {
+                    let h = file.paired_head_of_base(symbol.line)?;
+                    let d = file.buffer.display_line(h)?;
+                    let line_str = file.buffer.text.lines().nth(d)?;
+                    Some((h, word_column_near(line_str, &symbol.text, symbol.column)?))
+                });
+            if let Some((h_line, h_col)) = bridge {
+                head = to_ranges(
+                    client
+                        .with_overlay(
+                            full,
+                            None,
+                            client.document_highlight(full, h_line as u32, h_col as u32),
+                        )
+                        .await,
+                );
+            }
+        }
+        crate::review::model::Highlights { head, base }
+    }
+}
+
+/// Byte column of the whole-word occurrence of `ident` in `line` closest
+/// to `near`.
+fn word_column_near(line: &str, ident: &str, near: usize) -> Option<usize> {
+    if ident.is_empty() {
+        return None;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    let bytes = line.as_bytes();
+    let mut best: Option<usize> = None;
+    let mut from = 0;
+    while let Some(pos) = line[from..].find(ident) {
+        let start = from + pos;
+        let end = start + ident.len();
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_ident(bytes[end]);
+        if before_ok && after_ok && best.is_none_or(|b| start.abs_diff(near) < b.abs_diff(near)) {
+            best = Some(start);
+        }
+        from = start + ident.chars().next().map_or(1, char::len_utf8);
+    }
+    best
 }
 
 /// Look up names written in comments and answers: each identifier in them
@@ -6126,7 +6347,7 @@ fn spawn_names(
                         .iter()
                         .find(|c| c.kind() == perch_lsp::ServerKind::Jdtls)
                         .map(|c| c.as_ref());
-                    let located = read_locations(&worktree, &locations, jdtls).await;
+                    let located = read_locations(&worktree, &locations, jdtls, None).await;
                     (!located.is_empty()).then(|| (segments, Arc::new(located)))
                 }
                 None => None,
@@ -6221,7 +6442,7 @@ fn spawn_calls(
         };
         let mut calls = Vec::with_capacity(named.len());
         for (call_item, location) in named {
-            let Some(site) = read_locations(&worktree, &[location], Some(&client))
+            let Some(site) = read_locations(&worktree, &[location], Some(&client), None)
                 .await
                 .into_iter()
                 .next()
@@ -20763,8 +20984,12 @@ async fn announce_file(
         })
         .unwrap_or(false);
     if still_current {
-        client.did_open(&full, &text).await;
-        send_outline(&client, &full, &text, path, &events).await;
+        client
+            .with_overlay(&full, None, async {
+                client.did_open(&full, &text).await;
+                send_outline(&client, &full, &text, path, &events).await;
+            })
+            .await;
     }
 }
 
@@ -20841,6 +21066,7 @@ async fn read_locations(
     worktree: &Path,
     locations: &[perch_lsp::lsp_types::Location],
     client: Option<&perch_lsp::Client>,
+    base_file: Option<&Path>,
 ) -> Vec<crate::review::model::Located> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let mut texts: std::collections::HashMap<std::path::PathBuf, Vec<String>> =
@@ -20877,6 +21103,7 @@ async fn read_locations(
                     .get(line)
                     .map(|l| l.trim().to_string())
                     .unwrap_or_default(),
+                base: false,
             });
             continue;
         }
@@ -20895,7 +21122,7 @@ async fn read_locations(
         };
         if !texts.contains_key(&target) {
             // The server counts lines in the text it was given, which for
-            // a file shown under a commit is not the disk's.
+            // a file shown under a commit or a base overlay is not the disk's.
             let text = match client.and_then(|c| c.given(&target)) {
                 Some(given) => Some(given.to_string()),
                 None => tokio::fs::read_to_string(&target).await.ok(),
@@ -20916,6 +21143,7 @@ async fn read_locations(
             line: line + 1,
             character: location.range.start.character as usize,
             text,
+            base: base_file == Some(target.as_path()),
         });
     }
     out.sort_by(|a, b| {
@@ -20978,7 +21206,10 @@ pub(crate) fn build_loaded_file(
             truncated: true,
             scope,
             base_buffer: None,
+            base_text: None,
             alignment: Vec::new(),
+            base_to_display: Vec::new(),
+            display_to_base: Vec::new(),
             blob,
             picture: None,
         };
@@ -20997,19 +21228,29 @@ pub(crate) fn build_loaded_file(
     // gives the split view its base side and its row pairing. A file
     // outside the list is shown plainly, which is what makes browsing the
     // whole tree useful during a review.
-    let (buffer, base_buffer, alignment) = match status {
+    let (buffer, base_buffer, base_text, alignment) = match status {
         Some(_) => {
             let diff = file_diff(&base, &head);
             let alignment = perch_git::alignment(&diff, &base, &head);
-            let base_buffer = (!base.is_empty()).then(|| DisplayBuffer::plain(&base));
+            let (base_buffer, base_text) = if base.is_empty() {
+                (None, None)
+            } else {
+                (
+                    Some(DisplayBuffer::plain(&base)),
+                    Some(Arc::from(base.as_str())),
+                )
+            };
             (
                 DisplayBuffer::unified(&head, &base, &diff),
                 base_buffer,
+                base_text,
                 alignment,
             )
         }
-        None => (DisplayBuffer::plain(&head), None, Vec::new()),
+        None => (DisplayBuffer::plain(&head), None, None, Vec::new()),
     };
+    let (base_to_display, display_to_base) =
+        crate::review::model::LoadedFile::base_maps(&buffer, &alignment);
 
     let spans_for = |text: &str, lang: Option<Language>| match lang {
         Some(lang) if !text.is_empty() => LineSpans::new(text, &highlight(lang, text)),
@@ -21027,7 +21268,10 @@ pub(crate) fn build_loaded_file(
         truncated: false,
         scope,
         base_buffer,
+        base_text,
         alignment,
+        base_to_display,
+        display_to_base,
         blob,
         picture,
     }
@@ -24879,8 +25123,13 @@ while True:
             uri: uri.parse().unwrap(),
             range: perch_lsp::lsp_types::Range { start: at, end: at },
         };
-        let located =
-            read_locations(&worktree, std::slice::from_ref(&location), Some(&jdtls)).await;
+        let located = read_locations(
+            &worktree,
+            std::slice::from_ref(&location),
+            Some(&jdtls),
+            None,
+        )
+        .await;
         let key = "jdt://contents/java.base/java.util/List.class";
         assert_eq!(located.len(), 1);
         assert_eq!(located[0].path, key);
@@ -24888,7 +25137,7 @@ while True:
         assert_eq!(located[0].line, 2);
         assert_eq!(located[0].text, "public interface List<E> {}");
         // Without jdtls a class file is nothing to read.
-        assert!(read_locations(&worktree, &[location], None)
+        assert!(read_locations(&worktree, &[location], None, None)
             .await
             .is_empty());
 
@@ -25008,7 +25257,13 @@ while True:
             uri: perch_lsp::client::path_to_uri(&full).unwrap(),
             range: perch_lsp::lsp_types::Range { start: at, end: at },
         };
-        let located = read_locations(&worktree, std::slice::from_ref(&location), Some(&rust)).await;
+        let located = read_locations(
+            &worktree,
+            std::slice::from_ref(&location),
+            Some(&rust),
+            None,
+        )
+        .await;
         assert_eq!(
             located[0].text, "fn shown() {}",
             "a line is read as the server counts it"
@@ -25021,7 +25276,7 @@ while True:
         );
         close_given_files(&ctx.language_servers, &worktree).await;
         assert_eq!(rust.given(&full), None, "read from disk again");
-        let located = read_locations(&worktree, &[location], Some(&rust)).await;
+        let located = read_locations(&worktree, &[location], Some(&rust), None).await;
         assert_eq!(located[0].text, "fn head() {}");
         rust.shutdown().await;
     }

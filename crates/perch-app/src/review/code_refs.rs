@@ -1016,6 +1016,7 @@ pub(crate) fn located(path: &str, line: usize, character: usize) -> Located {
         line,
         character,
         text: String::new(),
+        base: false,
     }
 }
 

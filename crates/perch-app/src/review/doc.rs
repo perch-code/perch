@@ -203,6 +203,9 @@ pub struct Doc {
     /// The head line each row is, for the rows that are one. A ghost, a
     /// filler, a divider and a spacer are none.
     heads: Vec<Option<usize>>,
+    /// The base line each row is, when the row shows one: a ghost in the
+    /// stacked layout, or any line of the base side in a split.
+    bases: Vec<Option<usize>>,
     /// The byte offset each row's text starts at.
     starts: Vec<usize>,
     /// The piece of its line each row shows. The whole line, from its
@@ -525,6 +528,19 @@ impl Doc {
         Some((self.head_line(row)?, column))
     }
 
+    /// The base line a row is, when it shows one: a ghost in the stacked
+    /// layout, or a line of the base side in a split.
+    pub fn base_line(&self, row: usize) -> Option<usize> {
+        self.bases.get(row).copied().flatten()
+    }
+
+    /// Where a byte offset in the text lands in the base file, as line and
+    /// column, when it lands on a base row.
+    pub fn base_position(&self, offset: usize) -> Option<(usize, usize)> {
+        let (row, column) = self.locate(offset);
+        Some((self.base_line(row)?, column))
+    }
+
     /// The display line nearest a row, looking down the file first, for a
     /// cursor that lands on a row that is no line.
     pub fn nearest_display_line(&self, row: usize) -> Option<usize> {
@@ -541,16 +557,17 @@ impl Doc {
 }
 
 /// What one side of a split has on a row: its line, as its display line,
-/// tint, text and head line, or nothing, for a filler.
-type SideLine<'a> = Option<(usize, Tint, &'a str, Option<usize>)>;
+/// tint, text, head line and base line, or nothing, for a filler.
+type SideLine<'a> = Option<(usize, Tint, &'a str, Option<usize>, Option<usize>)>;
 
 /// A document under construction: the lines joined as the editor wants
-/// them, with the head line of each row noted for the tables.
+/// them, with the head and base lines of each row noted for the tables.
 struct Builder {
     text: String,
     rows: Vec<DocRow>,
     folds: Vec<Run>,
     heads: Vec<Option<usize>>,
+    bases: Vec<Option<usize>>,
     starts: Vec<usize>,
     pieces: Vec<Piece>,
 }
@@ -562,6 +579,7 @@ impl Builder {
             rows: Vec::with_capacity(rows),
             folds: folds.to_vec(),
             heads: Vec::with_capacity(rows),
+            bases: Vec::with_capacity(rows),
             starts: Vec::with_capacity(rows),
             pieces: Vec::with_capacity(rows),
         }
@@ -569,7 +587,7 @@ impl Builder {
 
     /// A row that is no line, with no text.
     fn push(&mut self, row: DocRow) {
-        self.push_piece(row, "", "", None, Piece::default());
+        self.push_piece(row, "", "", None, None, Piece::default());
     }
 
     fn push_piece(
@@ -578,6 +596,7 @@ impl Builder {
         indent: &str,
         text: &str,
         head: Option<usize>,
+        base: Option<usize>,
         piece: Piece,
     ) {
         if !self.rows.is_empty() {
@@ -588,6 +607,7 @@ impl Builder {
         self.text.push_str(text);
         self.rows.push(row);
         self.heads.push(head);
+        self.bases.push(base);
         self.pieces.push(piece);
     }
 
@@ -599,6 +619,7 @@ impl Builder {
         tint: Tint,
         line: &str,
         head: Option<usize>,
+        base: Option<usize>,
         columns: Option<usize>,
     ) -> usize {
         let (breaks, indent) = match columns {
@@ -617,7 +638,7 @@ impl Builder {
                 len: to - from,
                 indent: indent.len(),
             };
-            self.push_piece(row, indent, &line[from..to], head, piece);
+            self.push_piece(row, indent, &line[from..to], head, base, piece);
             from = to;
         }
         breaks.len() + 1
@@ -627,7 +648,9 @@ impl Builder {
     /// it wraps to, or a filler; how many rows.
     fn push_side(&mut self, line: SideLine, columns: Option<usize>) -> usize {
         match line {
-            Some((display, tint, text, head)) => self.push_line(display, tint, text, head, columns),
+            Some((display, tint, text, head, base)) => {
+                self.push_line(display, tint, text, head, base, columns)
+            }
             None => {
                 self.push(DocRow::Filler);
                 1
@@ -639,7 +662,7 @@ impl Builder {
     /// length before the row was pushed: a line with blank rows of its
     /// own under it, and a filler with fillers.
     fn level(&mut self, line: SideLine, from: usize, rows: usize) {
-        let Some((display, tint, text, head)) = line else {
+        let Some((display, tint, text, head, base)) = line else {
             return self.fill_to(from, rows);
         };
         let piece = Piece {
@@ -648,7 +671,7 @@ impl Builder {
             indent: 0,
         };
         while self.rows.len() < from + rows {
-            self.push_piece(DocRow::Wrap { display, tint }, "", "", head, piece);
+            self.push_piece(DocRow::Wrap { display, tint }, "", "", head, base, piece);
         }
     }
 
@@ -719,6 +742,7 @@ impl Builder {
             rows: self.rows,
             folds: self.folds,
             heads: self.heads,
+            bases: self.bases,
             starts: self.starts,
             pieces: self.pieces,
             display_rows,
@@ -784,11 +808,16 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card], columns: Opt
             continue;
         }
         let row = buffer.rows[display];
+        let base = match row {
+            Row::Deleted { base_line } => Some(base_line),
+            Row::Head { .. } => None,
+        };
         out.push_line(
             display,
             tint_of(row),
             lines.get(display).copied().unwrap_or(""),
             row.head_line(),
+            base,
             columns,
         );
         out.push_cards(cards, display);
@@ -875,7 +904,13 @@ pub fn build_split(
                 None | Some(LineStatus::Modified) => Tint::Deleted,
                 Some(_) => Tint::Plain,
             };
-            (b, tint, base_lines.get(b).copied().unwrap_or(""), None)
+            (
+                b,
+                tint,
+                base_lines.get(b).copied().unwrap_or(""),
+                None,
+                Some(b),
+            )
         });
         let right_line: SideLine = match (display, head_status) {
             (Some(d), Some(status)) => {
@@ -884,7 +919,13 @@ pub fn build_split(
                     LineStatus::Modified => Tint::Modified,
                     LineStatus::Unchanged => Tint::Plain,
                 };
-                Some((d, tint, head_lines.get(d).copied().unwrap_or(""), head_line))
+                Some((
+                    d,
+                    tint,
+                    head_lines.get(d).copied().unwrap_or(""),
+                    head_line,
+                    None,
+                ))
             }
             _ => None,
         };

@@ -78,10 +78,10 @@ impl Fit {
 }
 
 /// The identifier the character at a byte offset of an editor's document
-/// belongs to, as a symbol in the head file `path`. The offset is a
-/// character's, not a caret's: the one under the pointer, so a pointer on
-/// the `(` after a name is on nothing, where a caret there would still be
-/// on the name. `None` on a row that is no head line too.
+/// belongs to, as a symbol in `path` on whichever side of the diff the
+/// row shows. The offset is a character's, not a caret's: the one under
+/// the pointer, so a pointer on the `(` after a name is on nothing, where
+/// a caret there would still be on the name.
 pub fn symbol_at(doc: &Doc, path: &str, offset: usize) -> Option<Symbol> {
     // The character in the document, not the line's at the column: in the
     // indent a wrapped row repeats, the pointer is on a space.
@@ -93,7 +93,10 @@ pub fn symbol_at(doc: &Doc, path: &str, offset: usize) -> Option<Symbol> {
         return None;
     }
     let (row, column) = doc.locate(offset);
-    let line = doc.head_line(row)?;
+    let (line, base) = doc
+        .head_line(row)
+        .map(|l| (l, false))
+        .or_else(|| doc.base_line(row).map(|l| (l, true)))?;
     let text = doc.source_line(row);
     let (start, text) = identifier_at(&text, column)?;
     Some(Symbol {
@@ -102,6 +105,7 @@ pub fn symbol_at(doc: &Doc, path: &str, offset: usize) -> Option<Symbol> {
         column: start,
         end: start + text.len(),
         text: text.to_string(),
+        base,
     })
 }
 
@@ -349,8 +353,19 @@ mod tests {
         let doc = doc::build(&buffer, &[], &[], None);
         // Row 0 is `fn alpha`, row 1 the ghost of `old_name`, row 2 `new_name`.
         assert_eq!(doc.head_line(1), None, "the ghost is no head line");
+        assert_eq!(doc.base_line(1), Some(1), "the ghost is base line 1");
         let on_ghost = doc.offset_of_row(1) + 4;
-        assert_eq!(symbol_at(&doc, "src/x.rs", on_ghost), None);
+        assert_eq!(
+            symbol_at(&doc, "src/x.rs", on_ghost),
+            Some(Symbol {
+                path: "src/x.rs".into(),
+                line: 1,
+                column: 3,
+                end: 11,
+                text: "old_name".into(),
+                base: true,
+            })
+        );
 
         let on_new = doc.offset_of_row(2) + 5;
         assert_eq!(
@@ -361,6 +376,7 @@ mod tests {
                 column: 3,
                 end: 11,
                 text: "new_name".into(),
+                base: false,
             })
         );
 

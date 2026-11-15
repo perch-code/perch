@@ -43,8 +43,8 @@ use crate::icons::SidebarIcon;
 use crate::review::cards::{tip, tip_with};
 use crate::review::conversation_find;
 use crate::review::doc::Doc;
-use crate::review::editor;
-use crate::review::model::{Layout, LiveDoc, ReviewState};
+use crate::review::editor::Side;
+use crate::review::model::{Layout, LiveDoc, LiveLayout, ReviewState};
 use crate::review::references;
 use crate::theme;
 use crate::ui::widgets::{clickable, sidebar_glyph};
@@ -351,15 +351,6 @@ pub fn wire(state: ReviewState) {
             },
             _ => (Vec::new(), None),
         };
-        // A split's head side has no row for a removed line, and the base
-        // side is over the base file; a match on a ghost is nowhere to go.
-        let found = match &file {
-            Some(file) if layout == Layout::Split && editor::splits(file) => found
-                .into_iter()
-                .filter(|m| !file.buffer.row(m.display).is_some_and(|r| r.is_deleted()))
-                .collect(),
-            _ => found,
-        };
         let found = Arc::new(found);
 
         // Written only when they change: the editor lays its rows out
@@ -446,7 +437,7 @@ pub fn close(state: ReviewState, pane: Pane) {
     // The box goes with the bar, and a view taken down is told nothing;
     // said here so the code's keys are back before the next press.
     state.find_focused.set(false);
-    match head_live(state).and_then(|live| live.content) {
+    match active_live(state).and_then(|live| live.content) {
         Some(content) => content.request_focus(),
         // No editor, while the file loads: the keyboard is nobody's
         // rather than the gone box's.
@@ -509,12 +500,16 @@ pub(crate) fn keep_keyboard(state: ReviewState) {
     }
 }
 
-/// The editor that has the file, as the live documents have it: the
-/// stacked one, or the head side of a split. Nothing while no editor is
-/// up, or while the entry is an editor's since rebuilt.
-fn head_live(state: ReviewState) -> Option<LiveDoc> {
+/// The open editors of the current epoch, or `None` while none is up or
+/// while the entry is an editor's since rebuilt.
+fn live_layout(state: ReviewState) -> Option<LiveLayout> {
     let docs = state.docs.get_untracked()?;
-    (docs.epoch == state.editor_epoch.get_untracked()).then(|| docs.layout.head().clone())
+    (docs.epoch == state.editor_epoch.get_untracked()).then_some(docs.layout)
+}
+
+/// The editor whose cursor is currently the pane's.
+fn active_live(state: ReviewState) -> Option<LiveDoc> {
+    Some(live_layout(state)?.active().clone())
 }
 
 /// The editor's selection as byte offsets in its text, the two the same
@@ -530,12 +525,47 @@ fn selection(live: &LiveDoc) -> Option<(usize, usize)> {
     })
 }
 
-/// Where the caret is, as a display line and a byte column: the start of
-/// the selection, or its end when `end`. A caret on a row that is no
-/// line, a divider's or a card's, is at the start of the nearest line.
+/// Where the caret is, as a unified display line and a byte column: the
+/// start of the selection, or its end when `end`. On a split's base side
+/// the row's base line is mapped into the unified buffer; a caret on a
+/// row that is no line is at the start of the nearest line.
 fn caret(state: ReviewState, end: bool) -> Option<(usize, usize)> {
-    let live = head_live(state)?;
-    let (lo, hi) = selection(&live)?;
+    let layout = live_layout(state)?;
+    match layout {
+        LiveLayout::Stacked(live) => caret_in_head(&live, end),
+        LiveLayout::Split {
+            left,
+            right,
+            active,
+        } => match active.get_untracked() {
+            Side::Head => caret_in_head(&right, end),
+            Side::Base => {
+                let file = Effect::untrack(|| state.active_file())?;
+                let (lo, hi) = selection(&left)?;
+                let offset = if end { hi } else { lo };
+                left.doc.try_with_untracked(|d| {
+                    let d = d?;
+                    let (row, column) = d.locate(offset);
+                    if let Some(base_line) = d.display_line(row) {
+                        return Some((file.display_of_base(base_line)?, column));
+                    }
+                    let on_right = right
+                        .doc
+                        .try_with_untracked(|r| r.and_then(|r| r.display_line(row)));
+                    let nearest = on_right.or_else(|| {
+                        d.nearest(row, |r| {
+                            d.display_line(r).and_then(|b| file.display_of_base(b))
+                        })
+                    })?;
+                    Some((nearest, 0))
+                })
+            }
+        },
+    }
+}
+
+fn caret_in_head(live: &LiveDoc, end: bool) -> Option<(usize, usize)> {
+    let (lo, hi) = selection(live)?;
     let offset = if end { hi } else { lo };
     live.doc.try_with_untracked(|d| {
         let d = d?;
@@ -547,10 +577,10 @@ fn caret(state: ReviewState, end: bool) -> Option<(usize, usize)> {
     })
 }
 
-/// What Cmd-F looks for: the editor's selection, when there is one and
-/// it is on one line, or else the word the caret is on.
+/// What Cmd-F looks for: the active editor's selection, when there is one
+/// and it is on one line, or else the word the caret is on.
 fn seed(state: ReviewState) -> Option<String> {
-    let live = head_live(state)?;
+    let live = active_live(state)?;
     let (lo, hi) = selection(&live)?;
     live.doc.try_with_untracked(|d| {
         let d = d?;
@@ -568,22 +598,62 @@ fn seed(state: ReviewState) -> Option<String> {
 /// Select a match in the editor, which scrolls to its caret, and reveal
 /// the fold it is in first: the reveal reaches the editor before this
 /// goes on, since the effect that rebuilds the document runs on the
-/// write. A match with no row after that, a ghost's on a split's head
-/// side, is left where it is.
+/// write. In a split, a removed line's match selects on the base side and
+/// a head line's on the head side, switching the active side first so the
+/// other side's deselection does not cancel the scroll.
 fn go_to(state: ReviewState, m: Match) {
-    let Some(live) = head_live(state) else { return };
+    let Some(layout) = live_layout(state) else {
+        return;
+    };
     let Some(file) = Effect::untrack(|| state.active_file()) else {
         return;
     };
-    let row_of = |d: Option<&Arc<Doc>>| d.and_then(|d| d.row_of_display(m.display));
-    let mut row = live.doc.try_with_untracked(row_of);
-    if row.is_none() {
-        if let Some(head) = file.buffer.head_line(m.display) {
-            state.reveal_around(&file, head);
-            row = live.doc.try_with_untracked(row_of);
+    let (live, row) = match layout {
+        LiveLayout::Stacked(live) => {
+            let row_of = |d: Option<&Arc<Doc>>| d.and_then(|d| d.row_of_display(m.display));
+            let mut row = live.doc.try_with_untracked(row_of);
+            if row.is_none() {
+                if let Some(head) = file.buffer.head_line(m.display) {
+                    state.reveal_around(&file, head);
+                    row = live.doc.try_with_untracked(row_of);
+                }
+            }
+            let Some(row) = row else { return };
+            (live, row)
         }
-    }
-    let Some(row) = row else { return };
+        LiveLayout::Split {
+            left,
+            right,
+            active,
+        } => match file.buffer.row(m.display) {
+            Some(perch_git::Row::Deleted { base_line }) => {
+                let Some(row) = left
+                    .doc
+                    .try_with_untracked(|d| d.and_then(|d| d.row_of_display(base_line)))
+                else {
+                    return;
+                };
+                if active.get_untracked() != Side::Base {
+                    active.set(Side::Base);
+                }
+                (left, row)
+            }
+            Some(perch_git::Row::Head { head_line, .. }) => {
+                let row_of = |d: Option<&Arc<Doc>>| d.and_then(|d| d.row_of_display(m.display));
+                let mut row = right.doc.try_with_untracked(row_of);
+                if row.is_none() {
+                    state.reveal_around(&file, head_line);
+                    row = right.doc.try_with_untracked(row_of);
+                }
+                let Some(row) = row else { return };
+                if active.get_untracked() != Side::Head {
+                    active.set(Side::Head);
+                }
+                (right, row)
+            }
+            None => return,
+        },
+    };
     let Some((start, end)) = live.doc.try_with_untracked(|d| {
         let d = d?;
         Some((d.offset_at(row, m.start), d.end_offset_at(row, m.end)))
@@ -1800,7 +1870,7 @@ mod window {
     }
 
     #[test]
-    fn in_a_split_the_head_side_is_searched_and_a_ghost_is_not() {
+    fn in_a_split_both_sides_are_searched_and_each_match_lands_on_its_side() {
         let (mut harness, state) = harness();
         state.layout.set(Layout::Split);
         harness.rebuild();
@@ -1810,23 +1880,69 @@ mod window {
         typed(&mut harness, "path");
         assert_eq!(
             *state.find_matches.get(),
-            vec![m(0, 4, 8), m(2, 8, 12), m(4, 8, 12)],
-            "the ghost's path has no row on the head side"
+            vec![m(0, 4, 8), m(1, 8, 12), m(2, 8, 12), m(4, 8, 12)],
+            "both the base ghost and the head lines are found"
         );
+        let crate::review::model::LiveLayout::Split {
+            left,
+            right,
+            active,
+        } = state.docs.get().unwrap().layout
+        else {
+            panic!("split layout");
+        };
+        assert_eq!(state.find_current.get(), Some(0));
+
+        // Enter steps onto the deleted match on the left (base) side.
         harness.dispatch_event(enter(Modifiers::empty()));
         harness.rebuild();
         assert_eq!(state.find_current.get(), Some(1));
-        let right = live(state);
+        assert_eq!(active.get(), crate::review::editor::Side::Base);
+        let (lo, hi) = left.cursor.with(|c| {
+            c.regions_iter()
+                .fold((usize::MAX, 0), |(lo, hi), (a, b, _)| {
+                    (lo.min(a.min(b)), hi.max(a.max(b)))
+                })
+        });
+        assert_eq!(&left.doc.get().text[lo..hi], "path");
+        let left_row = left.doc.get().row_of_display(1).unwrap();
+        assert_eq!(lo, left.doc.get().offset_of_row(left_row) + 8);
+
+        // Next Enter steps onto the added match on the right (head) side.
+        harness.dispatch_event(enter(Modifiers::empty()));
+        harness.rebuild();
+        assert_eq!(state.find_current.get(), Some(2));
+        assert_eq!(active.get(), crate::review::editor::Side::Head);
         let (lo, hi) = selection(state);
         assert_eq!(&right.doc.get().text[lo..hi], "Path");
         let row = right.doc.get().row_of_display(2).unwrap();
         assert_eq!(lo, right.doc.get().offset_of_row(row) + 8);
 
-        // Back to stacked: the ghost's is back, and the bar starts over.
+        // Escape while on the left match focuses the left editor, and Cmd-F
+        // from a word on the left seeds the query from the left side.
+        harness.dispatch_event(enter(Modifiers::SHIFT));
+        harness.rebuild();
+        assert_eq!(active.get(), crate::review::editor::Side::Base);
+        harness.dispatch_event(escape());
+        harness.rebuild();
+        assert!(harness.is_focused(left.content.unwrap()));
+        left.cursor.update(|c| {
+            c.set_insert(floem::views::editor::core::selection::Selection::caret(
+                left.doc.get().offset_of_row(left_row),
+                floem::views::editor::core::cursor::CursorAffinity::Backward,
+            ))
+        });
+        harness.rebuild();
+        harness.dispatch_event(cmd(Code::KeyF, "f"));
+        harness.rebuild();
+        assert_eq!(state.find_query.get(), "let");
+        assert_eq!(state.find_current.get(), Some(1));
+
+        // Back to stacked: all five `let` matches stay, and the bar starts over.
         state.layout.set(Layout::Stacked);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.find_matches.with(|m| m.len()), 4);
+        assert_eq!(state.find_matches.with(|m| m.len()), 5);
         assert_eq!(state.find_current.get(), None);
     }
 

@@ -51,6 +51,7 @@ pub fn show(state: ReviewState, backend: &Backend, symbol: &Symbol) {
         &symbol.path,
         symbol.line as u32,
         symbol.column as u32,
+        state.base_text_for(symbol),
     );
 }
 
@@ -457,6 +458,7 @@ mod tests {
                 line: line as usize + 4,
                 character: 8,
                 text: text.into(),
+                base: false,
             },
         }
     }
@@ -468,6 +470,7 @@ mod tests {
             line: 1,
             character: 3,
             text: "fn run()".into(),
+            base: false,
         }
     }
 
@@ -575,6 +578,7 @@ mod tests {
             line: 9,
             character: 0,
             text: "run()".into(),
+            base: false,
         };
         assert_eq!(place_label(&site), "task.rs:9 \u{00b7} tokio 1.40.0");
     }
@@ -593,6 +597,7 @@ mod tests {
             column: 8,
             end: 11,
             text: "run".into(),
+            base: false,
         };
 
         show(state, &backend, &symbol);
@@ -673,6 +678,7 @@ mod tests {
             column: 8,
             end: 11,
             text: "run".into(),
+            base: false,
         };
         let loading = "rust-analyzer is still loading";
 

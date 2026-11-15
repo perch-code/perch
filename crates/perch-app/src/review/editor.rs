@@ -92,12 +92,15 @@ pub fn editor_pane(
         Effect::new(move |_| {
             if let Some((path, line, column)) = state.pending_jump.get() {
                 state.pending_jump.set(None);
+                let base = state.pending_jump_base.get_untracked();
+                state.pending_jump_base.set(false);
                 if state
                     .active
                     .with_untracked(|a| a.as_deref() != Some(path.as_str()))
                 {
                     state.open_for_jump(|| open_file(&path));
                 }
+                state.jump_base.set(base);
                 state.jump_caret.set(Some((line, column)));
                 state.jump_to_line.set(Some(line));
             }
@@ -480,7 +483,7 @@ fn stacked_view(
     // The folds are wired before the jump: a jump into a fold reveals it,
     // and the reveal has to reach the editor before the jump looks for the
     // row to scroll to.
-    wire_highlights(state, &live, live_file);
+    wire_highlights(state, &live, live_file, None);
     let columns = wrap_columns(state, viewport, Layout::Stacked);
     let heading = heading(viewport, scroll_to);
     wire_folds(state, live_file, memos, columns, epoch, {
@@ -514,7 +517,7 @@ fn stacked_view(
         cursor,
         epoch,
     );
-    wire_jump(state, live_file, doc, scroll_to, cursor, epoch);
+    wire_jump(state, live_file, doc, scroll_to, cursor, None, epoch);
     wire_page(state, doc, viewport, scroll_delta, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
@@ -1505,12 +1508,18 @@ fn split_view(
     );
     let line_height = theme::code_line_height() as f64;
 
+    // The side whose cursor is the pane's, the one the reader last moved;
+    // see `wire_cursor`. The other side's selection goes, so that there is
+    // one, as on a page.
+    let active = RwSignal::new(Side::Head);
+
     // Distinct cache keys, in case the two ever share a layout cache.
     let left = code_editor(
         left_text,
         PerchStyling::side(
             live_file,
             Side::Base,
+            active,
             left_doc,
             state.highlights,
             state.find_matches,
@@ -1524,6 +1533,7 @@ fn split_view(
         PerchStyling::side(
             live_file,
             Side::Head,
+            active,
             right_doc,
             state.highlights,
             state.find_matches,
@@ -1538,6 +1548,7 @@ fn split_view(
         layout: LiveLayout::Split {
             left: left_live.clone(),
             right: right_live.clone(),
+            active,
         },
     }));
 
@@ -1555,10 +1566,6 @@ fn split_view(
     );
     // Where an edit last moved each cursor to.
     let (left_shifted, right_shifted) = (RwSignal::new(None), RwSignal::new(None));
-    // The side whose cursor is the pane's, the one the reader last moved;
-    // see `wire_cursor`. The other side's selection goes, so that there is
-    // one, as on a page.
-    let active = RwSignal::new(Side::Head);
     Effect::new(move |before: Option<Side>| {
         let now = active.get();
         if before.is_some_and(|before| before != now) {
@@ -1574,8 +1581,8 @@ fn split_view(
 
     // The folds are wired before the jump, as in the stacked layout. The
     // right is edited first: it owns the scroll, and the left follows.
-    wire_highlights(state, &right_live, live_file);
-    wire_highlights(state, &left_live, live_file);
+    wire_highlights(state, &right_live, live_file, Some(active));
+    wire_highlights(state, &left_live, live_file, Some(active));
     // The two sides are the same width, so the head's says for both.
     let columns = wrap_columns(state, right_viewport, Layout::Split);
     let right_heading = heading(right_viewport, right_scroll_to);
@@ -1652,6 +1659,7 @@ fn split_view(
         right_doc,
         right_scroll_to,
         right_cursor,
+        Some((left_doc, left_cursor, active)),
         epoch,
     );
     wire_page(
@@ -1662,9 +1670,8 @@ fn split_view(
         right_cursor,
         epoch,
     );
-    // The base side has no symbols the server knows, so its menu is Copy
-    // alone. Made navigable first, so the head side's is the last editor
-    // a test reads.
+    // Made navigable first, so the head side's is the last editor a test
+    // reads.
     let left = navigation::navigable(left, state, backend.clone(), file.clone(), left_doc);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
@@ -1960,8 +1967,18 @@ fn wire_cursor(
     shifted: RwSignal<Option<usize>>,
     of: CursorOf,
 ) {
-    Effect::new(move |previous: Option<usize>| {
-        let offset = cursor.with(|c| c.offset());
+    Effect::new(move |previous: Option<(usize, usize, usize)>| {
+        let (offset, lo, hi) = cursor.with(|c| {
+            let offset = c.offset();
+            let (lo, hi) = c
+                .mode
+                .regions_iter()
+                .fold((usize::MAX, 0usize), |(lo, hi), (a, b, _)| {
+                    (lo.min(a.min(b)), hi.max(a.max(b)))
+                });
+            (offset, lo, hi)
+        });
+        let stamp = (offset, lo, hi);
         // Taken whichever way this run goes, so that a later click landing
         // on the same offset is a click.
         let by_edit = shifted.try_update(|s| s.take()).flatten() == Some(offset);
@@ -1979,13 +1996,13 @@ fn wire_cursor(
                 taken = true;
             }
             if active.get_untracked() != side {
-                return offset;
+                return stamp;
             }
         }
         // A side taking the pane says its line and selection, wherever
         // its caret is.
-        if previous == Some(offset) && !taken {
-            return offset;
+        if previous == Some(stamp) && !taken {
+            return stamp;
         }
         let doc = doc.get_untracked();
         let base = match of {
@@ -2008,13 +2025,6 @@ fn wire_cursor(
         // The selection, as display lines, for a thread's anchor. A caret
         // is a one-line selection. Rows that are no line at all fall out,
         // and a selection of nothing but those is no selection.
-        let (lo, hi) = cursor.with(|c| {
-            c.mode
-                .regions_iter()
-                .fold((usize::MAX, 0usize), |(lo, hi), (a, b, _)| {
-                    (lo.min(a.min(b)), hi.max(a.max(b)))
-                })
-        });
         if lo != usize::MAX {
             let (first_row, _) = doc.locate(lo);
             let (last_row, _) = doc.locate(hi);
@@ -2034,9 +2044,15 @@ fn wire_cursor(
         }
 
         if by_edit {
-            return offset;
+            return stamp;
         }
-        let position = doc.head_position(offset);
+        let resolved = doc
+            .head_position(offset)
+            .map(|(l, c)| (l, c, false))
+            .or_else(|| doc.base_position(offset).map(|(l, c)| (l, c, true)));
+        let position = resolved.map(|(l, c, _)| (l, c));
+        let pos_base = resolved.is_some_and(|(_, _, b)| b);
+        state.last_position_base.set(pos_base);
         state.last_position.set(position);
 
         // The identifier at the caret, by the caret's reading: just past
@@ -2051,13 +2067,14 @@ fn wire_cursor(
                 column: start,
                 end: start + text.len(),
                 text: text.to_string(),
+                base: pos_base,
             })
         });
         let same = state
             .highlight_ask
             .with_untracked(|a| a.as_ref().map(|(_, s)| s) == symbol.as_ref());
         if same {
-            return offset;
+            return stamp;
         }
         state.clear_highlights();
         if let Some(symbol) = symbol {
@@ -2065,13 +2082,15 @@ fn wire_cursor(
             floem::action::exec_after(
                 std::time::Duration::from_millis(hover::ASK_DELAY_MILLIS),
                 move |_| {
-                    if state.last_position.with_untracked(|p| *p == position) {
+                    if state.last_position.with_untracked(|p| *p == position)
+                        && state.last_position_base.get_untracked() == pos_base
+                    {
                         state.ask_highlights(&backend, symbol);
                     }
                 },
             );
         }
-        offset
+        stamp
     });
 }
 
@@ -2079,7 +2098,12 @@ fn wire_cursor(
 /// when the tint changes, the symbol's or the find bar's, or a reload of
 /// the file is set in place with its colours, the cached layouts are
 /// stale, and are dropped so the lines in view are laid out again.
-fn wire_highlights(state: ReviewState, live: &LiveDoc, file: LiveFile) {
+fn wire_highlights(
+    state: ReviewState,
+    live: &LiveDoc,
+    file: LiveFile,
+    active: Option<RwSignal<Side>>,
+) {
     let handle = live.handle.clone();
     Effect::new(move |before: Option<()>| {
         // A reload set in place may colour the same text anew.
@@ -2087,6 +2111,9 @@ fn wire_highlights(state: ReviewState, live: &LiveDoc, file: LiveFile) {
         state.highlights.track();
         state.find_matches.track();
         state.find_current.track();
+        if let Some(active) = active {
+            active.track();
+        }
         // The layouts built with the editor are right; only a change
         // after that makes them stale.
         if before.is_some() {
@@ -2183,16 +2210,19 @@ fn restore_place(
 /// first, like any other reveal, and Reset undoes it like any other. A
 /// navigation's jump also lands the caret on the line, so the next jump
 /// remembers leaving from there.
+type SplitBase = (RwSignal<Arc<Doc>>, RwSignal<Cursor>, RwSignal<Side>);
+
 fn wire_jump(
     state: ReviewState,
     file: LiveFile,
     doc: RwSignal<Arc<Doc>>,
     scroll_to: RwSignal<Option<Vec2>>,
     cursor: RwSignal<Cursor>,
+    split_base: Option<SplitBase>,
     epoch: u64,
 ) {
     Effect::new(move |_| {
-        let Some(head_line) = state.jump_to_line.get() else {
+        let Some(target_line) = state.jump_to_line.get() else {
             return;
         };
         // A jump written in the same breath as a file open lands here
@@ -2203,6 +2233,70 @@ fn wire_jump(
             return;
         }
         state.jump_to_line.set(None);
+        let on_base = state.jump_base.get_untracked();
+        state.jump_base.set(false);
+        let caret = state
+            .jump_caret
+            .try_update(|c| c.take_if(|(line, _)| *line == target_line))
+            .flatten();
+        if on_base {
+            match split_base {
+                None => {
+                    let loaded = file.get_untracked();
+                    let display = loaded.display_of_base(target_line);
+                    let mut row =
+                        display.and_then(|d| doc.with_untracked(|doc| doc.row_of_display(d)));
+                    if row.is_none() {
+                        if let Some(head) = loaded.unchanged_head_of_base(target_line) {
+                            state.reveal_around(&loaded, head);
+                            row = display
+                                .and_then(|d| doc.with_untracked(|doc| doc.row_of_display(d)));
+                        }
+                    }
+                    let row =
+                        row.unwrap_or_else(|| doc.with_untracked(|d| d.len().saturating_sub(1)));
+                    if let Some((_, column)) = caret {
+                        let offset = doc.with_untracked(|d| d.offset_at(row, column));
+                        cursor.update(|c| {
+                            c.set_offset(offset, CursorAffinity::Backward, false, false)
+                        });
+                    }
+                    let target = row.saturating_sub(4) as f64;
+                    scroll_to.set(Some(Vec2::new(
+                        0.0,
+                        target * theme::code_line_height() as f64,
+                    )));
+                }
+                Some((left_doc, left_cursor, active)) => {
+                    let mut row = left_doc.with_untracked(|d| d.row_of_display(target_line));
+                    if row.is_none() {
+                        let loaded = file.get_untracked();
+                        if let Some(head) = loaded.unchanged_head_of_base(target_line) {
+                            state.reveal_around(&loaded, head);
+                            row = left_doc.with_untracked(|d| d.row_of_display(target_line));
+                        }
+                    }
+                    let row = row
+                        .unwrap_or_else(|| left_doc.with_untracked(|d| d.len().saturating_sub(1)));
+                    if let Some((_, column)) = caret {
+                        if active.get_untracked() != Side::Base {
+                            active.set(Side::Base);
+                        }
+                        let offset = left_doc.with_untracked(|d| d.offset_at(row, column));
+                        left_cursor.update(|c| {
+                            c.set_offset(offset, CursorAffinity::Backward, false, false)
+                        });
+                    }
+                    let target = row.saturating_sub(4) as f64;
+                    scroll_to.set(Some(Vec2::new(
+                        0.0,
+                        target * theme::code_line_height() as f64,
+                    )));
+                }
+            }
+            return;
+        }
+        let head_line = target_line;
         // Lines, not a line: all of them shown, if a fold hides any.
         let through = state
             .jump_through
@@ -2223,6 +2317,15 @@ fn wire_jump(
         }
         // A line the file does not have lands at the end of it.
         let row = row.unwrap_or_else(|| doc.with_untracked(|d| d.len().saturating_sub(1)));
+        if let Some((_, column)) = caret {
+            if let Some((_, _, active)) = split_base {
+                if active.get_untracked() != Side::Head {
+                    active.set(Side::Head);
+                }
+            }
+            let offset = doc.with_untracked(|d| d.offset_at(row, column));
+            cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
+        }
         // Land the target a few lines below the top rather than flush
         // against it, so its context is visible.
         let target = row.saturating_sub(4) as f64;
@@ -2230,14 +2333,6 @@ fn wire_jump(
             0.0,
             target * theme::code_line_height() as f64,
         )));
-        let caret = state
-            .jump_caret
-            .try_update(|c| c.take_if(|(line, _)| *line == head_line))
-            .flatten();
-        if let Some((_, column)) = caret {
-            let offset = doc.with_untracked(|d| d.offset_at(row, column));
-            cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
-        }
     });
 }
 
@@ -2704,7 +2799,7 @@ mod window {
             .get()
             .expect("the split registered both documents");
         assert_eq!(docs.epoch, state.editor_epoch.get());
-        let LiveLayout::Split { left, right } = docs.layout else {
+        let LiveLayout::Split { left, right, .. } = docs.layout else {
             panic!("the split layout holds two documents");
         };
         assert_eq!(
@@ -3763,7 +3858,7 @@ mod window {
     /// The split's two live documents, left and right.
     fn sides(state: ReviewState) -> (LiveDoc, LiveDoc) {
         match state.docs.get().expect("an editor is open").layout {
-            LiveLayout::Split { left, right } => (left, right),
+            LiveLayout::Split { left, right, .. } => (left, right),
             LiveLayout::Stacked(_) => panic!("the layout is split"),
         }
     }
@@ -4590,9 +4685,10 @@ mod window {
         let cursor = super::STACKED_CURSOR
             .with(|c| c.get())
             .expect("a stacked editor was built");
-        // The editor's cursor starts on row 0, a ghost, which is nowhere
-        // in the head file.
-        assert_eq!(state.last_position.get(), None);
+        // The editor's cursor starts on row 0, a ghost, which is base
+        // line 0 rather than in the head file.
+        assert_eq!(state.last_position.get(), Some((0, 0)));
+        assert!(state.last_position_base.get());
 
         // The cursor placed as a click would place it: on "new bottom",
         // head line 61, three columns in, below the divider at rows 5
@@ -4605,6 +4701,7 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((61, 3)));
+        assert!(!state.last_position_base.get());
         assert_eq!(
             state.request_token.get(),
             0,

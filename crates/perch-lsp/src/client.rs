@@ -112,6 +112,9 @@ pub struct Client {
     /// Where events go, and the status last sent there. One lock holds
     /// both, so a status told again lands in its place among the rest.
     told: std::sync::Mutex<(mpsc::UnboundedSender<ServerEvent>, Status)>,
+    /// Holds the server's file texts steady while an ask temporarily swaps
+    /// in a file's base text and puts back what was there before.
+    overlay_gate: Mutex<()>,
     /// The files given to the server, by URI: the version each is at and
     /// the text it was given, which it reads in place of the disk's.
     documents: std::sync::Mutex<HashMap<String, (i32, Arc<str>)>>,
@@ -204,6 +207,7 @@ impl Client {
             spec,
             root: root.to_path_buf(),
             told: std::sync::Mutex::new((events, Status::Starting)),
+            overlay_gate: Default::default(),
             documents: Default::default(),
             class_files: Default::default(),
             exited: Default::default(),
@@ -559,6 +563,7 @@ impl Client {
     /// Close every file the server was given, so it reads them from disk
     /// again: a server kept for later may outlive the text it was given.
     pub async fn close_documents(&self) {
+        let _guard = self.overlay_gate.lock().await;
         let given: Vec<String> = self
             .documents
             .lock()
@@ -569,6 +574,28 @@ impl Client {
                 self.close_uri(uri).await;
             }
         }
+    }
+
+    /// Run `f` while `path` holds `overlay` (when `Some`), then put back
+    /// whatever text the server had for `path` before, or close it again if
+    /// the server had none. Every ask that reads or swaps a file's overlay
+    /// takes the same gate, so a head ask never sees a base text mid-swap.
+    pub async fn with_overlay<F, T>(&self, path: &Path, overlay: Option<&str>, f: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let _guard = self.overlay_gate.lock().await;
+        let Some(text) = overlay else {
+            return f.await;
+        };
+        let previous = self.given(path);
+        self.did_open(path, text).await;
+        let out = f.await;
+        match previous {
+            Some(prev) => self.did_open(path, &prev).await,
+            None => self.did_close(path).await,
+        }
+        out
     }
 
     async fn close_uri(&self, uri: Uri) {
@@ -2605,5 +2632,41 @@ while True:
         let search = &spec.options["workspace"]["symbol"]["search"];
         assert!(search["limit"].as_u64().unwrap_or(0) > 128, "{search}");
         assert_eq!(search["excludeImports"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn an_overlay_swaps_in_for_its_future_and_restores_what_was_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let script = root.join("server.py");
+        let log = root.join("methods");
+        std::fs::write(&script, RECORDING_SERVER).unwrap();
+        let spec = ServerSpec {
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string(), log.display().to_string()],
+            kind: ServerKind::RustAnalyzer,
+            options: Value::Null,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, &root, tx).await.unwrap();
+        let file = root.join("lib.rs");
+
+        // Unopened before: opened for the overlay, closed again after.
+        let during_closed = client
+            .with_overlay(&file, Some("base"), async { client.given(&file) })
+            .await;
+        assert_eq!(during_closed.as_deref(), Some("base"));
+        assert_eq!(client.given(&file), None);
+
+        // Given "head" before: changed to "base" for the overlay, restored
+        // to "head" after.
+        client.did_open(&file, "head").await;
+        let during_open = client
+            .with_overlay(&file, Some("base"), async { client.given(&file) })
+            .await;
+        assert_eq!(during_open.as_deref(), Some("base"));
+        assert_eq!(client.given(&file).as_deref(), Some("head"));
+
+        client.shutdown().await;
     }
 }
