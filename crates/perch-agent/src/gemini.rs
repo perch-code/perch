@@ -18,10 +18,11 @@
 //! Perch.
 //!
 //! Both load the checkout's own `.agents/` (and `.agent/`, `_agents/`,
-//! `_agent/`): hooks and MCP servers that run as the reader, outside any
-//! sandbox, with no trust prompt and no flag to turn them off. So a
-//! checkout that has one is refused unless the reader trusts the
-//! repository; see [`repo_config`].
+//! `_agent/`), which can hold hooks, MCP servers and plugins that run as
+//! the reader, outside any sandbox, with no trust prompt and no flag to
+//! turn them off. So a checkout whose configuration holds anything but
+//! skills, rules and Markdown workflows is refused unless the reader
+//! trusts the repository; see [`refusal`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -33,47 +34,463 @@ use crate::parse::{counts_suffix, one_line, short_path, str_of};
 use crate::RunEvent;
 
 /// Where agy looks for a workspace's own customizations: hooks, MCP
-/// servers, plugins, skills, rules and agents. agy 1.5.5 reads all four
-/// at the top of the workspace.
+/// servers, plugins, agents, sidecars, skills, rules and workflows. agy
+/// reads all four in every directory from a workspace up to the top of
+/// its repository.
 pub const CONFIG_DIRS: &[&str] = &[".agents", ".agent", "_agents", "_agent"];
 
-/// The workspace configuration agy would load from `cwd`, if there is any:
-/// one of [`CONFIG_DIRS`] in `cwd` or a directory above it, up to the top
-/// of its repository. agy reads every one between the working directory
-/// and the repository root.
-pub fn repo_config(cwd: &Path) -> Option<PathBuf> {
-    let real = crate::real_path(cwd);
-    for dir in real.ancestors() {
-        if let Some(found) = CONFIG_DIRS
-            .iter()
-            .map(|name| dir.join(name))
-            .find(|path| path.symlink_metadata().is_ok())
-        {
-            return Some(found);
+/// What marks the top of a repository for agy, in the order it looks.
+/// Without one, agy reads its workspace alone and nothing above it.
+const VCS_MARKERS: &[&str] = &[".git", ".hg", ".jj", ".repo", ".citc"];
+
+/// How many entries of one configuration directory Perch looks at, how
+/// deep, and how large a Markdown file it reads for includes, before it
+/// gives up and refuses.
+const SCAN_LIMIT: usize = 5_000;
+const DEPTH_LIMIT: usize = 16;
+const READ_LIMIT: u64 = 1 << 20;
+
+/// Files a folder picks up without anyone putting configuration in it,
+/// which agy loads nothing from.
+const IGNORED: &[&str] = &[".DS_Store", ".gitkeep", ".gitignore"];
+
+/// Names that load hooks, MCP servers, plugins, agents or sidecars at the
+/// top of a configuration directory. agy 1.5.9 ignores them inside a
+/// skill, but Perch refuses them there too, in any case, so a loader that
+/// starts looking deeper fails closed.
+const LOADER_NAMES: &[&str] = &[
+    "hooks.json",
+    "mcp_config.json",
+    "mcp.json",
+    ".mcp.json",
+    "plugin.json",
+    "plugins.json",
+    "plugins.txt",
+    "agents.json",
+    "agents.txt",
+    "skills.json",
+    "skills.txt",
+    "rules.json",
+    "workflows.json",
+    "workflow.json",
+    "sidecar.json",
+    "sidecars.json",
+    ".agents",
+    ".agent",
+    "_agents",
+    "_agent",
+    ".gemini",
+    ".antigravity-plugin",
+    ".gemini-plugin",
+    ".claude-plugin",
+];
+
+/// What makes Perch refuse a checkout: a path, and a sentence about it
+/// with `{path}` where the path goes.
+struct Finding {
+    path: PathBuf,
+    says: String,
+}
+
+impl Finding {
+    fn new(path: &Path, says: impl Into<String>) -> Finding {
+        Finding {
+            path: path.to_path_buf(),
+            says: says.into(),
         }
-        if dir.join(".git").exists() {
-            break;
+    }
+}
+
+/// The directories a print-mode run adds to its workspace beside `cwd`:
+/// `dirs`, then a linked worktree's git directories and the object
+/// directories it borrows, which git needs and agy's sandbox reads
+/// nothing outside of. agy takes each as a workspace of its own and
+/// loads its configuration too, so [`refusal`] checks them all.
+pub(crate) fn print_dirs(cwd: &Path, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = dirs.to_vec();
+    dirs.extend(crate::linked_git_dirs(cwd));
+    dirs.extend(crate::alternate_object_dirs(cwd));
+    dirs
+}
+
+/// Why a Gemini run in `cwd`, adding `added` to its workspace, will not
+/// start, or `None` when it may.
+///
+/// agy loads each workspace's configuration from every directory between
+/// it and the top of its repository: the [`CONFIG_DIRS`], and a
+/// `.gemini/config.json` that can name another directory to load them
+/// from. What runs code (hooks, MCP servers, plugins, agents, sidecars)
+/// runs it as the reader, outside any sandbox. So Perch accepts a
+/// configuration directory only when everything in it is known not to:
+/// skills, rules, Markdown workflows and a README. Anything else, a name
+/// it does not know among them, is refused; so is a rule, `AGENTS.md` or
+/// `GEMINI.md` that brings a file from outside the repository into the
+/// prompt, which agy reads itself, outside the sandbox, and a review
+/// could then quote back.
+pub(crate) fn refusal(cwd: &Path, added: &[PathBuf], trusted: bool) -> Option<String> {
+    if trusted {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let starts = std::iter::once((cwd, true)).chain(added.iter().map(|d| (d.as_path(), false)));
+    for (start, own) in starts {
+        let dirs = walked_dirs(start);
+        let root = dirs.last().cloned().unwrap_or_else(|| start.to_path_buf());
+        for dir in dirs {
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            if let Some(finding) = vet_dir(&dir, &root) {
+                return Some(refusal_text(cwd, &finding, own));
+            }
         }
     }
     None
 }
 
-/// Why a Gemini run will not start in `cwd`, or `None` when it may.
-pub(crate) fn refusal(cwd: &Path, trusted: bool) -> Option<String> {
-    if trusted {
+/// The refusal as the reader sees it. Trust lets Work run, and Work
+/// loads only its own checkout's configuration: when what Perch found
+/// came from a directory a question or review adds, Work needs nothing.
+fn refusal_text(cwd: &Path, finding: &Finding, own: bool) -> String {
+    let real = crate::real_path(cwd);
+    let shown = match finding.path.strip_prefix(&real) {
+        Ok(inside) if !inside.as_os_str().is_empty() => inside.display().to_string(),
+        _ => crate::prompt_path(&finding.path),
+    };
+    let what = finding.says.replace("{path}", &shown);
+    if own {
+        format!(
+            "{what}. So Perch does not run Gemini here. Gemini can still work here, as Work, once \
+the repository is trusted in config.toml (`[repo.work] trust = true`); a question or a review \
+can't."
+        )
+    } else {
+        format!(
+            "{what}. A question or a review here also reads that directory, so Perch does not run \
+Gemini for one. Work reads only this checkout and can still run here."
+        )
+    }
+}
+
+/// Every directory agy reads configuration from for a workspace at
+/// `start`: it and each one above it, up to the top of its repository;
+/// or `start` alone outside one. The top comes last.
+fn walked_dirs(start: &Path) -> Vec<PathBuf> {
+    let real = crate::real_path(start);
+    let mut dirs = Vec::new();
+    for dir in real.ancestors() {
+        dirs.push(dir.to_path_buf());
+        if VCS_MARKERS
+            .iter()
+            .any(|marker| dir.join(marker).symlink_metadata().is_ok())
+        {
+            return dirs;
+        }
+    }
+    vec![real]
+}
+
+/// What in `dir` itself makes agy unsafe to run: a configuration
+/// directory holding more than Perch accepts, a `.gemini/config.json`,
+/// or an `AGENTS.md` or `GEMINI.md` that brings in a file from outside
+/// `root`. Names are looked up by joining them on, so on a filesystem
+/// that ignores case `.AGENTS` is found as agy finds it.
+fn vet_dir(dir: &Path, root: &Path) -> Option<Finding> {
+    for name in CONFIG_DIRS {
+        if let Some(finding) = vet_config(&dir.join(name), root) {
+            return Some(finding);
+        }
+    }
+    let gemini = dir.join(".gemini").join("config.json");
+    if gemini.symlink_metadata().is_ok() {
+        return Some(Finding::new(
+            &gemini,
+            "{path} can point agy at hooks and MCP servers elsewhere in the repository, which it \
+runs as you, outside any sandbox",
+        ));
+    }
+    ["AGENTS.md", "GEMINI.md"]
+        .iter()
+        .find_map(|name| vet_context_file(&dir.join(name), root))
+}
+
+/// `AGENTS.md` or `GEMINI.md`, which agy puts in the prompt whole. A link
+/// is fine while it stays in the repository (`AGENTS.md` beside a
+/// `CLAUDE.md` it points at, say); its includes are checked from both
+/// ends, not knowing which one agy resolves them from.
+fn vet_context_file(file: &Path, root: &Path) -> Option<Finding> {
+    let meta = file.symlink_metadata().ok()?;
+    if !meta.is_symlink() {
+        return meta
+            .is_file()
+            .then(|| vet_includes(file, file, root))
+            .flatten();
+    }
+    let Ok(real) = std::fs::canonicalize(file) else {
+        return None;
+    };
+    if !real.starts_with(root) {
+        return Some(Finding::new(
+            file,
+            "{path} links to a file outside the repository, which agy would put in the prompt",
+        ));
+    }
+    if !real.is_file() {
         return None;
     }
-    let found = repo_config(cwd)?;
-    let name = found
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    Some(format!(
-        "This checkout has its own Antigravity configuration ({name}/). agy runs its hooks and \
-MCP servers as you, outside any sandbox, and has no way to turn them off, so Perch does not \
-run Gemini here. Gemini runs here only as Work, with the repository trusted in config.toml \
-(`[repo.work] trust = true`)."
+    vet_includes(file, file, root).or_else(|| vet_includes(file, &real, root))
+}
+
+/// What in one configuration directory Perch does not accept, if
+/// anything. Its own entries are compared exactly, so `Skills/` is not
+/// `skills/`, and nothing is followed through a symbolic link.
+fn vet_config(config: &Path, root: &Path) -> Option<Finding> {
+    let meta = config.symlink_metadata().ok()?;
+    if meta.is_symlink() {
+        return Some(link(config));
+    }
+    if !meta.is_dir() {
+        return Some(unknown(config));
+    }
+    let mut budget = SCAN_LIMIT;
+    let list = match entries(config, &mut budget) {
+        Ok(list) => list,
+        Err(finding) => return Some(finding),
+    };
+    for (path, meta) in list {
+        if meta.is_symlink() {
+            return Some(link(&path));
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let found = match name.as_ref() {
+            "README.md" if meta.is_file() => None,
+            "skills" if meta.is_dir() => vet_skills(&path, &mut budget),
+            "rules" | "workflows" if meta.is_dir() => vet_markdown(&path, root, &mut budget),
+            _ => Some(classify(&path, &name)),
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// A directory's entries with their own metadata, links unfollowed, in
+/// name order so the same checkout always gives the same answer; the
+/// [`IGNORED`] names left out. Each counts against `budget`, and what
+/// can't be listed is a refusal, not an empty directory.
+fn entries(dir: &Path, budget: &mut usize) -> Result<Vec<(PathBuf, std::fs::Metadata)>, Finding> {
+    let mut list = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|_| unreadable(dir))? {
+        if *budget == 0 {
+            return Err(too_big(dir));
+        }
+        *budget -= 1;
+        let path = entry.map_err(|_| unreadable(dir))?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if IGNORED.contains(&name.as_ref()) {
+            continue;
+        }
+        let meta = path.symlink_metadata().map_err(|_| unreadable(&path))?;
+        list.push((path, meta));
+    }
+    list.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(list)
+}
+
+/// `skills/`: each skill a directory of plain files at any depth, its
+/// scripts among them, which run only when the model runs them (in the
+/// sandbox, or by asking); or a loose Markdown file.
+fn vet_skills(skills: &Path, budget: &mut usize) -> Option<Finding> {
+    let list = match entries(skills, budget) {
+        Ok(list) => list,
+        Err(finding) => return Some(finding),
+    };
+    for (path, meta) in list {
+        if meta.is_symlink() {
+            return Some(link(&path));
+        }
+        let found = if meta.is_dir() {
+            vet_skill_tree(&path, 1, budget)
+        } else if meta.is_file() && is_markdown(&path) {
+            None
+        } else {
+            Some(unknown(&path))
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+fn vet_skill_tree(dir: &Path, depth: usize, budget: &mut usize) -> Option<Finding> {
+    if depth > DEPTH_LIMIT {
+        return Some(too_big(dir));
+    }
+    let list = match entries(dir, budget) {
+        Ok(list) => list,
+        Err(finding) => return Some(finding),
+    };
+    for (path, meta) in list {
+        if meta.is_symlink() {
+            return Some(link(&path));
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if LOADER_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)) {
+            return Some(Finding::new(
+                &path,
+                "{path} is named like a file agy loads hooks, MCP servers or plugins from. agy \
+ignores it inside a skill today, but Perch refuses it there too",
+            ));
+        }
+        let found = if meta.is_dir() {
+            vet_skill_tree(&path, depth + 1, budget)
+        } else if meta.is_file() {
+            None
+        } else {
+            Some(unknown(&path))
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// `rules/` and `workflows/`: Markdown files only, directly inside. A
+/// directory under `workflows/` is agy's executable kind, a Python flow.
+fn vet_markdown(dir: &Path, root: &Path, budget: &mut usize) -> Option<Finding> {
+    let list = match entries(dir, budget) {
+        Ok(list) => list,
+        Err(finding) => return Some(finding),
+    };
+    list.into_iter().find_map(|(path, meta)| {
+        if meta.is_symlink() {
+            Some(link(&path))
+        } else if meta.is_file() && is_markdown(&path) {
+            vet_includes(&path, &path, root)
+        } else {
+            Some(unknown(&path))
+        }
+    })
+}
+
+fn is_markdown(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "md")
+}
+
+/// An `@[label](target)` include in `file` that brings in a file from
+/// outside `root`. agy reads the target itself, outside the sandbox, and
+/// puts it in the prompt, resolving a relative one from the including
+/// file's directory (`from`'s); Perch resolves it the same way, through
+/// any link, and refuses a `~` or a URL, which it can't. A target that
+/// isn't there brings nothing. The file is read as bytes, as agy reads
+/// it, so one bad byte doesn't hide what follows.
+fn vet_includes(file: &Path, from: &Path, root: &Path) -> Option<Finding> {
+    let too_big = std::fs::metadata(from).map_or(true, |meta| meta.len() > READ_LIMIT);
+    if too_big {
+        return Some(Finding::new(
+            file,
+            "{path} is too large for Perch to check what agy would include from it",
+        ));
+    }
+    let Ok(bytes) = std::fs::read(from) else {
+        return Some(unreadable(file));
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let base = from.parent().unwrap_or(root);
+    let target = includes(&text).into_iter().find(|target| {
+        if target.starts_with('~') || target.contains(':') {
+            return true;
+        }
+        std::fs::canonicalize(base.join(target)).is_ok_and(|real| !real.starts_with(root))
+    })?;
+    Some(Finding::new(
+        file,
+        format!(
+            "{{path}} includes {target}, from outside the repository, which agy would put in the \
+prompt"
+        ),
     ))
+}
+
+/// The targets of every `@[label](target)` in `text`.
+fn includes(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("@[") {
+        rest = &rest[at + 2..];
+        let Some(close) = rest.find(']') else { break };
+        let after = &rest[close + 1..];
+        if let Some(target) = after.strip_prefix('(') {
+            if let Some(end) = target.find(')') {
+                let target = target[..end].trim();
+                if !target.is_empty() {
+                    found.push(target);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// What a name Perch does not accept at the top of a configuration
+/// directory would bring, where agy's documentation says.
+fn classify(path: &Path, name: &str) -> Finding {
+    let name = name.to_ascii_lowercase();
+    let says = match name.as_str() {
+        "hooks.json" => {
+            "{path} defines hooks, which agy runs as you, outside any sandbox, with no way to \
+turn them off"
+        }
+        "mcp_config.json" | "mcp.json" => {
+            "{path} defines MCP servers, which agy starts as you, outside any sandbox, with no way \
+to turn them off"
+        }
+        "plugins" | "plugins.json" | "plugins.txt" => {
+            "{path} adds plugins, which bring hooks and MCP servers that agy runs as you, outside \
+any sandbox"
+        }
+        "agents" | "agents.json" | "agents.txt" => {
+            "{path} adds custom agents, which can bring hooks and MCP servers that agy runs as \
+you, outside any sandbox"
+        }
+        "sidecars" | "sidecars.json" => {
+            "{path} defines sidecars, background commands that agy runs as you, outside any \
+sandbox"
+        }
+        _ => return unknown(path),
+    };
+    Finding::new(path, says)
+}
+
+fn unknown(path: &Path) -> Finding {
+    Finding::new(
+        path,
+        "{path} is in agy's configuration, and Perch can't vouch for it: it accepts only skills, \
+rules, Markdown workflows and a README there, since agy runs hooks, MCP servers and plugins from \
+that folder as you, outside any sandbox",
+    )
+}
+
+fn link(path: &Path) -> Finding {
+    Finding::new(
+        path,
+        "{path} is a symbolic link in agy's configuration, which Perch does not follow to check \
+what agy would load through it",
+    )
+}
+
+fn unreadable(path: &Path) -> Finding {
+    Finding::new(
+        path,
+        "Perch can't read {path} to check what agy would load from it",
+    )
+}
+
+fn too_big(path: &Path) -> Finding {
+    Finding::new(path, "{path} is too large or too deep for Perch to check")
 }
 
 /// The effort as agy spells it. agy's levels stop at `max`; Ultra, which
@@ -130,9 +547,7 @@ pub fn read_only_settings(cwd: &Path, dirs: &[PathBuf]) -> String {
 /// review snapshot's among them, without which git can't open a commit.
 /// They go in read-only with the rest.
 pub(crate) fn print_args(cwd: &Path, dirs: &[PathBuf], model: &str, effort: &str) -> Vec<String> {
-    let mut dirs = dirs.to_vec();
-    dirs.extend(crate::linked_git_dirs(cwd));
-    dirs.extend(crate::alternate_object_dirs(cwd));
+    let dirs = print_dirs(cwd, dirs);
     let mut args: Vec<String> = vec![
         "--output-format".into(),
         "stream-json".into(),
@@ -1414,23 +1829,274 @@ mod tests {
     }
 
     #[test]
-    fn a_checkout_with_agy_config_is_refused_unless_trusted() {
+    fn a_checkout_with_agy_config_that_runs_code_is_refused_unless_trusted() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".git")).unwrap();
-        assert_eq!(refusal(dir.path(), false), None);
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(refusal(&root, &[], false), None);
         for name in CONFIG_DIRS {
-            let config = dir.path().join(name);
+            let config = root.join(name);
             std::fs::create_dir(&config).unwrap();
-            let why = refusal(dir.path(), false).expect("refused");
-            assert!(why.contains(&format!("({name}/)")), "{why}");
-            assert_eq!(refusal(dir.path(), true), None);
-            std::fs::remove_dir(&config).unwrap();
+            assert_eq!(refusal(&root, &[], false), None, "an empty {name}/");
+            std::fs::write(config.join("hooks.json"), "{}").unwrap();
+            let why = refusal(&root, &[], false).expect("refused");
+            assert!(
+                why.contains(&format!("{name}/hooks.json defines hooks")),
+                "{why}"
+            );
+            assert!(why.contains("[repo.work] trust = true"), "{why}");
+            assert_eq!(refusal(&root, &[], true), None);
+            std::fs::remove_dir_all(&config).unwrap();
         }
-        // One in a parent inside the repository counts; one above it not.
-        let sub = dir.path().join("sub");
+        // One in a parent inside the repository counts.
+        let sub = root.join("sub");
         std::fs::create_dir(&sub).unwrap();
-        std::fs::create_dir(dir.path().join(".agents")).unwrap();
-        assert!(refusal(&sub, false).is_some());
+        std::fs::create_dir(root.join(".agents")).unwrap();
+        std::fs::write(root.join(".agents/mcp_config.json"), "{}").unwrap();
+        let why = refusal(&sub, &[], false).expect("refused");
+        assert!(why.contains("MCP servers"), "{why}");
+    }
+
+    /// slatedb's: a skill, its references, rules and a workflow, all text
+    /// the model reads, which agy runs nothing from.
+    #[test]
+    fn skills_rules_and_markdown_workflows_are_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let skill = root.join(".agents/skills/simple-english");
+        std::fs::create_dir_all(skill.join("references")).unwrap();
+        std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: simple-english\n---\n").unwrap();
+        std::fs::write(skill.join("references/checklist.md"), "- short words").unwrap();
+        std::fs::write(skill.join("scripts/check.py"), "print(1)").unwrap();
+        std::fs::write(root.join(".agents/skills/loose.md"), "x").unwrap();
+        std::fs::create_dir(root.join(".agents/rules")).unwrap();
+        // agy resolves an include from the including file's directory.
+        std::fs::write(root.join("CONTRIBUTING.md"), "be kind").unwrap();
+        std::fs::write(
+            root.join(".agents/rules/style.md"),
+            "See @[the guide](../../CONTRIBUTING.md) and @[gone](/nowhere/at/all).",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join(".agents/workflows")).unwrap();
+        std::fs::write(root.join(".agents/workflows/release.md"), "1. tag").unwrap();
+        std::fs::write(root.join(".agents/README.md"), "what this is").unwrap();
+        // What Finder and git leave behind.
+        for junk in [
+            ".agents/.DS_Store",
+            ".agents/skills/.DS_Store",
+            ".agents/rules/.gitkeep",
+        ] {
+            std::fs::write(root.join(junk), "").unwrap();
+        }
+        std::fs::write(root.join("CLAUDE.md"), "@[x](CONTRIBUTING.md)").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("CLAUDE.md", root.join("AGENTS.md")).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/GEMINI.md"), "@[up](../CONTRIBUTING.md)").unwrap();
+        assert_eq!(refusal(&root.join("sub"), &[], false), None);
+    }
+
+    #[test]
+    fn anything_else_in_agy_config_is_refused() {
+        let cases: &[(&str, &str)] = &[
+            ("plugins/p/plugin.json", "adds plugins"),
+            ("plugins.json", "adds plugins"),
+            ("agents/a.md", "custom agents"),
+            ("agents.json", "custom agents"),
+            ("sidecars/s/sidecar.json", "sidecars"),
+            ("mcp.json", "MCP servers"),
+            ("skills.json", "can't vouch for"),
+            ("config.json", "can't vouch for"),
+            ("Skills/s/SKILL.md", "can't vouch for"),
+            ("notes.txt", "can't vouch for"),
+            ("workflows/flow/workflow.json", "can't vouch for"),
+            ("rules/sub/r.md", "can't vouch for"),
+            ("rules/r.txt", "can't vouch for"),
+            ("skills/s/hooks.json", "inside a skill today"),
+            ("skills/s/deep/MCP_CONFIG.JSON", "inside a skill today"),
+            ("skills/s/.agents/x", "inside a skill today"),
+            (
+                "skills/s/.claude-plugin/plugin.json",
+                "inside a skill today",
+            ),
+            ("skills/loose.txt", "can't vouch for"),
+        ];
+        for (file, says) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            std::fs::create_dir(root.join(".git")).unwrap();
+            let path = root.join(".agents").join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{}").unwrap();
+            let why = refusal(&root, &[], false).unwrap_or_else(|| panic!("{file} accepted"));
+            assert!(why.contains(says), "{file}: {why}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_in_agy_config_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::fs::create_dir_all(root.join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join(".agents/skills/s")).unwrap();
+        let why = refusal(&root, &[], false).expect("refused");
+        assert!(why.contains(".agents/skills/s is a symbolic link"), "{why}");
+        std::fs::remove_dir_all(root.join(".agents")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join(".agent")).unwrap();
+        assert!(refusal(&root, &[], false).is_some());
+    }
+
+    /// `personal_customization_dir` points agy at another directory's
+    /// `.agents/`, whatever the config dirs here hold.
+    #[test]
+    fn a_gemini_config_json_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".gemini")).unwrap();
+        std::fs::write(root.join(".gemini/settings.json"), "{}").unwrap();
+        assert_eq!(refusal(&root, &[], false), None);
+        std::fs::write(root.join(".gemini/config.json"), "{}").unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let why = refusal(&sub, &[], false).expect("refused");
+        assert!(why.contains(".gemini/config.json"), "{why}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_from_outside_the_repository_in_the_prompt_is_refused() {
+        let link = |target: &str, at: &Path| std::os::unix::fs::symlink(target, at).unwrap();
+        let cases: &[(&str, &str, &str)] = &[
+            (".agents/rules/r.md", "@[key]({secret})", "includes"),
+            (
+                ".agents/rules/r.md",
+                "@[key](~/.aws/credentials)",
+                "includes",
+            ),
+            (
+                ".agents/rules/r.md",
+                "@[up](../../../secret.txt)",
+                "includes",
+            ),
+            (
+                ".agents/workflows/w.md",
+                "@[up](../../../secret.txt)",
+                "includes",
+            ),
+            (
+                "AGENTS.md",
+                "Read @[this](file:///etc/hosts) first.",
+                "includes",
+            ),
+            ("GEMINI.md", "@[a](ok.md) then @[b]({secret})", "includes"),
+            ("AGENTS.md", "\u{FFFD}@[b](../secret.txt)", "includes"),
+            ("AGENTS.md", "@[s](docs/link.txt)", "includes"),
+            ("AGENTS.md", "LINK", "links to a file outside"),
+        ];
+        for (file, text, says) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let tmp = dir.path().canonicalize().unwrap();
+            let secret = tmp.join("secret.txt");
+            std::fs::write(&secret, "hunter2").unwrap();
+            let root = tmp.join("repo");
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            std::fs::create_dir_all(root.join("docs")).unwrap();
+            link(secret.to_str().unwrap(), &root.join("docs/link.txt"));
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if *text == "LINK" {
+                link("../secret.txt", &path);
+            } else {
+                let text = text.replace("{secret}", secret.to_str().unwrap());
+                // A byte that isn't UTF-8 ahead of the include.
+                let mut bytes = text.replace('\u{FFFD}', "").into_bytes();
+                if text.starts_with('\u{FFFD}') {
+                    bytes.insert(0, 0xFF);
+                }
+                std::fs::write(&path, bytes).unwrap();
+            }
+            let why = refusal(&root, &[], false).unwrap_or_else(|| panic!("{file}: {text}"));
+            assert!(why.contains(says), "{file}: {why}");
+            assert!(why.contains("outside the repository"), "{why}");
+        }
+        assert_eq!(includes("@[a](b) @[c] (d) @[e](f"), ["b"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_perch_cannot_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let config = root.join(".agents");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(config.join("hooks.json"), "{}").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o311)).unwrap();
+        let why = refusal(&root, &[], false);
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let why = why.expect("refused");
+        assert!(why.contains("can't read .agents"), "{why}");
+    }
+
+    #[test]
+    fn a_config_too_large_to_check_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let rules = root.join(".agents/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        for n in 0..=SCAN_LIMIT {
+            std::fs::write(rules.join(format!("{n}.md")), "").unwrap();
+        }
+        let why = refusal(&root, &[], false).expect("refused");
+        assert!(why.contains("too large"), "{why}");
+    }
+
+    /// agy takes every `--add-dir` as a workspace and walks it up to its
+    /// own repository's top: a linked worktree's git directories lead to
+    /// the main checkout's configuration. Above a directory with no
+    /// repository it reads nothing.
+    #[test]
+    fn added_dirs_bring_their_own_repositories_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let main = root.join("main");
+        let gitdir = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..").unwrap();
+        let wt = root.join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        std::fs::create_dir(main.join(".agents")).unwrap();
+        std::fs::write(main.join(".agents/hooks.json"), "{}").unwrap();
+
+        assert_eq!(refusal(&wt, &[], false), None, "Work adds nothing");
+        let why = refusal(&wt, &print_dirs(&wt, &[]), false).expect("refused");
+        assert!(
+            why.contains("main/.agents/hooks.json defines hooks"),
+            "{why}"
+        );
+        assert!(why.contains("Work reads only this checkout"), "{why}");
+        assert!(!why.contains("trust = true"), "{why}");
+
+        // A discussion directory outside any repository counts alone.
+        let context = root.join("context/review-1");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::create_dir(root.join("context/.agents")).unwrap();
+        std::fs::write(root.join("context/.agents/hooks.json"), "{}").unwrap();
+        let clean = root.join("clean");
+        std::fs::create_dir_all(clean.join(".git")).unwrap();
+        assert_eq!(refusal(&clean, std::slice::from_ref(&context), false), None);
+        std::fs::create_dir(context.join(".agents")).unwrap();
+        std::fs::write(context.join(".agents/hooks.json"), "{}").unwrap();
+        assert!(refusal(&clean, &[context], false).is_some());
     }
 
     fn session(dir: &Path) -> AcpSession {

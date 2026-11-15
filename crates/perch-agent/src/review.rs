@@ -390,7 +390,14 @@ impl ReviewSpec {
             ));
         }
         if self.backend == Backend::Gemini {
-            if let Some(why) = crate::gemini::refusal(&self.cwd, false) {
+            if let Some(why) = crate::gemini::refusal(
+                &self.cwd,
+                &crate::gemini::print_dirs(
+                    &self.cwd,
+                    &self.discussion_dir.iter().cloned().collect::<Vec<_>>(),
+                ),
+                false,
+            ) {
                 return Err(why);
             }
         }
@@ -555,7 +562,9 @@ impl ReviewVerificationSpec {
             return Err("review verification requires a private Git checkout".into());
         }
         if self.backend == Backend::Gemini {
-            if let Some(why) = crate::gemini::refusal(&self.cwd, false) {
+            if let Some(why) =
+                crate::gemini::refusal(&self.cwd, &crate::gemini::print_dirs(&self.cwd, &[]), false)
+            {
                 return Err(why);
             }
         }
@@ -2041,11 +2050,15 @@ mod tests {
         assert!(prompt.contains(&format!("git diff {}...{}", "1".repeat(40), "2".repeat(40))));
         assert!(prompt.ends_with("--focus on the parser"));
 
-        // A checkout carrying agy's own configuration is refused.
-        std::fs::create_dir(dir.path().join(".agents")).unwrap();
-        assert!(spec.validate().unwrap_err().contains(".agents/"));
+        // A checkout whose agy configuration runs code is refused; one
+        // holding only skills is not.
+        std::fs::create_dir_all(dir.path().join(".agents/skills/s")).unwrap();
+        std::fs::write(dir.path().join(".agents/skills/s/SKILL.md"), "x").unwrap();
+        spec.validate().unwrap();
+        std::fs::write(dir.path().join(".agents/hooks.json"), "{}").unwrap();
+        assert!(spec.validate().unwrap_err().contains(".agents/hooks.json"));
         let mut codex_schema = review_spec(Backend::Gemini, dir.path().into());
-        std::fs::remove_dir(dir.path().join(".agents")).unwrap();
+        std::fs::remove_dir_all(dir.path().join(".agents")).unwrap();
         codex_schema.merge_base_sha = "1".repeat(40);
         codex_schema.head_sha = "2".repeat(40);
         assert!(codex_schema.validate().unwrap_err().contains("Gemini"));

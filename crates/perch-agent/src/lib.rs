@@ -37,8 +37,8 @@ pub use discover::{
     parse_codex_catalog, parse_gemini_catalog, path_with_install_dirs, CodexModel,
 };
 pub use gemini::{
-    read_only_settings as gemini_read_only_settings, repo_config as gemini_repo_config,
-    GeminiParser, CONFIG_DIRS as GEMINI_CONFIG_DIRS,
+    read_only_settings as gemini_read_only_settings, GeminiParser,
+    CONFIG_DIRS as GEMINI_CONFIG_DIRS,
 };
 pub use interactive::{ApprovalKind, ApprovalRequest, Decision};
 use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
@@ -727,12 +727,16 @@ impl RunSpec {
     }
 
     /// Why this run will not start, when it will not: a Gemini run in a
-    /// checkout carrying agy's own configuration, unless trusted.
+    /// checkout carrying agy configuration that runs code, unless trusted.
+    /// A question checks every directory it adds to agy's workspace, each
+    /// of which agy loads configuration from; Work, over ACP, adds none.
     pub fn refusal(&self) -> Option<String> {
-        match self.backend {
-            Backend::Gemini => gemini::refusal(
+        match (self.backend, &self.mode) {
+            (Backend::Gemini, Mode::Work(grant)) => gemini::refusal(&self.cwd, &[], grant.trust),
+            (Backend::Gemini, Mode::Ask) => gemini::refusal(
                 &self.cwd,
-                matches!(&self.mode, Mode::Work(grant) if grant.trust),
+                &gemini::print_dirs(&self.cwd, &self.read_dirs),
+                false,
             ),
             _ => None,
         }
@@ -3202,6 +3206,8 @@ mod tests {
         assert!(matches!(work.conversation(), Conversation::Acp(_)));
         assert_eq!(work.refusal(), None);
         std::fs::create_dir(dir.path().join("_agents")).unwrap();
+        assert_eq!(work.refusal(), None, "an empty _agents/ runs nothing");
+        std::fs::write(dir.path().join("_agents/hooks.json"), "{}").unwrap();
         assert!(work.refusal().is_some());
         assert!(gemini(Mode::Ask, dir.path()).refusal().is_some());
         let trusted = gemini(
