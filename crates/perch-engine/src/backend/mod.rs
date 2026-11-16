@@ -18693,7 +18693,9 @@ async fn ask_as(
 /// request, answers it at once; otherwise the reader is asked, and the
 /// request is denied if they have not answered in `approval_timeout`.
 /// The setting is read now, not when the run started, so turning it on
-/// or off holds for the next request.
+/// or off holds for the next request. `nested` is the worktree and the
+/// `.git`s below its top as the run started.
+#[allow(clippy::too_many_arguments)]
 async fn on_approval(
     ctx: &Ctx,
     run: &RunRecord,
@@ -18702,6 +18704,7 @@ async fn on_approval(
     thread_id: &str,
     id: &str,
     request: &perch_agent::ApprovalRequest,
+    nested: Option<(&Path, &crate::nested_git::Nested)>,
 ) {
     let repo = ctx
         .item(item_id)
@@ -18724,14 +18727,25 @@ async fn on_approval(
         return;
     }
     // A commit outside the sandbox that would run hooks is asked about,
-    // grant or not: they may be what the sandboxed run wrote.
-    let hooked = matches!(request.kind, perch_agent::ApprovalKind::Command)
-        && crate::approvals::is_git_write(&request.subject)
-        && match run.working_directory.as_deref() {
+    // grant or not: they may be what the sandboxed run wrote. So is one
+    // in a worktree where a `.git` appeared or changed below the top
+    // since the run started: git runs what its config says there, and
+    // the sandbox cannot stop every way a run can put one there.
+    let covered = crate::approvals::covering(&grants, request).is_some();
+    let git_write = matches!(request.kind, perch_agent::ApprovalKind::Command)
+        && crate::approvals::is_git_write(&request.subject);
+    let mut why = None;
+    let ask_anyway = covered && git_write && {
+        let hooked = match run.working_directory.as_deref() {
             Some(dir) => crate::approvals::runs_hooks(Path::new(dir)).await,
             None => true,
         };
-    if !hooked && crate::approvals::covering(&grants, request).is_some() {
+        if !hooked {
+            why = nested_since(nested).await;
+        }
+        hooked || why.is_some()
+    };
+    if covered && !ask_anyway {
         handle.answer(id, perch_agent::Decision::Allow);
         record_approval_step(
             ctx,
@@ -18750,7 +18764,10 @@ async fn on_approval(
         title: crate::approvals::title(request),
         command: matches!(request.kind, perch_agent::ApprovalKind::Command)
             .then(|| request.subject.clone()),
-        detail: request.detail.clone(),
+        detail: match (why, &request.detail) {
+            (Some(why), Some(detail)) => Some(format!("{why}\n\n{detail}")),
+            (why, detail) => why.or_else(|| detail.clone()),
+        },
         always: crate::approvals::always_button(request),
     };
     record_approval_step(
@@ -18788,6 +18805,22 @@ async fn on_approval(
         tokio::time::sleep(wait).await;
         settle(&ctx, &run_id, &id, Settle::TimedOut(wait), Some(asking)).await;
     });
+}
+
+/// Why a commit the grant covers must be asked about instead, from the
+/// `.git`s below the worktree's top now and as the run started (see
+/// [`crate::nested_git::unsettled`]). Not having looked then counts.
+async fn nested_since(nested: Option<(&Path, &crate::nested_git::Nested)>) -> Option<String> {
+    const NOT_LOOKED: &str = "Perch did not look for Git repositories inside the worktree as this run started, so the commit grant doesn't answer for this.";
+    let Some((top, before)) = nested else {
+        return Some(NOT_LOOKED.to_string());
+    };
+    let (top, before) = (top.to_path_buf(), before.clone());
+    tokio::task::spawn_blocking(move || {
+        crate::nested_git::unsettled(&top, &before, &crate::nested_git::below(&top))
+    })
+    .await
+    .unwrap_or_else(|_| Some(NOT_LOOKED.to_string()))
 }
 
 /// Answer a request, once: by the reader, by a timeout, or because its
@@ -19432,9 +19465,10 @@ async fn execute_question(
     run = ctx.runs.load(&run.id).unwrap_or(run);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let worktree = spec.cwd.clone();
-    // Where the sandbox cannot keep a Work run from making a `.git` below
-    // the worktree's top, the ones there now, to compare with after.
-    let nested_before = if crate::nested_git::WATCHED && run.mode == RunMode::Work {
+    // The `.git`s below the worktree's top now, to compare with while the
+    // run asks to commit and after it: the sandbox cannot stop every way
+    // a Work run can make one.
+    let nested_before = if run.mode == RunMode::Work {
         let top = worktree.clone();
         tokio::task::spawn_blocking(move || crate::nested_git::below(&top))
             .await
@@ -19518,7 +19552,13 @@ async fn execute_question(
         event_index += 1;
         if let perch_agent::RunEvent::Approval { id, request } = &event {
             if persistence_error.is_none() {
-                on_approval(ctx, &run, &handle, &item_id, &thread.id, id, request).await;
+                let nested = nested_before
+                    .as_ref()
+                    .map(|before| (worktree.as_path(), before));
+                on_approval(
+                    ctx, &run, &handle, &item_id, &thread.id, id, request, nested,
+                )
+                .await;
             }
             continue;
         }
@@ -28105,6 +28145,99 @@ read eof || true
             .with_cache(|c| c.grants_for("a/b").unwrap())
             .unwrap()
             .is_empty());
+    }
+
+    /// The commit grant answers a commit outside the sandbox, but not
+    /// once a `.git` has appeared below the worktree's top since the run
+    /// started, as one moved in does past either sandbox: `git add -A`
+    /// would run its `core.fsmonitor` outside the sandbox. The card says
+    /// why.
+    #[tokio::test]
+    async fn the_commit_grant_asks_once_a_git_appeared_inside_the_worktree() {
+        let commit = r#"{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git add -A && git commit -m x","dangerouslyDisableSandbox":true}}"#;
+        for appear in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+            let mut config = Config::default();
+            config.agent.binary = asking_claude(dir.path(), commit);
+            if appear {
+                // Made between the run's start and its request.
+                let claude = std::fs::read_to_string(&config.agent.binary).unwrap();
+                std::fs::write(
+                    &config.agent.binary,
+                    claude.replacen("read user\n", "read user\nmkdir -p sub/.git\n", 1),
+                )
+                .unwrap();
+            }
+            ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+            let worktree = dir.path().join("worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            git(&worktree, &["init", "-q"]);
+            let item = work_branch(&ctx, &worktree);
+            ctx.with_cache(|c| {
+                c.insert_grant(&perch_github::WorkGrantRecord {
+                    id: "g1".into(),
+                    repo: "a/b".into(),
+                    key: "commit".into(),
+                    label: "commit".into(),
+                    created_at: "2026-09-22T10:00:00Z".parse().unwrap(),
+                })
+            })
+            .unwrap()
+            .unwrap();
+            let running = tokio::spawn({
+                let (ctx, id) = (ctx.clone(), item.id.clone());
+                async move {
+                    ask(
+                        &ctx,
+                        id,
+                        None,
+                        None,
+                        "Commit it".into(),
+                        perch_agent::Backend::ClaudeCode,
+                        "sonnet".into(),
+                        perch_agent::Effort::Medium,
+                        RunMode::Work,
+                    )
+                    .await
+                }
+            });
+            if !appear {
+                running.await.unwrap();
+                assert!(
+                    !received
+                        .try_iter()
+                        .any(|e| matches!(e, Event::ApprovalRequested(_))),
+                    "the grant answered"
+                );
+                let steps = step_summaries(&ctx, &item);
+                assert!(
+                    steps.iter().any(|s| s
+                        == "Allowed by a grant: Run outside the sandbox: git add -A && git commit -m x [ok]"),
+                    "{steps:?}"
+                );
+                continue;
+            }
+            let view = next_event(&received, |e| match e {
+                Event::ApprovalRequested(view) => Some(view),
+                _ => None,
+            })
+            .await;
+            assert_eq!(
+                view.detail.as_deref(),
+                Some("A Git repository appeared at sub/.git during this run. Git outside the sandbox would run what it holds, so the commit grant doesn't answer for this.")
+            );
+            settle_approval(
+                &ctx,
+                &view.run_id,
+                &view.id,
+                Settle::Answered(ApprovalAnswer::Deny),
+            )
+            .await;
+            running.await.unwrap();
+            let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
+            assert!(answers.contains("\"behavior\":\"deny\""), "{answers}");
+        }
     }
 
     #[tokio::test]

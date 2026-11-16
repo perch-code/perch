@@ -207,6 +207,17 @@ What the host needs that the Mac didn't:
 - Claude Code on Linux skips glob `denyWrite` patterns, so a Work run
   loses `*/**/.git`. After a Work run on Linux, a `.git` that appeared
   below the worktree's top fails the run's record with the path named.
+- It also loses `worktrees/*/commondir` and `worktrees/*/config.worktree`,
+  which kept a worktree Perch adds to the same repository while a run with
+  the commit grant goes from being pointed at the run's own config. So on
+  Linux the commit grant doesn't open a linked worktree's repository git
+  directory whole: only the run's own `worktrees/<name>`, and `objects/`,
+  `refs/` and `logs/` (made before the run if missing, as in a bare clone).
+  That is what a commit, a branch or a tag writes, checked with git 2.50
+  under a macOS sandbox profile allowing only those. Git also tries to lock
+  `packed-refs` on each ref update; it prints that it can't and the commit
+  lands. Deleting a packed branch fails. A main checkout's `.git` stays
+  open, with `worktrees/` denied whole.
 
 ### Beside T3 Code
 
@@ -272,6 +283,17 @@ Where the implementation went its own way, and why:
 - The nested `.git` check on Linux also fails a run whose existing nested
   `.git` had its config or hooks changed, or whose `.git` file points
   elsewhere, not only one that appeared.
+- The nested `.git` look runs on every platform, not only Linux: a run can
+  move in a directory holding a `.git` past either sandbox. It is taken as
+  a Work run starts, and the commit grant doesn't answer a git write while
+  a `.git` is new or changed since then, or the worktree is past the look's
+  limit; the reader is asked, and the card says why. After the run, a new
+  `.git` file is a checked-out submodule only where `.gitmodules` said one
+  goes before the run and it points into a git directory's `modules/`. A
+  `.git` file's target repository counts as part of it, and `.GIT` counts.
+  The commit grant keeps each git directory's `modules/` read-only, the
+  run's own `worktrees/<name>/modules` included, where a linked worktree's
+  submodules live.
 - The window frame moved out of the database into `window-frame` in the
   Mac's own Perch home, read and written there whatever the engine; the
   old meta key is still read when there is no file. Remote, the frame had

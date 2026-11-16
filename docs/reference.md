@@ -1098,16 +1098,20 @@ On Linux, Claude Code's sandbox is bubblewrap with socat for its network
 proxy. A Work run or a question on a machine without `bwrap` and `socat` on
 `PATH` is refused before it starts: "Claude Code's sandbox needs bwrap and
 socat on Linux…". Claude Code on Linux also skips the glob that keeps a Work
-run from making a `.git` inside the worktree, so Perch looks itself: a `.git`
-that appeared below the worktree's top during a Work run, or one there before
-whose `config`, `config.worktree`, `commondir`, `gitdir` or hooks changed,
-or whose `.git` file now points elsewhere, fails the run, with its path
-named. A submodule `.gitmodules` names, checked out by the run, is left
-alone, and `node_modules`, `target`, `.venv` and `venv` are not looked
-through. The look follows no link and opens nothing but plain files, a link
-or a FIFO counting by what it is, `.gitmodules` included, and goes through
-at most 200,000 folders and hooks in nested repositories: a run that takes
-the worktree past that fails too.
+run from making a `.git` inside the worktree, and on any platform a run can
+move in a directory that already holds one, so Perch looks itself, as a Work
+run starts and again as it ends: a `.git` that appeared below the worktree's
+top during the run, or one there before whose `config`, `config.worktree`,
+`commondir`, `gitdir` or hooks changed, or whose `.git` file now points
+elsewhere or at a repository that changed, fails the run, with its path
+named. `.GIT` counts, as macOS doesn't tell it from `.git`. A submodule that
+`.gitmodules` named before the run, checked out by it with a `.git` file
+pointing into the repository's `modules/`, is left alone, and
+`node_modules`, `target`, `.venv` and `venv` are not looked through. The
+look follows no link out of the worktree and opens nothing but plain files,
+a link or a FIFO counting by what it is, `.gitmodules` included, and goes
+through at most 200,000 folders and hooks in nested repositories: a run that
+takes the worktree past that fails too.
 
 ### Approvals
 
@@ -1176,10 +1180,17 @@ or sets config, such as `-S`, `--exec` or `--template`. Anything else is asked
 for as its own command, and the grant does not answer it.
 The commit grant also changes the sandbox of later Claude Code Work runs: their
 worktree's git directories become writable, apart from each one's `config`,
-`config.worktree`, `commondir` and `hooks`, the repository's other worktrees'
-directories under `worktrees/` (and the `commondir` and `config.worktree` of
-any added while the run goes), and its submodules' under `modules/`. The run is
-told it may commit but not push.
+`config.worktree`, `commondir`, `hooks` and `modules/` (its submodules'
+repositories), and the repository's other worktrees' directories under
+`worktrees/` (and the `commondir` and `config.worktree` of any added while the
+run goes). On Linux, where that last rule can't be kept, a linked worktree's
+run gets only its own directory and the repository's `objects/`, `refs/` and
+`logs/`; git there prints that it can't lock `packed-refs` and commits anyway.
+The run is told it may commit but not push.
+While a Work run goes, the grant doesn't answer a commit once a `.git` has
+appeared or changed below the worktree's top since the run started, or the
+worktree is too big to look through: git outside the sandbox would run what
+that repository's config says. You're asked, and the card says why.
 With or without the grant, a Work run, Claude Code's or Codex's, can't write a
 `.git` below the top of its worktree: git would take a directory holding one
 for a submodule and, the next time it runs there outside the sandbox, use a

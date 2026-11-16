@@ -388,8 +388,14 @@ pub fn alternate_object_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// What in a git directory steers git rather than holding the history,
-/// which a run that may commit still may not write.
-const GIT_CONTROL: [&str; 4] = ["config", "config.worktree", "commondir", "hooks"];
+/// which a run that may commit still may not write. `modules/` holds the
+/// submodules' repositories, whose config git obeys when it looks inside
+/// one: a linked worktree's own are under `worktrees/<name>/modules`.
+const GIT_CONTROL: [&str; 5] = ["config", "config.worktree", "commondir", "hooks", "modules"];
+
+/// Whether Claude Code's sandbox keeps glob `denyWrite` patterns. On
+/// Linux it skips them ("Skipping glob write pattern on Linux").
+const GLOBS_HOLD: bool = !cfg!(target_os = "linux");
 
 /// The git directories a commit in the worktree writes: a linked
 /// worktree's two (see [`linked_git_dirs`]), or its own `.git`, the
@@ -411,19 +417,38 @@ fn git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
 /// The repository's git directory also holds what git uses elsewhere,
 /// which stays read-only too: every other worktree's directory under
 /// `worktrees/`, whose `commondir` and `config.worktree` would steer git
-/// in that worktree, and `modules/`, the submodules' git directories.
-/// A deny outranks an allow, so the run's own directory there can't be
-/// carved out of a denied `worktrees/`; the others are named one by one,
-/// and the globs cover a worktree added while the run is going.
-fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+/// in that worktree. A deny outranks an allow, so the run's own directory
+/// there can't be carved out of a denied `worktrees/`; the others are
+/// named one by one, and the globs cover a worktree added while the run
+/// is going.
+///
+/// Where globs don't hold (`globs_hold` false: Linux), those globs would
+/// leave a worktree Perch adds while the run goes open, and a rewritten
+/// `commondir` there would make Perch's next git in it run the run's
+/// config. So the repository's git directory is not opened whole: for a
+/// linked worktree only its own directory and what a commit writes in the
+/// repository's, `objects/`, `refs/` and `logs/` (made now if missing, as
+/// a bare clone has none and git can't make it inside the sandbox). Git
+/// still tries to lock `packed-refs` there on each ref update, says it
+/// can't, and goes on; a command that rewrites `packed-refs`, deleting a
+/// packed branch say, fails. A main checkout's `.git` is its own and is
+/// opened, with `worktrees/` denied whole, as no part of it is the run's.
+fn commit_paths(worktree: &std::path::Path, globs_hold: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let dirs = git_dirs(worktree);
     let mut guarded: Vec<PathBuf> = dirs
         .iter()
         .flat_map(|dir| GIT_CONTROL.map(|name| dir.join(name)))
         .collect();
-    let common = dirs.last().expect("one git directory at least");
+    let common = dirs.last().expect("one git directory at least").clone();
     let worktrees = common.join("worktrees");
-    guarded.extend(["commondir", "config.worktree"].map(|name| worktrees.join("*").join(name)));
+    let linked = dirs.len() > 1;
+    if !globs_hold && !linked {
+        guarded.push(worktrees);
+        return (dirs, guarded);
+    }
+    if globs_hold {
+        guarded.extend(["commondir", "config.worktree"].map(|name| worktrees.join("*").join(name)));
+    }
     if let Ok(entries) = std::fs::read_dir(&worktrees) {
         let mut others: Vec<PathBuf> = entries
             .flatten()
@@ -433,8 +458,13 @@ fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         others.sort();
         guarded.extend(others);
     }
-    guarded.push(common.join("modules"));
-    (dirs, guarded)
+    if globs_hold {
+        return (dirs, guarded);
+    }
+    let _ = std::fs::create_dir_all(common.join("logs"));
+    let mut open: Vec<PathBuf> = dirs[..dirs.len() - 1].to_vec();
+    open.extend(["objects", "refs", "logs"].map(|name| common.join(name)));
+    (open, guarded)
 }
 
 /// The `--settings` a Work run starts with. The shell's sandbox is the
@@ -447,6 +477,16 @@ fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 /// directories it uses; with that, the git directories are writable but
 /// their config and hooks are not (see [`commit_paths`]).
 pub fn claude_work_settings(cwd: &std::path::Path, grant: &WorkGrant) -> String {
+    claude_work_settings_where(cwd, grant, GLOBS_HOLD)
+}
+
+/// [`claude_work_settings`], for a sandbox that keeps glob patterns or
+/// not.
+fn claude_work_settings_where(
+    cwd: &std::path::Path,
+    grant: &WorkGrant,
+    globs_hold: bool,
+) -> String {
     let real = real_path(cwd);
     let mut allow_write = vec![real.clone(), real_path(&std::env::temp_dir())];
     allow_write.extend(grant.write.iter().map(|p| real_path(p)));
@@ -461,7 +501,7 @@ pub fn claude_work_settings(cwd: &std::path::Path, grant: &WorkGrant) -> String 
         .collect();
     deny_write.push(nested_git(&real));
     if grant.commit {
-        let (dirs, guarded) = commit_paths(&real);
+        let (dirs, guarded) = commit_paths(&real, globs_hold);
         allow_write.extend(dirs);
         deny_write.extend(guarded);
     } else {
@@ -535,7 +575,7 @@ pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(Stri
         let guarded = dirs
             .iter()
             .flat_map(|dir| GIT_CONTROL.map(|name| dir.join(name)))
-            .chain([common.join("worktrees"), common.join("modules")]);
+            .chain([common.join("worktrees")]);
         entries.extend(
             dirs.iter()
                 .map(|dir| (dir.to_string_lossy().into_owned(), "write")),
@@ -2755,7 +2795,7 @@ mod tests {
             ..WorkGrant::default()
         };
         let settings: serde_json::Value =
-            serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
+            serde_json::from_str(&claude_work_settings_where(&worktree, &grant, true)).unwrap();
         let allow = settings["sandbox"]["filesystem"]["allowWrite"]
             .as_array()
             .unwrap();
@@ -2887,7 +2927,7 @@ mod tests {
             ..WorkGrant::default()
         };
         let settings: serde_json::Value =
-            serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
+            serde_json::from_str(&claude_work_settings_where(&worktree, &grant, true)).unwrap();
         let allow = settings["sandbox"]["filesystem"]["allowWrite"]
             .as_array()
             .unwrap();
@@ -2913,6 +2953,99 @@ mod tests {
                 .is_some_and(|p| p.ends_with("/**/.git") && !p.ends_with("/*/**/.git"))),
             "`**/.git` would match the top-level `.git` too: {deny:?}"
         );
+    }
+
+    /// Where Claude Code skips glob patterns, as on Linux, the commit
+    /// grant doesn't open the repository's git directory whole: the
+    /// `commondir` of a worktree Perch adds while the run goes would be
+    /// open, and Perch's next git there would run the run's config. Only
+    /// the run's own directory and what a commit writes are. A
+    /// submodule's repository, the run's own included, stays read-only on
+    /// every platform.
+    #[test]
+    fn without_globs_the_commit_grant_opens_only_what_a_commit_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let common = real.join("repo.git");
+        let own = common.join("worktrees/wt");
+        let other = common.join("worktrees/other");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(own.join("commondir"), "../..\n").unwrap();
+        let worktree = real.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", own.display()),
+        )
+        .unwrap();
+        let grant = WorkGrant {
+            commit: true,
+            ..WorkGrant::default()
+        };
+        let lists = |settings: String| {
+            let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+            let list = |key: &str| -> Vec<String> {
+                settings["sandbox"]["filesystem"][key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|path| path.as_str().unwrap().to_string())
+                    .collect()
+            };
+            (list("allowWrite"), list("denyWrite"))
+        };
+        let has = |list: &[String], path: &std::path::Path| {
+            list.iter().any(|p| *p == path.to_string_lossy())
+        };
+
+        for globs_hold in [true, false] {
+            let (_, deny) = lists(claude_work_settings_where(&worktree, &grant, globs_hold));
+            for guarded in [own.join("modules"), common.join("modules")] {
+                assert!(has(&deny, &guarded), "{} in {deny:?}", guarded.display());
+            }
+        }
+
+        let (allow, deny) = lists(claude_work_settings_where(&worktree, &grant, false));
+        assert!(!has(&allow, &common), "{allow:?}");
+        for open in [
+            own.clone(),
+            common.join("objects"),
+            common.join("refs"),
+            common.join("logs"),
+        ] {
+            assert!(has(&allow, &open), "{} in {allow:?}", open.display());
+        }
+        assert!(common.join("logs").is_dir(), "made, as git can't");
+        for guarded in [
+            own.join("config.worktree"),
+            own.join("commondir"),
+            own.join("hooks"),
+            other.clone(),
+            worktree.join(".git"),
+        ] {
+            assert!(has(&deny, &guarded), "{} in {deny:?}", guarded.display());
+        }
+        assert!(
+            !deny.iter().any(|p| p.contains("/worktrees/*/")),
+            "a glob that isn't kept: {deny:?}"
+        );
+
+        // A main checkout's `.git` is its own, and every worktree under
+        // it someone else's, now or later.
+        let main = real.join("main");
+        let git = main.join(".git");
+        std::fs::create_dir_all(git.join("worktrees/elsewhere")).unwrap();
+        let (allow, deny) = lists(claude_work_settings_where(&main, &grant, false));
+        assert!(has(&allow, &git) && !has(&deny, &git), "{allow:?} {deny:?}");
+        for guarded in [
+            git.join("config"),
+            git.join("hooks"),
+            git.join("modules"),
+            git.join("worktrees"),
+        ] {
+            assert!(has(&deny, &guarded), "{} in {deny:?}", guarded.display());
+        }
     }
 
     #[test]

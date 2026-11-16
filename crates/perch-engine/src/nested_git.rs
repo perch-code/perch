@@ -1,25 +1,24 @@
 //! A Work run may not make or change a Git repository inside its worktree:
 //! a nested `.git` can hold hooks and config that the next `git` run there
 //! obeys. Its sandbox settings deny writes to `<worktree>/*/**/.git`, but
-//! Claude Code on Linux drops glob patterns from `denyWrite`, so there the
-//! rule is not kept. The engine looks instead: the `.git`s below the
-//! worktree's top before the run and after it, with what in each one
-//! decides what git runs, and one that appeared or changed fails the run's
-//! record, with its path named.
+//! Claude Code on Linux drops glob patterns from `denyWrite`, and on any
+//! platform a run can move in a directory that already holds a `.git`. The
+//! engine looks as well: the `.git`s below the worktree's top as the run
+//! starts, with what in each one decides what git runs. One that appeared
+//! or changed since keeps a grant from answering a git write outside the
+//! sandbox while the run goes ([`unsettled`]), and fails the run's record
+//! afterwards, with its path named ([`appeared`]).
 //!
-//! The run may have left anything there, so the look never follows a link,
-//! never opens what is not a plain file (a FIFO would block it for good,
+//! The run may have left anything there, so the look follows no link but
+//! a `.git` one (and a `.git` file's `gitdir:`) to the repository git would
+//! use, and there only to what [`Held`] keeps, never opens what is not a
+//! plain file (a FIFO would block it for good,
 //! a link to `/dev/zero` would fill memory), reads no more than
 //! [`KEPT_BYTES`] of a file and keeps only its digest, and goes through at
 //! most [`MOST_LOOKED`] directories and hooks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-
-/// Whether runs are looked at this way: only where the sandbox cannot
-/// keep the rule itself, and in this crate's tests, so the engine's side
-/// of it is tried on every machine.
-pub(crate) const WATCHED: bool = cfg!(any(target_os = "linux", test));
 
 /// Directories not looked inside: installed dependencies and build output,
 /// which can hold many thousands of files and repositories of their own
@@ -49,11 +48,12 @@ pub(crate) type Kept = [u8; 32];
 const DECIDING: [&str; 3] = ["commondir", "config.worktree", "gitdir"];
 
 /// What a `.git` holds that decides what git does there: a repository's
-/// `config` and hooks, or where a `.git` file or link points.
+/// `config` and hooks, or where a `.git` file or link points and what the
+/// repository there holds, as the run could write that too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Held {
     Repository(BTreeMap<String, Kept>),
-    Pointer(Kept),
+    Pointer(Kept, Option<BTreeMap<String, Kept>>),
 }
 
 /// The `.git`s below a worktree's top, and what each holds.
@@ -62,12 +62,38 @@ pub(crate) struct Nested {
     pub(crate) gits: BTreeMap<PathBuf, Held>,
     /// False when the look stopped at [`MOST_LOOKED`] with more to go.
     pub(crate) whole: bool,
+    /// The submodules `.gitmodules` declared when this was taken (see
+    /// [`submodules`]). Only the look before the run is trusted with it:
+    /// the run can write `.gitmodules`.
+    submodules: BTreeSet<PathBuf>,
+    /// Where the top's submodules keep their git directories: `modules/`
+    /// in each git directory the top uses, which the sandbox keeps
+    /// read-only, made real.
+    modules: Vec<PathBuf>,
+}
+
+impl Nested {
+    /// Whether a `.git` that was not there before is a submodule checked
+    /// out by `git submodule update`: a `.git` file where `.gitmodules`
+    /// said one goes before the run, pointing into a `modules/` the run
+    /// could not write.
+    fn checked_out(&self, path: &Path) -> bool {
+        let Some(to) = pointed(path).and_then(|to| to.canonicalize().ok()) else {
+            return false;
+        };
+        self.submodules.contains(path)
+            && self
+                .modules
+                .iter()
+                .any(|modules| to != *modules && to.starts_with(modules))
+    }
 }
 
 /// Every `.git` below `top`, as a directory or as the file a worktree or a
 /// submodule has, and not `top`'s own. A `.git` is not looked inside past
-/// what [`Held`] keeps, and links are not followed: what a link points at
-/// is not in the worktree.
+/// what [`Held`] keeps, and links to folders are not followed: what a
+/// link points at is not in the worktree. A `.git` link or file is
+/// followed to its repository, as git would.
 pub(crate) fn below(top: &Path) -> Nested {
     below_within(top, MOST_LOOKED)
 }
@@ -76,6 +102,8 @@ fn below_within(top: &Path, most_looked: usize) -> Nested {
     let mut found = Nested {
         gits: BTreeMap::new(),
         whole: true,
+        submodules: submodules(top),
+        modules: modules(top),
     };
     let mut dirs = vec![top.to_path_buf()];
     let mut left = most_looked;
@@ -93,7 +121,9 @@ fn below_within(top: &Path, most_looked: usize) -> Nested {
                 continue;
             };
             let name = entry.file_name();
-            if name == ".git" {
+            // On a filesystem that ignores case, as macOS's does, git
+            // finds `.GIT` where it looks for `.git`.
+            if name.eq_ignore_ascii_case(".git") {
                 if dir != top {
                     let path = entry.path();
                     let held = if kind.is_dir() {
@@ -103,7 +133,24 @@ fn below_within(top: &Path, most_looked: usize) -> Nested {
                         };
                         Held::Repository(held)
                     } else {
-                        Held::Pointer(file(&path).unwrap_or_default())
+                        // Git follows a `.git` link, and a `.git` file's
+                        // `gitdir:`, to the repository it uses.
+                        let to = if kind.is_symlink() {
+                            Some(path.clone())
+                        } else {
+                            pointed(&path)
+                        };
+                        let there = match to {
+                            Some(to) if to.is_dir() => {
+                                let Some(held) = repository(&to, &mut left) else {
+                                    found.whole = false;
+                                    break 'dirs;
+                                };
+                                Some(held)
+                            }
+                            _ => None,
+                        };
+                        Held::Pointer(file(&path).unwrap_or_default(), there)
                     };
                     found.gits.insert(path, held);
                 }
@@ -228,11 +275,36 @@ fn read_plain(path: &Path) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= KEPT_BYTES).then_some(bytes)
 }
 
+/// Where a `.git` file points, as git reads it: `gitdir: <dir>`, relative
+/// to the file's folder. None for anything else, or a file that is not
+/// plain or is too long.
+fn pointed(path: &Path) -> Option<PathBuf> {
+    let bytes = read_plain(path)?;
+    let text = String::from_utf8(bytes).ok()?;
+    let dir = text.trim_end().strip_prefix("gitdir:")?.trim();
+    (!dir.is_empty() && !dir.contains('\n')).then(|| path.parent().unwrap_or(path).join(dir))
+}
+
+/// The `modules/` of each git directory `top` uses, where git keeps its
+/// submodules' repositories: a linked worktree's own (`git submodule
+/// update` there puts them under `worktrees/<name>/modules`) and the
+/// repository's. The sandbox keeps both read-only.
+fn modules(top: &Path) -> Vec<PathBuf> {
+    let mut dirs = perch_agent::linked_git_dirs(top);
+    if dirs.is_empty() {
+        dirs.push(top.join(".git"));
+    }
+    dirs.into_iter()
+        .map(|dir| dir.canonicalize().unwrap_or(dir).join("modules"))
+        .collect()
+}
+
 /// The submodules `.gitmodules` at `top` declares, by the `.git` file each
 /// has once checked out. `git submodule update` makes those, and they point
 /// into the top's own repository, which the sandbox keeps. The run can
-/// write `.gitmodules` too, so it is read as a hook is: one that is not a
-/// plain file, or is too long, declares none.
+/// write `.gitmodules` too, so the declared ones are taken before it, and
+/// it is read as a hook is: one that is not a plain file, or is too long,
+/// declares none.
 fn submodules(top: &Path) -> BTreeSet<PathBuf> {
     let Some(bytes) = read_plain(&top.join(".gitmodules")) else {
         return BTreeSet::new();
@@ -246,17 +318,48 @@ fn submodules(top: &Path) -> BTreeSet<PathBuf> {
         .collect()
 }
 
+/// Why a git write outside the sandbox, which a grant would answer while
+/// a run goes, must be asked about instead: a `.git` below the top that
+/// was not there as the run started (`before`), or holds something else
+/// `now`, or a worktree too big to look through. Git there runs what that
+/// `.git`'s config says, outside the sandbox: `git add -A` looks inside a
+/// submodule with its `core.fsmonitor`. A submodule checked out since is
+/// asked about too. None when nothing has.
+pub(crate) fn unsettled(top: &Path, before: &Nested, now: &Nested) -> Option<String> {
+    let named = |path: &Path| path.strip_prefix(top).unwrap_or(path).display().to_string();
+    let why = " Git outside the sandbox would run what it holds, so the commit grant doesn't answer for this.";
+    for (path, held) in &now.gits {
+        match before.gits.get(path) {
+            None => {
+                return Some(format!(
+                    "A Git repository appeared at {} during this run.{why}",
+                    named(path)
+                ))
+            }
+            Some(was) if was != held => {
+                return Some(format!(
+                    "The Git repository at {} changed during this run.{why}",
+                    named(path)
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    (!now.whole).then(|| format!(
+        "The worktree has more than {MOST_LOOKED} folders and Git hooks, more than Perch looks through for a Git repository made inside it, so the commit grant doesn't answer for this."
+    ))
+}
+
 /// The `.git`s in `after` that were not in `before`, or hold something
 /// else, and what the run's record says about them: None when there are
 /// none.
 pub(crate) fn appeared(top: &Path, before: &Nested, after: &Nested) -> Option<String> {
     let named = |path: &Path| path.strip_prefix(top).unwrap_or(path).display().to_string();
-    let submodules = submodules(top);
     let mut new = Vec::new();
     let mut changed = Vec::new();
     for (path, held) in &after.gits {
         match before.gits.get(path) {
-            None if matches!(held, Held::Pointer(_)) && submodules.contains(path) => {}
+            None if matches!(held, Held::Pointer(..)) && before.checked_out(path) => {}
             None => new.push(named(path)),
             Some(was) if was != held => changed.push(named(path)),
             Some(_) => {}
@@ -282,11 +385,11 @@ pub(crate) fn appeared(top: &Path, before: &Nested, after: &Nested) -> Option<St
         // Past the most looked through, what was not looked at could hold
         // one. A worktree that was that big before is not the run's doing.
         return (before.whole && !after.whole).then(|| format!(
-            "This Work run took the worktree past {MOST_LOOKED} folders and Git hooks, more than Perch looks through for a Git repository made below its top. Claude Code's sandbox on Linux cannot stop a run making one, so look for any before running git there."
+            "This Work run took the worktree past {MOST_LOOKED} folders and Git hooks, more than Perch looks through for a Git repository made below its top. The sandbox cannot stop every way a run can make one, so look for any before running git there."
         ));
     };
     Some(format!(
-        "{}{}, below the worktree's top, during this Work run. Claude Code's sandbox on Linux cannot stop a run doing that, so look at what it holds before running git there.",
+        "{}{}, below the worktree's top, during this Work run. The sandbox cannot stop every way a run can do that, so look at what it holds before running git there.",
         first.to_uppercase(),
         said.as_str()
     ))
@@ -383,6 +486,7 @@ mod tests {
             "[submodule \"lib\"]\n\tpath = vendor/lib\n\turl = https://example.com/lib\n",
         )
         .unwrap();
+        std::fs::create_dir_all(top.join(".git/modules/lib")).unwrap();
         let before = below(top);
         std::fs::create_dir_all(top.join("vendor/lib")).unwrap();
         std::fs::write(
@@ -399,6 +503,127 @@ mod tests {
         std::fs::remove_file(top.join("vendor/lib/.git")).unwrap();
         std::fs::create_dir(top.join("vendor/lib/.git")).unwrap();
         assert!(appeared(top, &before, &below(top)).is_some());
+    }
+
+    /// A `.git` file where a submodule goes passes only when it points
+    /// into the repository's `modules/`, which the run could not write,
+    /// and only where `.gitmodules` said one goes before the run: the run
+    /// can write `.gitmodules`, and a `.git` file naming a repository it
+    /// made under any other name.
+    #[test]
+    fn a_submodule_s_git_file_passes_only_into_modules_as_declared_before() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join(".git/modules/lib")).unwrap();
+        std::fs::write(
+            top.join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = vendor/lib\n",
+        )
+        .unwrap();
+        let before = below(top);
+
+        std::fs::create_dir_all(top.join("vendor/.evil_git")).unwrap();
+        std::fs::create_dir_all(top.join("vendor/lib")).unwrap();
+        std::fs::write(top.join("vendor/lib/.git"), "gitdir: ../.evil_git\n").unwrap();
+        let said = appeared(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("A Git repository appeared at vendor/lib/.git,"),
+            "{said}"
+        );
+        // Out of `modules/` by `..` is out.
+        std::fs::write(
+            top.join("vendor/lib/.git"),
+            "gitdir: ../../.git/modules/../../vendor/.evil_git\n",
+        )
+        .unwrap();
+        assert!(appeared(top, &before, &below(top)).is_some());
+
+        // Declared by a `.gitmodules` the run wrote is not declared.
+        std::fs::remove_dir_all(top.join("vendor")).unwrap();
+        std::fs::create_dir_all(top.join(".git/modules/other")).unwrap();
+        std::fs::write(
+            top.join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = vendor/lib\n[submodule \"other\"]\n\tpath = other\n",
+        )
+        .unwrap();
+        std::fs::create_dir(top.join("other")).unwrap();
+        std::fs::write(top.join("other/.git"), "gitdir: ../.git/modules/other\n").unwrap();
+        let said = appeared(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("A Git repository appeared at other/.git,"),
+            "{said}"
+        );
+    }
+
+    /// Git follows a `.git` file to the repository it names, so a change
+    /// there is a change to the `.git`, though the file is as it was.
+    #[test]
+    fn a_change_where_a_git_file_points_is_a_change() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join("store/hooks")).unwrap();
+        std::fs::create_dir(top.join("linked")).unwrap();
+        std::fs::write(top.join("linked/.git"), "gitdir: ../store\n").unwrap();
+        let before = below(top);
+        std::fs::write(top.join("store/config"), "[core]\n\tfsmonitor = x\n").unwrap();
+        let said = appeared(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("The Git repository at linked/.git was changed"),
+            "{said}"
+        );
+    }
+
+    /// macOS's filesystem ignores case, so git takes `.GIT` for `.git`.
+    #[test]
+    fn a_git_in_other_case_is_a_git() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        let before = below(top);
+        std::fs::create_dir_all(top.join("x/.GIT")).unwrap();
+        let said = appeared(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("A Git repository appeared at x/.GIT,"),
+            "{said}"
+        );
+    }
+
+    /// While the run goes, any `.git` new or changed since it started is
+    /// a reason to ask, a submodule's among them, and so is a worktree
+    /// too big to look through.
+    #[test]
+    fn unsettled_names_what_appeared_or_changed() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join(".git/modules/lib")).unwrap();
+        std::fs::create_dir_all(top.join("old/.git")).unwrap();
+        std::fs::write(
+            top.join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = lib\n",
+        )
+        .unwrap();
+        let before = below(top);
+        assert_eq!(unsettled(top, &before, &below(top)), None);
+
+        std::fs::create_dir(top.join("lib")).unwrap();
+        std::fs::write(top.join("lib/.git"), "gitdir: ../.git/modules/lib\n").unwrap();
+        let said = unsettled(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("A Git repository appeared at lib/.git during this run. Git outside"),
+            "{said}"
+        );
+        std::fs::remove_dir_all(top.join("lib")).unwrap();
+
+        std::fs::write(top.join("old/.git/config"), "[core]\n").unwrap();
+        let said = unsettled(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("The Git repository at old/.git changed during this run."),
+            "{said}"
+        );
+        std::fs::remove_file(top.join("old/.git/config")).unwrap();
+        assert_eq!(unsettled(top, &before, &below(top)), None);
+
+        let said = unsettled(top, &before, &below_within(top, 1)).unwrap();
+        assert!(said.starts_with("The worktree has more than"), "{said}");
     }
 
     #[cfg(unix)]
