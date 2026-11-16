@@ -309,7 +309,7 @@ connect. VS Code's Remote SSH, Zed and T3 Code work the same way.
 2. Probe and upload (below). (Done.)
 3. Versioned installs and their cleanup (below). (Done.)
 4. Replacing an older engine (below). (Done.)
-5. Host checks (below).
+5. Host checks (below). (Done.)
 
 ### Modes
 
@@ -440,7 +440,8 @@ button to Settings when anything required is missing.
   an install the strip says Connecting again until the engine answers.
 - Cleanup runs in a thread as the bridge starts, keeps the newest other
   `perchd-*` by modification time, and touches only plain files.
-- `perch --connect` prints the welcome only; the host checks are step 5.
+- `perch --connect` prints the welcome only; the host checks came with
+  step 5.
 - The stop hello also carries `unless_build`, the bridge's own build, and
   an engine of that build answers `Staying`. The bridge's check and its
   stop are one exchange, so two Macs of the same new build replacing the
@@ -470,6 +471,32 @@ button to Settings when anything required is missing.
 - `perch --connect` replaces an idle older engine too, and prints what it
   left running. `perchd status` prints the engine's build. The protocol
   is 5.
+- The host checks are `Event::HostChecks(Vec<HostCheck>)`, each with
+  `what`, `ok`, `required`, `detail` and an optional `fix`, and the
+  protocol is 6 for it. The engine keeps the last look for a resync and
+  sends a look only when it differs from the last, so a config taken up
+  with nothing changed for the host says nothing. A look begun later wins
+  over a slow one begun earlier. It also looks again when a poll takes up
+  a new token, since `gh auth login` changes no config.
+- logind is asked with `loginctl show-session -p KillUserProcesses -p
+  KillOnlyUsers -p KillExcludeUsers`, which with no session names the
+  manager's settings; `show-user` has no `KillUserProcesses`. The check
+  weighs the three as logind does, so a user in `KillExcludeUsers` passes,
+  and the fix adds the user there in a drop-in rather than turning the
+  setting off for everyone.
+- The agents come from discovery's answer: an agent is found when
+  discovery put a path in place of its name. Nothing looks for them a
+  second time. One agent is enough, so no agent check is required unless
+  none is found, and then Claude Code's is.
+- The fixes that install use the first of apt-get, dnf, yum, pacman,
+  zypper and apk found on the host. A missing `[[repo]]` root is cloned
+  from github.com only when the config names no GitHub Enterprise host,
+  since which host a repository is on is not known from its name.
+- `perch --connect` sends a resync after the welcome and waits up to 30 s
+  for the checks; an engine that has just started looks after discovery.
+- The strip shows "needs setup" only while connected to the build the app
+  wants; an engine of another build has its own strip, which matters
+  more.
 
 ## Acceptance
 

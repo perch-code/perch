@@ -1355,6 +1355,11 @@ pub enum Event {
         message: String,
     },
     Status(Status),
+    /// What the host lacks for its engine to do its work, each with what
+    /// to run to put it right. Only an engine under `perchd serve` sends
+    /// it: at start, whenever config.toml or the token changes what it
+    /// finds, and in a resync.
+    HostChecks(Vec<crate::host::HostCheck>),
     /// How the app's connection to an engine on another machine stands.
     /// Made by the client as the connection comes and goes, never sent by
     /// an engine.
@@ -4714,7 +4719,10 @@ async fn run(
         window: NO_WINDOW,
         views: fencing.views.clone(),
         status: Arc::new(std::sync::Mutex::new(startup_status)),
+        host: (hub.lifetime() == Lifetime::Service).then(Default::default),
     };
+    // Discovery has found the agents by now, which the checks weigh.
+    ctx.look_at_host();
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
     update::spawn(ctx.clone());
@@ -7053,6 +7061,10 @@ struct Ctx {
     views: Views,
     /// What the status line says now, for a client that connects later.
     status: Arc<std::sync::Mutex<Option<Status>>>,
+    /// The host's checks, looked at again as config.toml and the token
+    /// change. Only under `perchd serve`: the app's own engine is on the
+    /// Mac the reader is at.
+    host: Option<Arc<crate::host::Watch>>,
 }
 
 /// The GitHub client and the token it was built on.
@@ -7193,6 +7205,35 @@ impl Ctx {
         if let Ok(mut current) = self.session.write() {
             *current = session;
         }
+    }
+
+    /// Look at the host again, under `perchd serve`, and tell every client
+    /// what changed. The look runs beside whatever called it; one begun
+    /// after it wins.
+    fn look_at_host(&self) {
+        let Some(watch) = self.host.clone() else {
+            return;
+        };
+        let generation = watch.begin();
+        let config = self.config();
+        let credentials = self.credentials.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let token = {
+                let config = config.clone();
+                move || (credentials.resolve)(&config).map(|token| token.source.describe())
+            };
+            let checks = crate::host::look(&config, token).await;
+            if let Some(checks) = watch.land(generation, checks) {
+                let missing: Vec<&str> = checks
+                    .iter()
+                    .filter(|check| check.blocks())
+                    .map(|check| check.what.as_str())
+                    .collect();
+                tracing::info!(?missing, "host checked");
+                let _ = events.send(Event::HostChecks(checks));
+            }
+        });
     }
 
     /// Download a picture a comment shows, for the window to decode and
@@ -8499,6 +8540,9 @@ fn send_standing(ctx: &Ctx) {
     ctx.send_pending_approvals();
     if let Some(status) = ctx.status() {
         ctx.send_status(status);
+    }
+    if let Some(checks) = ctx.host.as_ref().and_then(|watch| watch.last()) {
+        let _ = ctx.events.send(Event::HostChecks(checks));
     }
     ctx.want_avatars(seeded.faces.avatars);
     ctx.want_avatars(notification_avatars(&seeded.notifications));
@@ -14869,6 +14913,7 @@ async fn adopt_new_token(ctx: &Ctx) -> Option<Session> {
     tracing::info!(source = %session.source, "github token taken up");
     ctx.set_session(Some(session.clone()));
     ctx.preparer.set_token(Some(session.token.clone()));
+    ctx.look_at_host();
     Some(session)
 }
 
@@ -22604,6 +22649,7 @@ mod tests {
             window: NO_WINDOW,
             views: Default::default(),
             status: Default::default(),
+            host: None,
         };
         (ctx, received)
     }

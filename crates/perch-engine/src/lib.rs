@@ -9,6 +9,7 @@ pub mod ask;
 pub mod backend;
 pub mod context;
 pub mod feedback;
+pub mod host;
 pub mod inbox;
 pub mod items;
 pub mod lock;

@@ -7,8 +7,8 @@
 //! engine with nothing running as the app would. Prints the engine's
 //! welcome and exits 0, or says why not and exits 1. An older engine left
 //! running for its runs or clients, or a newer one, is said after the
-//! welcome. No window is opened; the engine is left running, as the app
-//! leaves it.
+//! welcome, and then what the host lacks, with what to run for each. No
+//! window is opened; the engine is left running, as the app leaves it.
 
 use std::time::Duration;
 
@@ -56,7 +56,11 @@ pub fn run(args: &[String]) -> i32 {
         |said| eprintln!("{said}"),
     ));
     match connected {
-        Ok((welcome, other)) => {
+        Ok(perch_engine::wire::remote::Connected {
+            welcome,
+            other,
+            checks,
+        }) => {
             println!(
                 "Connected to {host}: perchd {} (protocol {}) on {}",
                 welcome.engine_version, welcome.protocol, welcome.host
@@ -69,11 +73,62 @@ pub fn run(args: &[String]) -> i32 {
             if let Some(other) = other {
                 println!("{}", perch_engine::wire::remote::other_said(&host, &other));
             }
+            match checks {
+                Some(checks) => print!("{}", checks_said(&checks)),
+                None => println!("host checks: the engine did not send them in time"),
+            }
             0
         }
         Err(why) => {
             eprintln!("perch --connect: can't connect to {host}: {why}");
             1
         }
+    }
+}
+
+/// The host's checks, a line each, with what to run under one that
+/// failed.
+fn checks_said(checks: &[perch_engine::host::HostCheck]) -> String {
+    let mut said = String::from("host checks:\n");
+    for check in checks {
+        let mark = match (check.ok, check.required) {
+            (true, _) => "ok",
+            (false, true) => "missing",
+            (false, false) => "optional",
+        };
+        said.push_str(&format!("  {mark:<9}{}: {}\n", check.what, check.detail));
+        if let Some(fix) = check.fix.as_deref().filter(|_| !check.ok) {
+            said.push_str(&format!("           run: {fix}\n"));
+        }
+    }
+    if perch_engine::host::needs_setup(checks) {
+        said.push_str("The host needs setup: run what is under each missing check there.\n");
+    }
+    said
+}
+
+#[cfg(test)]
+mod tests {
+    use perch_engine::host::HostCheck;
+
+    #[test]
+    fn checks_are_said_a_line_each_with_the_fix_under() {
+        let check = |what: &str, ok, required, fix: Option<&str>| HostCheck {
+            what: what.into(),
+            ok,
+            required,
+            detail: format!("{what} detail."),
+            fix: fix.map(str::to_string),
+        };
+        let said = super::checks_said(&[
+            check("git", true, true, None),
+            check("GitHub token", false, true, Some("gh auth login")),
+            check("Codex", false, false, Some("npm install -g @openai/codex")),
+        ]);
+        assert_eq!(
+            said,
+            "host checks:\n  ok       git: git detail.\n  missing  GitHub token: GitHub token detail.\n           run: gh auth login\n  optional Codex: Codex detail.\n           run: npm install -g @openai/codex\nThe host needs setup: run what is under each missing check there.\n"
+        );
+        assert!(!super::checks_said(&[check("git", true, true, None)]).contains("needs setup"));
     }
 }

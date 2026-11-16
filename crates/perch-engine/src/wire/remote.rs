@@ -806,15 +806,15 @@ async fn install_if_asked(
 /// Connect to the engine on `host` once, installing `perchd` first if it
 /// is missing, and replacing an older one with nothing running, and give
 /// its welcome, with the engine of another build left running if it is
-/// one, or why there was none: what `perch --connect` does. `said` hears
-/// what is done on the way: the build being installed, or the engine
-/// being replaced.
+/// one, and the host's checks, or why there was none: what `perch
+/// --connect` does. `said` hears what is done on the way: the build being
+/// installed, or the engine being replaced.
 pub async fn connect_once(
     host: &str,
     bridge: Bridge,
     answer: Duration,
     mut said: impl FnMut(&str),
-) -> Result<(super::Welcome, Option<OtherEngine>), String> {
+) -> Result<Connected, String> {
     let (mut dial, mut install) = dial_for(host, bridge);
     let mut installed: Option<String> = None;
     let mut replace = Replace::No;
@@ -831,10 +831,11 @@ pub async fn connect_once(
         let within = answer_wait(answer, asked);
         let why = match tokio::time::timeout(within, handshake(stream)).await {
             Ok(Ok((welcome, session))) => {
-                drop(session);
-                let _ = hang_up().await;
-                match judge(wanted.as_deref(), &welcome.about(), may_replace) {
+                let judged = judge(wanted.as_deref(), &welcome.about(), may_replace);
+                let (other, checks) = match judged {
                     Judged::Replace(other) => {
+                        drop(session);
+                        let _ = hang_up().await;
                         said(&format!(
                             "Restarting {host}'s engine, perchd {}, to update it to {}…",
                             other.engine, other.wanted
@@ -842,9 +843,15 @@ pub async fn connect_once(
                         (replace, replacing) = (Replace::IfIdle, Some(other));
                         continue;
                     }
-                    Judged::Leave(other) => return Ok((welcome, Some(other))),
-                    Judged::Use => return Ok((welcome, None)),
-                }
+                    Judged::Leave(other) => (Some(other), session.host_checks(HOST_CHECKS).await),
+                    Judged::Use => (None, session.host_checks(HOST_CHECKS).await),
+                };
+                let _ = hang_up().await;
+                return Ok(Connected {
+                    welcome,
+                    other,
+                    checks,
+                });
             }
             Ok(Err(WireError::Refused(reason, about))) => {
                 let _ = hang_up().await;
@@ -894,6 +901,21 @@ pub async fn connect_once(
             Some(Err(failed)) => return Err(failed.why),
         }
     }
+}
+
+/// How long `connect_once` waits for the host's checks once connected. An
+/// engine a bridge has just started looks at the host after it has found
+/// the agents, which can take a few seconds.
+const HOST_CHECKS: Duration = Duration::from_secs(30);
+
+/// What `connect_once` connected to.
+#[derive(Debug)]
+pub struct Connected {
+    pub welcome: super::Welcome,
+    /// The engine of another build left running, when it is one.
+    pub other: Option<OtherEngine>,
+    /// What the host lacks, or `None` when the engine did not say in time.
+    pub checks: Option<Vec<crate::host::HostCheck>>,
 }
 
 /// Why `host` cannot be handed to ssh, or None when it can: ssh would read

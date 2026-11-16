@@ -1,11 +1,14 @@
-//! General: where the engine is, how Perch talks to GitHub, and where
-//! config.toml is.
+//! General: where the engine is, and with it on a host what the host
+//! lacks, how Perch talks to GitHub, and where config.toml is.
 
 use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::views::{Decorators, Stack};
+use perch_engine::host::HostCheck;
 use perch_github::Setting;
+
+use crate::theme;
 
 use super::controls::{self, choices, select, setting_text};
 use super::{Group, Page, Row};
@@ -18,8 +21,15 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
     if crate::remote::host().is_some() {
         files.push(client_config_file(page));
     }
+    let mut engine_rows = vec![engine(&page.here())];
+    // What the host's engine found, read tracked so a check that comes or
+    // goes builds the page again.
+    if crate::remote::host().is_some() {
+        let checks = page.state.host_checks.get();
+        engine_rows.extend(checks.iter().map(|check| host_check(page, check)));
+    }
     vec![
-        Group::new("Engine", vec![engine(&page.here())]),
+        Group::new("Engine", engine_rows),
         Group::new("GitHub", vec![poll_interval(page), github_host(page)]),
         Group::new("Config file", files),
     ]
@@ -72,6 +82,93 @@ fn engine(page: &Page) -> Row {
     .keywords(&["remote", "host", "ssh", "perchd", "server", "remote.host"])
     .reset("remote.host", Setting::RemoteHost(None))
     .restart(move || pending.with_config(|c| c.remote.host().map(str::to_string)) != running_host())
+}
+
+/// What a host check says under its title: what was found or is missing,
+/// and what to run on the host when it is.
+fn check_description(check: &HostCheck) -> String {
+    match check.fix.as_deref().filter(|_| !check.ok) {
+        Some(fix) => format!("{}\nOn the host, run: {fix}", check.detail),
+        None => check.detail.clone(),
+    }
+}
+
+/// How a check stands, in a word.
+fn check_mark(check: &HostCheck) -> &'static str {
+    match (check.ok, check.required) {
+        (true, _) => "Found",
+        (false, true) => "Missing",
+        (false, false) => "Not installed",
+    }
+}
+
+/// The check that looks for `what`, as the host's engine last said it.
+fn current(state: crate::state::AppState, what: &str) -> Option<HostCheck> {
+    state
+        .host_checks
+        .with(|checks| checks.iter().find(|c| c.what == what).cloned())
+}
+
+/// One of the host's checks: what it is, what was found or what to run,
+/// how it stands, and a Copy for the command. The row is the check's by
+/// what it looks for, and reads it as it now is, so a look that changes
+/// only the words shows them.
+fn host_check(page: &Page, check: &HostCheck) -> Row {
+    let state = page.state;
+    let what = Rc::new(check.what.clone());
+    let name = what.to_lowercase().replace(' ', "-");
+    let control = {
+        let (what, name) = (what.clone(), name.clone());
+        move || {
+            let (mark, style, copy, shown) =
+                (what.clone(), what.clone(), what.clone(), what.clone());
+            Stack::horizontal((
+                Label::derived(move || {
+                    current(state, &mark)
+                        .map(|c| check_mark(&c))
+                        .unwrap_or_default()
+                })
+                .debug_name(format!("settings-host-check-mark:{name}"))
+                .style(move |s| {
+                    let blocks = current(state, &style).is_some_and(|c| c.blocks());
+                    s.font_size(theme::TEXT_META)
+                        .color(if blocks {
+                            theme::notice_fg()
+                        } else {
+                            theme::fg_muted()
+                        })
+                        .apply_if(blocks, |s| s.font_weight(theme::weight_emphasis()))
+                }),
+                super::controls::button(
+                    "Copy",
+                    format!("settings-host-check-copy:{name}"),
+                    || true,
+                    move || {
+                        if let Some(fix) = current(state, &copy).and_then(|c| c.fix) {
+                            crate::ui::widgets::copy_to_clipboard(fix);
+                        }
+                    },
+                )
+                .style(move |s| {
+                    let has_fix = current(state, &shown).is_some_and(|c| !c.ok && c.fix.is_some());
+                    s.apply_if(!has_fix, |s| s.hide())
+                }),
+            ))
+            .style(|s| s.gap(10.0).items_center())
+            .into_any()
+        }
+    };
+    Row::new(
+        format!("host-check:{name}"),
+        check.what.clone(),
+        move || {
+            current(state, &what)
+                .map(|c| check_description(&c))
+                .unwrap_or_default()
+        },
+        control,
+    )
+    .keywords(&["host", "setup", "check", "missing", "install", "perchd"])
 }
 
 /// `secs` as a person would say it: "30 seconds", "1 minute".
@@ -249,6 +346,28 @@ fn client_config_file(_page: &Page) -> Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_check_says_what_to_run_only_while_it_fails() {
+        let mut check = HostCheck {
+            what: "git".into(),
+            ok: false,
+            required: true,
+            detail: "git is not on PATH.".into(),
+            fix: Some("sudo apt-get install -y git".into()),
+        };
+        assert_eq!(
+            check_description(&check),
+            "git is not on PATH.\nOn the host, run: sudo apt-get install -y git"
+        );
+        assert_eq!(check_mark(&check), "Missing");
+        check.required = false;
+        assert_eq!(check_mark(&check), "Not installed");
+        check.ok = true;
+        check.detail = "git version 2.43.0.".into();
+        assert_eq!(check_description(&check), "git version 2.43.0.");
+        assert_eq!(check_mark(&check), "Found");
+    }
 
     #[test]
     fn an_interval_reads_in_the_largest_whole_unit() {

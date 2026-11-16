@@ -251,6 +251,9 @@ pub struct AppState {
     /// How the connection to an engine on another machine stands, as the
     /// client last said. `None` with the engine in process.
     pub link: RwSignal<Option<crate::backend::EngineLink>>,
+    /// What the host's engine says the host lacks, as last heard. Empty
+    /// with the engine in process, which never looks.
+    pub host_checks: RwSignal<Vec<perch_engine::host::HostCheck>>,
     /// Open…'s box.
     pub open_box: crate::ui::open_box::OpenBox,
     /// The Settings page over the window.
@@ -554,6 +557,7 @@ impl AppState {
             agent: RwSignal::new(AgentConfig::default()),
             work_approvals: RwSignal::new(Default::default()),
             usage: RwSignal::new(Default::default()),
+            host_checks: RwSignal::new(Vec::new()),
             update: RwSignal::new(crate::update::UpdateStatus::Current),
             hovered_item: RwSignal::new(None),
             hovered_row: RwSignal::new(None),
@@ -594,6 +598,7 @@ impl AppState {
         copy(self.github_hosts, data.github_hosts);
         copy(self.settings_file, data.settings_file);
         copy(self.link, data.link);
+        copy(self.host_checks, data.host_checks);
         copy(self.browse, data.browse);
         copy(self.items, data.items);
         copy(self.notifications, data.notifications);
@@ -3575,6 +3580,7 @@ impl AppState {
             Event::AgentConfig(agent) => self.agent.set(agent),
             Event::WorkApprovals(approvals) => self.work_approvals.set(approvals),
             Event::Usage(board) => self.usage.set(board),
+            Event::HostChecks(checks) => self.host_checks.set(checks),
             Event::Update(status) => self.apply_update(status),
             Event::UpdateChecked(found) => self.apply_update_checked(found),
             Event::StarAsk => self.ask_for_star(),

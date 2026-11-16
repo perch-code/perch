@@ -20,7 +20,10 @@ and the settings split by whose they are. `[ui]`, `[display]`,
 written to the Mac's config.toml. Everything else is the engine's, in the
 host's config.toml, and Settings writes it there through the engine. The
 Mac's file can still hold engine settings from before; they are not read
-while a host is set.
+while a host is set. The host's engine looks again at what the host lacks
+each time its config.toml changes, so a `[[repo]]` added there, or a
+`token`, clears its check (see
+[What the app checks](reference.md#what-the-app-checks)).
 
 Settings (`Cmd-,`, or the gear at the foot of the sidebar) edits this file.
 It changes only the keys you touch, so your comments and layout stay. Edits

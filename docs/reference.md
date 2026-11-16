@@ -1536,7 +1536,7 @@ included, whatever its libc. The app installs it on a host itself (see
   other clients are connected and how many agent runs are queued or under
   way. It exits 0 when one answers and 3 when none does.
 - `perchd --version` prints the version and the wire protocol, as
-  `perchd 0.9.0 (protocol 5)`.
+  `perchd 0.9.0 (protocol 6)`.
 
 A socket file left by an engine that was killed is removed when the next
 one starts, once nothing answers on it.
@@ -1547,7 +1547,9 @@ next connects. Stopping the engine while the app is connected does not
 keep it stopped: the app reconnects and its bridge starts another. Quit
 the app, or set it to This Mac, first. On Linux the engine needs logind's
 `KillUserProcesses=no`, the default on most distributions; with `yes`, it
-is killed when the ssh session that started it ends, its runs with it.
+is killed when the ssh session that started it ends, its runs with it,
+unless the user is in `KillExcludeUsers`. The engine checks this (see
+[What the app checks](#what-the-app-checks)).
 
 The app says it is still there every 15 seconds it has nothing else to
 send, and the engine hangs up on a client it has heard nothing from in a
@@ -1578,6 +1580,44 @@ put on it first. On it:
 
 Then on the Mac, set `[remote] host` in `~/.perch/config.toml` to the name
 you `ssh` to, or type it into Settings > General > Engine, and restart Perch.
+Once it connects, the app says what of the above the host still lacks.
+
+### What the app checks
+
+The engine on a host looks at the host as it starts, again whenever its
+config.toml changes or it takes up a new GitHub token, and tells every
+connected app what it found. Settings > General lists each check under
+Engine with what was found or, when something is missing, the command to
+run on the host and a Copy button. When something required is missing,
+the strip at the foot of every window says "<host> needs setup", with
+what is missing and an **Open Settings** button. `perch --connect` prints
+the same list. It checks:
+
+- **GitHub token** (required): one is found, as the engine finds it:
+  `GITHUB_TOKEN`, `GH_TOKEN`, `gh auth token`, then `token` in its
+  config.toml. Only whether there is one, and where it came from, is
+  said; the token never leaves the host. Fix: `gh auth login`.
+- **git** (required): `git --version` runs. Fix: the install command for
+  the host's package manager (apt-get, dnf, yum, pacman, zypper or apk).
+- **Repositories** (required): at least one `[[repo]]` has a `root` that is
+  a directory on the host. Roots that are not there are named. For a
+  github.com repository the fix is the `git clone` that puts it there.
+- **Claude Code**, **Codex**, **agy (Gemini)**: each agent CLI as the
+  engine's agent discovery found it, with its path and version. None is
+  required while another is installed; with none at all, Claude Code is.
+  Fixes: `curl -fsSL https://claude.ai/install.sh | bash` and `npm install
+  -g @openai/codex`; agy points at its documentation.
+- **bubblewrap and socat** (required, on Linux with Claude Code): both on
+  `PATH`, for Claude Code's sandbox. Fix: the package manager's install.
+- **logind** (required, on Linux): `loginctl show-session` says logind
+  does not kill the user's processes at logout. Fix: a drop-in that adds
+  the user to `KillExcludeUsers`, then a restart of `systemd-logind`. With
+  no `loginctl`, or no logind to ask, as in a container, there is no
+  check.
+
+Each command runs with a timeout of ten seconds, beside the engine's work,
+and one that runs out counts as missing. The app's own engine, on the Mac,
+checks nothing.
 
 ### Installing perchd
 
@@ -1662,7 +1702,10 @@ window: it installs `perchd` if the host needs it, replaces an older
 engine with nothing running, prints the engine's version, protocol, build,
 host name, home and data folder, how many other clients it has and how
 many runs, and exits 0. An older engine left running for its runs, or a
-newer one, is said after that. It reads `[remote]` from the Mac's
+newer one, is said after that, and then the host's checks, a line each,
+with the command to run under each that failed (see [What the app
+checks](#what-the-app-checks)). It waits up to 30 seconds for them, as an
+engine that has just started looks after it has found the agents. It reads `[remote]` from the Mac's
 config.toml, and `[remote] host` when no host is given. On failure it says
 why and exits 1.
 

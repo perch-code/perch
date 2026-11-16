@@ -42,8 +42,9 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// handle's ids, a resync's runs and kept settings replace a window's.
 /// 4: keepalive lines, and a resync's waiting approvals. 5: the hello and
 /// its answer are frozen (see `Hello`), a hello can ask a host's engine to
-/// stop, and the answers name the engine's build.
-pub const PROTOCOL: u32 = 5;
+/// stop, and the answers name the engine's build. 6: a host's engine
+/// sends its host checks.
+pub const PROTOCOL: u32 = 6;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -856,6 +857,35 @@ impl<S> Session<S>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
+    /// Ask for everything, as a client does once connected, and read what
+    /// comes until the host's checks do: `perch --connect`. `None` when
+    /// they don't come within `within`, from an engine that only now
+    /// started and is still looking, or one that is not a host's and never
+    /// looks.
+    pub(crate) async fn host_checks(
+        mut self,
+        within: Duration,
+    ) -> Option<Vec<crate::host::HostCheck>> {
+        let asked = CommandLine {
+            window: crate::backend::NO_WINDOW,
+            command: Command::Resync,
+        };
+        write_line(&mut self.write, &asked).await.ok()?;
+        let read = async {
+            loop {
+                match next_message::<_, EventLine>(&mut self.read, &mut self.line).await {
+                    Ok(Some(Ok(EventLine {
+                        event: Event::HostChecks(checks),
+                        ..
+                    }))) => return Some(checks),
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => return None,
+                }
+            }
+        };
+        tokio::time::timeout(within, read).await.ok().flatten()
+    }
+
     /// Write what comes from `outgoing` and hand what the engine says,
     /// past `navigations`, to `events`, on tasks of their own. The
     /// returned receiver resolves, with an error, once the engine has
@@ -1111,6 +1141,90 @@ mod tests {
         };
         assert_eq!(welcome.build, "");
         assert_eq!((welcome.clients, welcome.runs), (1, 2));
+    }
+
+    /// `perch --connect` asks for everything once in, and reads past what
+    /// else comes to the host's checks; an engine that never sends them
+    /// is given up on.
+    #[tokio::test]
+    async fn the_host_checks_are_read_out_of_a_resync() {
+        let (near, far) = tokio::io::duplex(1 << 16);
+        let engine = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(far);
+            let mut read = BufReader::new(read);
+            let mut line = Vec::new();
+            let hello = next_message::<_, Hello>(&mut read, &mut line).await;
+            assert!(matches!(hello, Ok(Some(Ok(_)))));
+            let welcome = Answer::Welcome(Welcome {
+                protocol: PROTOCOL,
+                engine_version: VERSION.into(),
+                connection: 1,
+                host: "halo".into(),
+                home: "/home/c".into(),
+                data_root: "/home/c/.perch".into(),
+                clients: 0,
+                runs: 0,
+                build: VERSION.into(),
+            });
+            write_line(&mut write, &welcome).await.unwrap();
+            let asked = next_message::<_, CommandLine>(&mut read, &mut line).await;
+            let Ok(Some(Ok(CommandLine {
+                command: Command::Resync,
+                ..
+            }))) = asked
+            else {
+                panic!("not a resync: {asked:?}");
+            };
+            let check = crate::host::HostCheck {
+                what: "git".into(),
+                ok: true,
+                required: true,
+                detail: "git version 2.43.0.".into(),
+                fix: None,
+            };
+            for event in [
+                Event::Notice("hello".into()),
+                Event::HostChecks(vec![check.clone()]),
+            ] {
+                let line = EventLine {
+                    window: crate::backend::NO_WINDOW,
+                    event,
+                };
+                write_line(&mut write, &line).await.unwrap();
+            }
+            // Held open, as an engine would be.
+            let _ = next_message::<_, CommandLine>(&mut read, &mut line).await;
+            check
+        });
+        let (_, session) = handshake(near).await.unwrap();
+        let checks = session.host_checks(Duration::from_secs(5)).await;
+        let check = engine.await.unwrap();
+        assert_eq!(checks, Some(vec![check]));
+
+        // An engine that says nothing more.
+        let (near, far) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(far);
+            let mut read = BufReader::new(read);
+            let mut line = Vec::new();
+            let _ = next_message::<_, Hello>(&mut read, &mut line).await;
+            let welcome = Answer::Welcome(Welcome {
+                protocol: PROTOCOL,
+                engine_version: VERSION.into(),
+                connection: 1,
+                host: "halo".into(),
+                home: "/home/c".into(),
+                data_root: "/home/c/.perch".into(),
+                clients: 0,
+                runs: 0,
+                build: VERSION.into(),
+            });
+            write_line(&mut write, &welcome).await.unwrap();
+            let _ = next_message::<_, CommandLine>(&mut read, &mut line).await;
+            let _ = next_message::<_, CommandLine>(&mut read, &mut line).await;
+        });
+        let (_, session) = handshake(near).await.unwrap();
+        assert_eq!(session.host_checks(Duration::from_millis(200)).await, None);
     }
 
     #[test]

@@ -669,16 +669,7 @@ fn scrub_env(command: &mut Command) {
 /// own, or, told to fall back, runs unsandboxed. The engine asks before
 /// it starts a run on Linux; on the Mac the sandbox is the system's.
 pub fn linux_sandbox_refusal(path: Option<&std::ffi::OsStr>) -> Option<String> {
-    let dirs: Vec<PathBuf> = path.into_iter().flat_map(std::env::split_paths).collect();
-    let missing: Vec<&str> = ["bwrap", "socat"]
-        .into_iter()
-        .filter(|tool| {
-            !dirs
-                .iter()
-                .filter(|dir| !dir.as_os_str().is_empty())
-                .any(|dir| dir.join(tool).is_file())
-        })
-        .collect();
+    let missing = linux_sandbox_missing(path);
     let lacks = match missing.as_slice() {
         [] => return None,
         [one] => format!("no {one}"),
@@ -687,6 +678,22 @@ pub fn linux_sandbox_refusal(path: Option<&std::ffi::OsStr>) -> Option<String> {
     Some(format!(
         "Claude Code's sandbox needs bwrap and socat on Linux, and this machine has {lacks} on PATH. Install bubblewrap and socat, then run it again."
     ))
+}
+
+/// Which of the tools Claude Code's sandbox needs on Linux, `bwrap` and
+/// `socat`, are not on `path`: what `linux_sandbox_refusal` refuses for,
+/// and what a host's checks say to install.
+pub fn linux_sandbox_missing(path: Option<&std::ffi::OsStr>) -> Vec<&'static str> {
+    let dirs: Vec<PathBuf> = path.into_iter().flat_map(std::env::split_paths).collect();
+    ["bwrap", "socat"]
+        .into_iter()
+        .filter(|tool| {
+            !dirs
+                .iter()
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .any(|dir| dir.join(tool).is_file())
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -3245,6 +3252,10 @@ mod tests {
             None
         );
         assert!(linux_sandbox_refusal(None).is_some());
+        assert_eq!(
+            linux_sandbox_missing(Some(&path(&[socat.path()]))),
+            vec!["bwrap"]
+        );
     }
 
     #[test]

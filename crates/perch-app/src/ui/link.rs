@@ -7,6 +7,10 @@
 //! the app installs there, left running: an older one busy with runs or
 //! other clients, with a button to restart it, or a newer one, which only
 //! updating the app answers.
+//!
+//! Connected, it says the host needs setup while the host's engine finds
+//! something it can't work without, with a button to Settings, where each
+//! check says what to run.
 
 use std::rc::Rc;
 
@@ -19,14 +23,25 @@ use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{action_button, sidebar_glyph};
+use perch_engine::host::HostCheck;
 use perch_engine::wire::remote::other_said;
 
 /// What the strip says, and the line under it, for how the connection
-/// stands; `None` while it is up to the build the app installs, or with
+/// stands and what the host's engine found missing; `None` while it is up
+/// to the build the app installs with nothing required missing, or with
 /// the engine in process.
-pub fn said(link: &EngineLink) -> Option<(String, Option<String>)> {
+pub fn said(link: &EngineLink, checks: &[HostCheck]) -> Option<(String, Option<String>)> {
     match link {
-        EngineLink::Up { other: None, .. } => None,
+        EngineLink::Up {
+            host, other: None, ..
+        } => needs_setup(link, checks).then(|| {
+            let missing: Vec<&str> = checks
+                .iter()
+                .filter(|check| check.blocks())
+                .map(|check| check.detail.as_str())
+                .collect();
+            (format!("{host} needs setup."), Some(missing.join(" ")))
+        }),
         EngineLink::Up {
             host,
             other: Some(other),
@@ -66,6 +81,13 @@ pub fn said(link: &EngineLink) -> Option<(String, Option<String>)> {
     }
 }
 
+/// Whether the strip offers Settings: connected to the build the app
+/// installs, which found something required missing. Another build's
+/// strip says what matters more.
+fn needs_setup(link: &EngineLink, checks: &[HostCheck]) -> bool {
+    matches!(link, EngineLink::Up { other: None, .. }) && perch_engine::host::needs_setup(checks)
+}
+
 /// Whether the reader can ask for a try now.
 fn can_retry(link: &EngineLink) -> bool {
     matches!(link, EngineLink::Down { .. })
@@ -83,7 +105,20 @@ fn can_restart(link: &EngineLink) -> bool {
 
 /// The strip, hidden while there is nothing to say.
 pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    let said_now = move || state.link.with(|link| link.as_ref().and_then(said));
+    let said_now = move || {
+        state.host_checks.with(|checks| {
+            state
+                .link
+                .with(|link| link.as_ref().and_then(|link| said(link, checks)))
+        })
+    };
+    let setup = move || {
+        state.host_checks.with(|checks| {
+            state
+                .link
+                .with(|link| link.as_ref().is_some_and(|link| needs_setup(link, checks)))
+        })
+    };
     let headline = move || said_now().map(|(headline, _)| headline).unwrap_or_default();
     let why = move || said_now().and_then(|(_, why)| why).unwrap_or_default();
     let has_why = move || said_now().is_some_and(|(_, why)| why.is_some());
@@ -132,6 +167,20 @@ pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             move || restarter.restart_engine(),
         )
         .style(move |s| s.margin_left(12.0).apply_if(!restart(), |s| s.hide())),
+        action_button(
+            || "Open Settings".to_string(),
+            "link-settings",
+            false,
+            || true,
+            move || {
+                state
+                    .settings
+                    .section
+                    .set(crate::ui::settings::Section::General);
+                crate::ui::settings::show(state, None);
+            },
+        )
+        .style(move |s| s.margin_left(12.0).apply_if(!setup(), |s| s.hide())),
     ))
     .debug_name("link-banner")
     .style(move |s| {
@@ -151,6 +200,90 @@ mod tests {
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::reactive::SignalUpdate;
     use std::time::Duration;
+
+    /// What the strip says with no host checks heard.
+    fn said_(link: &EngineLink) -> Option<(String, Option<String>)> {
+        said(link, &[])
+    }
+
+    fn check(what: &str, ok: bool, required: bool) -> HostCheck {
+        HostCheck {
+            what: what.into(),
+            ok,
+            required,
+            detail: format!("No {what}."),
+            fix: None,
+        }
+    }
+
+    fn up(other: Option<perch_engine::backend::OtherEngine>) -> EngineLink {
+        EngineLink::Up {
+            host: "halo".into(),
+            welcome: perch_engine::wire::Welcome {
+                protocol: perch_engine::wire::PROTOCOL,
+                engine_version: "0".into(),
+                connection: 1,
+                host: "halo".into(),
+                home: "/home/chris".into(),
+                data_root: "/home/chris/.perch".into(),
+                clients: 0,
+                runs: 0,
+                build: "0".into(),
+            },
+            again: true,
+            other,
+        }
+    }
+
+    /// Connected to a host that lacks something required: the strip says
+    /// so, with what is missing and a way to Settings. Something optional
+    /// missing says nothing, and another build's strip comes first.
+    #[test]
+    fn a_host_missing_something_required_needs_setup() {
+        let missing = [
+            check("git", true, true),
+            check("GitHub token", false, true),
+            check("Codex", false, false),
+            check("logind", false, true),
+        ];
+        assert_eq!(
+            said(&up(None), &missing),
+            Some((
+                "halo needs setup.".to_string(),
+                Some("No GitHub token. No logind.".to_string())
+            ))
+        );
+        assert!(needs_setup(&up(None), &missing));
+        let optional = [check("git", true, true), check("Codex", false, false)];
+        assert_eq!(said(&up(None), &optional), None);
+        assert!(!needs_setup(&up(None), &optional));
+        assert!(!needs_setup(&up(Some(older(0))), &missing));
+        assert!(said(&up(Some(older(0))), &missing)
+            .unwrap()
+            .0
+            .contains("restart it"));
+        let down = EngineLink::Down {
+            host: "halo".into(),
+            why: String::new(),
+            retry_in: Some(Duration::from_secs(1)),
+            ever: true,
+            other: None,
+        };
+        assert!(!needs_setup(&down, &missing));
+
+        let root = TestRoot::new();
+        let state = AppState::new();
+        let (backend, _) = Backend::recording();
+        let view = banner(state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 200.0);
+        state.link.set(Some(up(None)));
+        assert!(!shown(&mut harness, "link-banner"));
+        state.host_checks.set(missing.to_vec());
+        assert!(shown(&mut harness, "link-settings"));
+        assert!(!shown(&mut harness, "link-restart"));
+        state.host_checks.set(optional.to_vec());
+        assert!(!shown(&mut harness, "link-banner"));
+    }
 
     fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
         if id.debug_name().contains(name) {
@@ -198,22 +331,6 @@ mod tests {
         assert!(shown(&mut harness, "link-banner-why"));
         assert!(shown(&mut harness, "link-reconnect"));
         assert!(!shown(&mut harness, "link-restart"));
-        let up = |other| EngineLink::Up {
-            host: "halo".into(),
-            welcome: perch_engine::wire::Welcome {
-                protocol: perch_engine::wire::PROTOCOL,
-                engine_version: "0".into(),
-                connection: 1,
-                host: "halo".into(),
-                home: "/home/chris".into(),
-                data_root: "/home/chris/.perch".into(),
-                clients: 0,
-                runs: 0,
-                build: "0".into(),
-            },
-            again: true,
-            other,
-        };
         state.link.set(Some(up(None)));
         assert!(!shown(&mut harness, "link-banner"));
         // Up to an older engine left running, the strip stays, with a
@@ -244,37 +361,37 @@ mod tests {
             other: None,
         };
         assert_eq!(
-            said(&down(true, Some(Duration::from_secs(2)))),
+            said_(&down(true, Some(Duration::from_secs(2)))),
             Some((
                 "Disconnected from halo. Reconnecting…".to_string(),
                 Some("ssh: connect to host halo port 22: Operation timed out".to_string())
             ))
         );
         assert_eq!(
-            said(&down(false, Some(Duration::from_secs(1)))).unwrap().0,
+            said_(&down(false, Some(Duration::from_secs(1)))).unwrap().0,
             "Can't connect to halo. Trying again…"
         );
         // A refused protocol says which side to update, in its reason, and
         // that no more tries are coming.
         assert_eq!(
-            said(&down(true, None)).unwrap().0,
+            said_(&down(true, None)).unwrap().0,
             "Perch can't connect to halo."
         );
         assert_eq!(
-            said(&EngineLink::Connecting {
+            said_(&EngineLink::Connecting {
                 host: "halo".into()
             }),
             Some(("Connecting to halo…".to_string(), None))
         );
         assert_eq!(
-            said(&EngineLink::Installing {
+            said_(&EngineLink::Installing {
                 host: "halo".into(),
                 build: "0.9.0".into()
             }),
             Some(("Installing perchd 0.9.0 on halo…".to_string(), None))
         );
         assert_eq!(
-            said(&EngineLink::Restarting {
+            said_(&EngineLink::Restarting {
                 host: "halo".into(),
                 build: "0.9.0".into()
             }),
@@ -298,7 +415,7 @@ mod tests {
             ever: false,
             other: Some(older(1)),
         };
-        let (headline, why) = said(&refused).unwrap();
+        let (headline, why) = said_(&refused).unwrap();
         assert_eq!(
             headline,
             "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (1 agent run would be stopped)."
@@ -316,7 +433,10 @@ mod tests {
                 ..older(0)
             }),
         };
-        assert!(said(&newer).unwrap().0.contains("Update Perch on this Mac"));
+        assert!(said_(&newer)
+            .unwrap()
+            .0
+            .contains("Update Perch on this Mac"));
         assert!(!can_restart(&newer));
     }
 }

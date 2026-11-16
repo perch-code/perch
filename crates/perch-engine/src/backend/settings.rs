@@ -387,6 +387,8 @@ pub(super) async fn take_up_whole_config(ctx: &Ctx, path: &Path) -> Result<Confi
     }
     if rediscover {
         discover_again(ctx, file.agent.clone());
+    } else {
+        ctx.look_at_host();
     }
     Ok(running)
 }
@@ -442,5 +444,6 @@ fn discover_again(ctx: &Ctx, mut agent: AgentConfig) {
         ctx.replace_agent(agent.clone());
         ctx.set_review_capabilities(capabilities);
         let _ = ctx.events.send(Event::AgentConfig(agent));
+        ctx.look_at_host();
     });
 }

@@ -647,3 +647,55 @@ async fn a_bridge_says_why_the_engine_it_started_did_not_start() {
     assert!(!failed.exists());
     leave(a).await;
 }
+
+/// The host's checks in an event, when it is them.
+fn host_checks(_: WindowId, event: &Event) -> Option<Vec<perch_engine::host::HostCheck>> {
+    match event {
+        Event::HostChecks(checks) => Some(checks.clone()),
+        _ => None,
+    }
+}
+
+/// The engine looks at its host as it starts and says what is missing,
+/// in a resync too, and looks again when config.toml changes. This home
+/// has no token, no agent and no repository; git is the system's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_engine_says_what_its_host_lacks() {
+    let home = Home::new();
+    let a = client(&home).await;
+    a.backend.resync();
+    let checks = wait(&a.events, host_checks).await;
+    let check = |checks: &[perch_engine::host::HostCheck], what: &str| {
+        checks
+            .iter()
+            .find(|c| c.what == what)
+            .unwrap_or_else(|| panic!("no {what} in {checks:#?}"))
+            .clone()
+    };
+    let token = check(&checks, "GitHub token");
+    assert!(token.blocks(), "{token:?}");
+    assert_eq!(token.fix.as_deref(), Some("gh auth login"));
+    assert!(check(&checks, "git").ok, "{checks:#?}");
+    assert!(check(&checks, "Repositories").blocks());
+    let claude = check(&checks, "Claude Code");
+    assert!(claude.blocks(), "{claude:?}");
+    assert!(claude.detail.contains("/nonexistent/claude"), "{claude:?}");
+    assert!(perch_engine::host::needs_setup(&checks));
+
+    // A client that comes later hears them in its resync.
+    let b = client(&home).await;
+    b.backend.resync();
+    assert_eq!(wait(&b.events, host_checks).await, checks);
+
+    // A repository added is looked at again, and every client hears it.
+    home.with_repository();
+    for client in [&a, &b] {
+        let again = wait(&client.events, |window, event| {
+            host_checks(window, event).filter(|checks| check(checks, "Repositories").ok)
+        })
+        .await;
+        assert!(check(&again, "GitHub token").blocks());
+    }
+    leave(a).await;
+    leave(b).await;
+}
