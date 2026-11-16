@@ -1533,6 +1533,8 @@ trying until you press Reconnect.
 Settings shows the host's config.toml, with the Mac's `[ui]`, `[display]`,
 `[keybindings]` and `[remote]` in place of the host's; the Config file
 group has both files. Keyboard shortcut warnings are about the Mac's file.
+Add repository… would offer the Mac's folders, so with a host it says to add
+the `[[repo]]` to the host's config.toml instead.
 
 ## Development
 

@@ -564,16 +564,25 @@ fn repo_chip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             let backend = backend.clone();
             menu.item("Add repository…", move |item| {
                 let backend = backend.clone();
-                item.action(move || add_repository(backend.clone()))
+                item.action(move || add_repository(state, backend.clone()))
             })
         },
         "new-work-repo".into(),
     )
 }
 
-/// The system folder chooser, then the backend adds what was picked.
-pub(crate) fn add_repository(backend: Rc<Backend>) {
+/// The system folder chooser, then the backend adds what was picked. With
+/// the engine on a host the chooser would offer this Mac's folders, which
+/// the host has none of, so the reader is told where to add one instead.
+pub(crate) fn add_repository(state: AppState, backend: Rc<Backend>) {
     use floem::platform::file::FileDialogOptions;
+
+    if let Some(host) = crate::remote::host() {
+        state.complain(format!(
+            "Repositories live on {host}: add a [[repo]] with its root to the config.toml there (Settings > General > Config file)."
+        ));
+        return;
+    }
 
     floem::action::open_file(
         FileDialogOptions::new()

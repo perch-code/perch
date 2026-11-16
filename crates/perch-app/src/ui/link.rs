@@ -95,7 +95,70 @@ pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use floem::headless::{HeadlessHarness, TestRoot};
+    use floem::reactive::SignalUpdate;
     use std::time::Duration;
+
+    fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+        if id.debug_name().contains(name) {
+            return Some(id);
+        }
+        id.children()
+            .into_iter()
+            .find_map(|child| named(child, name))
+    }
+
+    fn shown(harness: &mut HeadlessHarness, name: &str) -> bool {
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+        named(harness.root_id(), name).is_some_and(|id| {
+            let r = id.get_visual_rect_no_clip();
+            r.width() > 0.0 && r.height() > 0.0
+        })
+    }
+
+    /// In process there is no strip; on a host it is up while the engine
+    /// is not, with Reconnect once a try has failed, and gone once it is
+    /// back.
+    #[test]
+    fn the_strip_is_up_only_while_the_engine_is_not() {
+        let root = TestRoot::new();
+        let state = AppState::new();
+        let (backend, _) = Backend::recording();
+        let view = banner(state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 200.0);
+        assert!(!shown(&mut harness, "link-banner"));
+        state.link.set(Some(EngineLink::Connecting {
+            host: "halo".into(),
+        }));
+        assert!(shown(&mut harness, "link-banner"));
+        assert!(!shown(&mut harness, "link-reconnect"));
+        state.link.set(Some(EngineLink::Down {
+            host: "halo".into(),
+            why: "ssh: Could not resolve hostname halo".into(),
+            retry_in: Some(Duration::from_secs(1)),
+            ever: true,
+        }));
+        assert!(shown(&mut harness, "link-banner-why"));
+        assert!(shown(&mut harness, "link-reconnect"));
+        state.link.set(Some(EngineLink::Up {
+            host: "halo".into(),
+            welcome: perch_engine::wire::Welcome {
+                protocol: perch_engine::wire::PROTOCOL,
+                engine_version: "0".into(),
+                connection: 1,
+                host: "halo".into(),
+                home: "/home/chris".into(),
+                data_root: "/home/chris/.perch".into(),
+                clients: 0,
+                runs: 0,
+            },
+            again: true,
+        }));
+        assert!(!shown(&mut harness, "link-banner"));
+    }
 
     #[test]
     fn the_strip_says_what_happened_and_why() {

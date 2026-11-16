@@ -484,12 +484,12 @@ fn add(page: &Page) -> Row {
     let control = {
         let page = page.clone();
         move || {
-            let (enabled, backend) = (page.clone(), page.backend.clone());
+            let (enabled, backend, state) = (page.clone(), page.backend.clone(), page.state);
             controls::button(
                 "Add repository…",
                 "settings-add-repository",
                 move || enabled.writable(),
-                move || crate::ui::new_work::add_repository(backend.clone()),
+                move || crate::ui::new_work::add_repository(state, backend.clone()),
             )
             .into_any()
         }

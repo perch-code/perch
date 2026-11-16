@@ -27,7 +27,7 @@ pub enum Place {
 thread_local! {
     /// The UI thread's: set once at launch, and given the engine's home
     /// when it connects.
-    static PLACE: RefCell<Place> = RefCell::new(Place::ThisMac);
+    static PLACE: RefCell<Place> = const { RefCell::new(Place::ThisMac) };
 }
 
 pub fn place() -> Place {

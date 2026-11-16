@@ -293,7 +293,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     state,
                     review,
                     empty_backend.clone(),
-                    nothing_open(empty_backend.clone(), no_repos),
+                    nothing_open(state, empty_backend.clone(), no_repos),
                 )
                 .into_any()
             }
@@ -1412,7 +1412,7 @@ fn text_box_focused(cx: &floem::context::EventCx<'_>, root: floem::ViewId) -> bo
 /// The main area with nothing open. With no repository in the config,
 /// Add repository under the words: the inbox needs none, but new work
 /// does, and this is the first screen a new install shows.
-fn nothing_open(backend: Rc<Backend>, no_repos: bool) -> impl IntoView {
+fn nothing_open(state: AppState, backend: Rc<Backend>, no_repos: bool) -> impl IntoView {
     let under = if no_repos {
         Stack::vertical((
             Label::derived(|| "Add a repository to start new work.".to_string()).style(|s| {
@@ -1426,7 +1426,7 @@ fn nothing_open(backend: Rc<Backend>, no_repos: bool) -> impl IntoView {
                 "empty-add-repository",
                 false,
                 || true,
-                move || new_work::add_repository(backend.clone()),
+                move || new_work::add_repository(state, backend.clone()),
             ),
         ))
         .style(|s| s.items_center())
