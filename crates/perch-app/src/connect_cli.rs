@@ -3,9 +3,12 @@
 //! Connects to the engine on `host`, or on `[remote] host` with none
 //! given, as the app would: through `[remote] command` when the Mac's
 //! config.toml sets one, else through the `perchd` the app installs there,
-//! installing it first when the host has none. Prints the engine's
-//! welcome and exits 0, or says why not and exits 1. No window is opened;
-//! the engine is left running, as the app leaves it.
+//! installing it first when the host has none, and replacing an older
+//! engine with nothing running as the app would. Prints the engine's
+//! welcome and exits 0, or says why not and exits 1. An older engine left
+//! running for its runs or clients, or a newer one, is said after the
+//! welcome. No window is opened; the engine is left running, as the app
+//! leaves it.
 
 use std::time::Duration;
 
@@ -50,18 +53,22 @@ pub fn run(args: &[String]) -> i32 {
         &host,
         bridge,
         ANSWER,
-        |build| eprintln!("Installing perchd {build} on {host}…"),
+        |said| eprintln!("{said}"),
     ));
     match connected {
-        Ok(welcome) => {
+        Ok((welcome, other)) => {
             println!(
                 "Connected to {host}: perchd {} (protocol {}) on {}",
                 welcome.engine_version, welcome.protocol, welcome.host
             );
+            println!("build: {}", welcome.build);
             println!("home: {}", welcome.home.display());
             println!("data: {}", welcome.data_root.display());
             println!("other clients: {}", welcome.clients);
             println!("runs: {}", welcome.runs);
+            if let Some(other) = other {
+                println!("{}", perch_engine::wire::remote::other_said(&host, &other));
+            }
             0
         }
         Err(why) => {

@@ -308,7 +308,7 @@ connect. VS Code's Remote SSH, Zed and T3 Code work the same way.
    name. (Done.)
 2. Probe and upload (below). (Done.)
 3. Versioned installs and their cleanup (below). (Done.)
-4. Replacing an older engine (below).
+4. Replacing an older engine (below). (Done.)
 5. Host checks (below).
 
 ### Modes
@@ -441,6 +441,35 @@ button to Settings when anything required is missing.
 - Cleanup runs in a thread as the bridge starts, keeps the newest other
   `perchd-*` by modification time, and touches only plain files.
 - `perch --connect` prints the welcome only; the host checks are step 5.
+- The stop hello also carries `unless_build`, the bridge's own build, and
+  an engine of that build answers `Staying`. The bridge's check and its
+  stop are one exchange, so two Macs of the same new build replacing the
+  same old engine at once cannot have the second stop the engine the first
+  just started. `Busy`, `Stopping` and `Staying` each carry the engine's
+  `About` (version, protocol, build, runs, clients), which a refusal
+  carries beside its reason.
+- The engine answers the stop in `wire::serve`, which only tells the
+  engine (`Engine::ask_to_stop`); `perchd serve` waits for that beside its
+  signals and stops down the same path, so there is one way to stop.
+- An engine from before protocol 5 says nothing of itself in a refusal
+  and refuses a stop as it refuses any other protocol. The app does not
+  dial again to try: the strip says to stop that `perchd serve` by hand.
+- `perchd serve` refuses a `perch.db` from a newer Perch at start, rather
+  than running without its database as the app's engine does; a host's
+  engine has nobody to tell, and its runs would go unrecorded. Its reason,
+  and any other a serve fails with, goes in `$PERCH_HOME/run/serve-failed`.
+  A bridge whose serve failed with a reason there (any exit but 75, the
+  home held) says it at once rather than waiting out its 10 s.
+- The strip's states are `EngineLink::Restarting { host, build }`, and
+  `other: Option<OtherEngine>` on `Up` and `Down`. With runs at 0 the
+  strip names the other clients a restart would disconnect instead.
+- One automatic replace a connect: the count starts again on a connection
+  to the build wanted, or when the reader presses Reconnect or Restart. A
+  try that replaces waits a minute longer for the engine's answer, the
+  minute the bridge gives the old engine to stop.
+- `perch --connect` replaces an idle older engine too, and prints what it
+  left running. `perchd status` prints the engine's build. The protocol
+  is 5.
 
 ## Acceptance
 

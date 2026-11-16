@@ -3653,8 +3653,18 @@ impl AppState {
             Event::Link(link) => {
                 // What a progress card waited for went with the
                 // connection: the engine answers on the one it was asked on.
-                if let crate::backend::EngineLink::Down { host, .. } = &link {
-                    self.drop_lost_open(host, true);
+                // A restart lets a connection go too, when there was one.
+                let was_up = self.link.with_untracked(|was| {
+                    matches!(was, Some(crate::backend::EngineLink::Up { .. }))
+                });
+                match &link {
+                    crate::backend::EngineLink::Down { host, .. } => {
+                        self.drop_lost_open(host, true)
+                    }
+                    crate::backend::EngineLink::Restarting { host, .. } if was_up => {
+                        self.drop_lost_open(host, true)
+                    }
+                    _ => {}
                 }
                 self.link.set(Some(link));
             }

@@ -46,12 +46,13 @@ pub fn run() -> ExitCode {
                 "running: Perch {} (protocol {}) on {}",
                 welcome.engine_version, welcome.protocol, welcome.host
             );
+            println!("build: {}", welcome.build);
             println!("perch home: {}", welcome.data_root.display());
             println!("clients: {}", welcome.clients);
             println!("runs: {}", welcome.runs);
             ExitCode::SUCCESS
         }
-        Err(WireError::Refused(reason)) => {
+        Err(WireError::Refused(reason, _)) => {
             println!("running, but it refused this perchd: {reason}");
             ExitCode::FAILURE
         }

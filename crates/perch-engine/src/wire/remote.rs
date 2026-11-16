@@ -34,6 +34,10 @@
 //!   again at once, outside the waits (see `provision`). Installing once
 //!   is all a try gets: a host that still says so after is a fault the
 //!   reader has to look at, and the tries stop.
+//! - With no `[remote] command`, an engine of an older build than the
+//!   app's, already running there, is replaced when it has nothing
+//!   running, and otherwise left running with a restart offered; one of a
+//!   newer build is never stopped (see `keep_connected`).
 //!
 //! How the connection stands goes to the windows as `Event::Link`, with
 //! the engine's own events, in order.
@@ -47,14 +51,27 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::provision::{self, Arch, Failed, Source};
-use super::{handshake, WireError};
+use super::provision::{self, Arch, Failed, Replace, Source};
+use super::{handshake, WireError, PROTOCOL, VERSION};
 use crate::backend::client::Navigations;
-use crate::backend::{Backend, Command, EngineLink, Event, WindowId, NO_WINDOW};
+use crate::backend::{Backend, Command, EngineLink, Event, OtherEngine, WindowId, NO_WINDOW};
 
 /// How often a refused command is said, at most: a pointer moving over
 /// code asks for hovers many times a second.
 const REFUSALS_APART: Duration = Duration::from_secs(2);
+
+/// How much longer a try that replaces the engine waits for an answer: the
+/// bridge gives the engine it stops a minute to stop its runs and let the
+/// home go.
+const REPLACING: Duration = Duration::from_secs(60);
+
+/// How long a try made as `replace` says waits for the engine's answer.
+fn answer_wait(answer: Duration, replace: Replace) -> Duration {
+    match replace {
+        Replace::No => answer,
+        Replace::IfIdle | Replace::Always => answer + REPLACING,
+    }
+}
 
 /// What ssh runs on the host to reach the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +93,9 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 /// A stream to an engine, as a dial made it.
 pub struct Dialed {
     pub stream: Box<dyn Stream>,
+    /// The build of `perchd` the dial ran, when the app installs it; None
+    /// for a `[remote] command`, which may run any.
+    pub build: Option<String>,
     /// Let go of what carries the stream, once the stream is done with,
     /// and say what it said last on its way out, such as ssh's last line
     /// of stderr: why it ended, most often.
@@ -83,8 +103,9 @@ pub struct Dialed {
 }
 
 /// How a stream to the engine is made: `ssh` in the app, a pipe in memory
-/// in a test. Err says why none could be.
-pub type Dial = Box<dyn FnMut() -> BoxFuture<Result<Dialed, String>> + Send>;
+/// in a test, replacing an engine of another build as asked. Err says why
+/// none could be.
+pub type Dial = Box<dyn FnMut(Replace) -> BoxFuture<Result<Dialed, String>> + Send>;
 
 /// How `perchd` is put on the host, for a try that ended with the host
 /// saying it has none, for the processor it named: the build it installs,
@@ -131,6 +152,8 @@ pub struct Link {
     state: Mutex<Linked>,
     /// Told to try now rather than when the wait is up.
     retry: tokio::sync::Notify,
+    /// Told when the reader asks for the restart offered.
+    restart: tokio::sync::Notify,
 }
 
 struct Linked {
@@ -145,6 +168,11 @@ struct Linked {
     /// What the windows sent before the first try ended, while it is
     /// under way; `None` after.
     starting: Option<Vec<(WindowId, Command)>>,
+    /// The older engine the windows offer to restart, while they do.
+    offer: Option<OtherEngine>,
+    /// The build the reader asked a restart for, while it is not yet
+    /// under way.
+    restart: Option<String>,
 }
 
 impl Default for Linked {
@@ -154,6 +182,8 @@ impl Default for Linked {
             windows: BTreeMap::new(),
             refused_at: HashMap::new(),
             starting: Some(Vec::new()),
+            offer: None,
+            restart: None,
         }
     }
 }
@@ -245,11 +275,53 @@ impl Link {
         }
     }
 
+    /// Restart the engine offered, unless none is: the strip's Restart.
+    pub(crate) fn restart_now(&self) {
+        let mut linked = self.linked();
+        if let Some(offer) = linked.offer.take() {
+            linked.restart = Some(offer.wanted);
+            drop(linked);
+            self.restart.notify_one();
+        }
+    }
+
+    /// The build of the restart the reader asked for, which this takes,
+    /// saying it is under way.
+    fn take_restart(&self) -> Option<String> {
+        let build = self.linked().restart.take()?;
+        tracing::info!(host = self.host, build, "restarting the engine, as asked");
+        self.say(EngineLink::Restarting {
+            host: self.host.clone(),
+            build: build.clone(),
+        });
+        Some(build)
+    }
+
+    /// How the try after a wake the reader asked for treats the engine.
+    fn after_wake(&self) -> Replace {
+        match self.take_restart() {
+            Some(_) => Replace::Always,
+            None => Replace::No,
+        }
+    }
+
+    /// Offer to restart `other` when it is older, else nothing.
+    fn offering(&self, linked: &mut Linked, other: Option<&OtherEngine>) {
+        linked.offer = other.filter(|other| !other.newer).cloned();
+    }
+
     /// Connected: the windows are opened in the engine, each said key or
     /// not as it last was, then everything is asked for again, before any
-    /// command from a window can go.
-    fn up(&self, welcome: &super::Welcome, to: UnboundedSender<(WindowId, Command)>) -> bool {
+    /// command from a window can go. `other` when the engine is another
+    /// build, left running.
+    fn up(
+        &self,
+        welcome: &super::Welcome,
+        to: UnboundedSender<(WindowId, Command)>,
+        other: Option<OtherEngine>,
+    ) -> bool {
         let mut linked = self.linked();
+        self.offering(&mut linked, other.as_ref());
         self.navigations.reconnected(welcome.connection);
         for (&window, &key) in &linked.windows {
             let _ = to.send((window, Command::WindowOpened));
@@ -269,6 +341,7 @@ impl Link {
             host: self.host.clone(),
             welcome: welcome.clone(),
             again,
+            other,
         })
     }
 
@@ -277,6 +350,7 @@ impl Link {
     fn down(&self) {
         let mut linked = self.linked();
         linked.to = None;
+        linked.offer = None;
         let dropped = linked.starting.take().unwrap_or_default();
         let windows: BTreeSet<WindowId> = dropped.into_iter().map(|(window, _)| window).collect();
         for window in windows {
@@ -291,19 +365,24 @@ impl Link {
     }
 
     /// Not connected for `why`, which trying again cannot help: no more
-    /// tries until the reader asks for one. False once nobody is
-    /// listening.
-    async fn halt(&self, why: String, ever: bool) -> bool {
+    /// tries until the reader asks for one, or for the restart of `other`
+    /// offered. False once nobody is listening.
+    async fn halt(&self, why: String, ever: bool, other: Option<OtherEngine>) -> bool {
         self.down();
+        self.offering(&mut self.linked(), other.as_ref());
         if !self.say(EngineLink::Down {
             host: self.host.clone(),
             why,
             retry_in: None,
             ever,
+            other,
         }) {
             return false;
         }
-        self.retry.notified().await;
+        tokio::select! {
+            () = self.retry.notified() => {}
+            () = self.restart.notified() => {}
+        }
         true
     }
 }
@@ -330,6 +409,7 @@ pub fn link(
         events,
         state: Mutex::default(),
         retry: tokio::sync::Notify::new(),
+        restart: tokio::sync::Notify::new(),
     });
     runtime.spawn(keep_connected(link.clone(), dial, install, backoff));
     (Backend::linked(link), received)
@@ -337,6 +417,12 @@ pub fn link(
 
 /// Make the connection, and make it again each time it is lost, until the
 /// app stops listening.
+///
+/// With `perchd` installed by the app, the engine reached is weighed
+/// against the build the app wants (`judge`). An older one with nothing
+/// running is replaced at once, once a connect: the next dial passes
+/// `--replace-if-idle`. One busy is left running, and the windows offer a
+/// restart, which dials with `--replace`. A newer one is never stopped.
 async fn keep_connected(
     link: Arc<Link>,
     mut dial: Dial,
@@ -351,15 +437,29 @@ async fn keep_connected(
     let mut ever = false;
     // The build the last try installed, while the try after it is made.
     let mut installed: Option<String> = None;
+    // How the next dial treats an engine of another build.
+    let mut replace = Replace::No;
+    // Whether this connect has replaced an engine by itself: it does so
+    // once, so two builds can never take turns stopping each other.
+    let mut replaced = false;
+    // The older engine an automatic replace was for, which a busy line
+    // from that dial is about.
+    let mut replacing: Option<OtherEngine> = None;
     loop {
         let just_installed = installed.take();
-        let why = match dial().await {
+        let asked = std::mem::take(&mut replace);
+        let why = match dial(asked).await {
             Err(why) => why,
-            Ok(Dialed { stream, hang_up }) => {
+            Ok(Dialed {
+                stream,
+                hang_up,
+                build: wanted,
+            }) => {
                 // Given up when the reader asks for a try now, or when the
                 // engine is too long answering.
+                let within = answer_wait(backoff.answer, asked);
                 let answered = tokio::select! {
-                    answered = tokio::time::timeout(backoff.answer, handshake(stream)) => Some(answered),
+                    answered = tokio::time::timeout(within, handshake(stream)) => Some(answered),
                     () = link.retry.notified() => None,
                 };
                 match answered {
@@ -369,27 +469,73 @@ async fn keep_connected(
                         continue;
                     }
                     Some(Err(_)) => hang_up().await.unwrap_or_else(|| {
-                        format!(
-                            "{host} did not answer within {} s.",
-                            backoff.answer.as_secs()
-                        )
+                        format!("{host} did not answer within {} s.", within.as_secs())
                     }),
                     Some(Ok(Ok((welcome, session)))) => {
+                        let other = match judge(wanted.as_deref(), &welcome.about(), !replaced) {
+                            Judged::Replace(other) => {
+                                drop(session);
+                                let _ = hang_up().await;
+                                tracing::info!(
+                                    host,
+                                    engine = other.engine,
+                                    wanted = other.wanted,
+                                    "the engine is an older build with nothing running; replacing it"
+                                );
+                                if !link.say(EngineLink::Restarting {
+                                    host: host.clone(),
+                                    build: other.wanted.clone(),
+                                }) {
+                                    return;
+                                }
+                                (replace, replaced) = (Replace::IfIdle, true);
+                                replacing = Some(other);
+                                continue;
+                            }
+                            Judged::Leave(other) => {
+                                tracing::info!(
+                                    host,
+                                    engine = other.engine,
+                                    wanted = other.wanted,
+                                    runs = other.runs,
+                                    clients = other.clients,
+                                    newer = other.newer,
+                                    "the engine is another build; leaving it running"
+                                );
+                                Some(other)
+                            }
+                            Judged::Use => {
+                                replaced = false;
+                                None
+                            }
+                        };
                         tracing::info!(
                             host,
                             engine = welcome.engine_version,
+                            build = welcome.build,
                             engine_host = welcome.host,
                             "connected to the engine"
                         );
                         let (to, outgoing) = tokio::sync::mpsc::unbounded_channel();
-                        let ended =
+                        let mut ended =
                             session.carry(outgoing, link.navigations(), link.events.clone());
-                        if !link.up(&welcome, to) {
+                        if !link.up(&welcome, to, other) {
                             return;
                         }
                         ever = true;
                         let since = Instant::now();
-                        let _ = ended.await;
+                        // Until the engine goes, or the reader asks for the
+                        // restart offered.
+                        let restart = loop {
+                            tokio::select! {
+                                _ = &mut ended => break false,
+                                () = link.restart.notified() => {
+                                    if link.linked().restart.is_some() {
+                                        break true;
+                                    }
+                                }
+                            }
+                        };
                         // A connection that lasted starts the waits again;
                         // one that ended at once, an engine failing as it
                         // is asked for everything say, keeps doubling them.
@@ -397,16 +543,60 @@ async fn keep_connected(
                             wait = backoff.first;
                         }
                         link.down();
+                        if restart {
+                            // Said before the hang-up, which can take a
+                            // moment, so the strip changes on the click.
+                            replace = link.after_wake();
+                            let _ = hang_up().await;
+                            continue;
+                        }
                         hang_up()
                             .await
                             .unwrap_or_else(|| "The connection was lost.".to_string())
                     }
-                    Some(Ok(Err(WireError::Refused(reason)))) => {
+                    Some(Ok(Err(WireError::Refused(reason, about)))) => {
                         let _ = hang_up().await;
                         tracing::warn!(host, %reason, "the engine refused the app");
-                        if !link.halt(reason, ever).await {
+                        let (why, other) = match judge(wanted.as_deref(), &about, !replaced) {
+                            // An engine from before the handshake was
+                            // frozen cannot be asked to stop.
+                            _ if wanted.is_some() && about.protocol == 0 => (
+                                format!(
+                                    "{reason} Perch can't replace an engine this old: stop perchd serve on {host} and reconnect."
+                                ),
+                                None,
+                            ),
+                            Judged::Replace(other) => {
+                                tracing::info!(
+                                    host,
+                                    engine = other.engine,
+                                    wanted = other.wanted,
+                                    "the engine is an older build with nothing running; replacing it"
+                                );
+                                if !link.say(EngineLink::Restarting {
+                                    host: host.clone(),
+                                    build: other.wanted.clone(),
+                                }) {
+                                    return;
+                                }
+                                (replace, replaced) = (Replace::IfIdle, true);
+                                replacing = Some(other);
+                                continue;
+                            }
+                            Judged::Leave(other) if !other.newer => (
+                                format!(
+                                    "It speaks protocol {}, and this app {PROTOCOL}, so Perch can't use it until it restarts.",
+                                    about.protocol
+                                ),
+                                Some(other),
+                            ),
+                            Judged::Leave(other) => (reason, Some(other)),
+                            Judged::Use => (reason, None),
+                        };
+                        if !link.halt(why, ever, other).await {
                             return;
                         }
+                        (replace, replaced) = (link.after_wake(), false);
                         wait = backoff.first;
                         continue;
                     }
@@ -414,6 +604,24 @@ async fn keep_connected(
                 }
             }
         };
+        // A replace-if-idle that found the engine busy by the time it
+        // asked: left running, with the restart offered.
+        if let (Some(busy), Some(seen)) = (provision::busy_line(&why), replacing.take()) {
+            tracing::info!(host, ?busy, "the engine was busy; not replacing it");
+            let other = OtherEngine {
+                runs: busy.runs,
+                clients: busy.clients,
+                ..seen
+            };
+            let why = "Perch would have restarted it to update it, but it is in use.".to_string();
+            if !link.halt(why, ever, Some(other)).await {
+                return;
+            }
+            (replace, replaced) = (link.after_wake(), false);
+            wait = backoff.first;
+            continue;
+        }
+        replacing = None;
         let installing = |build: &str| {
             link.say(EngineLink::Installing {
                 host: host.clone(),
@@ -434,9 +642,10 @@ async fn keep_connected(
             }
             Some(Err(Failed { why, lasting: true })) => {
                 tracing::warn!(host, %why, "perchd could not be installed");
-                if !link.halt(why, ever).await {
+                if !link.halt(why, ever, None).await {
                     return;
                 }
+                (replace, replaced) = (link.after_wake(), false);
                 wait = backoff.first;
                 continue;
             }
@@ -449,15 +658,117 @@ async fn keep_connected(
             why,
             retry_in: Some(wait),
             ever,
+            other: None,
         }) {
             return;
         }
-        tokio::select! {
-            () = tokio::time::sleep(wait) => {}
-            () = link.retry.notified() => {}
+        let asked_now = tokio::select! {
+            () = tokio::time::sleep(wait) => false,
+            () = link.retry.notified() => true,
+            () = link.restart.notified() => true,
+        };
+        if asked_now {
+            (replace, replaced) = (link.after_wake(), false);
         }
         wait = backoff.after(wait);
     }
+}
+
+/// How an engine's build stands to the one the app wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Age {
+    Same,
+    Older,
+    Newer,
+}
+
+/// The engine's build `engine_build`, of `engine_version`, against
+/// `wanted`, a build of the app's version `app_version`. Newer only by
+/// version: an engine of the same version and another build, a dev build
+/// rebuilt or a release beside a dev build, is replaced as an older one
+/// is. One that names no build, from before builds were named, is older.
+pub fn age(app_version: &str, wanted: &str, engine_version: &str, engine_build: &str) -> Age {
+    if !engine_build.is_empty() && engine_build == wanted {
+        return Age::Same;
+    }
+    match (
+        semver::Version::parse(engine_version),
+        semver::Version::parse(app_version),
+    ) {
+        (Ok(engine), Ok(app)) if engine > app => Age::Newer,
+        _ => Age::Older,
+    }
+}
+
+/// What a try does with the engine it reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Judged {
+    /// Use it: the build wanted, or any engine, for a `[remote] command`,
+    /// which wants none.
+    Use,
+    /// An older build with no runs and no other client, and this connect
+    /// has not replaced one yet: dial again, replacing it if still idle.
+    Replace(OtherEngine),
+    /// Leave it running and say so: an older build that is busy, or one
+    /// already replaced once this connect, or a newer one.
+    Leave(OtherEngine),
+}
+
+/// Weigh the engine `about` describes against the build `wanted`.
+/// `may_replace` while this connect has not replaced one.
+fn judge(wanted: Option<&str>, about: &super::About, may_replace: bool) -> Judged {
+    let Some(wanted) = wanted else {
+        return Judged::Use;
+    };
+    let newer = match age(VERSION, wanted, &about.engine_version, &about.build) {
+        Age::Same => return Judged::Use,
+        Age::Newer => true,
+        Age::Older => false,
+    };
+    let other = OtherEngine {
+        engine: if about.build.is_empty() {
+            about.engine_version.clone()
+        } else {
+            about.build.clone()
+        },
+        wanted: wanted.to_string(),
+        runs: about.runs,
+        clients: about.clients,
+        newer,
+    };
+    if !newer && may_replace && about.runs == 0 && about.clients == 0 {
+        Judged::Replace(other)
+    } else {
+        Judged::Leave(other)
+    }
+}
+
+/// What the windows say of an engine of another build left running.
+pub fn other_said(host: &str, other: &OtherEngine) -> String {
+    let OtherEngine {
+        engine,
+        wanted,
+        runs,
+        clients,
+        newer,
+    } = other;
+    if *newer {
+        return format!(
+            "{host}'s engine is perchd {engine}, newer than this app's {wanted}. Update Perch on this Mac."
+        );
+    }
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let cost = if *runs > 0 {
+        format!(" ({runs} agent run{} would be stopped)", plural(*runs))
+    } else if *clients > 0 {
+        format!(
+            " ({clients} other client{} would be disconnected)",
+            plural(*clients)
+        )
+    } else {
+        String::new()
+    };
+    format!("{host}'s engine is perchd {engine}; restart it to update to {wanted}{cost}.")
 }
 
 /// When `why`, the last thing a try said, is the host saying it has no
@@ -493,34 +804,82 @@ async fn install_if_asked(
 }
 
 /// Connect to the engine on `host` once, installing `perchd` first if it
-/// is missing, and give its welcome, or why there was none: what `perch
-/// --connect` does. `installing` hears the build being installed.
+/// is missing, and replacing an older one with nothing running, and give
+/// its welcome, with the engine of another build left running if it is
+/// one, or why there was none: what `perch --connect` does. `said` hears
+/// what is done on the way: the build being installed, or the engine
+/// being replaced.
 pub async fn connect_once(
     host: &str,
     bridge: Bridge,
     answer: Duration,
-    mut installing: impl FnMut(&str),
-) -> Result<super::Welcome, String> {
+    mut said: impl FnMut(&str),
+) -> Result<(super::Welcome, Option<OtherEngine>), String> {
     let (mut dial, mut install) = dial_for(host, bridge);
     let mut installed: Option<String> = None;
+    let mut replace = Replace::No;
+    let mut replacing: Option<OtherEngine> = None;
     loop {
         let just_installed = installed.take();
-        let Dialed { stream, hang_up } = dial().await?;
-        let why = match tokio::time::timeout(answer, handshake(stream)).await {
+        let asked = std::mem::take(&mut replace);
+        let Dialed {
+            stream,
+            hang_up,
+            build: wanted,
+        } = dial(asked).await?;
+        let may_replace = replacing.is_none();
+        let within = answer_wait(answer, asked);
+        let why = match tokio::time::timeout(within, handshake(stream)).await {
             Ok(Ok((welcome, session))) => {
                 drop(session);
                 let _ = hang_up().await;
-                return Ok(welcome);
+                match judge(wanted.as_deref(), &welcome.about(), may_replace) {
+                    Judged::Replace(other) => {
+                        said(&format!(
+                            "Restarting {host}'s engine, perchd {}, to update it to {}…",
+                            other.engine, other.wanted
+                        ));
+                        (replace, replacing) = (Replace::IfIdle, Some(other));
+                        continue;
+                    }
+                    Judged::Leave(other) => return Ok((welcome, Some(other))),
+                    Judged::Use => return Ok((welcome, None)),
+                }
             }
-            Ok(Err(WireError::Refused(reason))) => {
+            Ok(Err(WireError::Refused(reason, about))) => {
                 let _ = hang_up().await;
-                return Err(reason);
+                match judge(wanted.as_deref(), &about, may_replace) {
+                    Judged::Replace(other) if about.protocol != 0 => {
+                        said(&format!(
+                            "Restarting {host}'s engine, perchd {}, to update it to {}…",
+                            other.engine, other.wanted
+                        ));
+                        (replace, replacing) = (Replace::IfIdle, Some(other));
+                        continue;
+                    }
+                    Judged::Leave(other) if about.protocol != 0 => {
+                        return Err(format!("{} {reason}", other_said(host, &other)))
+                    }
+                    _ => return Err(reason),
+                }
             }
             Ok(Err(error)) => hang_up().await.unwrap_or_else(|| error.to_string()),
             Err(_) => hang_up()
                 .await
-                .unwrap_or_else(|| format!("{host} did not answer within {} s.", answer.as_secs())),
+                .unwrap_or_else(|| format!("{host} did not answer within {} s.", within.as_secs())),
         };
+        if let (Some(busy), Some(seen)) = (provision::busy_line(&why), replacing.as_ref()) {
+            let other = OtherEngine {
+                runs: busy.runs,
+                clients: busy.clients,
+                ..seen.clone()
+            };
+            return Err(format!(
+                "{} It came into use before it could be restarted.",
+                other_said(host, &other)
+            ));
+        }
+        let mut installing = |build: &str| said(&format!("Installing perchd {build} on {host}…"));
         match install_if_asked(
             install.as_mut(),
             host,
@@ -610,19 +969,20 @@ pub fn ssh_args(host: &str, remote: &str) -> Vec<String> {
     .collect()
 }
 
-/// The remote line ssh runs for `bridge`, by `build` when it is installed.
-fn remote_line(bridge: &Bridge, build: &str) -> String {
+/// The remote line ssh runs for `bridge`, by `build` when it is
+/// installed, replacing another build as `replace` says.
+fn remote_line(bridge: &Bridge, build: &str, replace: Replace) -> String {
     match bridge {
         Bridge::Command(command) => in_login_shell(command),
-        Bridge::Installed(_) => provision::connect_command(build),
+        Bridge::Installed(_) => provision::connect_command(build, replace),
     }
 }
 
 /// Dial `host` with ssh (`PERCH_SSH` when set), which runs `remote` there.
 /// ssh's stderr goes to the log, and its last line is why a connection
-/// ended. A host saying it has no `perchd` to run keeps that as the last
-/// line, whatever ssh says after it.
-async fn dial_ssh(host: &str, remote: &str) -> Result<Dialed, String> {
+/// ended. A host saying it has no `perchd` to run, or a bridge saying the
+/// engine is busy, keeps that as the last line, whatever ssh says after it.
+async fn dial_ssh(host: &str, remote: &str, build: Option<String>) -> Result<Dialed, String> {
     if let Some(why) = bad_host(host) {
         return Err(why);
     }
@@ -652,9 +1012,10 @@ async fn dial_ssh(host: &str, remote: &str) -> Result<Dialed, String> {
                 }
                 tracing::info!(host, "ssh: {line}");
                 if let Ok(mut last) = last.lock() {
-                    let kept = last
-                        .as_deref()
-                        .is_some_and(|was| was.starts_with(provision::INSTALL_SAID));
+                    let kept = last.as_deref().is_some_and(|was| {
+                        was.starts_with(provision::INSTALL_SAID)
+                            || was.starts_with(provision::BUSY_SAID)
+                    });
                     if !kept {
                         *last = Some(line.to_string());
                     }
@@ -664,6 +1025,7 @@ async fn dial_ssh(host: &str, remote: &str) -> Result<Dialed, String> {
     });
     Ok(Dialed {
         stream: Box::new(tokio::io::join(stdout, stdin)),
+        build,
         hang_up: Box::new(move || {
             Box::pin(async move {
                 // Most often ssh has gone already, or is going, and its
@@ -697,7 +1059,7 @@ async fn dial_ssh(host: &str, remote: &str) -> Result<Dialed, String> {
 pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
     let dial: Dial = Box::new({
         let (host, bridge) = (host.to_string(), bridge.clone());
-        move || {
+        move |replace| {
             let (host, bridge) = (host.clone(), bridge.clone());
             Box::pin(async move {
                 let build = match &bridge {
@@ -717,7 +1079,9 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                         "perchd's build, {build}, has a character Perch won't put on a command line."
                     ));
                 }
-                dial_ssh(&host, &remote_line(&bridge, &build)).await
+                let remote = remote_line(&bridge, &build, replace);
+                let installed = matches!(bridge, Bridge::Installed(_)).then_some(build);
+                dial_ssh(&host, &remote, installed).await
             })
         }
     });
@@ -808,7 +1172,7 @@ pub fn over_ssh(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{encode, next_message, Answer, CommandLine, Hello, Welcome, PROTOCOL};
+    use crate::wire::{encode, next_message, About, Answer, CommandLine, Hello, Welcome, PROTOCOL};
     use tokio::io::{AsyncWriteExt, BufReader, DuplexStream};
 
     #[test]
@@ -888,16 +1252,23 @@ mod tests {
         }
 
         async fn welcome(&mut self, connection: u64) {
+            self.welcome_as(connection, &engine(VERSION, VERSION, 0, 0))
+                .await;
+        }
+
+        /// Let the client in as the engine `about` says.
+        async fn welcome_as(&mut self, connection: u64, about: &About) {
             self.hello().await;
             self.answer(Answer::Welcome(Welcome {
                 protocol: PROTOCOL,
-                engine_version: "0".into(),
+                engine_version: about.engine_version.clone(),
                 connection,
                 host: "halo".into(),
                 home: "/home/chris".into(),
                 data_root: "/home/chris/.perch".into(),
-                clients: 0,
-                runs: 0,
+                clients: about.clients,
+                runs: about.runs,
+                build: about.build.clone(),
             }))
             .await;
         }
@@ -926,6 +1297,17 @@ mod tests {
         }
     }
 
+    /// An engine as it says it is.
+    fn engine(version: &str, build: &str, runs: usize, clients: usize) -> About {
+        About {
+            engine_version: version.into(),
+            protocol: PROTOCOL,
+            build: build.into(),
+            runs,
+            clients,
+        }
+    }
+
     /// A dial that hands the client one end of a pipe in memory and the
     /// test the other, or fails with `why` while `refusing` holds it.
     struct Pipes {
@@ -934,20 +1316,33 @@ mod tests {
         failing: Arc<Mutex<Option<String>>>,
         /// What a dial says last as it is hung up, ssh's last line.
         last: Arc<Mutex<Option<String>>>,
+        /// How each dial was asked to treat another build.
+        asked: Arc<Mutex<Vec<Replace>>>,
     }
 
+    /// Dials as a `[remote] command`, which wants no build.
     fn pipes() -> (Dial, Pipes) {
+        pipes_for(None)
+    }
+
+    /// Dials of the `perchd` of `build`, as the app installs it.
+    fn pipes_for(build: Option<&str>) -> (Dial, Pipes) {
+        let build = build.map(str::to_string);
         let (to_test, far) = tokio::sync::mpsc::unbounded_channel();
         let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failing = Arc::new(Mutex::new(None::<String>));
         let last = Arc::new(Mutex::new(None::<String>));
+        let asked = Arc::new(Mutex::new(Vec::new()));
         let dial: Dial = Box::new({
-            let (dials, failing, last) = (dials.clone(), failing.clone(), last.clone());
-            move || {
+            let (dials, failing, last, asked) =
+                (dials.clone(), failing.clone(), last.clone(), asked.clone());
+            move |replace| {
                 dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                asked.lock().unwrap().push(replace);
                 let failing = failing.lock().unwrap().clone();
                 let said = last.lock().unwrap().clone();
                 let to_test = to_test.clone();
+                let build = build.clone();
                 Box::pin(async move {
                     if let Some(why) = failing {
                         return Err(why);
@@ -961,6 +1356,7 @@ mod tests {
                     });
                     Ok(Dialed {
                         stream: Box::new(near),
+                        build,
                         hang_up: Box::new(move || Box::pin(async move { said })),
                     })
                 })
@@ -973,6 +1369,7 @@ mod tests {
                 dials,
                 failing,
                 last,
+                asked,
             },
         )
     }
@@ -1376,6 +1773,7 @@ mod tests {
         let reason = "Perch 1 speaks protocol 1, and this engine, Perch 2, speaks protocol 2. Update the app.";
         far.answer(Answer::Refused {
             reason: reason.into(),
+            about: About::default(),
         })
         .await;
         loop {
@@ -1572,6 +1970,348 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_engine_is_older_unless_its_version_is_newer() {
+        let age = |wanted, version, build| age("0.9.0", wanted, version, build);
+        assert_eq!(age("0.9.0", "0.9.0", "0.9.0"), Age::Same);
+        assert_eq!(age("0.9.0", "0.8.2", "0.8.2"), Age::Older);
+        assert_eq!(age("0.9.0", "0.10.0", "0.10.0"), Age::Newer);
+        assert_eq!(age("0.9.0", "1.0.0-beta.1", "1.0.0-beta.1"), Age::Newer);
+        // A dev build of the same version, rebuilt, or a release beside
+        // one, is replaced.
+        assert_eq!(
+            age("0.9.0-0123456789ab", "0.9.0", "0.9.0-ba9876543210"),
+            Age::Older
+        );
+        assert_eq!(age("0.9.0", "0.9.0", "0.9.0-ba9876543210"), Age::Older);
+        assert_eq!(
+            age("0.9.0-0123456789ab", "0.9.0", "0.9.0-0123456789ab"),
+            Age::Same
+        );
+        // An engine that names no build is from before builds were named.
+        assert_eq!(age("0.9.0", "", ""), Age::Older);
+        assert_eq!(age("0.9.0", "0.9.0", ""), Age::Older);
+    }
+
+    #[test]
+    fn an_older_engine_is_replaced_only_idle_and_once() {
+        let wanted = Some("0.9.0-0123456789ab");
+        let older = |runs, clients| engine("0.8.0", "0.8.0", runs, clients);
+        assert!(matches!(
+            judge(wanted, &older(0, 0), true),
+            Judged::Replace(OtherEngine { ref engine, newer: false, .. }) if engine == "0.8.0"
+        ));
+        assert!(matches!(
+            judge(wanted, &older(0, 0), false),
+            Judged::Leave(_)
+        ));
+        assert!(matches!(
+            judge(wanted, &older(2, 0), true),
+            Judged::Leave(OtherEngine { runs: 2, .. })
+        ));
+        assert!(matches!(
+            judge(wanted, &older(0, 1), true),
+            Judged::Leave(OtherEngine { clients: 1, .. })
+        ));
+        // A newer one is never replaced, idle or not.
+        assert!(matches!(
+            judge(wanted, &engine("99.0.0", "99.0.0", 0, 0), true),
+            Judged::Leave(OtherEngine { newer: true, .. })
+        ));
+        assert_eq!(
+            judge(wanted, &engine(VERSION, "0.9.0-0123456789ab", 3, 3), true),
+            Judged::Use
+        );
+        // A command of the reader's own wants no build: any engine goes.
+        assert_eq!(judge(None, &older(0, 0), true), Judged::Use);
+    }
+
+    #[test]
+    fn the_windows_say_what_a_restart_would_stop() {
+        let other = |runs, clients, newer| OtherEngine {
+            engine: "0.8.0".into(),
+            wanted: "0.9.0".into(),
+            runs,
+            clients,
+            newer,
+        };
+        assert_eq!(
+            other_said("halo", &other(2, 1, false)),
+            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (2 agent runs would be stopped)."
+        );
+        assert_eq!(
+            other_said("halo", &other(1, 0, false)),
+            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (1 agent run would be stopped)."
+        );
+        assert_eq!(
+            other_said("halo", &other(0, 1, false)),
+            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (1 other client would be disconnected)."
+        );
+        assert_eq!(
+            other_said("halo", &other(0, 0, true)),
+            "halo's engine is perchd 0.8.0, newer than this app's 0.9.0. Update Perch on this Mac."
+        );
+    }
+
+    /// The build the app's dials want, of its own version.
+    const WANTED: &str = concat!(env!("CARGO_PKG_VERSION"), "-0123456789ab");
+
+    fn installed_link() -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>, Pipes) {
+        let (dial, pipes) = pipes_for(Some(WANTED));
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        (backend, events, pipes)
+    }
+
+    /// The next link that is not Connecting.
+    async fn next_said(events: &std::sync::mpsc::Receiver<(WindowId, Event)>) -> EngineLink {
+        loop {
+            let link = next_link(events).await;
+            if !matches!(link, EngineLink::Connecting { .. }) {
+                return link;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_older_engine_with_nothing_running_is_replaced_at_once() {
+        let (_backend, events, mut pipes) = installed_link();
+        pipes
+            .next()
+            .await
+            .welcome_as(1, &engine("0.0.1", "0.0.1", 0, 0))
+            .await;
+        assert_eq!(
+            next_said(&events).await,
+            EngineLink::Restarting {
+                host: "halo".into(),
+                build: WANTED.into()
+            }
+        );
+        // Kept, so the connection stays up.
+        let mut kept = pipes.next().await;
+        kept.welcome_as(2, &engine(VERSION, WANTED, 0, 0)).await;
+        let EngineLink::Up { other, .. } = next_said(&events).await else {
+            panic!("not up");
+        };
+        assert_eq!(other, None);
+        assert_eq!(*pipes.asked.lock().unwrap(), [Replace::No, Replace::IfIdle]);
+    }
+
+    /// One replace a connect: an engine still older after it is left
+    /// running, rather than replaced again and again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_engine_still_older_after_a_replace_is_left_running() {
+        let (_backend, events, mut pipes) = installed_link();
+        let older = engine("0.0.1", "0.0.1", 0, 0);
+        pipes.next().await.welcome_as(1, &older).await;
+        let mut far = pipes.next().await;
+        far.welcome_as(2, &older).await;
+        loop {
+            if let EngineLink::Up { other, .. } = next_said(&events).await {
+                assert_eq!(other.map(|other| other.engine), Some("0.0.1".to_string()));
+                break;
+            }
+        }
+        assert!(far.command().await.is_some(), "connected");
+        assert_eq!(pipes.dials(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_busy_older_engine_is_used_and_restarted_only_when_asked() {
+        let (backend, events, mut pipes) = installed_link();
+        let mut far = pipes.next().await;
+        far.welcome_as(1, &engine("0.0.1", "0.0.1", 2, 1)).await;
+        let EngineLink::Up { other, .. } = next_said(&events).await else {
+            panic!("not up");
+        };
+        let other = other.expect("another build");
+        assert_eq!((other.runs, other.clients, other.newer), (2, 1, false));
+        // Connected meanwhile, as to any engine.
+        assert!(matches!(
+            far.command().await,
+            Some((NO_WINDOW, Command::Resync))
+        ));
+        assert_eq!(pipes.dials(), 1);
+
+        backend.restart_engine();
+        assert_eq!(
+            next_said(&events).await,
+            EngineLink::Restarting {
+                host: "halo".into(),
+                build: WANTED.into()
+            }
+        );
+        // The old connection is let go.
+        assert!(far.command().await.is_none());
+        // Kept, so the connection stays up.
+        let mut kept = pipes.next().await;
+        kept.welcome_as(2, &engine(VERSION, WANTED, 0, 0)).await;
+        assert!(matches!(
+            next_said(&events).await,
+            EngineLink::Up { other: None, .. }
+        ));
+        assert_eq!(*pipes.asked.lock().unwrap(), [Replace::No, Replace::Always]);
+        // With nothing offered, a Restart does nothing.
+        backend.restart_engine();
+        tokio::time::sleep(QUICK.last * 2).await;
+        assert_eq!(pipes.dials(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_newer_engine_is_never_stopped() {
+        let (backend, events, mut pipes) = installed_link();
+        let mut far = pipes.next().await;
+        far.welcome_as(1, &engine("99.0.0", "99.0.0", 0, 0)).await;
+        let EngineLink::Up { other, .. } = next_said(&events).await else {
+            panic!("not up");
+        };
+        assert!(other.unwrap().newer);
+        backend.restart_engine();
+        tokio::time::sleep(QUICK.last * 2).await;
+        assert_eq!(pipes.dials(), 1);
+
+        // Refusing the app's protocol, it is said newer, and left alone.
+        let (backend, events, mut pipes) = installed_link();
+        let mut far = pipes.next().await;
+        far.hello().await;
+        far.answer(Answer::Refused {
+            reason: "Update the app.".into(),
+            about: About {
+                protocol: PROTOCOL + 1,
+                ..engine("99.0.0", "99.0.0", 0, 0)
+            },
+        })
+        .await;
+        let EngineLink::Down {
+            other, retry_in, ..
+        } = next_said(&events).await
+        else {
+            panic!("not down");
+        };
+        assert!(other.unwrap().newer);
+        assert_eq!(retry_in, None);
+        backend.restart_engine();
+        tokio::time::sleep(QUICK.last * 2).await;
+        assert_eq!(pipes.dials(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_older_engine_that_refuses_the_app_is_offered_a_restart() {
+        let (backend, events, mut pipes) = installed_link();
+        let mut far = pipes.next().await;
+        far.hello().await;
+        far.answer(Answer::Refused {
+            reason: "Update the engine.".into(),
+            about: About {
+                protocol: PROTOCOL - 1,
+                ..engine("0.0.1", "0.0.1", 1, 0)
+            },
+        })
+        .await;
+        let EngineLink::Down {
+            other, retry_in, ..
+        } = next_said(&events).await
+        else {
+            panic!("not down");
+        };
+        assert_eq!(other.unwrap().runs, 1);
+        assert_eq!(retry_in, None);
+        backend.restart_engine();
+        assert!(matches!(
+            next_said(&events).await,
+            EngineLink::Restarting { .. }
+        ));
+        // Kept, so the connection stays up.
+        let mut kept = pipes.next().await;
+        kept.welcome_as(2, &engine(VERSION, WANTED, 0, 0)).await;
+        assert!(matches!(
+            next_said(&events).await,
+            EngineLink::Up { other: None, .. }
+        ));
+        assert_eq!(*pipes.asked.lock().unwrap(), [Replace::No, Replace::Always]);
+    }
+
+    /// An engine that came into use between the welcome and the replace:
+    /// the bridge says it is busy, and the restart is offered instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replace_that_finds_the_engine_busy_offers_a_restart() {
+        let (backend, events, mut pipes) = installed_link();
+        let mut first = pipes.next().await;
+        // What the next dial, the replace, says as it ends.
+        *pipes.last.lock().unwrap() = Some("perch-busy: 0.0.1 3 0".into());
+        first.welcome_as(1, &engine("0.0.1", "0.0.1", 0, 0)).await;
+        assert!(matches!(
+            next_said(&events).await,
+            EngineLink::Restarting { .. }
+        ));
+        drop(pipes.next().await);
+        let EngineLink::Down {
+            other, retry_in, ..
+        } = next_said(&events).await
+        else {
+            panic!("not down");
+        };
+        let other = other.unwrap();
+        assert_eq!((other.engine.as_str(), other.runs), ("0.0.1", 3));
+        assert_eq!(retry_in, None);
+        tokio::time::sleep(QUICK.last * 2).await;
+        assert_eq!(pipes.dials(), 2);
+        *pipes.last.lock().unwrap() = None;
+        backend.restart_engine();
+        drop(pipes.next().await);
+        assert_eq!(
+            *pipes.asked.lock().unwrap(),
+            [Replace::No, Replace::IfIdle, Replace::Always]
+        );
+    }
+
+    /// An engine from before the frozen handshake says nothing of itself,
+    /// and could not hear a stop: the reader is told to stop it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_engine_from_before_the_frozen_handshake_is_not_replaced() {
+        let (_backend, events, mut pipes) = installed_link();
+        let mut far = pipes.next().await;
+        far.hello().await;
+        far.answer(Answer::Refused {
+            reason: "Update the engine.".into(),
+            about: About::default(),
+        })
+        .await;
+        let EngineLink::Down { why, other, .. } = next_said(&events).await else {
+            panic!("not down");
+        };
+        assert!(why.contains("stop perchd serve on halo"), "{why}");
+        assert_eq!(other, None);
+        tokio::time::sleep(QUICK.last * 2).await;
+        assert_eq!(pipes.dials(), 1);
+    }
+
+    /// With a command of the reader's own, any engine is used as it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_a_command_given_no_engine_is_replaced() {
+        let (dial, mut pipes) = pipes();
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        let mut kept = pipes.next().await;
+        kept.welcome_as(1, &engine("0.0.1", "0.0.1", 0, 0)).await;
+        assert!(matches!(
+            next_said(&events).await,
+            EngineLink::Up { other: None, .. }
+        ));
+        assert_eq!(*pipes.asked.lock().unwrap(), [Replace::No]);
+    }
+
     /// The connection script, run as ssh would have the login shell run
     /// it, by each shell there is here: bash and zsh on macOS, fish when
     /// installed. It runs the bridge of the build named, under the Perch
@@ -1589,10 +2329,10 @@ mod tests {
             let fake = bin.join("perchd-0.9.0-0123456789ab");
             std::fs::write(&fake, "#!/bin/sh\necho \"ran $0 $*\"\n").unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let run = |build: &str| {
+            let run_as = |build: &str, replace: Replace| {
                 std::process::Command::new(&shell)
                     .arg("-c")
-                    .arg(provision::connect_command(build))
+                    .arg(provision::connect_command(build, replace))
                     .env_clear()
                     .env("HOME", home.path())
                     .env("SHELL", &shell)
@@ -1600,6 +2340,7 @@ mod tests {
                     .output()
                     .unwrap()
             };
+            let run = |build: &str| run_as(build, Replace::No);
             let ran = run("0.9.0-0123456789ab");
             assert_eq!(
                 String::from_utf8_lossy(&ran.stdout).trim(),
@@ -1608,6 +2349,13 @@ mod tests {
                 String::from_utf8_lossy(&ran.stderr)
             );
             assert!(ran.status.success(), "{shell}");
+            let ran = run_as("0.9.0-0123456789ab", Replace::IfIdle);
+            assert_eq!(
+                String::from_utf8_lossy(&ran.stdout).trim(),
+                format!("ran {} bridge --replace-if-idle", fake.display()),
+                "{shell}: {}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
 
             let missing = run("0.9.0");
             assert_eq!(

@@ -83,6 +83,23 @@ impl Engine {
         let _ = self.hub.commands.send(Inbound::Shutdown);
     }
 
+    /// How long the engine runs.
+    pub fn lifetime(&self) -> Lifetime {
+        self.hub.lifetime
+    }
+
+    /// A client asked over the wire for the engine to stop: tell whoever
+    /// runs it as a service, which stops it as it would for SIGTERM. The
+    /// engine does not stop itself, so there is one way to stop.
+    pub fn ask_to_stop(&self) {
+        self.hub.stop_asked.notify_one();
+    }
+
+    /// Wait for a client to ask the engine to stop.
+    pub async fn stop_asked(&self) {
+        self.hub.stop_asked.notified().await;
+    }
+
     /// The engine's runtime, for the tasks that carry a connection.
     pub fn runtime(&self) -> &tokio::runtime::Handle {
         &self.runtime
@@ -186,6 +203,8 @@ pub(super) struct Hub {
     /// The engine's runs, once it has started them, for counting.
     pub(super) runs: OnceLock<super::runs::RunManager>,
     pub(super) stopped: Stopped,
+    /// Told when a client asks the engine to stop.
+    stop_asked: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -221,6 +240,7 @@ impl Hub {
             state: Mutex::default(),
             runs: OnceLock::new(),
             stopped: Stopped::default(),
+            stop_asked: tokio::sync::Notify::new(),
         }
     }
 

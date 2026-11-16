@@ -1490,11 +1490,16 @@ included, whatever its libc. The app installs it on a host itself (see
   0600). It keeps polling, sweeping and running agents with no client
   connected. SIGTERM, SIGINT or SIGHUP stops it as quitting the app does:
   running agents are stopped and recorded Interrupted, the socket is
-  removed and the home let go. A second SIGTERM or SIGINT while it stops
-  ends it at once; another SIGHUP does not, as a dropped ssh session sends
-  two. It logs to stderr, in colour only on a terminal, and to
-  `$PERCH_HOME/logs`, never to stdout. With another engine on the home it
-  exits 75.
+  removed and the home let go. A bridge of another build asking it to stop
+  over the socket stops it the same way. A second SIGTERM or SIGINT while
+  it stops ends it at once; another SIGHUP does not, as a dropped ssh
+  session sends two. It logs to stderr, in colour only on a terminal, and
+  to `$PERCH_HOME/logs`, never to stdout. With another engine on the home
+  it exits 75. It does not start on a `perch.db` a newer Perch has
+  migrated, which it would otherwise run without, its runs unrecorded.
+  When it can't start, it writes why to `$PERCH_HOME/run/serve-failed`
+  (mode 0600) as well as to its log, and removes the file when it next
+  starts.
 - The engine never keeps the ssh session's `SSH_AUTH_SOCK`,
   `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`, whether a bridge started it
   or it was run by hand in a login: it outlives the session, and every
@@ -1506,18 +1511,32 @@ included, whatever its libc. The app installs it on a host itself (see
   until either side closes. It is what the app has ssh run. With
   no engine answering it starts `perchd serve` in a session of its own, so
   the engine outlives the ssh connection, and waits up to 10 seconds for
-  it. When something holds the home's lock without listening, the Perch
-  app running on the host say, it names that process. It writes nothing
-  but the engine's messages to stdout. A bridge the app installed, one
-  run from `$PERCH_HOME/bin/perchd-<build>`, removes the other
-  `perchd-*` there but the newest, and the temporary files of uploads
-  that stopped over an hour ago.
+  it. An engine that failed to start for a reason it left in
+  `serve-failed` is not waited for: the bridge says that reason. When
+  something holds the home's lock without listening, an engine still
+  stopping or the Perch app running on the host, it names that process.
+  It writes nothing but the engine's messages to stdout. A bridge the app
+  installed, one run from `$PERCH_HOME/bin/perchd-<build>`, removes the
+  other `perchd-*` there but the newest, and the temporary files of
+  uploads that stopped over an hour ago.
+- `perchd bridge --replace` makes way for its own build. An engine of
+  another build is asked over the socket to stop, and stops as SIGTERM
+  stops it. The bridge waits up to a minute for its socket to stop
+  answering and the home's lock to be free, then starts its own engine
+  and carries on as a bridge. An engine of its own build is joined as it
+  is. `--replace-if-idle` does the same only when the engine has no runs
+  and no clients; otherwise it writes `perch-busy: <version> <runs>
+  <clients>` to stderr and exits 98, leaving the engine running. Nothing
+  is ever signalled or killed by its pid. The Perch app running on the
+  host holds the home with no socket, and can't be replaced: quit it
+  there. A build is the `<build>` of the `perchd-<build>` it runs as, or
+  its version when it was not installed by the app.
 - `perchd status` connects without starting anything and prints whether
-  an engine is running, its version and protocol, its Perch home, how many
+  an engine is running, its version, protocol and build, its Perch home, how many
   other clients are connected and how many agent runs are queued or under
   way. It exits 0 when one answers and 3 when none does.
 - `perchd --version` prints the version and the wire protocol, as
-  `perchd 0.9.0 (protocol 4)`.
+  `perchd 0.9.0 (protocol 5)`.
 
 A socket file left by an engine that was killed is removed when the next
 one starts, once nothing answers on it.
@@ -1601,10 +1620,49 @@ processor and name the app's version and protocol.
 Each bridge the app installed removes the older builds beside it but the
 newest one (see [perchd](#perchd)).
 
+### When the app is updated
+
+Updating the app changes the build it wants, so its next connection
+installs the new `perchd` beside the old. The engine already running on
+the host is the old build, and the app weighs it against its own:
+
+- No runs and no other client connected: the app hangs up and connects
+  again with `perchd bridge --replace-if-idle`, which stops the old engine
+  and starts the new one. The strip says "Restarting the engine on <host>
+  to update it to perchd <build>…" meanwhile, and the log says so. It does
+  this once a connection: an engine still older after it is left running.
+- Busy, with runs or another Mac connected: the app leaves it running. When
+  it still speaks the app's protocol, the app connects to it as usual and
+  the strip says "<host>'s engine is perchd 0.8.0; restart it to update to
+  0.9.0 (2 agent runs would be stopped)", with a Restart button. When it
+  doesn't, the strip says the same without a connection, with Restart and
+  Reconnect. Restart connects with `perchd bridge --replace`, which stops
+  the old engine whatever it is doing: its runs are recorded Interrupted,
+  as when the app quits, and other Macs connected to it reconnect to the
+  new one. An engine that comes into use between the app's look and its
+  `--replace-if-idle` is left running, and the strip offers the restart.
+- Newer than the app, by version: the app never stops it. The strip says
+  "<host>'s engine is perchd 1.0.0, newer than this app's 0.9.0. Update
+  Perch on this Mac."; while it speaks the app's protocol the app is still
+  connected to it.
+
+A dev build of the same version as the engine's, but another build, counts
+as older. With `[remote] command` set none of this happens: the app uses
+whatever engine the command reaches.
+
+The app's first message, and the engine's answer, are frozen as of
+protocol 5: later versions only add fields that may be left out. So an
+engine of any later protocol still says who it is when it refuses the app,
+and still hears a request to stop. An engine from before protocol 5 says
+nothing of itself and can't be asked to stop; the strip says to stop its
+`perchd serve` on the host and reconnect.
+
 `perch --connect [host]` does what the app does to connect, with no
-window: it installs `perchd` if the host needs it, prints the engine's
-version, protocol, host name, home and data folder, how many other clients
-it has and how many runs, and exits 0. It reads `[remote]` from the Mac's
+window: it installs `perchd` if the host needs it, replaces an older
+engine with nothing running, prints the engine's version, protocol, build,
+host name, home and data folder, how many other clients it has and how
+many runs, and exits 0. An older engine left running for its runs, or a
+newer one, is said after that. It reads `[remote]` from the Mac's
 config.toml, and `[remote] host` when no host is given. On failure it says
 why and exits 1.
 
@@ -1692,8 +1750,10 @@ look for it in the list before trying again. Neither is done again by
 itself, since Start work done twice makes two branches.
 
 When the app and the engine speak different versions of the wire, the
-engine refuses the app, the strip says which one to update, and Perch stops
-trying until you press Reconnect.
+engine refuses the app and Perch stops trying until you press Reconnect.
+With the app installing `perchd`, the strip offers to restart an older
+engine (see [When the app is updated](#when-the-app-is-updated)); with
+`[remote] command`, it says which one to update.
 
 Settings shows the host's config.toml, with the Mac's `[ui]`, `[display]`,
 `[keybindings]` and `[remote]` in place of the host's; the Config file
@@ -1710,9 +1770,9 @@ the `[[repo]]` to the host's config.toml instead.
 
 - The app uses one engine at a time, this Mac's or one host's; changing it
   takes a restart, and items never move between engines.
-- Nothing updates `perchd` on the host. When the app is updated and the wire
-  changes, the strip says to update the engine; install the new release's
-  `perchd` and restart it.
+- With `[remote] command` set, nothing updates `perchd` on the host. When
+  the app is updated and the wire changes, the strip says to update the
+  engine; install the new release's `perchd` and restart it.
 - Add repository… doesn't reach the host: edit its config.toml by hand.
 - Windows hosts are not supported.
 

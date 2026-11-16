@@ -1902,24 +1902,51 @@ pub enum EngineLink {
     /// The host had no `perchd` of the build the app wants, and it is being
     /// installed: downloaded, or read from `[remote] perchd`, and uploaded.
     Installing { host: String, build: String },
+    /// The host's engine is an older build, and is being stopped so that
+    /// `build` can start: by itself when it had nothing running, or by the
+    /// reader's Restart.
+    Restarting { host: String, build: String },
     /// Let in. `again` when something a window asked for may have been
     /// lost: the client had been connected before and lost it, or its
     /// first try failed. The engine has been asked for everything again,
-    /// and each window reopens what it had open, or was opening.
+    /// and each window reopens what it had open, or was opening. `other`
+    /// when the engine is not the build the app installs, and was left
+    /// running.
     Up {
         host: String,
         welcome: crate::wire::Welcome,
         again: bool,
+        #[serde(default)]
+        other: Option<OtherEngine>,
     },
     /// Not connected, and why. The next try is in `retry_in`; `None` when
     /// no more are made until the reader asks, as after the engine refused
-    /// the app's protocol. `ever` when it had been connected.
+    /// the app's protocol. `ever` when it had been connected. `other` when
+    /// the engine that refused is another build than the app's.
     Down {
         host: String,
         why: String,
         retry_in: Option<Duration>,
         ever: bool,
+        #[serde(default)]
+        other: Option<OtherEngine>,
     },
+}
+
+/// A host's engine of another build than the one the app installs there,
+/// which the app left running: one with runs or other clients that a
+/// restart would stop, or one newer than the app, which it never stops.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OtherEngine {
+    /// The engine's build, and the one the app wants.
+    pub engine: String,
+    pub wanted: String,
+    /// Agent runs a restart would stop, and other clients it would
+    /// disconnect.
+    pub runs: usize,
+    pub clients: usize,
+    /// Newer than the app: only updating Perch on the Mac helps.
+    pub newer: bool,
 }
 
 impl EngineLink {
@@ -1927,6 +1954,7 @@ impl EngineLink {
         match self {
             EngineLink::Connecting { host }
             | EngineLink::Installing { host, .. }
+            | EngineLink::Restarting { host, .. }
             | EngineLink::Up { host, .. }
             | EngineLink::Down { host, .. } => host,
         }
@@ -2937,6 +2965,15 @@ impl Backend {
     pub fn reconnect(&self) {
         if let Some(link) = &self.link {
             link.retry_now();
+        }
+    }
+
+    /// Stop the host's engine, an older build left running for its runs or
+    /// its other clients, and start the one the app installs: the strip's
+    /// Restart. Nothing unless the strip is offering it.
+    pub fn restart_engine(&self) {
+        if let Some(link) = &self.link {
+            link.restart_now();
         }
     }
 

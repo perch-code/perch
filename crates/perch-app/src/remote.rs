@@ -405,6 +405,7 @@ mod tests {
             data_root: "/home/chris/.perch".into(),
             clients: 0,
             runs: 0,
+            build: "0".into(),
         });
         assert_eq!(host().as_deref(), Some("halo"));
         assert_eq!(tilde(Path::new("/home/chris/Code/perch")), "~/Code/perch");

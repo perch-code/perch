@@ -67,7 +67,12 @@ impl Home {
     }
 
     fn perchd(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(PERCHD);
+        self.perchd_as(Path::new(PERCHD), args)
+    }
+
+    /// `exe`, a perchd under another name, run as `perchd` is.
+    fn perchd_as(&self, exe: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(exe);
         command
             .args(args)
             .env_clear()
@@ -196,8 +201,14 @@ struct Client {
 }
 
 async fn client(home: &Home) -> Client {
-    let mut bridge = home
-        .perchd_async(&["bridge"])
+    let (client, welcome) = client_as(home, Path::new(PERCHD), &["bridge"]).await;
+    assert_eq!(welcome.engine_version, wire::VERSION);
+    client
+}
+
+/// A client through a bridge run as `exe` with `args`, and its welcome.
+async fn client_as(home: &Home, exe: &Path, args: &[&str]) -> (Client, wire::Welcome) {
+    let mut bridge = tokio::process::Command::from(home.perchd_as(exe, args))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -210,12 +221,14 @@ async fn client(home: &Home) -> Client {
         .expect("no welcome")
         .expect("the handshake failed");
     assert_eq!(welcome.protocol, wire::PROTOCOL);
-    assert_eq!(welcome.engine_version, wire::VERSION);
-    Client {
-        bridge,
-        backend,
-        events,
-    }
+    (
+        Client {
+            bridge,
+            backend,
+            events,
+        },
+        welcome,
+    )
 }
 
 /// Wait for the first event `pick` takes, skipping the rest.
@@ -487,4 +500,150 @@ fn version_and_usage() {
     let out = home.perchd(&["nonsense"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage: perchd"));
+}
+
+/// The engine's log so far, every day of it.
+fn engine_log(home: &Home) -> String {
+    std::fs::read_dir(home.perch().join("logs"))
+        .map(|logs| {
+            logs.flatten()
+                .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Let a client go as an ssh session ending would.
+async fn leave(client: Client) {
+    let Client {
+        mut bridge,
+        backend,
+        events,
+    } = client;
+    let _ = bridge.kill().await;
+    drop((backend, events));
+}
+
+/// A bridge of another build stops an older engine over the wire, never by
+/// its pid, and starts its own: at once with `--replace`, and with
+/// `--replace-if-idle` only when nobody is using it. One of its own build
+/// is joined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bridge_of_another_build_replaces_the_engine_as_asked() {
+    let home = Home::new();
+    let a = client(&home).await;
+    a.backend.resync();
+    wait(&a.events, resynced).await;
+    let first = home.engine_pid().expect("an engine holds the home");
+
+    // Another build: the same binary, by the name the app installs it by.
+    let other = home.dir.path().join("other/perchd-9.9.9-test");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    if std::fs::hard_link(PERCHD, &other).is_err() {
+        std::fs::copy(PERCHD, &other).unwrap();
+    }
+
+    // In use, it is left running, and the bridge says so.
+    let busy = tokio::time::timeout(
+        PATIENCE,
+        tokio::process::Command::from(home.perchd_as(&other, &["bridge", "--replace-if-idle"]))
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .expect("the bridge kept running")
+    .unwrap();
+    let said = String::from_utf8_lossy(&busy.stderr);
+    assert_eq!(busy.status.code(), Some(98), "{said}");
+    assert_eq!(
+        said.lines().last(),
+        Some(format!("perch-busy: {} 0 1", wire::VERSION).as_str())
+    );
+    assert!(busy.stdout.is_empty());
+    assert_eq!(home.engine_pid(), Some(first));
+
+    // Idle, it is stopped, as SIGTERM stops it, and the bridge's own build
+    // takes its place.
+    leave(a).await;
+    eventually("the engine to see a leave", || {
+        home.status().1.contains("clients: 0")
+    });
+    let (b, welcome) = client_as(&home, &other, &["bridge", "--replace-if-idle"]).await;
+    assert_eq!(welcome.build, "9.9.9-test");
+    assert_eq!(welcome.clients, 0);
+    let second = home.engine_pid().expect("an engine holds the home");
+    assert_ne!(second, first);
+    assert!(
+        engine_log(&home).contains("a stop asked for over the wire"),
+        "{}",
+        engine_log(&home)
+    );
+
+    // Of the bridge's own build, it is joined, busy or not.
+    let (c, welcome) = client_as(&home, &other, &["bridge", "--replace"]).await;
+    assert_eq!(welcome.build, "9.9.9-test");
+    assert_eq!(welcome.clients, 1);
+    assert_eq!(home.engine_pid(), Some(second));
+
+    // `--replace` stops it busy, and its clients' bridges end with it.
+    let (d, welcome) = client_as(&home, Path::new(PERCHD), &["bridge", "--replace"]).await;
+    assert_eq!(welcome.build, wire::VERSION);
+    assert_eq!(welcome.clients, 0);
+    assert_ne!(home.engine_pid(), Some(second));
+    for mut gone in [b.bridge, c.bridge] {
+        let ended = tokio::time::timeout(PATIENCE, gone.wait())
+            .await
+            .expect("a bridge outlived its engine")
+            .unwrap();
+        assert!(ended.success(), "{ended:?}");
+    }
+    leave(d).await;
+}
+
+/// An engine a bridge started that would not start says why, and the
+/// bridge passes it on rather than waiting out its time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bridge_says_why_the_engine_it_started_did_not_start() {
+    let home = Home::new();
+    {
+        // A database a newer Perch has moved on.
+        let cache = perch_github::Cache::open(&home.perch().join("perch.db"), None).unwrap();
+        let newer = perch_github::cache::SCHEMA_VERSION + 1;
+        cache
+            .set_meta("schema_version", &newer.to_string())
+            .unwrap();
+    }
+    let since = Instant::now();
+    let out = tokio::time::timeout(
+        PATIENCE,
+        home.perchd_async(&["bridge"]).stdin(Stdio::null()).output(),
+    )
+    .await
+    .expect("the bridge kept running")
+    .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(said.contains("did not start"), "{said}");
+    assert!(said.contains("newer Perch"), "{said}");
+    assert_eq!(said.trim().lines().count(), 1, "{said}");
+    assert!(
+        since.elapsed() < Duration::from_secs(8),
+        "waited out its time"
+    );
+    let failed = home.perch().join("run/serve-failed");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&failed).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    // Started once the database is one it reads, the reason goes.
+    for name in ["perch.db", "perch.db-wal", "perch.db-shm"] {
+        let _ = std::fs::remove_file(home.perch().join(name));
+    }
+    let a = client(&home).await;
+    a.backend.resync();
+    wait(&a.events, resynced).await;
+    assert!(!failed.exists());
+    leave(a).await;
 }

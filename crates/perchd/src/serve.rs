@@ -1,8 +1,13 @@
 //! `perchd serve`: the engine as a service. It lives until SIGTERM, SIGINT
-//! or SIGHUP, whoever connects and leaves, and stops then as quitting the
-//! app does: runs stopped and recorded Interrupted, children reaped, the
-//! home let go and the socket removed. A second SIGTERM or SIGINT while
-//! it stops ends it at once.
+//! or SIGHUP, or a client asks it to stop over the wire (`perchd bridge
+//! --replace`), whoever connects and leaves, and stops then as quitting
+//! the app does: runs stopped and recorded Interrupted, children reaped,
+//! the home let go and the socket removed. A second SIGTERM or SIGINT
+//! while it stops ends it at once.
+//!
+//! An engine that cannot start says why in `$PERCH_HOME/run/serve-failed`
+//! as well as in its log, for the bridge that started it to pass on; one
+//! that starts removes the file.
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -40,7 +45,13 @@ impl From<String> for Failed {
 pub fn run() -> ExitCode {
     prepare_environment();
     init_logging();
-    tracing::info!(version = perch_engine::wire::VERSION, "perchd starting");
+    // Read while the binary is still there under its own name.
+    let build = perch_engine::wire::build();
+    tracing::info!(
+        version = perch_engine::wire::VERSION,
+        build,
+        "perchd starting"
+    );
     match serve() {
         Ok(()) => {
             tracing::info!("perchd stopped");
@@ -48,13 +59,65 @@ pub fn run() -> ExitCode {
         }
         Err(Failed::Held(why)) => {
             tracing::error!("perchd could not start: {why}");
+            say_failed(&why);
             ExitCode::from(HOME_HELD)
         }
         Err(Failed::Other(why)) => {
             tracing::error!("perchd could not start: {why}");
+            say_failed(&why);
             ExitCode::FAILURE
         }
     }
+}
+
+/// Refuse a database a newer Perch has moved on, `found` being its schema.
+/// The app's engine runs on without its database and says so in a window;
+/// a host's has nobody to tell, and would run with its runs unrecorded, so
+/// it does not start. The bridge that started it passes the reason on.
+fn newer_database(path: &std::path::Path, found: Option<&str>) -> Result<(), String> {
+    let current = perch_github::cache::SCHEMA_VERSION;
+    match found.and_then(|found| found.parse::<u32>().ok()) {
+        Some(found) if found > current => Err(format!(
+            "{} was moved on by a newer Perch (schema {found}), and perchd {} reads up to schema {current}. Update Perch on the Mac, or start the newer perchd",
+            path.display(),
+            perch_engine::wire::VERSION,
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Where an engine that could not start says why.
+pub fn failed_path() -> std::path::PathBuf {
+    socket::path().with_file_name("serve-failed")
+}
+
+/// Leave `why` for the bridge that started this engine, owner-only. The
+/// directory may not be there yet: the home is taken before the socket's
+/// directory is made.
+fn say_failed(why: &str) {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = failed_path();
+    let written = (|| {
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        writeln!(file, "{}", one_line(why))
+    })();
+    if let Err(error) = written {
+        tracing::warn!(%error, path = %path.display(), "could not say why perchd failed");
+    }
+}
+
+/// `why` on one line, as the bridge's stderr has the app show its last.
+pub fn one_line(why: &str) -> String {
+    why.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn serve() -> Result<(), Failed> {
@@ -71,6 +134,10 @@ fn serve() -> Result<(), Failed> {
             Failed::Other(error.to_string())
         }
     })?;
+    if let Some(path) = perch_github::config::db_path() {
+        let found = perch_github::Cache::peek_meta(&path, "schema_version");
+        newer_database(&path, found.as_deref()).map_err(Failed::Other)?;
+    }
     let engine = unstarted.engine().clone();
     let runtime = engine.runtime().clone();
     let socket = socket::path();
@@ -96,6 +163,7 @@ fn serve() -> Result<(), Failed> {
     // perchd keeps no settings of its own beyond the engine's.
     unstarted.start(|_| {});
     tracing::info!(socket = %socket.display(), "listening");
+    let _ = std::fs::remove_file(failed_path());
     runtime.spawn(accept(listener, engine.clone()));
 
     // An engine that stops by itself has failed: its thread panicked. The
@@ -108,11 +176,14 @@ fn serve() -> Result<(), Failed> {
             let _ = stopped.send(());
         }
     });
+    // A client asking it to stop, a newer build's bridge making way for
+    // its own engine, stops it as a signal does.
     let signal = runtime.block_on(async {
         tokio::select! {
             biased;
             _ = stopped_by_itself => None,
             signal = signals.next() => Some(signal.unwrap_or("no signal; the runtime went")),
+            () = engine.stop_asked() => Some("a stop asked for over the wire"),
         }
     });
     let Some(signal) = signal else {
@@ -272,6 +343,26 @@ mod tests {
 
     /// A forwarded agent comes with an ssh session's own variables; a
     /// host's own agent, from a desktop login, comes alone and is kept.
+    #[test]
+    fn a_database_from_a_newer_perch_is_refused() {
+        let path = std::path::Path::new("/home/c/.perch/perch.db");
+        let current = perch_github::cache::SCHEMA_VERSION;
+        assert!(newer_database(path, None).is_ok());
+        assert!(newer_database(path, Some(&current.to_string())).is_ok());
+        assert!(newer_database(path, Some("3")).is_ok());
+        let why = newer_database(path, Some(&(current + 1).to_string())).unwrap_err();
+        assert!(why.contains("newer Perch"), "{why}");
+        assert!(why.contains(&format!("schema {}", current + 1)), "{why}");
+    }
+
+    #[test]
+    fn why_it_failed_is_one_line() {
+        assert_eq!(
+            one_line("the cache was made by a newer Perch:\n  schema 9,\tthis is 8\n"),
+            "the cache was made by a newer Perch: schema 9, this is 8"
+        );
+    }
+
     #[test]
     fn only_an_ssh_session_s_agent_is_dropped() {
         let session = |name: &str| matches!(name, "SSH_AUTH_SOCK" | "SSH_CONNECTION" | "SSH_TTY");

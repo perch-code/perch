@@ -2,6 +2,11 @@
 //! cannot be reached: what happened, why, and a button to try now. It
 //! stays until the connection is back, as a toast would not: what the
 //! window shows meanwhile is what it had, and nothing done in it goes.
+//!
+//! It also stays while the host's engine is another build than the one
+//! the app installs there, left running: an older one busy with runs or
+//! other clients, with a button to restart it, or a newer one, which only
+//! updating the app answers.
 
 use std::rc::Rc;
 
@@ -14,21 +19,42 @@ use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{action_button, sidebar_glyph};
+use perch_engine::wire::remote::other_said;
 
 /// What the strip says, and the line under it, for how the connection
-/// stands; `None` while it is up, or with the engine in process.
+/// stands; `None` while it is up to the build the app installs, or with
+/// the engine in process.
 pub fn said(link: &EngineLink) -> Option<(String, Option<String>)> {
     match link {
-        EngineLink::Up { .. } => None,
+        EngineLink::Up { other: None, .. } => None,
+        EngineLink::Up {
+            host,
+            other: Some(other),
+            ..
+        } => Some((other_said(host, other), None)),
         EngineLink::Connecting { host } => Some((format!("Connecting to {host}…"), None)),
         EngineLink::Installing { host, build } => {
             Some((format!("Installing perchd {build} on {host}…"), None))
         }
+        EngineLink::Restarting { host, build } => Some((
+            format!("Restarting the engine on {host} to update it to perchd {build}…"),
+            None,
+        )),
+        EngineLink::Down {
+            host,
+            why,
+            other: Some(other),
+            ..
+        } => Some((
+            other_said(host, other),
+            Some(why.clone()).filter(|why| !why.is_empty()),
+        )),
         EngineLink::Down {
             host,
             why,
             retry_in,
             ever,
+            other: None,
         } => {
             let headline = match (ever, retry_in) {
                 (_, None) => format!("Perch can't connect to {host}."),
@@ -45,6 +71,16 @@ fn can_retry(link: &EngineLink) -> bool {
     matches!(link, EngineLink::Down { .. })
 }
 
+/// Whether the reader can restart the host's engine: an older build left
+/// running. A newer one is never stopped.
+fn can_restart(link: &EngineLink) -> bool {
+    matches!(
+        link,
+        EngineLink::Up { other: Some(other), .. } | EngineLink::Down { other: Some(other), .. }
+            if !other.newer
+    )
+}
+
 /// The strip, hidden while there is nothing to say.
 pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let said_now = move || state.link.with(|link| link.as_ref().and_then(said));
@@ -52,6 +88,12 @@ pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let why = move || said_now().and_then(|(_, why)| why).unwrap_or_default();
     let has_why = move || said_now().is_some_and(|(_, why)| why.is_some());
     let retry = move || state.link.with(|link| link.as_ref().is_some_and(can_retry));
+    let restart = move || {
+        state
+            .link
+            .with(|link| link.as_ref().is_some_and(can_restart))
+    };
+    let restarter = backend.clone();
     Stack::horizontal((
         sidebar_glyph(SidebarIcon::Warning, theme::notice_fg)
             .style(|s| s.size(16.0, 16.0).flex_shrink(0.0_f32).margin_right(10.0)),
@@ -82,6 +124,14 @@ pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             move || backend.reconnect(),
         )
         .style(move |s| s.margin_left(12.0).apply_if(!retry(), |s| s.hide())),
+        action_button(
+            || "Restart".to_string(),
+            "link-restart",
+            false,
+            || true,
+            move || restarter.restart_engine(),
+        )
+        .style(move |s| s.margin_left(12.0).apply_if(!restart(), |s| s.hide())),
     ))
     .debug_name("link-banner")
     .style(move |s| {
@@ -143,10 +193,12 @@ mod tests {
             why: "ssh: Could not resolve hostname halo".into(),
             retry_in: Some(Duration::from_secs(1)),
             ever: true,
+            other: None,
         }));
         assert!(shown(&mut harness, "link-banner-why"));
         assert!(shown(&mut harness, "link-reconnect"));
-        state.link.set(Some(EngineLink::Up {
+        assert!(!shown(&mut harness, "link-restart"));
+        let up = |other| EngineLink::Up {
             host: "halo".into(),
             welcome: perch_engine::wire::Welcome {
                 protocol: perch_engine::wire::PROTOCOL,
@@ -157,10 +209,29 @@ mod tests {
                 data_root: "/home/chris/.perch".into(),
                 clients: 0,
                 runs: 0,
+                build: "0".into(),
             },
             again: true,
-        }));
+            other,
+        };
+        state.link.set(Some(up(None)));
         assert!(!shown(&mut harness, "link-banner"));
+        // Up to an older engine left running, the strip stays, with a
+        // restart and no reconnect.
+        state.link.set(Some(up(Some(older(2)))));
+        assert!(shown(&mut harness, "link-banner"));
+        assert!(shown(&mut harness, "link-restart"));
+        assert!(!shown(&mut harness, "link-reconnect"));
+    }
+
+    fn older(runs: usize) -> perch_engine::backend::OtherEngine {
+        perch_engine::backend::OtherEngine {
+            engine: "0.8.0".into(),
+            wanted: "0.9.0".into(),
+            runs,
+            clients: 0,
+            newer: false,
+        }
     }
 
     #[test]
@@ -170,6 +241,7 @@ mod tests {
             why: "ssh: connect to host halo port 22: Operation timed out".into(),
             retry_in,
             ever,
+            other: None,
         };
         assert_eq!(
             said(&down(true, Some(Duration::from_secs(2)))),
@@ -201,9 +273,50 @@ mod tests {
             }),
             Some(("Installing perchd 0.9.0 on halo…".to_string(), None))
         );
+        assert_eq!(
+            said(&EngineLink::Restarting {
+                host: "halo".into(),
+                build: "0.9.0".into()
+            }),
+            Some((
+                "Restarting the engine on halo to update it to perchd 0.9.0…".to_string(),
+                None
+            ))
+        );
         assert!(can_retry(&down(true, None)));
         assert!(!can_retry(&EngineLink::Connecting {
             host: "halo".into()
         }));
+
+        // Refused by an older engine with runs: what a restart would stop,
+        // why there is no connection, and both buttons.
+        let refused = EngineLink::Down {
+            host: "halo".into(),
+            why: "It speaks protocol 4, and this app 5, so Perch can't use it until it restarts."
+                .into(),
+            retry_in: None,
+            ever: false,
+            other: Some(older(1)),
+        };
+        let (headline, why) = said(&refused).unwrap();
+        assert_eq!(
+            headline,
+            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (1 agent run would be stopped)."
+        );
+        assert!(why.unwrap().contains("protocol 4"));
+        assert!(can_restart(&refused) && can_retry(&refused));
+        // A newer one is never offered a restart.
+        let newer = EngineLink::Down {
+            host: "halo".into(),
+            why: "Update the app.".into(),
+            retry_in: None,
+            ever: false,
+            other: Some(perch_engine::backend::OtherEngine {
+                newer: true,
+                ..older(0)
+            }),
+        };
+        assert!(said(&newer).unwrap().0.contains("Update Perch on this Mac"));
+        assert!(!can_restart(&newer));
     }
 }

@@ -9,15 +9,25 @@
 //!
 //! A bridge the app installed clears the older builds beside it as it
 //! starts (see `cleanup`).
+//!
+//! `--replace` and `--replace-if-idle` make way for this bridge's own
+//! build: an engine of another build is asked over the wire to stop (it
+//! stops as SIGTERM stops it), and once it has let the home go, this
+//! bridge starts its own. Nothing is signalled or killed by pid. An engine
+//! of this build is joined as it is. With `--replace-if-idle`, an engine
+//! with runs or clients is left alone, and the bridge says
+//! `perch-busy: <version> <runs> <clients>` and exits 98.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitCode, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use perch_engine::lock::EngineLock;
+use perch_engine::wire::provision::{Replace, BUSY_EXIT, BUSY_SAID};
+use perch_engine::wire::{self, Answer};
 
 use crate::socket;
 
@@ -27,20 +37,135 @@ const STARTING: Duration = Duration::from_secs(10);
 /// How often the socket is tried while it starts.
 const POLL: Duration = Duration::from_millis(25);
 
-pub fn run() -> ExitCode {
+/// How long an engine asked to stop gets to let the home go: its runs
+/// are stopped and recorded first.
+const STOPPING: Duration = Duration::from_secs(60);
+
+/// How long an engine gets to answer a stop.
+const ANSWER: Duration = Duration::from_secs(10);
+
+/// How the bridge's arguments say to treat an engine of another build,
+/// or None for ones it does not take.
+pub fn parse(args: &[String]) -> Option<Replace> {
+    [Replace::No, Replace::IfIdle, Replace::Always]
+        .into_iter()
+        .find(|replace| {
+            let flag: Vec<&str> = replace.flag().into_iter().collect();
+            args.iter().map(String::as_str).eq(flag)
+        })
+}
+
+/// How a bridge that could not join ends.
+enum Ended {
+    /// Why, for stderr.
+    Failed(String),
+    /// The engine is busy: what `--replace-if-idle` says instead.
+    Busy(wire::About),
+}
+
+pub fn run(replace: Replace) -> ExitCode {
     crate::cleanup::start();
+    let since = SystemTime::now();
     let socket = socket::path();
     let stream = match UnixStream::connect(&socket) {
-        Ok(stream) => stream,
-        Err(_) => match start_and_connect(&socket) {
-            Ok(stream) => stream,
-            Err(error) => {
-                eprintln!("perchd bridge: {error}");
-                return ExitCode::FAILURE;
-            }
-        },
+        Ok(stream) if replace == Replace::No => Ok(stream),
+        Ok(stream) => make_way(stream, &socket, replace, since),
+        Err(_) => start_and_connect(&socket, since).map_err(Ended::Failed),
     };
-    join(stream)
+    match stream {
+        Ok(stream) => join(stream),
+        Err(Ended::Failed(why)) => {
+            eprintln!("perchd bridge: {}", crate::serve::one_line(&why));
+            ExitCode::FAILURE
+        }
+        Err(Ended::Busy(about)) => {
+            eprintln!("{}", busy_line(&about));
+            ExitCode::from(BUSY_EXIT)
+        }
+    }
+}
+
+/// What a busy engine has the bridge say, the app's cue to offer a
+/// restart rather than make one.
+pub fn busy_line(about: &wire::About) -> String {
+    format!(
+        "{BUSY_SAID} {} {} {}",
+        about.engine_version, about.runs, about.clients
+    )
+}
+
+/// Ask the engine on `stream` to stop unless it is this bridge's build,
+/// wait for it to let the home go, and start this build's: a stream to
+/// the engine to join, either way.
+fn make_way(
+    stream: UnixStream,
+    socket: &Path,
+    replace: Replace,
+    since: SystemTime,
+) -> Result<UnixStream, Ended> {
+    let own = wire::build().to_string();
+    let answer = ask_to_stop(stream, replace == Replace::IfIdle, own.clone())
+        .map_err(|why| Ended::Failed(format!("could not ask the engine to stop: {why}")))?;
+    match answer {
+        Answer::Staying(_) => match UnixStream::connect(socket) {
+            Ok(stream) => Ok(stream),
+            // Gone since it answered: started again, as with none.
+            Err(_) => start_and_connect(socket, since).map_err(Ended::Failed),
+        },
+        Answer::Busy(about) => Err(Ended::Busy(about)),
+        Answer::Stopping(about) => {
+            wait_let_go(socket, STOPPING).map_err(|()| {
+                Ended::Failed(format!(
+                    "perchd {} said it would stop to make way for {own}, and was still running after {} s; its log is in {}",
+                    about.build,
+                    STOPPING.as_secs(),
+                    perch_engine::log_file::dir().display(),
+                ))
+            })?;
+            start_and_connect(socket, since).map_err(Ended::Failed)
+        }
+        Answer::Refused { reason, about } if about.protocol == 0 => Err(Ended::Failed(format!(
+            "the engine running here is from before Perch could replace one, and would not stop ({reason}); stop its perchd serve on this host and connect again"
+        ))),
+        Answer::Refused { reason, .. } => Err(Ended::Failed(format!(
+            "the engine running here would not stop: {reason}"
+        ))),
+        Answer::Welcome(_) => Err(Ended::Failed(
+            "the engine let the bridge in when asked to stop".to_string(),
+        )),
+    }
+}
+
+/// The engine's answer to a stop, sent on `stream`.
+fn ask_to_stop(stream: UnixStream, if_idle: bool, own: String) -> Result<Answer, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async move {
+        stream.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let stream = tokio::net::UnixStream::from_std(stream).map_err(|e| e.to_string())?;
+        tokio::time::timeout(ANSWER, wire::ask_to_stop(stream, if_idle, Some(own)))
+            .await
+            .map_err(|_| format!("it said nothing within {} s", ANSWER.as_secs()))?
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Wait up to `within` for an engine stopping to let the home go: its
+/// socket no longer answering, and its lock free.
+fn wait_let_go(socket: &Path, within: Duration) -> Result<(), ()> {
+    let home = perch_github::config::perch_home();
+    let deadline = Instant::now() + within;
+    loop {
+        if UnixStream::connect(socket).is_err() && EngineLock::holder(&home).is_none() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Copy stdin to the engine and the engine to stdout, until the engine
@@ -80,11 +205,27 @@ fn join(stream: UnixStream) -> ExitCode {
     }
 }
 
+/// What an engine started since `since` left to say why it could not
+/// start, on one line. A second is allowed for a file system that keeps
+/// times to the second.
+fn said_failed(since: SystemTime) -> Option<String> {
+    let path = crate::serve::failed_path();
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    let since = since.checked_sub(Duration::from_secs(1)).unwrap_or(since);
+    if modified < since {
+        return None;
+    }
+    let said = crate::serve::one_line(&std::fs::read_to_string(&path).ok()?);
+    (!said.is_empty()).then_some(said)
+}
+
 /// Start an engine and connect to it once it answers. One that exits
-/// without answering was turned away from the home, most likely by an
-/// engine still stopping, or racing another bridge's: it is tried again
-/// until the time is up.
-fn start_and_connect(socket: &Path) -> Result<UnixStream, String> {
+/// without answering, turned away from the home, most likely by an engine
+/// still stopping or racing another bridge's, is tried again until the
+/// time is up. One that failed for another reason, which it left in
+/// `serve-failed`, a cache from a newer Perch say, is not: the bridge
+/// says that reason.
+fn start_and_connect(socket: &Path, since: SystemTime) -> Result<UnixStream, String> {
     let deadline = Instant::now() + STARTING;
     let mut child: Option<Child> = None;
     let mut last_start = None;
@@ -94,7 +235,19 @@ fn start_and_connect(socket: &Path) -> Result<UnixStream, String> {
         }
         let running = match child.as_mut().map(Child::try_wait) {
             Some(Ok(None)) => true,
-            Some(Ok(Some(_)) | Err(_)) | None => false,
+            Some(Ok(Some(status))) => {
+                let held = status.code() == Some(i32::from(crate::serve::HOME_HELD));
+                if !held && !status.success() {
+                    if let Some(why) = said_failed(since) {
+                        return Err(format!(
+                            "the engine did not start: {why}. Its log is in {}",
+                            perch_engine::log_file::dir().display()
+                        ));
+                    }
+                }
+                false
+            }
+            Some(Err(_)) | None => false,
         };
         let may_start =
             last_start.is_none_or(|at: Instant| at.elapsed() >= Duration::from_millis(500));
@@ -106,11 +259,14 @@ fn start_and_connect(socket: &Path) -> Result<UnixStream, String> {
             let home = perch_github::config::perch_home();
             let holder = match EngineLock::holder(&home) {
                 Some(holder) => format!(
-                    "; {} holds {} without listening, as the Perch app does when it runs on this machine",
+                    "; {} holds {} without listening: an engine still stopping, or the Perch app running on this machine, which Perch can't replace (quit it there)",
                     holder.map_or("another process".to_string(), |pid| format!("process {pid}")),
                     perch_engine::lock::path(&home).display()
                 ),
-                None => String::new(),
+                None => match said_failed(since) {
+                    Some(why) => format!("; the last one to try said: {why}"),
+                    None => String::new(),
+                },
             };
             return Err(format!(
                 "no engine answered on {} within {} s{holder}; the engine's log is in {}",
@@ -150,4 +306,30 @@ fn start() -> Result<Child, String> {
     command
         .spawn()
         .map_err(|e| format!("could not start {} serve: {e}", exe.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_flags_the_app_passes_are_the_ones_taken() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse(&args(&[])), Some(Replace::No));
+        assert_eq!(parse(&args(&["--replace"])), Some(Replace::Always));
+        assert_eq!(parse(&args(&["--replace-if-idle"])), Some(Replace::IfIdle));
+        assert_eq!(parse(&args(&["--replace", "--replace"])), None);
+        assert_eq!(parse(&args(&["--force"])), None);
+        let about = wire::About {
+            engine_version: "0.9.0".into(),
+            runs: 2,
+            clients: 1,
+            ..wire::About::default()
+        };
+        assert_eq!(busy_line(&about), "perch-busy: 0.9.0 2 1");
+        assert_eq!(
+            perch_engine::wire::provision::busy_line(&busy_line(&about)).map(|b| b.runs),
+            Some(2)
+        );
+    }
 }

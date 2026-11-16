@@ -40,8 +40,10 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// peer would read wrong, or not at all, moves it on. 2: `Welcome` counts
 /// the engine's other clients and its runs. 3: scope picks carry the
 /// handle's ids, a resync's runs and kept settings replace a window's.
-/// 4: keepalive lines, and a resync's waiting approvals.
-pub const PROTOCOL: u32 = 4;
+/// 4: keepalive lines, and a resync's waiting approvals. 5: the hello and
+/// its answer are frozen (see `Hello`), a hello can ask a host's engine to
+/// stop, and the answers name the engine's build.
+pub const PROTOCOL: u32 = 5;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -90,10 +92,66 @@ impl Default for Limits {
 }
 
 /// The client's first line.
+///
+/// `Hello` and `Answer` are frozen from protocol 5: a later protocol only
+/// adds fields that may be left out, and never renames or removes one, so
+/// an engine of any protocol can read what a client of any other asks of
+/// it and say who it is. That is how an app updated past its host's engine
+/// tells the engine is older, and asks it to stop.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     pub protocol: u32,
     pub app_version: String,
+    /// What the client wants. Left out by a client before protocol 5,
+    /// which only ever connected.
+    #[serde(default)]
+    pub intent: Intent,
+}
+
+impl Hello {
+    /// This client's hello, asking to connect.
+    pub fn connect() -> Hello {
+        Hello {
+            protocol: PROTOCOL,
+            app_version: VERSION.to_string(),
+            intent: Intent::Connect,
+        }
+    }
+}
+
+/// What a client says hello for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Intent {
+    /// To be let in.
+    #[default]
+    Connect,
+    /// For the engine to stop as SIGTERM stops it, whatever protocol the
+    /// client speaks: `perchd bridge --replace`, making way for its own
+    /// build. Only an engine under `perchd serve` stops, and with
+    /// `if_idle`, only one with no runs and no clients. One of
+    /// `unless_build` stays, as it is what the client would start.
+    Stop {
+        if_idle: bool,
+        #[serde(default)]
+        unless_build: Option<String>,
+    },
+}
+
+/// Who an engine is and what it has, in every answer to a hello but a
+/// welcome, which says it its own way. Empty from an engine before
+/// protocol 5.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct About {
+    pub engine_version: String,
+    pub protocol: u32,
+    /// The `<build>` of the `perchd-<build>` it runs as, or its version
+    /// when it was not installed by the app.
+    pub build: String,
+    /// Agent runs queued or under way.
+    pub runs: usize,
+    /// Clients connected, not counting the one asking.
+    pub clients: usize,
 }
 
 /// The engine letting a client in, and where it is.
@@ -114,13 +172,41 @@ pub struct Welcome {
     pub clients: usize,
     /// How many agent runs were queued or under way then.
     pub runs: usize,
+    /// The engine's build, as `About::build`. Empty from one before
+    /// protocol 5.
+    #[serde(default)]
+    pub build: String,
 }
 
-/// The engine's answer to a `Hello`.
+impl Welcome {
+    /// What the welcome says of the engine, as a refusal says it.
+    pub fn about(&self) -> About {
+        About {
+            engine_version: self.engine_version.clone(),
+            protocol: self.protocol,
+            build: self.build.clone(),
+            runs: self.runs,
+            clients: self.clients,
+        }
+    }
+}
+
+/// The engine's answer to a `Hello`. Frozen, as `Hello` is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Answer {
     Welcome(Welcome),
-    Refused { reason: String },
+    Refused {
+        reason: String,
+        #[serde(flatten)]
+        about: About,
+    },
+    /// Asked to stop if idle, and not: it has runs or other clients.
+    Busy(About),
+    /// Stopping, as asked: its socket goes first and its home once its
+    /// runs are stopped and recorded.
+    Stopping(About),
+    /// Asked to stop unless of a build, and it is that build.
+    Staying(About),
 }
 
 /// A command line, from the client.
@@ -145,8 +231,9 @@ pub enum WireError {
     Malformed(String),
     /// The other side hung up before the handshake was done.
     Closed,
-    /// The engine would not let the client in, and why.
-    Refused(String),
+    /// The engine would not let the client in, why, and what it said of
+    /// itself.
+    Refused(String, About),
     /// The client fell more than `MAX_BACKLOG` behind.
     Behind,
     /// Nothing came from the client, not even a keepalive, in `IDLE`.
@@ -159,7 +246,7 @@ impl std::fmt::Display for WireError {
             WireError::Io(error) => write!(f, "{error}"),
             WireError::Malformed(why) => write!(f, "a malformed line: {why}"),
             WireError::Closed => f.write_str("the connection closed during the handshake"),
-            WireError::Refused(reason) => f.write_str(reason),
+            WireError::Refused(reason, _) => f.write_str(reason),
             WireError::Behind => f.write_str("the client fell too far behind"),
             WireError::Silent => f.write_str("the client said nothing for too long"),
         }
@@ -304,7 +391,45 @@ fn welcome(engine: &Engine, connection: u64) -> Welcome {
         data_root: perch_github::config::data_dir().unwrap_or_default(),
         clients: engine.connections().saturating_sub(1),
         runs: engine.active_runs(),
+        build: build().to_string(),
     }
+}
+
+/// What this engine says of itself to a client it does not let in. The
+/// one asking is not connected, so every connection counts.
+fn about(engine: &Engine) -> About {
+    About {
+        engine_version: VERSION.to_string(),
+        protocol: PROTOCOL,
+        build: build().to_string(),
+        runs: engine.active_runs(),
+        clients: engine.connections(),
+    }
+}
+
+/// This process's build: the `<build>` of the `perchd-<build>` it runs as,
+/// which the app installed, else its version. Read once, as the engine
+/// first says it: a newer build's bridge may remove this one's binary
+/// while it runs, and Linux then names it `perchd-<build> (deleted)`.
+pub fn build() -> &'static str {
+    static BUILD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BUILD.get_or_init(|| {
+        let exe = std::env::current_exe().ok();
+        build_named(
+            exe.as_deref()
+                .and_then(std::path::Path::file_name)
+                .and_then(std::ffi::OsStr::to_str),
+        )
+    })
+}
+
+/// The build an executable of `name` is.
+fn build_named(name: Option<&str>) -> String {
+    name.map(|name| name.strip_suffix(" (deleted)").unwrap_or(name))
+        .and_then(|name| name.strip_prefix("perchd-"))
+        .filter(|build| provision::plain_word(build))
+        .unwrap_or(VERSION)
+        .to_string()
 }
 
 fn host_name() -> String {
@@ -330,21 +455,80 @@ fn refusal(protocol: u64, app_version: &str) -> String {
     )
 }
 
-/// The client's hello, or why it is refused. Only the protocol is read
-/// before it is checked: a hello from another protocol may be another
-/// shape, and its client is still owed the refusal that names both.
-fn check_hello(hello: serde_json::Value) -> Result<Hello, WireError> {
+/// What a client's hello asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum Asked {
+    /// To connect, speaking this engine's protocol.
+    Connect(Hello),
+    /// To stop, whatever its protocol.
+    Stop {
+        if_idle: bool,
+        unless_build: Option<String>,
+    },
+}
+
+/// The client's hello, or why it is refused (with no `About`, which the
+/// caller fills in). Only the protocol and the intent are read before the
+/// protocol is checked: a hello from another protocol may be another
+/// shape, and its client is still owed the refusal that names both. A
+/// stop is read whatever the protocol, as it is what an app of another
+/// one sends to make way for its own engine.
+fn check_hello(hello: serde_json::Value) -> Result<Asked, WireError> {
     let Some(protocol) = hello.get("protocol").and_then(serde_json::Value::as_u64) else {
         return Err(WireError::Malformed("a hello with no protocol".into()));
     };
+    let intent = hello
+        .get("intent")
+        .and_then(|intent| serde_json::from_value::<Intent>(intent.clone()).ok());
+    if let Some(Intent::Stop {
+        if_idle,
+        unless_build,
+    }) = intent
+    {
+        return Ok(Asked::Stop {
+            if_idle,
+            unless_build,
+        });
+    }
     if protocol != u64::from(PROTOCOL) {
         let app_version = hello
             .get("app_version")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("(of no version said)");
-        return Err(WireError::Refused(refusal(protocol, app_version)));
+        return Err(WireError::Refused(
+            refusal(protocol, app_version),
+            About::default(),
+        ));
     }
-    serde_json::from_value(hello).map_err(|error| WireError::Malformed(error.to_string()))
+    serde_json::from_value(hello)
+        .map(Asked::Connect)
+        .map_err(|error| WireError::Malformed(error.to_string()))
+}
+
+/// The answer to a client asking the engine to stop: one of the build it
+/// would start stays; only an engine that runs as a service stops for the
+/// wire, the app's own never; one with runs or clients is busy when the
+/// client asked only if idle.
+fn answer_stop(
+    about: About,
+    lifetime: Lifetime,
+    if_idle: bool,
+    unless_build: Option<&str>,
+) -> Answer {
+    if unless_build == Some(about.build.as_str()) {
+        return Answer::Staying(about);
+    }
+    if lifetime != Lifetime::Service {
+        return Answer::Refused {
+            reason: "This engine is the Perch app's own, and stops only when the app quits."
+                .to_string(),
+            about,
+        };
+    }
+    if if_idle && (about.runs > 0 || about.clients > 0) {
+        return Answer::Busy(about);
+    }
+    Answer::Stopping(about)
 }
 
 /// Serve one client on `stream` until it hangs up, its stream fails, or
@@ -383,18 +567,38 @@ where
     .unwrap_or(Err(WireError::Silent))
     .and_then(check_hello);
     let hello = match hello {
-        Ok(hello) => hello,
-        Err(WireError::Refused(reason)) => {
+        Ok(Asked::Connect(hello)) => hello,
+        Ok(Asked::Stop {
+            if_idle,
+            unless_build,
+        }) => {
+            let answer = answer_stop(
+                about(&engine),
+                engine.lifetime(),
+                if_idle,
+                unless_build.as_deref(),
+            );
+            tracing::info!(?answer, "a client asked the engine to stop");
+            write_line(&mut write, &answer).await?;
+            let _ = write.shutdown().await;
+            if matches!(answer, Answer::Stopping(_)) {
+                engine.ask_to_stop();
+            }
+            return Ok(());
+        }
+        Err(WireError::Refused(reason, _)) => {
             tracing::warn!(%reason, "refused a client");
+            let about = about(&engine);
             write_line(
                 &mut write,
                 &Answer::Refused {
                     reason: reason.clone(),
+                    about: about.clone(),
                 },
             )
             .await?;
             let _ = write.shutdown().await;
-            return Err(WireError::Refused(reason));
+            return Err(WireError::Refused(reason, about));
         }
         Err(error) => {
             tracing::error!(%error, "closing a connection before its hello");
@@ -570,14 +774,7 @@ where
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
     let mut line = Vec::new();
-    write_line(
-        &mut write,
-        &Hello {
-            protocol: PROTOCOL,
-            app_version: VERSION.to_string(),
-        },
-    )
-    .await?;
+    write_line(&mut write, &Hello::connect()).await?;
     // A login shell on the far side of ssh may say something of its own
     // before the bridge starts, a profile's greeting say: it is passed
     // over, up to a point. What it said with no newline after, a terminal
@@ -612,8 +809,36 @@ where
                 keepalive: KEEPALIVE,
             },
         )),
-        Answer::Refused { reason } => Err(WireError::Refused(reason)),
+        Answer::Refused { reason, about } => Err(WireError::Refused(reason, about)),
+        // Not what a hello asking to connect is answered with.
+        other => Err(WireError::Malformed(format!(
+            "{other:?} in answer to a hello asking to connect"
+        ))),
     }
+}
+
+/// Ask the engine on `stream` to stop, unless it is of `unless_build`,
+/// and give its answer: what `perchd bridge --replace` sends.
+pub async fn ask_to_stop<S>(
+    stream: S,
+    if_idle: bool,
+    unless_build: Option<String>,
+) -> Result<Answer, WireError>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (read, mut write) = tokio::io::split(stream);
+    let mut read = BufReader::new(read);
+    let mut line = Vec::new();
+    let hello = Hello {
+        intent: Intent::Stop {
+            if_idle,
+            unless_build,
+        },
+        ..Hello::connect()
+    };
+    write_line(&mut write, &hello).await?;
+    first_message(&mut read, &mut line).await
 }
 
 /// How many lines before the engine's answer a client passes over.
@@ -795,7 +1020,7 @@ mod tests {
     #[test]
     fn a_hello_is_checked_by_its_protocol_before_its_shape() {
         let refused = |hello: serde_json::Value| match check_hello(hello) {
-            Err(WireError::Refused(reason)) => reason,
+            Err(WireError::Refused(reason, _)) => reason,
             other => panic!("{other:?}"),
         };
         let reason = refused(serde_json::json!({
@@ -811,12 +1036,188 @@ mod tests {
             check_hello(serde_json::json!({ "app_version": "1" })),
             Err(WireError::Malformed(_))
         ));
-        let hello = check_hello(serde_json::json!({
+        let Asked::Connect(hello) = check_hello(serde_json::json!({
             "protocol": PROTOCOL,
             "app_version": "1.2.3",
         }))
-        .unwrap();
+        .unwrap() else {
+            panic!("not a connect");
+        };
         assert_eq!(hello.app_version, "1.2.3");
+        assert_eq!(hello.intent, Intent::Connect);
+    }
+
+    /// A stop is heard whatever protocol asks it, past or future: it is
+    /// how an updated app makes way for its own engine.
+    #[test]
+    fn a_stop_is_read_before_the_protocol_is_checked() {
+        for protocol in [PROTOCOL, PROTOCOL + 7] {
+            let asked = check_hello(serde_json::json!({
+                "protocol": protocol,
+                "app_version": "9.9.9",
+                "intent": { "Stop": { "if_idle": true, "unless_build": "9.9.9", "said": "later" } },
+                "added_later": [1, 2],
+            }))
+            .unwrap();
+            assert_eq!(
+                asked,
+                Asked::Stop {
+                    if_idle: true,
+                    unless_build: Some("9.9.9".into())
+                }
+            );
+        }
+        // An intent of a later protocol that this one does not know is
+        // refused as that protocol is.
+        assert!(matches!(
+            check_hello(serde_json::json!({
+                "protocol": PROTOCOL + 1,
+                "app_version": "9.9.9",
+                "intent": "Wave",
+            })),
+            Err(WireError::Refused(..))
+        ));
+    }
+
+    #[test]
+    fn the_handshake_s_old_shapes_still_read() {
+        // A hello from before protocol 5 connects.
+        let hello: Hello = serde_json::from_str(r#"{"protocol":4,"app_version":"0.8.0"}"#).unwrap();
+        assert_eq!(hello.intent, Intent::Connect);
+        let stop: Intent = serde_json::from_str(r#"{"Stop":{"if_idle":false}}"#).unwrap();
+        assert_eq!(
+            stop,
+            Intent::Stop {
+                if_idle: false,
+                unless_build: None
+            }
+        );
+        // A refusal from an engine before protocol 5 says only why.
+        let refused: Answer = serde_json::from_str(r#"{"Refused":{"reason":"no"}}"#).unwrap();
+        assert_eq!(
+            refused,
+            Answer::Refused {
+                reason: "no".into(),
+                about: About::default()
+            }
+        );
+        // A welcome with no build, and one with fields from later.
+        let welcome: Answer = serde_json::from_str(
+            r#"{"Welcome":{"protocol":4,"engine_version":"0.8.0","connection":3,"host":"halo","home":"/home/c","data_root":"/home/c/.perch","clients":1,"runs":2,"later":true}}"#,
+        )
+        .unwrap();
+        let Answer::Welcome(welcome) = welcome else {
+            panic!("{welcome:?}");
+        };
+        assert_eq!(welcome.build, "");
+        assert_eq!((welcome.clients, welcome.runs), (1, 2));
+    }
+
+    #[test]
+    fn the_handshake_s_new_shapes_go_and_come_back() {
+        let about = About {
+            engine_version: "0.9.0".into(),
+            protocol: PROTOCOL,
+            build: "0.9.0-0123456789ab".into(),
+            runs: 2,
+            clients: 1,
+        };
+        let answers = [
+            Answer::Refused {
+                reason: "no".into(),
+                about: about.clone(),
+            },
+            Answer::Busy(about.clone()),
+            Answer::Stopping(about.clone()),
+            Answer::Staying(about.clone()),
+            Answer::Welcome(Welcome {
+                protocol: PROTOCOL,
+                engine_version: "0.9.0".into(),
+                connection: 1,
+                host: "halo".into(),
+                home: "/home/c".into(),
+                data_root: "/home/c/.perch".into(),
+                clients: 0,
+                runs: 0,
+                build: "0.9.0".into(),
+            }),
+        ];
+        for answer in answers {
+            let line = serde_json::to_string(&answer).unwrap();
+            assert_eq!(serde_json::from_str::<Answer>(&line).unwrap(), answer);
+        }
+        // The refusal's fields sit beside its reason, as an older client
+        // reads it: the reason, and nothing it does not know.
+        let line = serde_json::to_value(Answer::Refused {
+            reason: "no".into(),
+            about,
+        })
+        .unwrap();
+        assert_eq!(line["Refused"]["reason"], "no");
+        assert_eq!(line["Refused"]["build"], "0.9.0-0123456789ab");
+        let hello = Hello {
+            intent: Intent::Stop {
+                if_idle: true,
+                unless_build: Some("0.9.0".into()),
+            },
+            ..Hello::connect()
+        };
+        let line = serde_json::to_string(&hello).unwrap();
+        assert_eq!(serde_json::from_str::<Hello>(&line).unwrap(), hello);
+    }
+
+    #[test]
+    fn an_engine_stops_for_the_wire_only_as_a_service_and_idle_when_asked() {
+        let about = |runs, clients| About {
+            engine_version: VERSION.into(),
+            protocol: PROTOCOL,
+            build: "0.9.0".into(),
+            runs,
+            clients,
+        };
+        let stop = |runs, clients, lifetime, if_idle, unless: Option<&str>| {
+            answer_stop(about(runs, clients), lifetime, if_idle, unless)
+        };
+        assert!(matches!(
+            stop(0, 0, Lifetime::Service, true, Some("0.9.1")),
+            Answer::Stopping(_)
+        ));
+        assert!(matches!(
+            stop(1, 0, Lifetime::Service, true, None),
+            Answer::Busy(About { runs: 1, .. })
+        ));
+        assert!(matches!(
+            stop(0, 2, Lifetime::Service, true, None),
+            Answer::Busy(About { clients: 2, .. })
+        ));
+        assert!(matches!(
+            stop(3, 2, Lifetime::Service, false, None),
+            Answer::Stopping(_)
+        ));
+        // The build the client would start stays, busy or not.
+        assert!(matches!(
+            stop(3, 2, Lifetime::Service, false, Some("0.9.0")),
+            Answer::Staying(_)
+        ));
+        // The app's own engine never stops for the wire.
+        assert!(matches!(
+            stop(0, 0, Lifetime::WhileConnected, false, None),
+            Answer::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn a_build_is_read_from_the_name_the_app_installed_it_by() {
+        assert_eq!(build_named(Some("perchd-0.9.0")), "0.9.0");
+        assert_eq!(
+            build_named(Some("perchd-0.9.0-0123456789ab (deleted)")),
+            "0.9.0-0123456789ab"
+        );
+        assert_eq!(build_named(Some("perchd")), VERSION);
+        assert_eq!(build_named(Some("perch")), VERSION);
+        assert_eq!(build_named(Some("perchd-")), VERSION);
+        assert_eq!(build_named(Some("perchd-0.9;x")), VERSION);
+        assert_eq!(build_named(None), VERSION);
     }
 
     /// What a login shell says before the bridge starts is passed over,
@@ -825,6 +1226,7 @@ mod tests {
     async fn the_answer_is_found_after_what_a_login_shell_said() {
         let refused = encode(&Answer::Refused {
             reason: "no".into(),
+            about: About::default(),
         })
         .unwrap();
         let mut far_says = b"Welcome to halo\n\x1b]0;chris@halo\x07".to_vec();
@@ -832,7 +1234,7 @@ mod tests {
         let (near, mut far) = tokio::io::duplex(1 << 16);
         far.write_all(&far_says).await.unwrap();
         match handshake(near).await {
-            Err(WireError::Refused(reason)) => assert_eq!(reason, "no"),
+            Err(WireError::Refused(reason, _)) => assert_eq!(reason, "no"),
             Err(other) => panic!("{other:?}"),
             Ok(_) => panic!("welcomed"),
         }

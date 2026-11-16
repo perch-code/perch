@@ -324,6 +324,7 @@ fn linked(app: &App, link: &crate::backend::EngineLink) {
         host,
         welcome,
         again,
+        ..
     } = link
     else {
         return;
@@ -1091,6 +1092,7 @@ mod tests {
                 why: "gone".into(),
                 retry_in: None,
                 ever: true,
+                other: None,
             },
         ));
         assert!(matches!(

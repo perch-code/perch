@@ -578,14 +578,19 @@ async fn a_client_on_another_protocol_is_told_both_versions() {
     let hello = Hello {
         protocol: PROTOCOL + 1,
         app_version: "99.0.0".into(),
+        intent: wire::Intent::Connect,
     };
     let mut first = serde_json::to_vec(&hello).unwrap();
     first.push(b'\n');
     write.write_all(&first).await.unwrap();
     let answer: Answer = serde_json::from_str(&line(&mut read).await.unwrap()).unwrap();
-    let Answer::Refused { reason } = answer else {
+    let Answer::Refused { reason, about } = answer else {
         panic!("let in: {answer:?}");
     };
+    // The refusal says who the engine is, for an app that would replace it.
+    assert_eq!(about.engine_version, VERSION);
+    assert_eq!(about.protocol, PROTOCOL);
+    assert_eq!(about.build, wire::build());
     for named in [
         "99.0.0".to_string(),
         VERSION.to_string(),
@@ -598,7 +603,7 @@ async fn a_client_on_another_protocol_is_told_both_versions() {
     assert!(line(&mut read).await.is_none(), "the engine hung up");
     assert!(matches!(
         served.await.unwrap(),
-        Err(wire::WireError::Refused(_))
+        Err(wire::WireError::Refused(..))
     ));
     assert_eq!(engine.connections(), 0);
 
@@ -609,6 +614,7 @@ async fn a_client_on_another_protocol_is_told_both_versions() {
         let _ = line(&mut BufReader::new(read)).await;
         let refused = serde_json::to_string(&Answer::Refused {
             reason: "no".into(),
+            about: wire::About::default(),
         })
         .unwrap();
         write
@@ -618,7 +624,7 @@ async fn a_client_on_another_protocol_is_told_both_versions() {
     });
     assert!(matches!(
         wire::connect(near).await,
-        Err(wire::WireError::Refused(reason)) if reason == "no"
+        Err(wire::WireError::Refused(reason, _)) if reason == "no"
     ));
 }
 
@@ -635,11 +641,7 @@ async fn raw_client(
     let served = tokio::spawn(wire::serve_with(engine.clone(), far, limits));
     let (read, mut write) = tokio::io::split(near);
     let mut read = BufReader::new(read);
-    let hello = serde_json::to_string(&Hello {
-        protocol: PROTOCOL,
-        app_version: VERSION.into(),
-    })
-    .unwrap();
+    let hello = serde_json::to_string(&Hello::connect()).unwrap();
     write
         .write_all(format!("{hello}\n").as_bytes())
         .await
@@ -786,6 +788,7 @@ async fn a_quiet_client_says_it_is_there_every_little_while() {
             data_root: "/home/chris/.perch".into(),
             clients: 0,
             runs: 0,
+            build: VERSION.into(),
         }))
         .unwrap();
         write

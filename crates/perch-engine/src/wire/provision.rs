@@ -30,6 +30,57 @@ pub const INSTALL_SAID: &str = "perch-install:";
 /// How the connection script exits when it says `INSTALL_SAID`.
 pub const INSTALL_EXIT: i32 = 97;
 
+/// The start of what `perchd bridge --replace-if-idle` says on stderr when
+/// the engine it would replace has runs or clients, before `<version>
+/// <runs> <clients>`.
+pub const BUSY_SAID: &str = "perch-busy:";
+
+/// How `perchd bridge --replace-if-idle` exits when it says `BUSY_SAID`.
+pub const BUSY_EXIT: u8 = 98;
+
+/// What the bridge would do about an engine of another build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Replace {
+    /// Join whatever engine is there.
+    #[default]
+    No,
+    /// `--replace-if-idle`: stop it first unless it has runs or clients.
+    IfIdle,
+    /// `--replace`: stop it first.
+    Always,
+}
+
+impl Replace {
+    /// The bridge's flag for it.
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Replace::No => None,
+            Replace::IfIdle => Some("--replace-if-idle"),
+            Replace::Always => Some("--replace"),
+        }
+    }
+}
+
+/// An engine `--replace-if-idle` left alone, as its line says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Busy {
+    pub version: String,
+    pub runs: usize,
+    pub clients: usize,
+}
+
+/// What a line the host said means when it is the bridge saying the
+/// engine is busy.
+pub fn busy_line(line: &str) -> Option<Busy> {
+    let rest = line.trim().strip_prefix(BUSY_SAID)?;
+    let mut words = rest.split_whitespace();
+    Some(Busy {
+        version: words.next()?.to_string(),
+        runs: words.next()?.parse().ok()?,
+        clients: words.next()?.parse().ok()?,
+    })
+}
+
 /// The largest `perchd` (or tarball of one) taken: a release's is around
 /// 20 MB.
 const MAX_BINARY: u64 = 256 << 20;
@@ -119,12 +170,14 @@ pub fn plain_word(build: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
 }
 
-/// The connection script, run by `sh` with the build as `$1`: the bridge
-/// of that build if it is there, else a line saying what the host is, for
-/// the app to install from.
+/// The connection script, run by `sh` with the build as `$1` and the
+/// bridge's flags after it: the bridge of that build if it is there, else
+/// a line saying what the host is, for the app to install from.
 const CONNECT: &str = r#"d="${PERCH_HOME:-$HOME/.perch}/bin"
-if [ -x "$d/perchd-$1" ]; then
-  exec "$d/perchd-$1" bridge
+b="$1"
+shift
+if [ -x "$d/perchd-$b" ]; then
+  exec "$d/perchd-$b" bridge "$@"
 fi
 echo "perch-install: $(uname -s) $(uname -m)" >&2
 exit 97"#;
@@ -189,9 +242,12 @@ fn in_login_sh(name: &str, script: &str, args: &[&str]) -> String {
 }
 
 /// What ssh runs on the host to reach the engine through the `perchd` of
-/// `build`, or to say it is missing.
-pub fn connect_command(build: &str) -> String {
-    in_login_sh("perch-connect", CONNECT, &[build])
+/// `build`, replacing one of another build as `replace` says, or to say
+/// it is missing.
+pub fn connect_command(build: &str, replace: Replace) -> String {
+    let mut args = vec![build];
+    args.extend(replace.flag());
+    in_login_sh("perch-connect", CONNECT, &args)
 }
 
 /// What ssh runs on the host to install the `perchd` of `build` from its
@@ -586,6 +642,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_busy_engine_s_line_reads_back() {
+        assert_eq!(
+            busy_line("perch-busy: 0.9.0 2 1\n"),
+            Some(Busy {
+                version: "0.9.0".into(),
+                runs: 2,
+                clients: 1
+            })
+        );
+        assert_eq!(busy_line("perch-busy: 0.9.0 two 1"), None);
+        assert_eq!(busy_line("perch-install: Linux x86_64"), None);
+        assert!(connect_command("0.9.0", Replace::IfIdle).contains(" 0.9.0 --replace-if-idle'"));
+        assert!(connect_command("0.9.0", Replace::Always).ends_with(" 0.9.0 --replace'"));
+        assert!(connect_command("0.9.0", Replace::No).ends_with(" 0.9.0'"));
+    }
+
+    #[test]
     fn a_build_is_the_version_or_the_version_and_the_binary_s_hash() {
         assert_eq!(release_build(), VERSION);
         // SHA-256 of "perchd" is 4d5c0a….
@@ -611,7 +684,7 @@ pub(crate) mod tests {
         for script in [CONNECT, UPLOAD] {
             assert!(!script.contains(['\'', '\\', '`', '!']), "{script}");
         }
-        let command = connect_command("0.9.0");
+        let command = connect_command("0.9.0", Replace::No);
         assert!(command.starts_with("exec \"$SHELL\" -lc 'exec /bin/sh -c \""));
         assert!(command.ends_with("\" perch-connect 0.9.0'"));
         // One pair of single quotes, around the whole of what the login
