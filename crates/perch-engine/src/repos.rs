@@ -97,19 +97,6 @@ pub fn repo_source(typed: &str) -> Result<RepoSource, String> {
     }
 }
 
-/// Where a repository cloned for the reader goes: beside the first root
-/// they already have, since that is where they keep their clones, else
-/// `code` in their home.
-pub fn clone_parent(config: &Config, home: &std::path::Path) -> std::path::PathBuf {
-    config
-        .repo
-        .iter()
-        .filter_map(|entry| entry.root_path())
-        .find(|root| root.is_dir())
-        .and_then(|root| root.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| home.join("code"))
-}
-
 /// `Config::load()` with every entry resolved, for a caller already on a
 /// runtime.
 pub async fn load_resolved_async() -> Config {
@@ -160,21 +147,6 @@ mod tests {
         ] {
             assert!(repo_source(typed).is_err(), "{typed}");
         }
-    }
-
-    #[test]
-    fn a_clone_goes_beside_the_roots_there_are_or_under_code() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path();
-        assert_eq!(clone_parent(&Config::default(), home), home.join("code"));
-        std::fs::create_dir_all(home.join("src/widgets")).unwrap();
-        let config = Config::parse_text(&format!(
-            "[[repo]]\nroot = {:?}\n\n[[repo]]\nroot = {:?}\n",
-            home.join("gone/notes").display().to_string(),
-            home.join("src/widgets").display().to_string(),
-        ))
-        .unwrap();
-        assert_eq!(clone_parent(&config, home), home.join("src"));
     }
 
     fn git(dir: &Path, args: &[&str]) {

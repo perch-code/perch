@@ -1877,10 +1877,11 @@ Repositories, where the last row is a box and an **Add** button in place
 of the folder chooser. Type one of:
 
 - A repository on github.com, as `owner/name` or its URL. The engine
-  clones it on the host, with its own GitHub token, to `<name>` beside
-  the first repository root already there, or under `~/code` when there
-  is none yet, and adds it. A folder of that name that is already a clone
-  of it is used as it is; any other is left alone and named. The token is
+  clones it on the host, with its own GitHub token, to `<name>` in the
+  folder the **Clone into** row beside it names (`clone_root` in the
+  host's config.toml, such as `"~/Code"`), or in the home directory
+  there with none, and adds it. A folder of that name that is already a
+  clone of it is used as it is; any other is left alone and named. The token is
   given to that one `git clone` and is not written into the clone, whose
   later fetches and pushes use the host's own git credentials, as `gh auth
   login` sets them up.

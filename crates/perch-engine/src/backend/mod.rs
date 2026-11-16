@@ -14216,9 +14216,9 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
 
 /// [`add_repository`] from what the reader typed. A path is the folder,
 /// with `~` the engine's `home`. A repository on GitHub is cloned first,
-/// with the engine's token, to `<name>` beside the roots already there or
-/// under `~/code` (see `repos::clone_parent`); a folder of that name that
-/// is already a clone of it is used as it is, and any other is left alone.
+/// with the engine's token, to `<name>` in `clone_root`, the home
+/// directory with none; a folder of that name that is already a clone of
+/// it is used as it is, and any other is left alone.
 async fn add_repository_from(
     ctx: &Ctx,
     source: &str,
@@ -14251,7 +14251,7 @@ async fn add_repository_from(
             None => format!("{} is already in config.toml", id.full_name()),
         });
     }
-    let dest = crate::repos::clone_parent(&config, home).join(&id.repo);
+    let dest = config.clone_root_in(home).join(&id.repo);
     if dest.exists() {
         // One the reader cloned there themselves is theirs to add; any
         // other folder of the name is not Perch's to write into.
@@ -33878,7 +33878,7 @@ read eof || true
     }
 
     /// Add repository by what was typed, as with the engine on a host: a
-    /// repository's name uses the clone of it already under `~/code`
+    /// repository's name uses the clone of it already in `clone_root`
     /// rather than cloning, leaves a folder of that name that is something
     /// else alone, and is refused once it is declared; a path is the
     /// folder, with `~` the engine's home.
@@ -33888,10 +33888,11 @@ read eof || true
         let home = dir.path().canonicalize().unwrap();
         let (ctx, _received) = ctx_declaring(&home, &nowhere(), Vec::new());
         let config = home.join("config.toml");
-        std::fs::write(&config, "").unwrap();
+        std::fs::write(&config, "clone_root = \"~/Code\"\n").unwrap();
+        take_up_config(&ctx, &config).await;
         let add = |typed: &'static str| add_repository_from(&ctx, typed, &home, &config);
 
-        let widgets = home.join("code/widgets");
+        let widgets = home.join("Code/widgets");
         root_with_branch(&widgets, "feature");
         git(
             &widgets,
@@ -33904,7 +33905,7 @@ read eof || true
         assert!(again.contains("is already in config.toml, at"), "{again}");
 
         // A folder of the name that is some other repository.
-        root_with_branch(&home.join("code/gadgets"), "feature");
+        root_with_branch(&home.join("Code/gadgets"), "feature");
         let other = add("acme/gadgets").await.unwrap_err();
         assert!(
             other.contains("is already there and is not a clone of acme/gadgets"),

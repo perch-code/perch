@@ -43,6 +43,7 @@ impl AgentBackend {
 pub enum Setting {
     PollIntervalSecs(Option<u64>),
     GithubHost(Option<String>),
+    CloneRoot(Option<String>),
     AgentModel(Option<String>),
     AgentEffort(Option<String>),
     AgentMaxConcurrentRuns(Option<usize>),
@@ -314,6 +315,7 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             integer(*secs, "poll_interval_secs")?,
         ),
         Setting::GithubHost(host) => (top(&[], "github_host".into()), string(host)),
+        Setting::CloneRoot(root) => (top(&[], "clone_root".into()), string(root)),
         Setting::AgentModel(model) => (top(&["agent"], "model".into()), string(model)),
         Setting::AgentEffort(effort) => (top(&["agent"], "effort".into()), string(effort)),
         Setting::AgentMaxConcurrentRuns(runs) => (
@@ -1182,6 +1184,7 @@ mod tests {
         let changes = vec![
             Setting::PollIntervalSecs(Some(600)),
             Setting::GithubHost(Some("ghe.corp".into())),
+            Setting::CloneRoot(Some("~/Code".into())),
             Setting::AgentModel(Some("sonnet".into())),
             Setting::AgentEffort(Some("low".into())),
             Setting::AgentMaxConcurrentRuns(Some(8)),
@@ -1213,6 +1216,7 @@ mod tests {
         assert!(c.warnings.is_empty(), "{:?}", c.warnings);
         assert_eq!(c.poll_interval_secs, 600);
         assert_eq!(c.github_host.as_deref(), Some("ghe.corp"));
+        assert_eq!(c.clone_root.as_deref(), Some("~/Code"));
         assert_eq!(c.agent.model, "sonnet");
         assert_eq!(c.agent.effort, "low");
         assert_eq!(c.agent.max_concurrent_runs, 8);
@@ -1232,6 +1236,7 @@ mod tests {
         for key in [
             "poll_interval_secs",
             "github_host",
+            "clone_root",
             "agent.model",
             "agent.effort",
             "agent.max_concurrent_runs",
@@ -1249,7 +1254,7 @@ mod tests {
         ] {
             assert!(keys.contains(key), "{key} missing from {keys:?}");
         }
-        assert_eq!(keys.len(), 16, "{keys:?}");
+        assert_eq!(keys.len(), 17, "{keys:?}");
     }
 
     fn keybinding(action: &'static str, keys: Option<&[&str]>) -> Setting {

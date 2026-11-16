@@ -21,6 +21,10 @@ pub struct Config {
     /// github.com.
     #[serde(default)]
     pub github_host: Option<String>,
+    /// The folder a repository added by its name is cloned into, where
+    /// the engine is: the home directory with none.
+    #[serde(default)]
+    pub clone_root: Option<String>,
     /// `[[repo]]` entries: the repositories Perch knows about.
     #[serde(default)]
     pub repo: Vec<RepoConfig>,
@@ -902,6 +906,16 @@ pub struct DeclaredRepo {
 impl Config {
     /// The hosts whose remotes name a GitHub repository: github.com, and
     /// the enterprise host when the file names one.
+    /// Where a repository added by its name is cloned, with `~` read as
+    /// `home`: `clone_root`, or `home` itself with none. One that names no
+    /// root is taken from `home`.
+    pub fn clone_root_in(&self, home: &Path) -> PathBuf {
+        match self.clone_root.as_deref().map(str::trim) {
+            None | Some("") => home.to_path_buf(),
+            Some(root) => home.join(expand_home_in(root, home)),
+        }
+    }
+
     pub fn github_hosts(&self) -> Vec<String> {
         let mut hosts = vec!["github.com".to_string()];
         if let Some(host) = self.github_host.as_deref().filter(|h| !h.is_empty()) {
@@ -1254,6 +1268,7 @@ impl Config {
             poll_interval_secs: default_poll_secs(),
             agent: AgentConfig::default(),
             github_host: None,
+            clone_root: None,
             repo: Vec::new(),
             work: WorkDefaults::default(),
             lsp: LspConfig::default(),
@@ -2022,6 +2037,19 @@ network = ["index.crates.io"]
         assert!(!is_local("local"), "no slash, no owner");
         assert!(!is_local(""));
         assert_eq!(LOCAL_OWNER, "local");
+    }
+
+    #[test]
+    fn a_clone_root_is_read_from_home_and_is_home_with_none() {
+        let home = Path::new("/home/dev");
+        let root = |text: &str| Config::parse(text).unwrap().clone_root_in(home);
+        assert_eq!(root(""), home);
+        assert_eq!(root("clone_root = \"\""), home);
+        assert_eq!(root("clone_root = \"~\""), home);
+        assert_eq!(root("clone_root = \"~/Code\""), home.join("Code"));
+        assert_eq!(root("clone_root = \" ~/Code \""), home.join("Code"));
+        assert_eq!(root("clone_root = \"Code\""), home.join("Code"));
+        assert_eq!(root("clone_root = \"/srv/src\""), Path::new("/srv/src"));
     }
 
     #[test]

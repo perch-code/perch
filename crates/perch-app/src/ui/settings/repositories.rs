@@ -50,8 +50,61 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
             Group::new(repo.display_name(), rows).subtitle(subtitle)
         })
         .collect();
-    groups.push(Group::new("Add a repository", vec![add(page)]));
+    let mut adding = vec![add(page)];
+    // Only a host clones: on this machine a folder is picked.
+    if let Some(host) = crate::remote::host() {
+        adding.push(clone_root(page, host));
+    }
+    groups.push(Group::new("Add a repository", adding));
     groups
+}
+
+/// The folder a repository added by its name is cloned into, as the file
+/// has it, or `~` with none.
+fn clone_root_of(page: &Page) -> String {
+    page.with_config(|c| {
+        c.clone_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|root| !root.is_empty())
+            .unwrap_or("~")
+            .to_string()
+    })
+}
+
+/// `clone_root`: where on `host` a repository added by name is cloned.
+fn clone_root(page: &Page, host: String) -> Row {
+    let control = {
+        let page = page.clone();
+        move || {
+            let (value_page, write) = (page.clone(), page.clone());
+            setting_text(
+                &page,
+                move || value_page.with_config(|c| c.clone_root.clone().unwrap_or_default()),
+                "~",
+                move |typed| {
+                    let root = typed.trim();
+                    write.write(Setting::CloneRoot(
+                        (!root.is_empty()).then(|| root.to_string()),
+                    ))
+                },
+                "settings-clone-root",
+            )
+            .into_any()
+        }
+    };
+    Row::new(
+        "clone-root",
+        "Clone into",
+        move || {
+            format!(
+                "The folder on {host} a repository added by its name is cloned into, such as ~/Code. Your home directory there with none."
+            )
+        },
+        control,
+    )
+    .keywords(&["clone", "folder", "code", "directory", "clone_root"])
+    .reset("clone_root", Setting::CloneRoot(None))
 }
 
 /// The identity a write names a repository by: what the backend resolved,
@@ -514,12 +567,14 @@ fn add_on_host(page: &Page, host: String) -> Row {
             .into_any()
         }
     };
+    let where_to = page.clone();
     Row::new(
         "add-repository",
         title,
         move || {
             format!(
-                "Type owner/name to clone it from GitHub on {said}, beside your other repositories there or under ~/code, or the path of a clone already there. Perch adds it to the config.toml on {said}."
+                "Type owner/name to clone it from GitHub into {} on {said}, or the path of a clone already there. Perch adds it to the config.toml on {said}.",
+                clone_root_of(&where_to)
             )
         },
         control,
@@ -633,6 +688,15 @@ mod tests {
         super::super::tests::type_text(&mut harness, "~/code/notes");
         click(&mut harness, "settings-add-repository-go");
         assert_eq!(added(&mut commands), ["~/code/notes"]);
+
+        // Where a named one is cloned is a setting beside it, the home
+        // directory until it is set.
+        assert!(shown(&harness, "settings-clone-root"));
+        enter_in(&mut harness, "settings-clone-root", "~/Code");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::CloneRoot(Some("~/Code".into()))]
+        );
 
         // Neither a name nor a path: said, and not sent.
         state.apply(crate::backend::Event::RepositoryAdded("local/notes".into()));

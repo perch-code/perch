@@ -284,12 +284,14 @@ Where the implementation went its own way, and why:
 - Add repository… with a host set opens Settings > Repositories, where a
   box takes `owner/name` on GitHub or a path on the host. The engine
   clones a named one first, with its token for that one command, to
-  `<name>` beside the roots already there or under `~/code`, then adds it
+  `<name>` in `clone_root`, the home directory with none, then adds it
   as a folder picked would be. It was a notice saying to edit the host's
   config.toml, which left a first run on a new host with a step that had
-  no command to copy. A setting for where clones go was left out: the
-  roots already there say where the reader keeps them. `Command` gained
-  `AddRepositoryFrom`, so the wire is at 7.
+  no command to copy. `clone_root` is a top-level key of the engine's
+  config with a row beside the box; cloning beside the roots already
+  there was tried first and dropped, since the reader wanted to say
+  where. `Command` gained `AddRepositoryFrom` (wire 7) and `Setting`
+  gained `CloneRoot` (wire 8).
 - The nested `.git` check on Linux also fails a run whose existing nested
   `.git` had its config or hooks changed, or whose `.git` file points
   elsewhere, not only one that appeared.
