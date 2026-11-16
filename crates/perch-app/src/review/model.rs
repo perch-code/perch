@@ -24,7 +24,6 @@ pub use perch_engine::review::model::{
 
 use crate::review::code_refs::{Found, NameAsk, Named};
 use crate::review::doc::{self, Card, CardId, Doc, Reveals};
-use crate::review::picture::Picture;
 use crate::review::timeline::count_of;
 
 /// A key that moves through Conversation or the open file: Page Up and
@@ -3662,17 +3661,6 @@ impl ReviewState {
         self.as_source.with(|paths| paths.contains(path))
     }
 
-    /// The active file's picture, when it has one and is drawn: what the
-    /// pane shows in place of the editor, and what the strip's tile
-    /// describes.
-    pub fn drawn_picture(&self) -> Option<Picture> {
-        let file = self.active_file()?;
-        if self.shows_source(&file.path) {
-            return None;
-        }
-        Picture::of(&file)
-    }
-
     /// Whether the active file is markdown drawn as it reads, rather than
     /// its source: only when the reader asked, and only for a file whose
     /// text loaded whole.
@@ -3698,7 +3686,12 @@ impl ReviewState {
     /// Whether the active file is drawn, a picture or a preview, in place
     /// of the editor: no lines to jump between, find in or page through.
     pub fn drawn(&self) -> bool {
-        self.drawn_picture().is_some() || self.previewed()
+        // A file with a picture's markup is drawn unless the reader asked
+        // for the markup.
+        let pictured = self
+            .active_file()
+            .is_some_and(|file| file.picture.is_some() && !self.shows_source(&file.path));
+        pictured || self.previewed()
     }
 
     /// Flip the active file between its picture and its markup.

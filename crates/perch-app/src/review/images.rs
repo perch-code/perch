@@ -182,19 +182,12 @@ pub fn received(url: String, downloaded: Option<Downloaded>) {
         arrived(url, None);
         return;
     };
-    let scope = STORE.with(|store| {
-        let have = store
-            .pictures
-            .with_untracked(|pictures| pictures.contains_key(&url));
-        (!have && store.decoding.borrow_mut().insert(url.clone())).then_some(store.scope)
-    });
-    let Some(scope) = scope else {
+    let Some(scope) = claim(&url) else {
         return;
     };
     let done =
         floem::ext_event::create_ext_action(scope, |(url, decoded): (String, Option<Decoded>)| {
-            STORE.with(|store| store.decoding.borrow_mut().remove(&url));
-            arrived(url, decoded.map(Arc::new));
+            decoded_from(url, decoded);
         });
     std::thread::spawn(move || {
         let decoded = decode(&bytes, &url);
@@ -203,6 +196,25 @@ pub fn received(url: String, downloaded: Option<Downloaded>) {
         }
         done((url, decoded));
     });
+}
+
+/// The store's scope, for the decode's way back, when the picture at
+/// `url` is this window's to decode: none is drawn yet and no other window
+/// has started on it.
+fn claim(url: &str) -> Option<Scope> {
+    STORE.with(|store| {
+        let have = store
+            .pictures
+            .with_untracked(|pictures| pictures.contains_key(url));
+        (!have && store.decoding.borrow_mut().insert(url.to_string())).then_some(store.scope)
+    })
+}
+
+/// A decode [`claim`]ed for `url` is done, `None` when the bytes were not
+/// a picture.
+fn decoded_from(url: String, decoded: Option<Decoded>) {
+    STORE.with(|store| store.decoding.borrow_mut().remove(&url));
+    arrived(url, decoded.map(Arc::new));
 }
 
 /// The picture at `url` decoded, `None` when it could not be downloaded
@@ -407,6 +419,41 @@ pub(crate) mod tests {
         arrived(url.to_string(), None);
         want(url);
         assert_eq!(asked(), vec![url.to_string(), url.to_string()]);
+    }
+
+    /// Every window hears a download; the first has it decoded, and the
+    /// rest, while that runs or once it has landed, do nothing.
+    #[test]
+    fn a_download_every_window_hears_is_decoded_once() {
+        let _root = floem::headless::TestRoot::new();
+        let url = "https://x/heard.png".to_string();
+        received(url.clone(), Some(Downloaded(png(4, 4).into())));
+        assert!(claim(&url).is_none(), "a second window decoded it too");
+
+        decoded_from(url.clone(), decode(&png(4, 4), &url));
+        assert!(watch(url.clone()).get_untracked().is_some());
+        STORE.with(|store| assert!(!store.decoding.borrow().contains(&url)));
+        assert!(claim(&url).is_none(), "decoded again once drawn");
+    }
+
+    /// Bytes that are not a picture, or no bytes, leave nothing behind:
+    /// the next view to show it asks again, and that download is decoded.
+    #[test]
+    fn a_download_that_does_not_decode_is_asked_for_again() {
+        let _root = floem::headless::TestRoot::new();
+        asked();
+        let url = "https://x/not-a-picture.png".to_string();
+        want(&url);
+        assert!(claim(&url).is_some());
+        decoded_from(url.clone(), decode(b"<html>Not Found</html>", &url));
+        STORE.with(|store| assert!(!store.decoding.borrow().contains(&url)));
+        assert!(watch(url.clone()).get_untracked().is_none());
+        want(&url);
+
+        received(url.clone(), None);
+        want(&url);
+        assert_eq!(asked(), vec![url.clone(), url.clone(), url.clone()]);
+        assert!(claim(&url).is_some(), "the next download is decoded");
     }
 
     #[test]

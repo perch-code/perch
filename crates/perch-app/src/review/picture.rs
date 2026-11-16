@@ -4,16 +4,15 @@
 //! An SVG is text, and loads as every other file does, diffed and
 //! highlighted; the engine also hands over each side's markup, which is
 //! parsed here into the tree the renderer draws, so the pane can show
-//! what the file looks like rather than what it is written as. The two sides of a change are drawn at
-//! one scale, the one that fits the larger of them into a half, so a
-//! change of size shows as one. The markup is a click away: the strip's
-//! Source tile shows the file as the editor shows every other, with the
-//! diff, the gutter and the threads anchored in it.
+//! what the file looks like rather than what it is written as. The two
+//! sides of a change are drawn at one scale, the one that fits the larger
+//! of them into a half, so a change of size shows as one. The markup is a
+//! click away: the strip's Source tile shows the file as the editor shows
+//! every other, with the diff, the gutter and the threads anchored in it.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use floem::context::{LayoutChanged, PaintCx};
 use floem::kurbo::{Size, Stroke};
@@ -49,10 +48,24 @@ pub struct Drawing {
     hash: [u8; 8],
 }
 
-thread_local! {
-    /// The pictures parsed from loaded files' markup, by the markup they
-    /// came from. An entry goes once its file is let go.
-    static PARSED: RefCell<Vec<(Weak<PictureSource>, Picture)>> = const { RefCell::new(Vec::new()) };
+/// The pictures parsed from loaded files' markup, by the markup they came
+/// from. Shared between threads: a file is parsed off the main thread on
+/// its way in, and the window finds it here. An entry goes once its file
+/// is let go.
+static PARSED: Mutex<Vec<(Weak<PictureSource>, Picture)>> = Mutex::new(Vec::new());
+
+fn parsed() -> MutexGuard<'static, Vec<(Weak<PictureSource>, Picture)>> {
+    PARSED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The picture parsed from `source`, if it has been.
+fn kept(source: &Arc<PictureSource>) -> Option<Picture> {
+    let mut parsed = parsed();
+    parsed.retain(|(kept, _)| kept.strong_count() > 0);
+    parsed
+        .iter()
+        .find(|(kept, _)| std::ptr::eq(kept.as_ptr(), Arc::as_ptr(source)))
+        .map(|(_, picture)| picture.clone())
 }
 
 impl Picture {
@@ -72,23 +85,26 @@ impl Picture {
 
     /// The picture `file` draws as, parsed from the markup it loaded
     /// with. A file's sides are parsed once while it stays loaded, not on
-    /// every build of the pane or read of the strip's tile.
+    /// every build of the pane or read of the strip's tile. The engine's
+    /// events call this off the main thread as a file arrives (see
+    /// `windows::parse_pictures`), so the window finds it parsed.
     pub fn of(file: &LoadedFile) -> Option<Picture> {
         let source = file.picture.as_ref()?;
-        PARSED.with(|parsed| {
-            let mut parsed = parsed.borrow_mut();
-            parsed.retain(|(kept, _)| kept.strong_count() > 0);
-            if let Some((_, picture)) = parsed
-                .iter()
-                .find(|(kept, _)| std::ptr::eq(kept.as_ptr(), Arc::as_ptr(source)))
-            {
-                return Some(picture.clone());
-            }
-            let picture =
-                Picture::parse(&file.path, source.head.as_deref(), source.base.as_deref())?;
-            parsed.push((Arc::downgrade(source), picture.clone()));
-            Some(picture)
-        })
+        if let Some(picture) = kept(source) {
+            return Some(picture);
+        }
+        // Parsed without the lock, so the window is never held up behind
+        // a parse on another thread.
+        let picture = Picture::parse(&file.path, source.head.as_deref(), source.base.as_deref())?;
+        let mut parsed = parsed();
+        if let Some((_, first)) = parsed
+            .iter()
+            .find(|(kept, _)| std::ptr::eq(kept.as_ptr(), Arc::as_ptr(source)))
+        {
+            return Some(first.clone());
+        }
+        parsed.push((Arc::downgrade(source), picture.clone()));
+        Some(picture)
     }
 
     /// The side the file is now: the head, or the base of a deletion.
@@ -579,6 +595,53 @@ mod tests {
         let c = Drawing::parse(SQUARE).unwrap();
         assert_eq!(a.hash, b.hash);
         assert_ne!(a.hash, c.hash);
+    }
+
+    /// A file parsed on another thread as it arrives is the one the window
+    /// draws: the main thread takes the same tree rather than parsing it
+    /// again, and the entry goes with the file.
+    #[test]
+    fn a_picture_parsed_on_the_way_in_is_not_parsed_again() {
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "arrived.svg".into(),
+            CIRCLE.into(),
+            SQUARE.into(),
+            Some(ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+        let on_the_way = std::thread::spawn({
+            let file = file.clone();
+            move || Picture::of(&file).unwrap()
+        })
+        .join()
+        .unwrap();
+        let here = Picture::of(&file).unwrap();
+        let tree = |picture: &Picture| {
+            picture
+                .head
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .tree
+                .clone()
+        };
+        assert!(Arc::ptr_eq(&tree(&on_the_way), &tree(&here)));
+
+        let source = Arc::downgrade(file.picture.as_ref().unwrap());
+        drop(file);
+        let _ = kept(&Arc::new(PictureSource {
+            head: None,
+            base: None,
+        }));
+        assert!(
+            !parsed()
+                .iter()
+                .any(|(kept, _)| std::ptr::eq(kept.as_ptr(), source.as_ptr())),
+            "a file let go keeps its picture"
+        );
     }
 
     #[test]

@@ -14,4 +14,6 @@ pub mod items;
 pub mod log_file;
 pub mod repos;
 pub mod review;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod update;

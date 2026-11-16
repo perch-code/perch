@@ -3688,7 +3688,6 @@ dependencies = [
 name = "perch-app"
 version = "0.8.0"
 dependencies = [
- "anyhow",
  "block2 0.6.2",
  "emojis",
  "floem",
@@ -3710,7 +3709,6 @@ dependencies = [
  "pulldown-cmark",
  "regex",
  "serde_json",
- "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",

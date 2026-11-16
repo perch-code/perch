@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use perch_git::cmd::Git;
@@ -20,20 +20,9 @@ use super::{
 /// What the app checks in a config as it is read, beyond what the engine
 /// knows: the keys `[keybindings]` names are the window's. What it finds
 /// goes in the config's warnings and is said as the file's others are.
-static APP_CHECK: OnceLock<fn(&mut Config)> = OnceLock::new();
-
-/// Have every read of config.toml checked by `check` as well. Set once,
-/// before [`spawn`](super::spawn).
-pub fn check_config_with(check: fn(&mut Config)) {
-    let _ = APP_CHECK.set(check);
-}
-
-/// The app's check of `config`, when it set one.
-pub(super) fn check_config(config: &mut Config) {
-    if let Some(check) = APP_CHECK.get() {
-        check(config);
-    }
-}
+/// Given to [`spawn`](super::spawn), so no way of starting the engine
+/// can leave it out.
+pub type CheckConfig = fn(&mut Config);
 
 /// config.toml as the Settings page shows it, sent at startup, after every
 /// write and after an edit made outside Perch.
@@ -131,22 +120,26 @@ pub(super) struct Held {
     /// Told when a take-up changes `poll_interval_secs`, so the command
     /// loop moves the poll it has scheduled rather than waiting it out.
     poll_interval: tokio::sync::Notify,
+    /// The app's check of each read, as startup ran it.
+    check: CheckConfig,
 }
 
 impl Default for Held {
     fn default() -> Self {
-        Held::new(None, AgentConfig::default(), &[], None)
+        Held::new(None, AgentConfig::default(), &[], None, |_| {})
     }
 }
 
 impl Held {
     /// What startup read: the file's stamp from before the read, its
-    /// `[agent]`, the warnings already shown, and the Settings sent.
+    /// `[agent]`, the warnings already shown, and the Settings sent; and
+    /// the app's check, for every read after it.
     pub(super) fn new(
         stamp: Option<Stamp>,
         file_agent: AgentConfig,
         warnings: &[String],
         sent: Option<SettingsFile>,
+        check: CheckConfig,
     ) -> Self {
         Held {
             turn: tokio::sync::Mutex::new(()),
@@ -156,6 +149,7 @@ impl Held {
             last: std::sync::Mutex::new(sent),
             discovery: AtomicU64::new(0),
             poll_interval: tokio::sync::Notify::new(),
+            check,
         }
     }
 
@@ -326,7 +320,7 @@ pub(super) async fn take_up_whole_config(ctx: &Ctx, path: &Path) -> Result<Confi
         }
     };
     crate::repos::resolve(&mut file, &Git::new(None)).await;
-    check_config(&mut file);
+    (held.check)(&mut file);
 
     let before = ctx.config();
     let rediscover = held.swap_file_agent(&file.agent);

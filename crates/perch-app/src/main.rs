@@ -107,8 +107,7 @@ fn main() {
     keymap::take_up(&config.keybindings);
 
     windows::load_frame();
-    backend::check_config_with(keymap::add_warnings);
-    let (backend, events) = backend::spawn();
+    let (backend, events) = backend::spawn(keymap::add_warnings);
     let mut started = Some((backend, events));
 
     // A development hook: open a pull request at launch rather than by

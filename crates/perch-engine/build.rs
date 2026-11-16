@@ -5,7 +5,7 @@
 //! A debug build leaves `-dirty` out on purpose. Knowing it means watching
 //! the git index, and `git add`, a commit, or an editor that refreshes git
 //! status touches the index. Every touch reran this script and recompiled
-//! all of perch-app.
+//! perch-engine and everything built on it.
 
 use std::path::PathBuf;
 use std::process::Command;

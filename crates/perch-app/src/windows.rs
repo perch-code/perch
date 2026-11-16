@@ -114,7 +114,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
     Scope::new().enter(move || {
         let model = new_state();
         let incoming = RwSignal::new(None::<(WindowId, Event)>);
-        update_signal_from_channel(incoming.write_only(), events);
+        update_signal_from_channel(incoming.write_only(), parse_pictures(events));
         // Folding an event is not a derivation. Untracked, so that a
         // signal this happens to read on the way past cannot subscribe the
         // effect to its own output and have the last event applied twice.
@@ -148,6 +148,31 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             settings_on_open: Cell::new(false),
         })));
     });
+}
+
+/// The engine's events as they came, but with each loaded SVG parsed into
+/// what draws first, on a thread of its own. The engine hands over markup
+/// and the window draws it; parsing it on the main thread would stall the
+/// window for a big file, or for the system's fonts loading the first
+/// time one has text. Events keep their order.
+fn parse_pictures(
+    events: std::sync::mpsc::Receiver<(WindowId, Event)>,
+) -> std::sync::mpsc::Receiver<(WindowId, Event)> {
+    let (parsed, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("perch-pictures".into())
+        .spawn(move || {
+            for (window, event) in events {
+                if let Event::FileLoaded { file, .. } = &event {
+                    crate::review::picture::Picture::of(file);
+                }
+                if parsed.send((window, event)).is_err() {
+                    return;
+                }
+            }
+        })
+        .expect("spawn picture thread");
+    receiver
 }
 
 /// Back, or forward, in the window that last had the keyboard.

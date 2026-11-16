@@ -239,19 +239,7 @@ pub fn thread_open_for_work(thread: &Thread) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perch_github::Issue;
-
-    fn issue(body: &str) -> Issue {
-        serde_json::from_value(serde_json::json!({
-            "number": 7,
-            "title": "Fence the manifest",
-            "body": body,
-            "state": "open",
-            "updated_at": "2026-09-18T09:59:00Z",
-            "repo_full_name": "slatedb/slatedb",
-        }))
-        .unwrap()
-    }
+    use perch_engine::test_support::issue;
 
     #[test]
     fn work_starts_from_anything_with_something_to_cut_from() {

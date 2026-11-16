@@ -28,7 +28,7 @@ use tokio::sync::Semaphore;
 pub use avatar::APP_AVATAR_CORNER;
 pub use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
-pub use settings::{check_config_with, SettingsFile};
+pub use settings::{CheckConfig, SettingsFile};
 use windows::{CommandSender, View, Views};
 pub use windows::{EventSender, WindowId, NO_WINDOW};
 
@@ -4130,8 +4130,10 @@ async fn detect_review_capabilities(
 }
 
 /// Start the worker thread. Returns a handle windows are opened from, and
-/// the events, each with the window whose view sent it.
-pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
+/// the events, each with the window whose view sent it. `check` looks at
+/// every read of config.toml for what the app knows and the engine does
+/// not (see [`CheckConfig`]).
+pub fn spawn(check: CheckConfig) -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
     let evt_tx = EventSender::routed(evt_tx);
@@ -4167,6 +4169,7 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
                 worker_scope_requests,
                 worker_merge_attempts,
                 worker_pull_request_review_attempts,
+                check,
             ));
         })
         .expect("spawn backend thread");
@@ -4195,6 +4198,7 @@ async fn run(
     scope_requests: Arc<ScopeRequests>,
     merge_attempts: Arc<MergeAttempts>,
     pull_request_review_attempts: Arc<PullRequestReviewAttempts>,
+    check: CheckConfig,
 ) {
     tracing::info!("backend started");
     // The file is read once, for the running config and the Settings page
@@ -4213,7 +4217,7 @@ async fn run(
     // declared list. No token is needed: the scan reads the root's own
     // config and fetches nothing.
     crate::repos::resolve(&mut config, &perch_git::cmd::Git::new(None)).await;
-    settings::check_config(&mut config);
+    check(&mut config);
     tracing::info!(poll = config.poll_interval_secs, repos = ?config.declared(), "config loaded");
     let settings_file = match (&config_file, config_text, config_error) {
         (Some(path), Some(text), _) => Some(SettingsFile::read(path, &text, &config)),
@@ -4225,6 +4229,7 @@ async fn run(
         config.agent.clone(),
         &config.warnings,
         settings_file.clone(),
+        check,
     ));
 
     // Which agents are installed, asked alongside the GitHub setup rather
@@ -32619,6 +32624,34 @@ model = \"opus\"\n",
         let again = settings_sent(&events).pop().unwrap();
         assert!(again.error.is_some());
         assert_eq!(ctx.config().poll_interval_secs, 45);
+    }
+
+    /// The app's check, `[keybindings]` in the window's case, looks at a
+    /// file taken up while Perch runs as it did at startup, and what it
+    /// finds is said with the file's own warnings.
+    #[tokio::test]
+    async fn a_file_taken_up_again_goes_through_the_app_s_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        ctx.settings = Arc::new(settings::Held::new(
+            None,
+            perch_github::AgentConfig::default(),
+            &[],
+            None,
+            |config| config.warnings.push("checked by the app".into()),
+        ));
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "poll_interval_secs = 45\n").unwrap();
+        assert!(settings::look_again(&ctx, &config).await);
+
+        assert!(ctx
+            .config()
+            .warnings
+            .contains(&"checked by the app".to_string()));
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Notice(m) if m == "checked by the app")));
     }
 
     #[tokio::test]
