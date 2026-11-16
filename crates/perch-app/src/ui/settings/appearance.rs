@@ -16,6 +16,7 @@ use crate::theme;
 const ZOOMS: [f64; 8] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0];
 
 pub(super) fn groups(page: &Page) -> Vec<Group> {
+    let page = &page.here();
     let mut display = vec![zoom(page), code_font_size(page)];
     // macOS draws code in SF Mono, whatever the file says.
     if !cfg!(target_os = "macos") {

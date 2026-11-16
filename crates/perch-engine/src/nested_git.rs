@@ -6,6 +6,12 @@
 //! worktree's top before the run and after it, with what in each one
 //! decides what git runs, and one that appeared or changed fails the run's
 //! record, with its path named.
+//!
+//! The run may have left anything there, so the look never follows a link,
+//! never opens what is not a plain file (a FIFO would block it for good,
+//! a link to `/dev/zero` would fill memory), keeps no more than
+//! [`KEPT_BYTES`] of a file, and goes through at most [`MOST_DIRS`]
+//! directories.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +27,21 @@ pub(crate) const WATCHED: bool = cfg!(any(target_os = "linux", test));
 /// git. Looking through them would hold up every Work run's start.
 const PASSED_OVER: [&str; 4] = ["node_modules", "target", ".venv", "venv"];
 
+/// The most directories looked through: a run that made millions would
+/// otherwise hold up its own end, and the engine thread doing the look.
+pub(crate) const MOST_DIRS: usize = 200_000;
+
+/// The most of a file kept to compare. A longer one is known by its size
+/// and its inode's change time, which a write always moves and nothing a
+/// run can do sets back.
+const KEPT_BYTES: u64 = 256 * 1024;
+
+/// The files in a repository's `.git`, besides `config` and its hooks,
+/// that change what git runs there: `commondir` takes config and hooks
+/// from another directory, `config.worktree` adds to the config, and
+/// `gitdir` is a linked worktree's way back.
+const DECIDING: [&str; 3] = ["commondir", "config.worktree", "gitdir"];
+
 /// What a `.git` holds that decides what git does there: a repository's
 /// `config` and hooks, or where a `.git` file or link points.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,16 +51,34 @@ pub(crate) enum Held {
 }
 
 /// The `.git`s below a worktree's top, and what each holds.
-pub(crate) type Nested = BTreeMap<PathBuf, Held>;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Nested {
+    pub(crate) gits: BTreeMap<PathBuf, Held>,
+    /// False when the look stopped at [`MOST_DIRS`] with more to go.
+    pub(crate) whole: bool,
+}
 
 /// Every `.git` below `top`, as a directory or as the file a worktree or a
 /// submodule has, and not `top`'s own. A `.git` is not looked inside past
 /// what [`Held`] keeps, and links are not followed: what a link points at
 /// is not in the worktree.
 pub(crate) fn below(top: &Path) -> Nested {
-    let mut found = Nested::new();
+    below_within(top, MOST_DIRS)
+}
+
+fn below_within(top: &Path, most_dirs: usize) -> Nested {
+    let mut found = Nested {
+        gits: BTreeMap::new(),
+        whole: true,
+    };
     let mut dirs = vec![top.to_path_buf()];
+    let mut looked = 0;
     while let Some(dir) = dirs.pop() {
+        if looked == most_dirs {
+            found.whole = false;
+            break;
+        }
+        looked += 1;
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -53,16 +92,10 @@ pub(crate) fn below(top: &Path) -> Nested {
                     let path = entry.path();
                     let held = if kind.is_dir() {
                         Held::Repository(repository(&path))
-                    } else if kind.is_symlink() {
-                        Held::Pointer(
-                            std::fs::read_link(&path)
-                                .map(|to| to.into_os_string().into_encoded_bytes())
-                                .unwrap_or_default(),
-                        )
                     } else {
-                        Held::Pointer(std::fs::read(&path).unwrap_or_default())
+                        Held::Pointer(file(&path).unwrap_or_default())
                     };
-                    found.insert(path, held);
+                    found.gits.insert(path, held);
                 }
                 continue;
             }
@@ -74,19 +107,100 @@ pub(crate) fn below(top: &Path) -> Nested {
     found
 }
 
-/// A repository's `config` and every hook, by name.
+/// A repository's `config`, the other files that decide what git runs
+/// there, and every hook, by name. `hooks` as a link is kept as one.
 fn repository(git: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut held = BTreeMap::new();
-    if let Ok(config) = std::fs::read(git.join("config")) {
-        held.insert("config".to_string(), config);
-    }
-    if let Ok(hooks) = std::fs::read_dir(git.join("hooks")) {
-        for hook in hooks.flatten() {
-            let name = format!("hooks/{}", hook.file_name().to_string_lossy());
-            held.insert(name, std::fs::read(hook.path()).unwrap_or_default());
+    for name in std::iter::once("config").chain(DECIDING) {
+        if let Some(kept) = file(&git.join(name)) {
+            held.insert(name.to_string(), kept);
         }
     }
+    let hooks = git.join("hooks");
+    match std::fs::symlink_metadata(&hooks) {
+        Ok(meta) if meta.is_dir() => {
+            if let Ok(entries) = std::fs::read_dir(&hooks) {
+                for hook in entries.flatten() {
+                    let name = format!("hooks/{}", hook.file_name().to_string_lossy());
+                    held.insert(name, file(&hook.path()).unwrap_or_default());
+                }
+            }
+        }
+        Ok(_) => {
+            held.insert("hooks".to_string(), file(&hooks).unwrap_or_default());
+        }
+        Err(_) => {}
+    }
     held
+}
+
+/// What stands at `path`, to compare, without following it if it is a
+/// link or opening it if it is not a plain file: a link's target, a plain
+/// file's bytes up to [`KEPT_BYTES`], or for a longer file, or a FIFO,
+/// socket or device, what kind it is and its inode. None when nothing is
+/// there.
+fn file(path: &Path) -> Option<Vec<u8>> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let kind = meta.file_type();
+    if kind.is_symlink() {
+        let mut kept = b"link:".to_vec();
+        if let Ok(to) = std::fs::read_link(path) {
+            kept.extend(to.into_os_string().into_encoded_bytes());
+        }
+        return Some(kept);
+    }
+    if kind.is_file() && meta.len() <= KEPT_BYTES {
+        if let Some(bytes) = read_plain(path) {
+            return Some(bytes);
+        }
+    }
+    Some(stamp(&meta).into_bytes())
+}
+
+/// What a file is known by when it is not read.
+#[cfg(unix)]
+fn stamp(meta: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!(
+        "not read: mode {:o}, inode {}, {} bytes, changed {}.{}",
+        meta.mode(),
+        meta.ino(),
+        meta.len(),
+        meta.ctime(),
+        meta.ctime_nsec()
+    )
+}
+
+#[cfg(not(unix))]
+fn stamp(meta: &std::fs::Metadata) -> String {
+    format!(
+        "not read: {:?}, {} bytes, modified {:?}",
+        meta.file_type(),
+        meta.len(),
+        meta.modified().ok()
+    )
+}
+
+/// A plain file's bytes, up to [`KEPT_BYTES`]; None when what is there is
+/// not a plain file by the time it is opened, or is longer. Opened without
+/// following a link or waiting on a FIFO, as either could have been put
+/// there since it was looked at.
+fn read_plain(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let opened = options.open(path).ok()?;
+    if !opened.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    opened.take(KEPT_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= KEPT_BYTES).then_some(bytes)
 }
 
 /// The submodules `.gitmodules` at `top` declares, by the `.git` file each
@@ -112,8 +226,8 @@ pub(crate) fn appeared(top: &Path, before: &Nested, after: &Nested) -> Option<St
     let submodules = submodules(top);
     let mut new = Vec::new();
     let mut changed = Vec::new();
-    for (path, held) in after {
-        match before.get(path) {
+    for (path, held) in &after.gits {
+        match before.gits.get(path) {
             None if matches!(held, Held::Pointer(_)) && submodules.contains(path) => {}
             None => new.push(named(path)),
             Some(was) if was != held => changed.push(named(path)),
@@ -136,7 +250,13 @@ pub(crate) fn appeared(top: &Path, before: &Nested, after: &Nested) -> Option<St
     }
     let said = said.join(", and ");
     let mut said = said.chars();
-    let first = said.next()?;
+    let Some(first) = said.next() else {
+        // Past the most looked through, what was not looked at could hold
+        // one. A worktree that was that big before is not the run's doing.
+        return (before.whole && !after.whole).then(|| format!(
+            "This Work run took the worktree past {MOST_DIRS} folders, more than Perch looks through for a Git repository made below its top. Claude Code's sandbox on Linux cannot stop a run making one, so look for any before running git there."
+        ));
+    };
     Some(format!(
         "{}{}, below the worktree's top, during this Work run. Claude Code's sandbox on Linux cannot stop a run doing that, so look at what it holds before running git there.",
         first.to_uppercase(),
@@ -157,7 +277,7 @@ mod tests {
         std::fs::create_dir_all(top.join("src")).unwrap();
         let before = below(top);
         assert_eq!(
-            before.keys().collect::<Vec<_>>(),
+            before.gits.keys().collect::<Vec<_>>(),
             [&top.join("vendor/old/.git")],
             "the top's own .git is not counted, nor a .git's insides"
         );
@@ -260,6 +380,97 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(elsewhere.path().join("repo/.git")).unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), top.path().join("link")).unwrap();
-        assert!(below(top.path()).is_empty());
+        assert!(below(top.path()).gits.is_empty());
+    }
+
+    /// What a run leaves in a nested `.git` is not followed or opened: a
+    /// link to `/dev/zero` would fill memory and a FIFO would wait for a
+    /// writer for good. Either is still a change.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_or_fifo_in_a_nested_git_is_named_without_being_opened() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join("x/.git/hooks")).unwrap();
+        std::fs::create_dir(top.join("y")).unwrap();
+        let before = below(top);
+
+        std::os::unix::fs::symlink("/dev/zero", top.join("x/.git/config")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", top.join("x/.git/hooks/pre-commit")).unwrap();
+        fifo(&top.join("x/.git/hooks/post-checkout"));
+        fifo(&top.join("y/.git"));
+        let after = below(top);
+        let said = appeared(top, &before, &after).unwrap();
+        assert!(
+            said.starts_with(
+                "A Git repository appeared at y/.git, and the Git repository at x/.git was changed"
+            ),
+            "{said}"
+        );
+        let Some(Held::Repository(held)) = after.gits.get(&top.join("x/.git")) else {
+            panic!("no repository");
+        };
+        assert_eq!(held["config"], b"link:/dev/zero");
+    }
+
+    #[cfg(unix)]
+    fn fifo(path: &Path) {
+        let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+
+    /// A long hook is known by its size and change time, not kept whole,
+    /// and still seen to change.
+    #[test]
+    fn a_long_hook_is_not_kept_whole_but_is_seen_to_change() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join("x/.git/hooks")).unwrap();
+        let hook = top.join("x/.git/hooks/pre-commit");
+        std::fs::write(&hook, vec![b'a'; KEPT_BYTES as usize + 1]).unwrap();
+        let before = below(top);
+        let Some(Held::Repository(held)) = before.gits.get(&top.join("x/.git")) else {
+            panic!("no repository");
+        };
+        assert!(held["hooks/pre-commit"].len() < 200);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&hook, vec![b'b'; KEPT_BYTES as usize + 1]).unwrap();
+        assert!(appeared(top, &before, &below(top)).is_some());
+    }
+
+    /// A `commondir` takes config and hooks from elsewhere: one written
+    /// into a repository that was there is a change.
+    #[test]
+    fn a_commondir_written_into_a_nested_git_is_named() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join("vendor/old/.git/hooks")).unwrap();
+        let before = below(top);
+        std::fs::write(top.join("vendor/old/.git/commondir"), "../../../evil\n").unwrap();
+        let said = appeared(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("The Git repository at vendor/old/.git was changed"),
+            "{said}"
+        );
+    }
+
+    /// The look stops at its most folders; a run that took the worktree
+    /// past it is said to have, and one that was past it before is not.
+    #[test]
+    fn a_worktree_grown_past_the_most_looked_through_is_named() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join("a")).unwrap();
+        let before = below_within(top, 3);
+        assert!(before.whole);
+        std::fs::create_dir_all(top.join("b/c/d")).unwrap();
+        let after = below_within(top, 3);
+        assert!(!after.whole);
+        let said = appeared(top, &before, &after).unwrap();
+        assert!(
+            said.starts_with("This Work run took the worktree past"),
+            "{said}"
+        );
+        assert_eq!(appeared(top, &after, &after), None);
     }
 }

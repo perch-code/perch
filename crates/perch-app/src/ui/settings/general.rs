@@ -19,7 +19,7 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
         files.push(client_config_file(page));
     }
     vec![
-        Group::new("Engine", vec![engine(page)]),
+        Group::new("Engine", vec![engine(&page.here())]),
         Group::new("GitHub", vec![poll_interval(page), github_host(page)]),
         Group::new("Config file", files),
     ]

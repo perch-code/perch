@@ -119,12 +119,6 @@ fn start_and_connect(socket: &Path) -> Result<UnixStream, String> {
     }
 }
 
-/// What an ssh session sets that the engine, which outlives the session,
-/// must not keep: an agent socket that may be forwarded from the client's
-/// machine, which every run the engine starts would be handed, and the
-/// session's own addresses and terminal.
-const SESSION_ONLY: [&str; 4] = ["SSH_AUTH_SOCK", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"];
-
 /// `perchd serve`, detached: a session of its own, so the ssh session
 /// ending does not end it, and no stdio of the bridge's, which belongs to
 /// the wire. It logs to its file.
@@ -136,7 +130,7 @@ fn start() -> Result<Child, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for name in SESSION_ONLY {
+    for name in crate::serve::SESSION_ONLY {
         command.env_remove(name);
     }
     // SAFETY: setsid is async-signal-safe, and nothing else runs between

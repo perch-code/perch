@@ -10,7 +10,10 @@
 //!   starting: what its first windows ask for as they are made goes once
 //!   the first try connects, and is dropped if it fails. Nothing was lost
 //!   then, and a window that asked for its lists and heard nothing would
-//!   sit empty. Each window whose asks were dropped is told so.
+//!   sit empty. Each window whose asks were dropped is told so. Nor is a
+//!   window told off for what the reader did not do: which window has the
+//!   keyboard is kept and said once connected, and a comment's picture is
+//!   asked for again by the app.
 //! - Tries are made 1 s apart at first, doubling to 30 s between, and the
 //!   reader can ask for one now, which gives up a try under way. A try
 //!   that has no answer in [`Backoff::answer`] is given up: a host that
@@ -20,7 +23,8 @@
 //!   second. A refusal of the app's protocol stops the tries: trying again
 //!   cannot help until one side is updated.
 //! - A connection made asks for everything again (`Command::Resync`), after
-//!   telling the engine of every window open, so the windows catch up on
+//!   telling the engine of every window open and which of them is key, so
+//!   the windows catch up on
 //!   what happened meanwhile. Each window reopens its item when it hears
 //!   it is connected and something it asked for may have been lost
 //!   (`EngineLink::Up`'s `again`).
@@ -28,7 +32,7 @@
 //! How the connection stands goes to the windows as `Event::Link`, with
 //! the engine's own events, in order.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -113,8 +117,9 @@ struct Linked {
     /// Where commands go while connected.
     to: Option<UnboundedSender<(WindowId, Command)>>,
     /// The client's windows that are open, to open again in the engine
-    /// each time it is connected.
-    windows: BTreeSet<WindowId>,
+    /// each time it is connected, and whether each is the key window. The
+    /// engine takes a window it is told of as key until told otherwise.
+    windows: BTreeMap<WindowId, bool>,
     /// When a refusal was last said to each window.
     refused_at: HashMap<WindowId, Instant>,
     /// What the windows sent before the first try ended, while it is
@@ -126,7 +131,7 @@ impl Default for Linked {
     fn default() -> Self {
         Linked {
             to: None,
-            windows: BTreeSet::new(),
+            windows: BTreeMap::new(),
             refused_at: HashMap::new(),
             starting: Some(Vec::new()),
         }
@@ -145,15 +150,21 @@ impl Link {
     }
 
     /// Send a window's command, or refuse it, saying so, with no
-    /// connection. A window opening or closing is kept either way.
+    /// connection. A window opening, closing or becoming key is kept
+    /// either way: the reader did none of those against the engine.
     pub(crate) fn send(&self, window: WindowId, command: Command) -> Result<(), ()> {
         let mut linked = self.linked();
         match command {
             Command::WindowOpened if window != NO_WINDOW => {
-                linked.windows.insert(window);
+                linked.windows.insert(window, true);
             }
             Command::WindowClosed => {
                 linked.windows.remove(&window);
+            }
+            Command::WindowKey { key } => {
+                if let Some(was) = linked.windows.get_mut(&window) {
+                    *was = key;
+                }
             }
             _ => {}
         }
@@ -172,7 +183,10 @@ impl Link {
         // Sent when the connection is made, whenever that is.
         if matches!(
             command,
-            Command::WindowOpened | Command::WindowClosed | Command::Resync
+            Command::WindowOpened
+                | Command::WindowClosed
+                | Command::WindowKey { .. }
+                | Command::Resync
         ) {
             return Ok(());
         }
@@ -180,7 +194,11 @@ impl Link {
             starting.push((window, command));
             return Ok(());
         }
-        self.refuse(&mut linked, window);
+        // A picture is asked for as a comment is drawn, not by the reader,
+        // and asked for again once connected.
+        if !matches!(command, Command::WantPicture { .. }) {
+            self.refuse(&mut linked, window);
+        }
         Err(())
     }
 
@@ -207,13 +225,15 @@ impl Link {
         }
     }
 
-    /// Connected: the windows are opened in the engine, then everything
-    /// is asked for again, before any command from a window can go.
+    /// Connected: the windows are opened in the engine, each said key or
+    /// not as it last was, then everything is asked for again, before any
+    /// command from a window can go.
     fn up(&self, welcome: &super::Welcome, to: UnboundedSender<(WindowId, Command)>) -> bool {
         let mut linked = self.linked();
         self.navigations.reconnected(welcome.connection);
-        for &window in &linked.windows {
+        for (&window, &key) in &linked.windows {
             let _ = to.send((window, Command::WindowOpened));
+            let _ = to.send((window, Command::WindowKey { key }));
         }
         let _ = to.send((NO_WINDOW, Command::Resync));
         // Only the first try has what the windows asked for as they were
@@ -815,6 +835,10 @@ mod tests {
         );
         assert!(matches!(
             far.command().await,
+            Some((w, Command::WindowKey { key: true })) if w == window.window()
+        ));
+        assert!(matches!(
+            far.command().await,
             Some((NO_WINDOW, Command::Resync))
         ));
         assert!(far.quiet(Duration::from_millis(100)).await);
@@ -851,11 +875,11 @@ mod tests {
         let mut far = pipes.next().await;
         far.welcome(1).await;
         let mut opened = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..6 {
             opened.push(far.command().await.unwrap());
         }
-        assert!(matches!(opened[2], (NO_WINDOW, Command::Resync)));
-        assert!(matches!(opened[3], (w, Command::RefreshOpenItem { .. }) if w == first.window()));
+        assert!(matches!(opened[4], (NO_WINDOW, Command::Resync)));
+        assert!(matches!(opened[5], (w, Command::RefreshOpenItem { .. }) if w == first.window()));
         second.close_window();
         assert!(matches!(
             far.command().await,
@@ -880,6 +904,10 @@ mod tests {
         ));
         assert!(matches!(
             far.command().await,
+            Some((w, Command::WindowKey { .. })) if w == first.window()
+        ));
+        assert!(matches!(
+            far.command().await,
             Some((NO_WINDOW, Command::Resync))
         ));
         loop {
@@ -894,6 +922,48 @@ mod tests {
             far.command().await,
             Some((_, Command::SetScope { scope_id, .. })) if scope_id > 0
         ));
+    }
+
+    /// A window that loses or gains the keyboard while disconnected is not
+    /// told off for it, and the engine hears where the keyboard is once
+    /// connected again: it takes every window it opens as key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn which_window_is_key_is_kept_through_a_lost_connection() {
+        let (dial, mut pipes) = pipes();
+        let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (first, second) = (backend.open_window(), backend.open_window());
+        let mut far = pipes.next().await;
+        far.welcome(1).await;
+        for _ in 0..5 {
+            far.command().await.unwrap();
+        }
+        drop(far);
+        loop {
+            if let EngineLink::Down { .. } = next_link(&events).await {
+                break;
+            }
+        }
+        // The app goes to the background while the link is down.
+        first.set_window_key(false);
+        second.set_window_key(false);
+        let mut far = pipes.next().await;
+        far.welcome(2).await;
+        let mut sent = Vec::new();
+        for _ in 0..5 {
+            sent.push(far.command().await.unwrap());
+        }
+        for window in [first.window(), second.window()] {
+            assert!(sent
+                .iter()
+                .any(|(w, c)| *w == window && matches!(c, Command::WindowKey { key: false })));
+        }
+        loop {
+            match next_event(&events).await {
+                (_, Event::Link(EngineLink::Up { .. })) => break,
+                (_, Event::Notice(message)) => panic!("told off: {message}"),
+                _ => {}
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1100,10 +1100,13 @@ proxy. A Work run or a question on a machine without `bwrap` and `socat` on
 socat on Linux…". Claude Code on Linux also skips the glob that keeps a Work
 run from making a `.git` inside the worktree, so Perch looks itself: a `.git`
 that appeared below the worktree's top during a Work run, or one there before
-whose `config` or hooks changed, or whose `.git` file now points elsewhere,
-fails the run, with its path named. A submodule `.gitmodules` names, checked
-out by the run, is left alone, and `node_modules`, `target`, `.venv` and
-`venv` are not looked through.
+whose `config`, `config.worktree`, `commondir`, `gitdir` or hooks changed,
+or whose `.git` file now points elsewhere, fails the run, with its path
+named. A submodule `.gitmodules` names, checked out by the run, is left
+alone, and `node_modules`, `target`, `.venv` and `venv` are not looked
+through. The look follows no link and opens nothing but plain files, a link
+or a FIFO counting by what it is, and goes through at most 200,000 folders:
+a run that takes the worktree past that fails too.
 
 ### Approvals
 
@@ -1481,13 +1484,15 @@ toolkit, so it needs no GTK. Releases carry it for Linux as
   0600). It keeps polling, sweeping and running agents with no client
   connected. SIGTERM, SIGINT or SIGHUP stops it as quitting the app does:
   running agents are stopped and recorded Interrupted, the socket is
-  removed and the home let go. A second signal while it stops ends it at
-  once. It logs to stderr, in colour only on a terminal, and to
+  removed and the home let go. A second SIGTERM or SIGINT while it stops
+  ends it at once; another SIGHUP does not, as a dropped ssh session sends
+  two. It logs to stderr, in colour only on a terminal, and to
   `$PERCH_HOME/logs`, never to stdout. With another engine on the home it
   exits 75.
 - The engine never keeps the ssh session's `SSH_AUTH_SOCK`,
-  `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`: it outlives the session, and
-  every agent it starts would get them. git over ssh on the host uses the
+  `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`, whether a bridge started it
+  or it was run by hand in a login: it outlives the session, and every
+  agent it starts would get them. git over ssh on the host uses the
   host's own keys.
 - `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
   until either side closes. It is what `ssh <host> perchd bridge` runs. With
@@ -1602,6 +1607,9 @@ home. What would open a path on the Mac reaches the host instead:
   when its `zed` command or the app is installed, else VS Code, as
   `code --remote ssh-remote+<host> <path>`. When neither can be run, the
   window says so.
+- Only a full path is opened. Open in Terminal refuses a path with a
+  quote, a backslash, a `!` or a control character, since the Mac's login
+  shell reads the line and fish or csh quote differently from sh.
 - Copy Path copies the host's path.
 
 While the host can't be reached, a strip along the foot of every window
@@ -1616,9 +1624,18 @@ starts is not restarted every second. The windows keep what they showed. A
 command sent meanwhile, a click or a comment, is not done and not kept for
 later: the window says "Not connected to <host>, so that wasn't done." What
 a window asked for while the first try was under way is sent if it
-connects, and said not done if it fails. When the connection is back, each
-window catches up on everything (the rows, the inbox, the runs, the
-settings) and opens its item again, or the one it was opening.
+connects, and said not done if it fails. A window losing or gaining the
+keyboard, and a comment's picture, are not refused: the engine hears which
+window has the keyboard once connected, and pictures that never came are
+asked for again. When the connection is back, each window catches up on
+everything (the rows, the inbox, the runs, the settings) and reads its item
+again, or opens the one it was opening. An item showing is read again
+under what shows, so text typed into its composer or review is kept.
+Opening a notification, the Open box, a search result or Start work while
+disconnected, or losing the connection before it answers, puts "The
+connection to <host> was lost before this opened. Try it again." on the
+progress card: it is not done again by itself, since Start work done twice
+makes two branches.
 
 When the app and the engine speak different versions of the wire, the
 engine refuses the app, the strip says which one to update, and Perch stops
@@ -1627,6 +1644,11 @@ trying until you press Reconnect.
 Settings shows the host's config.toml, with the Mac's `[ui]`, `[display]`,
 `[keybindings]` and `[remote]` in place of the host's; the Config file
 group has both files. Keyboard shortcut warnings are about the Mac's file.
+Until the host's engine has sent its settings, the page shows the Mac's
+tables over the defaults, and only the engine, appearance, display and
+shortcuts can be changed, so a host named wrong can be put right. A Mac
+file that stops parsing keeps the Mac's settings read last, with the
+error among the warnings, as the engine does with its own.
 Add repository… would offer the Mac's folders, so with a host it says to add
 the `[[repo]]` to the host's config.toml instead.
 

@@ -15824,7 +15824,10 @@ async fn scan_roots(ctx: &Ctx) -> bool {
 /// switched in the worktree and the old one deleted looks the same from
 /// the worktree list, and its row is put away instead. The old name must
 /// be gone, and its row must have no pull request, whose head is still
-/// the old name on GitHub. Returns whether a row was renamed.
+/// the old name on GitHub. The row must be this worktree's too, or one put
+/// away with its directory gone: the old name gone here says nothing of
+/// another repository's branch of that name, in Perch's clone or another
+/// root. Returns whether a row was renamed.
 async fn follow_rename(
     ctx: &Ctx,
     identity: &str,
@@ -15863,6 +15866,10 @@ async fn follow_rename(
                 return Some(None);
             }
             let c = item.checkout.as_mut()?;
+            let here = c.path.canonicalize().unwrap_or_else(|_| c.path.clone()) == path;
+            if !here && (c.owned || c.on_disk) {
+                return Some(None);
+            }
             c.branch = branch.to_string();
             // A worktree Perch made is the cut's to keep up; only its name
             // follows, so the scan makes no second row for it.
@@ -33001,6 +33008,50 @@ read eof || true
         assert!(row.is_archived());
         let holder = rows.iter().find(|i| i.id == holder.id).unwrap();
         assert_eq!(branch_of(holder), "taken");
+    }
+
+    #[tokio::test]
+    async fn a_rename_in_a_root_leaves_another_repository_s_row_on_the_old_name() {
+        // The branch is checked out in the root and, under the same name,
+        // in Perch's clone, or in another root of the repository, whose
+        // row the root's worktree shares. Renamed in the root, it is gone
+        // there and not in the other: that row keeps its name, and the
+        // root's worktree gets a row of its own.
+        for owned in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("notes");
+            let worktree = root_with_branch(&root, "fix-42").canonicalize().unwrap();
+            let mut entry = rooted(None, &root);
+            entry.resolve(None);
+            let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+            let items = || ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+            let branch_of = |item: &Item| item.checkout.as_ref().unwrap().branch.clone();
+            assert!(scan_roots(&ctx).await);
+            let mut other = items().remove(0);
+            let elsewhere = dir.path().join("elsewhere");
+            std::fs::create_dir(&elsewhere).unwrap();
+            let c = other.checkout.as_mut().unwrap();
+            c.owned = owned;
+            c.path = elsewhere;
+            ctx.with_cache(|c| c.update_item(&other)).unwrap().unwrap();
+
+            git(&worktree, &["branch", "-m", "fix-42-old"]);
+            scan_roots(&ctx).await;
+            let rows = items();
+            // The other row is not renamed. Perch's own stays; one under
+            // a root this scan did not find it in is put away as before.
+            assert!(
+                rows.iter()
+                    .all(|i| i.id != other.id || branch_of(i) == "fix-42"),
+                "owned: {owned}: {rows:?}"
+            );
+            assert_eq!(rows.iter().any(|i| i.id == other.id), owned);
+            let new = rows
+                .iter()
+                .find(|i| branch_of(i) == "fix-42-old")
+                .unwrap_or_else(|| panic!("owned: {owned}: {rows:?}"));
+            assert_ne!(new.id, other.id);
+        }
     }
 
     #[tokio::test]

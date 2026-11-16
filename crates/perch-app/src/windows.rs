@@ -141,7 +141,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
     Scope::new().enter(move || {
         let model = new_state();
         let incoming = RwSignal::new(None::<(WindowId, Event)>);
-        update_signal_from_channel(incoming.write_only(), parse_pictures(events));
+        update_signal_from_channel(incoming.write_only(), events);
         // Folding an event is not a derivation. Untracked, so that a
         // signal this happens to read on the way past cannot subscribe the
         // effect to its own output and have the last event applied twice.
@@ -178,32 +178,12 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             settings_on_open: Cell::new(false),
             engine_settings: RefCell::new(None),
         })));
+        // The page shows this machine's settings until the host's engine
+        // sends its own, which it may never do: a host named wrong.
+        if crate::remote::host().is_some() {
+            client_settings_written();
+        }
     });
-}
-
-/// The engine's events as they came, but with each loaded SVG parsed into
-/// what draws first, on a thread of its own. The engine hands over markup
-/// and the window draws it; parsing it on the main thread would stall the
-/// window for a big file, or for the system's fonts loading the first
-/// time one has text. Events keep their order.
-fn parse_pictures(
-    events: std::sync::mpsc::Receiver<(WindowId, Event)>,
-) -> std::sync::mpsc::Receiver<(WindowId, Event)> {
-    let (parsed, receiver) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("perch-pictures".into())
-        .spawn(move || {
-            for (window, event) in events {
-                if let Event::FileLoaded { file, .. } = &event {
-                    crate::review::picture::Picture::of(file);
-                }
-                if parsed.send((window, event)).is_err() {
-                    return;
-                }
-            }
-        })
-        .expect("spawn picture thread");
-    receiver
 }
 
 /// Back, or forward, in the window that last had the keyboard.
@@ -240,12 +220,19 @@ fn deliver(window: WindowId, mut event: Event) {
     if let Event::Settings(file) = &mut event {
         if crate::remote::host().is_some() {
             app.engine_settings.replace(Some(file.clone()));
-            *file =
-                crate::client_settings::merge(file.clone(), &crate::client_settings::Local::read());
+            *file = crate::client_settings::merge(
+                file.clone(),
+                &crate::client_settings::Local::read_kept(),
+            );
         }
     }
+    deliver_as_is(&app, window, event);
+}
+
+/// Hand `event` to the windows as it is.
+fn deliver_as_is(app: &App, window: WindowId, event: Event) {
     if let Event::Link(link) = &event {
-        linked(&app, link);
+        linked(app, link);
     }
     // `[ui] appearance` and `[keybindings]` are the whole app's, so they
     // are taken up once here rather than by each window's state.
@@ -280,12 +267,33 @@ pub fn notice(text: String) {
 }
 
 /// The client's own settings were written to this machine's file: every
-/// window is shown the engine's Settings with them put in again.
+/// window is shown the engine's Settings with them put in again. Before
+/// the engine on a host has sent its own, this machine's alone, so the
+/// host can be put right when it cannot be reached.
 pub fn client_settings_written() {
-    let Some(engine) = app().and_then(|app| app.engine_settings.borrow().clone()) else {
+    let Some(app) = app() else {
         return;
     };
-    deliver(crate::backend::NO_WINDOW, Event::Settings(engine));
+    let engine = app.engine_settings.borrow().clone();
+    match engine {
+        Some(engine) => deliver(crate::backend::NO_WINDOW, Event::Settings(engine)),
+        None => {
+            let Some(path) = perch_github::config::config_path() else {
+                return;
+            };
+            let local = crate::client_settings::Local::read_kept();
+            let file = crate::client_settings::alone(path, &local);
+            deliver_as_is(&app, crate::backend::NO_WINDOW, Event::Settings(file));
+        }
+    }
+}
+
+/// Whether the engine's settings are known: always in process, and with
+/// the engine on a host once it has sent them. Until then only the
+/// client's own can be changed.
+pub fn engine_settings_heard() -> bool {
+    crate::remote::host().is_none()
+        || app().is_none_or(|app| app.engine_settings.borrow().is_some())
 }
 
 /// How often this machine's config.toml is looked at for edits made
@@ -312,7 +320,12 @@ fn watch_client_file(seen: Option<(Option<std::time::SystemTime>, u64)>) {
 /// windows had open, or never heard them ask. The engine has been told of
 /// the windows and asked for everything by then.
 fn linked(app: &App, link: &crate::backend::EngineLink) {
-    let crate::backend::EngineLink::Up { welcome, again, .. } = link else {
+    let crate::backend::EngineLink::Up {
+        host,
+        welcome,
+        again,
+    } = link
+    else {
         return;
     };
     crate::remote::connected(welcome);
@@ -320,22 +333,29 @@ fn linked(app: &App, link: &crate::backend::EngineLink) {
         return;
     }
     for window in app.windows.borrow().iter() {
-        reopen_item(window.state, window.review, &window.backend);
+        reopen_item(window.state, window.review, &window.backend, host);
     }
+    crate::review::images::ask_again();
 }
 
-/// Open again the item a window had open, or was opening, as a click on
-/// its row would. One being opened is the window's latest ask, and the
-/// one its progress card waits for.
-pub(crate) fn reopen_item(state: AppState, review: ReviewState, backend: &Backend) {
-    let Some(item_id) = state.open_item.get_untracked().or_else(|| {
-        review
-            .item
-            .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
-    }) else {
+/// Open again the item a window had open, or was opening. One showing is
+/// read again under what shows, as an answer lands on an item opened
+/// again while it shows, so nothing typed into it goes. One being opened
+/// is the window's latest ask, and the one its progress card waits for.
+/// Any other act the card waits for is said lost.
+pub(crate) fn reopen_item(state: AppState, review: ReviewState, backend: &Backend, host: &str) {
+    let showing = review
+        .item
+        .with_untracked(|item| item.as_ref().map(|item| item.id.clone()));
+    let Some(item_id) = state.open_item.get_untracked().or_else(|| showing.clone()) else {
+        state.drop_lost_open(host);
         return;
     };
     let navigation_id = backend.open_item(&item_id);
+    if showing.as_deref() == Some(item_id.as_str()) {
+        state.expect_item_navigation(&item_id, navigation_id);
+        return;
+    }
     state.begin_item_review(
         review,
         "Reconnected; reading the item again",
@@ -1009,13 +1029,16 @@ mod tests {
         let review = ReviewState::new();
         let (backend, mut commands) = Backend::recording();
         // A window with nothing open asks for nothing.
-        reopen_item(state, review, &backend);
+        reopen_item(state, review, &backend, "halo");
         assert!(commands.try_recv().is_err());
 
         let mut item = perch_github::Item::new("a/b", "2026-09-18T09:59:00Z".parse().unwrap());
         item.id = "pr".into();
         review.item.set(Some(std::sync::Arc::new(item)));
-        reopen_item(state, review, &backend);
+        // What the reader was typing into it stays.
+        review.composer_draft.set("half a comment".into());
+        review.submit_review_draft.set("half a summary".into());
+        reopen_item(state, review, &backend, "halo");
         match commands.try_recv() {
             Ok(crate::backend::Command::OpenItem { id, navigation_id }) => {
                 assert_eq!(id, "pr");
@@ -1023,11 +1046,14 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        assert_eq!(review.composer_draft.get_untracked(), "half a comment");
+        assert_eq!(review.submit_review_draft.get_untracked(), "half a summary");
+        assert!(review.is_item("pr"));
 
         // A window still opening another item, whose ask was lost with the
         // connection, opens that one: its card waits for it.
         state.begin_item_review(review, "Opening", "branch", 1);
-        reopen_item(state, review, &backend);
+        reopen_item(state, review, &backend, "halo");
         match commands.try_recv() {
             Ok(crate::backend::Command::OpenItem { id, navigation_id }) => {
                 assert_eq!(id, "branch");
@@ -1035,5 +1061,46 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// An act that ends in an item opening, a notification read or Start
+    /// work, whose answer went with the connection, is not done again;
+    /// its card says so rather than waiting for good.
+    #[test]
+    fn a_window_waiting_on_a_lost_open_is_told() {
+        use crate::review::model::Preparing;
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+        state.begin_open("Reading the notification", 7);
+        reopen_item(state, review, &backend, "halo");
+        assert!(commands.try_recv().is_err());
+        assert!(matches!(
+            review.preparing.get_untracked(),
+            Preparing::Failed { message } if message.contains("halo")
+        ));
+
+        // The link dropping says so at once.
+        state.begin_open("Cutting a branch", 8);
+        state.apply(crate::backend::Event::Link(
+            crate::backend::EngineLink::Down {
+                host: "halo".into(),
+                why: "gone".into(),
+                retry_in: None,
+                ever: true,
+            },
+        ));
+        assert!(matches!(
+            review.preparing.get_untracked(),
+            Preparing::Failed { .. }
+        ));
+
+        // Begun while down, its ask was refused.
+        state.begin_open("Reading the issue", 9);
+        assert!(matches!(
+            review.preparing.get_untracked(),
+            Preparing::Failed { .. }
+        ));
     }
 }

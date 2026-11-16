@@ -299,7 +299,7 @@ fn prepare(app: AppState, review: ReviewState, backend: &Backend) {
     draft.caught_on_send = 0;
     draft.offer = None;
     let choice = diagnosis_choice(app, review);
-    let request = PrepareRequest {
+    let mut request = PrepareRequest {
         attempt: draft.attempt,
         kind: draft.kind,
         title: draft.title.trim().to_string(),
@@ -315,8 +315,45 @@ fn prepare(app: AppState, review: ReviewState, backend: &Backend) {
         choice,
         facts: window_facts(app, review),
     };
+    if let Some(host) = crate::remote::host() {
+        let user = std::env::var("USER").ok().filter(|u| !u.is_empty());
+        redact_here(&mut request, &perch_github::config::home_dir(), user, &host);
+    }
     app.feedback.set(Some(draft));
     backend.prepare_feedback(request);
+}
+
+/// Take this machine's home, login name and the host's name out of what
+/// the window adds to a report, before it goes to an engine on a host:
+/// that engine redacts with its own home and login, and would leave a
+/// path here, such as this machine's config.toml in a problem, as it is.
+fn redact_here(
+    request: &mut PrepareRequest,
+    home: &std::path::Path,
+    user: Option<String>,
+    host: &str,
+) {
+    let secrets = crate::feedback::Secrets {
+        exact: vec![host.to_string()],
+        home: Some(home.display().to_string()),
+        user,
+        repos: Vec::new(),
+        repo_paths: Vec::new(),
+    };
+    let clean = |text: &mut String| *text = crate::feedback::redact(text, &secrets).0;
+    for problem in request.problems.iter_mut().chain(request.seed.as_mut()) {
+        clean(&mut problem.text);
+    }
+    clean(&mut request.body);
+    let facts = &mut request.facts;
+    for line in facts
+        .display
+        .iter_mut()
+        .chain(facts.language_server.as_mut())
+        .chain(facts.last_poll.as_mut())
+    {
+        clean(line);
+    }
 }
 
 fn window_facts(app: AppState, review: ReviewState) -> WindowFacts {
@@ -1371,6 +1408,44 @@ mod tests {
     use crate::backend::Command;
     use crate::feedback::{Notes, Prepared, SendError, Sent, Subscription};
     use crate::review::header::tests::{named, pull_request_harness, rect};
+
+    /// With the engine on a host, this machine's paths and login name go
+    /// out of the window's part of a report before the engine sees it.
+    #[test]
+    fn this_machine_s_home_and_login_are_redacted_before_a_host_sees_them() {
+        let problem = |text: &str| Problem {
+            at: Timestamp::now(),
+            text: text.to_string(),
+            tone: Tone::Error,
+        };
+        let mut request = PrepareRequest {
+            attempt: 1,
+            kind: FeedbackKind::Bug,
+            title: "t".into(),
+            body: "It broke under /Users/macuser/Code.".into(),
+            diagnose: false,
+            seed: Some(problem("ssh chris@halo-box.example failed")),
+            problems: vec![problem(
+                "Couldn't write /Users/macuser/.perch/config.toml: denied",
+            )],
+            item_id: None,
+            choice: None,
+            facts: WindowFacts::default(),
+        };
+        redact_here(
+            &mut request,
+            std::path::Path::new("/Users/macuser"),
+            Some("macuser".into()),
+            "chris@halo-box.example",
+        );
+        assert_eq!(
+            request.problems[0].text,
+            "Couldn't write ~/.perch/config.toml: denied"
+        );
+        assert_eq!(request.body, "It broke under ~/Code.");
+        let seed = request.seed.unwrap().text;
+        assert!(!seed.contains("halo-box"), "{seed}");
+    }
 
     fn settle(harness: &mut HeadlessHarness) {
         for _ in 0..2 {

@@ -3650,7 +3650,14 @@ impl AppState {
             | Event::LspReferences { .. } => {}
             // Reopening each window's item when connected again is the
             // window list's, which holds the handles.
-            Event::Link(link) => self.link.set(Some(link)),
+            Event::Link(link) => {
+                // What a progress card waited for went with the
+                // connection: the engine answers on the one it was asked on.
+                if let crate::backend::EngineLink::Down { host, .. } = &link {
+                    self.drop_lost_open(host);
+                }
+                self.link.set(Some(link));
+            }
             Event::Status(status) => {
                 // Polls are quiet once one has gone through.
                 if status == Status::Refreshing
@@ -3729,6 +3736,47 @@ impl AppState {
         self.new_work.open.set(false);
         if let Some(review) = self.review.get_untracked() {
             review.begin(message);
+        }
+        // With no connection to the engine's host, the ask was refused.
+        let down = self.link.with_untracked(|link| match link {
+            Some(crate::backend::EngineLink::Down { host, .. }) => Some(host.clone()),
+            _ => None,
+        });
+        if let Some(host) = down {
+            self.drop_lost_open(&host);
+        }
+    }
+
+    /// Say on the progress card that what it waited for is lost, when it
+    /// waits for an act begun with [`Self::begin_open`]: the connection to
+    /// the engine on `host` went before the answer came. An item being
+    /// opened is opened again once connected; what these began, Start
+    /// work say, is not, since doing it twice is not the same as once.
+    pub fn drop_lost_open(&self, host: &str) {
+        let Some(review) = self.review.get_untracked() else {
+            return;
+        };
+        let Some(navigation_id) = self.expected_navigation_id.get_untracked() else {
+            return;
+        };
+        let waiting = self.open_item.with_untracked(Option::is_none)
+            && self
+                .open_expectation
+                .with_untracked(|expected| *expected == OpenExpectation::Any)
+            && review.item.with_untracked(Option::is_none)
+            && review.preparing.with_untracked(|preparing| {
+                matches!(preparing, crate::review::model::Preparing::Working { .. })
+            });
+        if waiting {
+            self.apply_with_review(
+                Event::ReviewFailed {
+                    navigation_id,
+                    message: format!(
+                        "The connection to {host} was lost before this opened. Try it again."
+                    ),
+                },
+                review,
+            );
         }
     }
 

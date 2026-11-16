@@ -49,10 +49,31 @@ pub struct Drawing {
 }
 
 /// The pictures parsed from loaded files' markup, by the markup they came
-/// from. Shared between threads: a file is parsed off the main thread on
-/// its way in, and the window finds it here. An entry goes once its file
-/// is let go.
+/// from. Shared between threads: a big file is parsed off the main thread,
+/// and the window finds it here. An entry goes once its file is let go.
 static PARSED: Mutex<Vec<(Weak<PictureSource>, Picture)>> = Mutex::new(Vec::new());
+
+/// The markup being parsed off the main thread, so each is parsed once.
+static PARSING: Mutex<Vec<Weak<PictureSource>>> = Mutex::new(Vec::new());
+
+/// The most markup, both sides together, parsed where the pane wants it:
+/// that takes well under a frame. More, or text while the system's fonts
+/// are still to be loaded, is parsed on a thread of its own.
+const PARSED_IN_PLACE: usize = 32 * 1024;
+
+thread_local! {
+    /// Moved on the main thread each time a parse made off it lands.
+    static LANDED: (floem::reactive::Scope, RwSignal<u64>) = {
+        let scope = floem::reactive::Scope::new();
+        (scope, scope.enter(|| RwSignal::new(0)))
+    };
+}
+
+/// How many parses made off the main thread have landed, tracked: what
+/// waits on one reads this to hear it land.
+pub fn landed() -> u64 {
+    LANDED.with(|(_, landed)| landed.get())
+}
 
 fn parsed() -> MutexGuard<'static, Vec<(Weak<PictureSource>, Picture)>> {
     PARSED.lock().unwrap_or_else(PoisonError::into_inner)
@@ -83,19 +104,64 @@ impl Picture {
         })
     }
 
+    /// The picture `file` draws as, for the main thread: `Some` with it,
+    /// or `Some(None)` for a file that does not draw, once it can be had
+    /// without holding up the window; `None` while it is parsed on a
+    /// thread of its own, which [`landed`] says the end of.
+    pub fn when_parsed(file: &LoadedFile) -> Option<Option<Picture>> {
+        let Some(source) = file.picture.as_ref() else {
+            return Some(None);
+        };
+        if !is_svg(&file.path) {
+            return Some(None);
+        }
+        if let Some(picture) = kept(source) {
+            return Some(Some(picture));
+        }
+        let sides = [source.head.as_deref(), source.base.as_deref()];
+        let size: usize = sides.iter().flatten().map(|side| side.len()).sum();
+        let text = sides.iter().flatten().any(|side| side.contains("<text"));
+        if size <= PARSED_IN_PLACE && (!text || fonts_loaded()) {
+            return Some(Picture::of(file));
+        }
+        let mut parsing = PARSING.lock().unwrap_or_else(PoisonError::into_inner);
+        parsing.retain(|kept| kept.strong_count() > 0);
+        if !parsing
+            .iter()
+            .any(|kept| std::ptr::eq(kept.as_ptr(), Arc::as_ptr(source)))
+        {
+            parsing.push(Arc::downgrade(source));
+            let landed = LANDED.with(|(scope, landed)| {
+                let landed = *landed;
+                floem::ext_event::create_ext_action(*scope, move |()| landed.update(|n| *n += 1))
+            });
+            let (path, source) = (file.path.clone(), source.clone());
+            std::thread::spawn(move || {
+                Picture::of_source(&path, &source);
+                PARSING
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|kept| !std::ptr::eq(kept.as_ptr(), Arc::as_ptr(&source)));
+                landed(());
+            });
+        }
+        None
+    }
+
     /// The picture `file` draws as, parsed from the markup it loaded
     /// with. A file's sides are parsed once while it stays loaded, not on
-    /// every build of the pane or read of the strip's tile. The engine's
-    /// events call this off the main thread as a file arrives (see
-    /// `windows::parse_pictures`), so the window finds it parsed.
+    /// every build of the pane or read of the strip's tile.
     pub fn of(file: &LoadedFile) -> Option<Picture> {
-        let source = file.picture.as_ref()?;
+        Picture::of_source(&file.path, file.picture.as_ref()?)
+    }
+
+    fn of_source(path: &str, source: &Arc<PictureSource>) -> Option<Picture> {
         if let Some(picture) = kept(source) {
             return Some(picture);
         }
         // Parsed without the lock, so the window is never held up behind
         // a parse on another thread.
-        let picture = Picture::parse(&file.path, source.head.as_deref(), source.base.as_deref())?;
+        let picture = Picture::parse(path, source.head.as_deref(), source.base.as_deref())?;
         let mut parsed = parsed();
         if let Some((_, first)) = parsed
             .iter()
@@ -158,9 +224,15 @@ fn options(markup: &str) -> usvg::Options<'static> {
     options
 }
 
+static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
+
+/// Whether the system's fonts have been loaded, which takes a moment.
+fn fonts_loaded() -> bool {
+    FONTS.get().is_some()
+}
+
 /// The system's fonts, loaded on the first call and kept.
 fn fonts() -> Arc<fontdb::Database> {
-    static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
     FONTS
         .get_or_init(|| {
             let mut fonts = fontdb::Database::new();
@@ -642,6 +714,40 @@ mod tests {
                 .any(|(kept, _)| std::ptr::eq(kept.as_ptr(), source.as_ptr())),
             "a file let go keeps its picture"
         );
+    }
+
+    /// A big file is parsed on a thread of its own, once, and the pane
+    /// waits for it rather than the window; a small one is parsed where
+    /// it is wanted.
+    #[test]
+    fn a_big_picture_is_parsed_off_the_main_thread() {
+        let _root = floem::headless::TestRoot::new();
+        let loaded = |path: &str, head: String| {
+            Arc::new(crate::backend::build_loaded_file(
+                path.into(),
+                head,
+                String::new(),
+                Some(ChangeStatus::Added),
+                false,
+                perch_git::Scope::Branch,
+                String::new(),
+            ))
+        };
+        let small = loaded("small.svg", CIRCLE.into());
+        assert!(matches!(Picture::when_parsed(&small), Some(Some(_))));
+        let padding = format!("<!-- {} --><circle", "x".repeat(PARSED_IN_PLACE));
+        let big = loaded("big.svg", CIRCLE.replace("<circle", &padding));
+        assert!(Picture::when_parsed(&big).is_none());
+        let source = big.picture.clone().unwrap();
+        for _ in 0..500 {
+            if kept(&source).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(Picture::when_parsed(&big), Some(Some(_))));
+        let plain = loaded("notes.txt", "hi".into());
+        assert!(matches!(Picture::when_parsed(&plain), Some(None)));
     }
 
     #[test]

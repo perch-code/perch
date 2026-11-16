@@ -92,7 +92,15 @@ pub(super) fn found(page: &Page, backend: AgentBackend) -> String {
         }
         let (binary, version, _) = parts(agent, backend);
         let path = Path::new(binary);
-        if path.is_absolute() && (binary != typed || path.is_file()) {
+        // A full path typed is kept as it is, found or not. Whether it is
+        // there is the engine's machine's to say: with the engine on a
+        // host, by the version it got from running it.
+        let there = if crate::remote::host().is_some() {
+            version.is_some()
+        } else {
+            path.is_file()
+        };
+        if path.is_absolute() && (binary != typed || there) {
             match version {
                 Some(version) => format!("Found {}, {version}.", controls::tilde(path)),
                 None => format!("Found {}.", controls::tilde(path)),
@@ -382,10 +390,7 @@ mod tests {
     #[test]
     fn the_agents_say_what_was_found_and_offer_what_was_found() {
         let (mut harness, state, mut commands) = window(1400.0, 1400.0, FILE);
-        let page = Page {
-            state,
-            backend: std::rc::Rc::new(crate::backend::Backend::detached()),
-        };
+        let page = Page::new(state, std::rc::Rc::new(crate::backend::Backend::detached()));
         assert_eq!(found(&page, AgentBackend::Claude), "Looking for it…");
 
         state.agent.set(discovered());
@@ -414,6 +419,25 @@ mod tests {
             "Not found as /opt/perch-test/codex. Give its full path if it isn't on PATH."
         );
         assert!(found(&page, AgentBackend::Gemini).starts_with("Not found as agy."));
+        // With the engine on a host, a full path is the host's: whether it
+        // is there is what the engine got from running it, not this Mac's
+        // files.
+        crate::remote::set_place(crate::remote::Place::Host {
+            host: "halo".into(),
+            home: std::path::PathBuf::new(),
+            data_root: std::path::PathBuf::new(),
+        });
+        state
+            .agent
+            .update(|agent| agent.codex.binary_version = Some("codex 9".into()));
+        assert_eq!(
+            found(&page, AgentBackend::Codex),
+            "Found /opt/perch-test/codex, codex 9."
+        );
+        state
+            .agent
+            .update(|agent| agent.codex.binary_version = None);
+        crate::remote::set_place(crate::remote::Place::ThisMac);
 
         // The file's choices, with resets where it makes them.
         assert!(shown(&harness, "settings-reset:agent-model"));
@@ -473,10 +497,7 @@ mod tests {
     fn a_model_nothing_offers_is_kept_in_the_menu() {
         let (_harness, state, _commands) = window(800.0, 600.0, "[agent]\nmodel = \"mystery\"\n");
         state.agent.set(discovered());
-        let page = Page {
-            state,
-            backend: std::rc::Rc::new(crate::backend::Backend::detached()),
-        };
+        let page = Page::new(state, std::rc::Rc::new(crate::backend::Backend::detached()));
         let outline = model_menu(&page).outline();
         assert_eq!(outline.last().map(String::as_str), Some("✓ (Mystery)"));
         assert!(outline.iter().any(|row| row.contains("Sol 6.1")));

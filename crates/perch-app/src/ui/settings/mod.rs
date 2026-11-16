@@ -200,6 +200,9 @@ impl Section {
 pub(crate) struct Page {
     pub state: AppState,
     pub backend: Rc<Backend>,
+    /// Whether the rows are the client's own settings, which this machine's
+    /// file holds whatever the engine.
+    client: bool,
 }
 
 thread_local! {
@@ -209,6 +212,23 @@ thread_local! {
 }
 
 impl Page {
+    pub(crate) fn new(state: AppState, backend: Rc<Backend>) -> Self {
+        Page {
+            state,
+            backend,
+            client: false,
+        }
+    }
+
+    /// The page for rows of the client's own settings: with the engine on
+    /// a host they can be changed before it has sent its own.
+    pub(crate) fn here(&self) -> Self {
+        Page {
+            client: true,
+            ..self.clone()
+        }
+    }
+
     /// Read the file's settings, tracked. Before the backend has said,
     /// the defaults.
     pub(crate) fn with_config<T>(&self, read: impl FnOnce(&Config) -> T) -> T {
@@ -223,12 +243,15 @@ impl Page {
     }
 
     /// Whether the controls can change anything: the file has been read,
-    /// and it parses.
+    /// and it parses. With the engine on a host, only the client's own
+    /// until the engine has sent its settings: the rest show defaults
+    /// until then, not what the host's file holds.
     pub(crate) fn writable(&self) -> bool {
-        self.state.settings_file.with(|file| {
+        let read = self.state.settings_file.with(|file| {
             file.as_ref()
                 .is_some_and(|file| file.error.is_none() && file.config.is_some())
-        })
+        });
+        read && (self.client || crate::windows::engine_settings_heard())
     }
 
     /// Whether the file sets `key`, in the dotted form `present_keys`
@@ -536,11 +559,7 @@ pub fn overlay(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         move || shown.get(),
         move |open| {
             if open {
-                page_view(Page {
-                    state,
-                    backend: backend.clone(),
-                })
-                .into_any()
+                page_view(Page::new(state, backend.clone())).into_any()
             } else {
                 Empty::new().into_any()
             }
@@ -1523,10 +1542,7 @@ mod tests {
         assert!(shown(&harness, "settings-row:zoom"));
         assert!(!shown(&harness, "settings-row:poll-interval"));
         assert!(shown(&harness, "settings-group:Appearance"));
-        let page = Page {
-            state,
-            backend: Rc::new(Backend::detached()),
-        };
+        let page = Page::new(state, Rc::new(Backend::detached()));
         let sections: Vec<Section> = found(&page, &words("zoom"))
             .into_iter()
             .map(|(section, _)| section)
@@ -1591,10 +1607,7 @@ mod tests {
     fn a_switch_writes_as_it_flips() {
         let state = AppState::new();
         let (backend, mut commands) = Backend::recording();
-        let page = Page {
-            state,
-            backend: Rc::new(backend),
-        };
+        let page = Page::new(state, Rc::new(backend));
         let on = RwSignal::new(false);
         let root = TestRoot::new();
         let switch = controls::toggle(

@@ -105,6 +105,30 @@ pub fn root_path(repo: &perch_github::RepoConfig) -> Option<PathBuf> {
     })
 }
 
+/// Why `path`, from the engine on a host, is not one to open there, or
+/// None when it is. It has to be absolute, so no editor reads it as an
+/// option. For a terminal it is quoted for the host's shell and then
+/// again for this one's, which is the reader's login shell and need not
+/// be a POSIX one: fish reads a backslash in single quotes, and csh a `!`,
+/// so a path with a quote, a backslash, a `!` or a control character could
+/// end the quoting and run the rest here.
+pub fn bad_path(path: &Path, for_terminal: bool) -> Option<String> {
+    let text = path.to_string_lossy();
+    if !text.starts_with('/') {
+        return Some(format!("{text} on the host is not a full path."));
+    }
+    if for_terminal
+        && text
+            .chars()
+            .any(|c| matches!(c, '\'' | '\\' | '!') || c.is_control())
+    {
+        return Some(format!(
+            "Perch can't open a terminal at {text} on the host: its name has a quote, a backslash, a ! or a control character."
+        ));
+    }
+    None
+}
+
 /// The line Terminal runs to open a shell in `path` on `host`: ssh with a
 /// terminal, a `cd` there, and the reader's login shell. The path is quoted
 /// for the host's shell, and the whole of what ssh runs there for this
@@ -191,7 +215,7 @@ fn zed() -> Option<PathBuf> {
 /// `$TERMINAL` or the first terminal found. What stops it is said in the
 /// windows.
 pub fn open_terminal_on(host: &str, path: &Path) {
-    if let Some(why) = bad_host(host) {
+    if let Some(why) = bad_host(host).or_else(|| bad_path(path, true)) {
         crate::windows::notice(why);
         return;
     }
@@ -237,7 +261,7 @@ pub fn open_terminal_on(host: &str, path: &Path) {
 /// said in the windows: an app opened from the Finder has a bare `PATH`,
 /// where `code` may not be.
 pub fn open_editor_on(host: &str, path: &Path) {
-    if let Some(why) = bad_host(host) {
+    if let Some(why) = bad_host(host).or_else(|| bad_path(path, false)) {
         crate::windows::notice(why);
         return;
     }
@@ -267,12 +291,12 @@ mod tests {
             terminal_line("halo", Path::new("/srv/code/perch")),
             "ssh -t -- halo 'cd -- /srv/code/perch && exec $SHELL -l'"
         );
-        // A path with a space and a quote is one word in the host's shell,
-        // and the whole is one word in this one's.
-        let line = terminal_line("chris@halo", Path::new("/srv/it's here"));
+        // A path with a space is one word in the host's shell, and the
+        // whole is one word in this one's.
+        let line = terminal_line("chris@halo", Path::new("/srv/it is here"));
         assert_eq!(
             line,
-            r#"ssh -t -- chris@halo 'cd -- '\''/srv/it'\''\'\'''\''s here'\'' && exec $SHELL -l'"#
+            r#"ssh -t -- chris@halo 'cd -- '\''/srv/it is here'\'' && exec $SHELL -l'"#
         );
         // What Terminal is told is AppleScript: its quotes and backslashes
         // escaped.
@@ -281,6 +305,21 @@ mod tests {
         assert_eq!(script[1], "tell application \"Terminal\"");
         assert_eq!(script[5], r#"do script "ssh -t h 'cd \"a\\b\"'""#);
         assert_eq!(script.len(), 8);
+    }
+
+    /// Only an absolute path is opened, and a terminal only at one whose
+    /// quoting every shell reads alike: no quote, backslash, `!` or
+    /// control character, so no backslash ever lands inside single quotes.
+    #[test]
+    fn a_host_path_that_could_be_an_option_or_end_the_quoting_is_refused() {
+        assert_eq!(bad_path(Path::new("/srv/it is here"), true), None);
+        assert_eq!(bad_path(Path::new("/srv/$HOME;x&&y"), true), None);
+        assert!(bad_path(Path::new("--install-extension=x"), false).is_some());
+        assert!(bad_path(Path::new("srv/x"), true).is_some());
+        for path in ["/srv/it's", r"/x\';touch p;#", "/srv/a!b", "/srv/a\nb"] {
+            assert!(bad_path(Path::new(path), true).is_some(), "{path}");
+            assert_eq!(bad_path(Path::new(path), false), None, "{path}");
+        }
     }
 
     #[test]

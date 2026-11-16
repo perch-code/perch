@@ -592,10 +592,7 @@ mod tests {
         resolved.config = Some(std::sync::Arc::new(config));
         state.settings_file.set(Some(resolved));
 
-        let page = Page {
-            state,
-            backend: Rc::new(Backend::detached()),
-        };
+        let page = Page::new(state, Rc::new(Backend::detached()));
         let cards = groups(&page);
         assert_eq!(
             cards[0].subtitle.as_deref(),

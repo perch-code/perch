@@ -157,6 +157,28 @@ pub fn want(src: &str) {
     }
 }
 
+/// Ask again for every picture asked for and not yet come: with the
+/// engine on a host, one asked for while the connection was down was
+/// refused, and one being downloaded as it dropped never arrives. Each is
+/// asked for once in [`want`], so the views showing them would not.
+pub fn ask_again() {
+    let waiting: Vec<String> = STORE.with(|store| {
+        let decoding = store.decoding.borrow();
+        store.pictures.with_untracked(|pictures| {
+            store
+                .asked
+                .borrow()
+                .iter()
+                .filter(|url| !pictures.contains_key(*url) && !decoding.contains(*url))
+                .cloned()
+                .collect()
+        })
+    });
+    for url in waiting {
+        ask(&url);
+    }
+}
+
 fn ask(src: &str) {
     #[cfg(test)]
     ASKED.with(|asked| asked.borrow_mut().push(src.to_string()));
@@ -409,6 +431,24 @@ pub(crate) mod tests {
             })
         });
         assert!(Arc::ptr_eq(&seen.get_untracked().unwrap(), &decoded));
+    }
+
+    /// Connected again, what was asked for and never came is asked for
+    /// again; what came is not.
+    #[test]
+    fn a_picture_that_never_came_is_asked_for_again_once_reconnected() {
+        let _root = floem::headless::TestRoot::new();
+        asked();
+        let (lost, came) = ("https://x/lost.png", "https://x/came.png");
+        want(lost);
+        want(came);
+        arrived(
+            came.to_string(),
+            Some(Arc::new(decode(&png(4, 4), came).unwrap())),
+        );
+        asked();
+        ask_again();
+        assert_eq!(asked(), vec![lost.to_string()]);
     }
 
     #[test]

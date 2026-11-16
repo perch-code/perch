@@ -6,6 +6,7 @@
 //! Settings page shows the engine's file with the client's tables put in
 //! from this one.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use perch_github::{is_client_key, Config, Setting};
@@ -52,6 +53,29 @@ impl Local {
         Self::of(text)
     }
 
+    /// Read this machine's file, keeping the client's settings it last
+    /// read whole when it does not parse now, as the engine keeps its own:
+    /// a typo saved mid-edit does not put the appearance and keys back to
+    /// the defaults, nor this machine back as the engine.
+    pub fn read_kept() -> Self {
+        Self::kept(Self::read())
+    }
+
+    fn kept(read: Self) -> Self {
+        LAST_WHOLE.with_borrow_mut(|last| match (&read.error, last.as_ref()) {
+            (None, _) => {
+                *last = Some(read.clone());
+                read
+            }
+            (Some(_), Some(whole)) => Local {
+                text: whole.text.clone(),
+                config: whole.config.clone(),
+                error: read.error,
+            },
+            (Some(_), None) => read,
+        })
+    }
+
     pub fn of(text: String) -> Self {
         match Config::parse_text(&text) {
             Ok(mut config) => {
@@ -72,6 +96,30 @@ impl Local {
             },
         }
     }
+}
+
+thread_local! {
+    /// This machine's file as last read whole.
+    static LAST_WHOLE: RefCell<Option<Local>> = const { RefCell::new(None) };
+}
+
+/// The Settings to show before the engine on a host has sent its own:
+/// this machine's tables over the defaults, at this machine's `path`, so
+/// the page shows the host it is trying and can change it. Unreadable
+/// when this machine's file is.
+pub fn alone(path: std::path::PathBuf, local: &Local) -> SettingsFile {
+    let mut file = merge(
+        SettingsFile {
+            path,
+            config: Some(Arc::new(Config::parse_text("").unwrap_or_default())),
+            error: None,
+            present: Default::default(),
+            warnings: Vec::new(),
+        },
+        local,
+    );
+    file.error = local.error.clone();
+    file
 }
 
 /// The engine's Settings with the client's tables, the keys of them the
@@ -125,6 +173,30 @@ pub fn write_here(changes: &[Setting]) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// A file that stops parsing keeps the client's settings it had, and
+    /// says what is wrong.
+    #[test]
+    fn a_broken_file_here_keeps_the_client_s_settings_read_last() {
+        let whole = Local::kept(Local::of(
+            "[remote]\nhost = \"halo\"\n[ui]\nappearance = \"dark\"\n".to_string(),
+        ));
+        assert_eq!(whole.config.remote.host(), Some("halo"));
+        let broken = Local::kept(Local::of("[remote\nhost = ".to_string()));
+        assert!(broken.error.is_some());
+        assert_eq!(broken.config.remote.host(), Some("halo"));
+        assert_eq!(
+            broken.config.ui.appearance,
+            perch_github::config::Appearance::Dark
+        );
+
+        // Before the engine has said, the page has this machine's tables.
+        let file = alone("/Users/chris/.perch/config.toml".into(), &whole);
+        assert_eq!(file.config.unwrap().remote.host(), Some("halo"));
+        assert!(file.error.is_none());
+        assert!(file.present.contains("remote.host"));
+        assert!(alone("/x".into(), &broken).error.is_some());
+    }
 
     #[test]
     fn with_the_engine_on_a_host_the_client_s_settings_stay_here() {

@@ -40,6 +40,7 @@ fn keymap(page: &Page) -> Rc<Keymap> {
 }
 
 pub(super) fn groups(page: &Page) -> Vec<Group> {
+    let page = &page.here();
     keymap::Group::ALL
         .into_iter()
         .map(|group| {
@@ -512,10 +513,7 @@ mod tests {
             900.0,
             "[keybindings]\npin = \"super+w\"\nbold = \"super+w\"\nnew_work = []\n",
         );
-        let page = Page {
-            state,
-            backend: Rc::new(crate::backend::Backend::detached()),
-        };
+        let page = Page::new(state, Rc::new(crate::backend::Backend::detached()));
         let keymap = keymap(&page);
         assert!(keymap.keys(Action::NewWork).is_empty());
         assert_eq!(
@@ -539,10 +537,7 @@ mod tests {
     #[test]
     fn search_finds_shortcuts() {
         let (mut harness, state, _commands) = window(1400.0, 900.0, "");
-        let page = Page {
-            state,
-            backend: Rc::new(crate::backend::Backend::detached()),
-        };
+        let page = Page::new(state, Rc::new(crate::backend::Backend::detached()));
         let rows = |query: &str| -> Vec<String> {
             found(&page, &words(query))
                 .into_iter()
@@ -599,10 +594,7 @@ mod tests {
             900.0,
             "[keybindings]\npin = [\"alt+super+h\", \"super+q\"]\n",
         );
-        let page = Page {
-            state,
-            backend: Rc::new(crate::backend::Backend::detached()),
-        };
+        let page = Page::new(state, Rc::new(crate::backend::Backend::detached()));
         assert_eq!(
             (row(&page, Action::Pin).description)(),
             format!(

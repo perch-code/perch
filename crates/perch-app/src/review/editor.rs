@@ -143,6 +143,19 @@ pub fn editor_pane(
     find::wire(state);
 
     let code_backend = backend.clone();
+    // Whether the open file is a picture still being parsed off the main
+    // thread. A Memo, so only the one it waits for landing builds the pane
+    // again, not every picture parsed.
+    let drawing = Memo::new(move |_| {
+        picture::landed();
+        let Some(path) = state.active.get() else {
+            return false;
+        };
+        !state.shows_source(&path)
+            && state
+                .file(&path)
+                .is_some_and(|file| picture::Picture::when_parsed(&file).is_none())
+    });
 
     Stack::vertical((
         Stack::new((
@@ -168,9 +181,10 @@ pub fn editor_pane(
                         state.layout.get(),
                         source,
                         preview,
+                        drawing.get(),
                     )
                 },
-                move |(path, epoch, layout, source, preview)| {
+                move |(path, epoch, layout, source, preview, _)| {
                     // Whatever editor stood here is going with its documents;
                     // the one built below registers its own.
                     state.docs.set(None);
@@ -194,9 +208,12 @@ pub fn editor_pane(
                                 // A file that draws is drawn, unless the reader
                                 // asked for its markup.
                                 let drawn = if source {
-                                    None
+                                    Some(None)
                                 } else {
-                                    picture::Picture::of(&file)
+                                    picture::Picture::when_parsed(&file)
+                                };
+                                let Some(drawn) = drawn else {
+                                    return loading_view(path).into_any();
                                 };
                                 let previewed = preview && preview::can_preview(&file);
                                 if previewed {

@@ -1,8 +1,8 @@
 //! `perchd serve`: the engine as a service. It lives until SIGTERM, SIGINT
 //! or SIGHUP, whoever connects and leaves, and stops then as quitting the
 //! app does: runs stopped and recorded Interrupted, children reaped, the
-//! home let go and the socket removed. A second signal while it stops
-//! ends it at once.
+//! home let go and the socket removed. A second SIGTERM or SIGINT while
+//! it stops ends it at once.
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -18,6 +18,13 @@ use crate::socket;
 /// `scripts/perchd.service`) does not try every few seconds while an
 /// engine a bridge started holds the home.
 pub const HOME_HELD: u8 = 75;
+
+/// What an ssh session sets that the engine, which outlives the session,
+/// must not keep: an agent socket that may be forwarded from the client's
+/// machine, which every run the engine starts would be handed, and the
+/// session's own addresses and terminal. Dropped however the engine was
+/// started, by a bridge or by hand in a login.
+pub const SESSION_ONLY: [&str; 4] = ["SSH_AUTH_SOCK", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"];
 
 /// Why serve failed.
 enum Failed {
@@ -123,10 +130,16 @@ fn serve() -> Result<(), Failed> {
     let _ = std::fs::remove_file(&socket);
     // Stopping waits for the command before it, which can be a long one:
     // a second signal is the reader saying not to wait. The kernel lets
-    // the home go as the process ends.
+    // the home go as the process ends. A hangup is not the reader: an ssh
+    // session that drops sends two, the shell's and then the kernel's as
+    // the shell exits.
     runtime.spawn(async move {
         // None as the runtime goes, the engine stopped: nothing to cut short.
-        if let Some(again) = signals.next().await {
+        while let Some(again) = signals.next().await {
+            if again == "SIGHUP" {
+                tracing::info!("another SIGHUP while stopping; still stopping");
+                continue;
+            }
             tracing::warn!(signal = again, "stopping at once");
             std::process::exit(1);
         }
@@ -194,6 +207,9 @@ async fn accept(listener: UnixListener, engine: Engine) {
 /// read the environment while it changes.
 fn prepare_environment() {
     for name in ["RUSTUP_TOOLCHAIN", "RUSTUP_TOOLCHAIN_SOURCE", "CARGO"] {
+        std::env::remove_var(name);
+    }
+    for name in SESSION_ONLY {
         std::env::remove_var(name);
     }
     // A systemd unit, like a Finder launch, gets a bare PATH.

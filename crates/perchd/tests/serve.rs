@@ -457,6 +457,13 @@ async fn a_bridge_with_no_engine_starts_one_that_outlives_it() {
     // session that drops is not left with its runs recorded as running.
     // SAFETY: a signal to the engine's pid, read from the lock it holds.
     unsafe { libc::kill(pid, libc::SIGHUP) };
+    // The session's shell sends one and the kernel another as the shell
+    // exits: the second does not cut the stop short.
+    eventually("the engine to start stopping", || !home.socket().exists());
+    if home.engine_pid() == Some(pid) {
+        // SAFETY: as above, the engine still holding its home.
+        unsafe { libc::kill(pid, libc::SIGHUP) };
+    }
     eventually("the engine to stop", || home.engine_pid().is_none());
     assert!(!home.socket().exists());
     let logs = std::fs::read_dir(home.perch().join("logs")).unwrap();
@@ -465,6 +472,7 @@ async fn a_bridge_with_no_engine_starts_one_that_outlives_it() {
         .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
         .collect();
     assert!(log.contains("SIGHUP"), "{log}");
+    assert!(!log.contains("stopping at once"), "{log}");
 }
 
 #[test]
