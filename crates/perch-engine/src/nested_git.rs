@@ -7,7 +7,9 @@
 //! starts, with what in each one decides what git runs. One that appeared
 //! or changed since keeps a grant from answering a git write outside the
 //! sandbox while the run goes ([`unsettled`]), and fails the run's record
-//! afterwards, with its path named ([`appeared`]).
+//! afterwards, with its path named ([`appeared`]). Only Gemini's grant
+//! answers such a write: Claude Code and Codex commit inside their
+//! sandbox, and their run can change the worktree while git runs outside.
 //!
 //! The run may have left anything there, so the look follows no link but
 //! a `.git` one (and a `.git` file's `gitdir:`) to the repository git would
@@ -23,7 +25,9 @@ use std::path::{Path, PathBuf};
 /// Directories not looked inside: installed dependencies and build output,
 /// which can hold many thousands of files and repositories of their own
 /// (`pip install -e git+…`, a test suite's fixtures), and where nobody runs
-/// git. Looking through them would hold up every Work run's start.
+/// git. Looking through them would hold up every Work run's start. A
+/// `.git` in one is still found where the index has a submodule, which is
+/// where git looks inside one (see [`gitlinks`]).
 const PASSED_OVER: [&str; 4] = ["node_modules", "target", ".venv", "venv"];
 
 /// The most directories, and hooks in nested repositories, looked at: a
@@ -62,6 +66,11 @@ pub(crate) struct Nested {
     pub(crate) gits: BTreeMap<PathBuf, Held>,
     /// False when the look stopped at [`MOST_LOOKED`] with more to go.
     pub(crate) whole: bool,
+    /// The folders the look could not list, which could hold a `.git`
+    /// that git, needing only to reach it by its path, still finds.
+    unread: BTreeSet<PathBuf>,
+    /// The top's own repository: its common git directory, made real.
+    common: Option<PathBuf>,
     /// The submodules `.gitmodules` declared when this was taken (see
     /// [`submodules`]). Only the look before the run is trusted with it:
     /// the run can write `.gitmodules`.
@@ -87,6 +96,31 @@ impl Nested {
                 .iter()
                 .any(|modules| to != *modules && to.starts_with(modules))
     }
+
+    /// Whether a `.git` that was not there before is a linked worktree
+    /// of the top's own repository, as `git worktree add` from the top
+    /// makes (Claude Code's `.claude/worktrees/` say): a `.git` file
+    /// pointing into the top's `worktrees/`, at a directory whose
+    /// `commondir` leads back to the top's. Git there takes its config
+    /// and hooks from the top's repository, which the sandbox keeps, and
+    /// the sandbox keeps the run from writing a new worktree's
+    /// `commondir`.
+    fn linked_to_top(&self, path: &Path) -> bool {
+        let Some(common) = &self.common else {
+            return false;
+        };
+        let Some(to) = pointed(path).and_then(|to| to.canonicalize().ok()) else {
+            return false;
+        };
+        if to.parent() != Some(common.join("worktrees").as_path()) {
+            return false;
+        }
+        let Some(back) = read_plain(&to.join("commondir")) else {
+            return false;
+        };
+        let back = String::from_utf8_lossy(&back);
+        to.join(back.trim()).canonicalize().ok().as_ref() == Some(common)
+    }
 }
 
 /// Every `.git` below `top`, as a directory or as the file a worktree or a
@@ -102,6 +136,8 @@ fn below_within(top: &Path, most_looked: usize) -> Nested {
     let mut found = Nested {
         gits: BTreeMap::new(),
         whole: true,
+        unread: BTreeSet::new(),
+        common: common(top),
         submodules: submodules(top),
         modules: modules(top),
     };
@@ -113,11 +149,28 @@ fn below_within(top: &Path, most_looked: usize) -> Nested {
             break;
         }
         left -= 1;
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // Gone since it was listed, or no longer a folder: nothing
+            // in it to find. Anything else, a folder the run took read
+            // permission from say, is one git can still reach into.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) =>
+            {
+                continue
+            }
+            Err(_) => {
+                found.unread.insert(dir);
+                continue;
+            }
         };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
+        for entry in entries {
+            let Some((entry, kind)) = entry
+                .ok()
+                .and_then(|entry| entry.file_type().ok().map(|kind| (entry, kind)))
+            else {
+                found.unread.insert(dir.clone());
                 continue;
             };
             let name = entry.file_name();
@@ -126,31 +179,9 @@ fn below_within(top: &Path, most_looked: usize) -> Nested {
             if name.eq_ignore_ascii_case(".git") {
                 if dir != top {
                     let path = entry.path();
-                    let held = if kind.is_dir() {
-                        let Some(held) = repository(&path, &mut left) else {
-                            found.whole = false;
-                            break 'dirs;
-                        };
-                        Held::Repository(held)
-                    } else {
-                        // Git follows a `.git` link, and a `.git` file's
-                        // `gitdir:`, to the repository it uses.
-                        let to = if kind.is_symlink() {
-                            Some(path.clone())
-                        } else {
-                            pointed(&path)
-                        };
-                        let there = match to {
-                            Some(to) if to.is_dir() => {
-                                let Some(held) = repository(&to, &mut left) else {
-                                    found.whole = false;
-                                    break 'dirs;
-                                };
-                                Some(held)
-                            }
-                            _ => None,
-                        };
-                        Held::Pointer(file(&path).unwrap_or_default(), there)
+                    let Some(held) = held(&path, kind, &mut left) else {
+                        found.whole = false;
+                        break 'dirs;
                     };
                     found.gits.insert(path, held);
                 }
@@ -161,7 +192,89 @@ fn below_within(top: &Path, most_looked: usize) -> Nested {
             }
         }
     }
+    // The submodules in the index, wherever they are: git looks inside
+    // each by its path, through a folder passed over or one that can't
+    // be listed.
+    if found.whole {
+        for at in gitlinks(top) {
+            if found
+                .gits
+                .keys()
+                .any(|path| path.parent() == Some(at.as_path()))
+            {
+                continue;
+            }
+            let path = at.join(".git");
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let Some(held) = held(&path, meta.file_type(), &mut left) else {
+                found.whole = false;
+                break;
+            };
+            found.gits.insert(path, held);
+        }
+    }
     found
+}
+
+/// What a `.git` of `kind` at `path` holds; None when the look runs out
+/// of what it may look at.
+fn held(path: &Path, kind: std::fs::FileType, left: &mut usize) -> Option<Held> {
+    if kind.is_dir() {
+        return Some(Held::Repository(repository(path, left)?));
+    }
+    // Git follows a `.git` link, and a `.git` file's `gitdir:`, to the
+    // repository it uses.
+    let to = if kind.is_symlink() {
+        Some(path.to_path_buf())
+    } else {
+        pointed(path)
+    };
+    let there = match to {
+        Some(to) if to.is_dir() => Some(repository(&to, left)?),
+        _ => None,
+    };
+    Some(Held::Pointer(file(path).unwrap_or_default(), there))
+}
+
+/// The paths the index at `top` has a submodule at (mode `160000`), the
+/// ones `git add -A` and `git commit -a` look inside. `ls-files` itself
+/// looks inside none. Nothing when git can't say.
+fn gitlinks(top: &Path) -> Vec<PathBuf> {
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(top)
+        .args(["-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    out.stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            let tab = entry.iter().position(|byte| *byte == b'\t')?;
+            let (meta, path) = (&entry[..tab], &entry[tab + 1..]);
+            if !meta.starts_with(b"160000 ") {
+                return None;
+            }
+            #[cfg(unix)]
+            let path =
+                Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path))
+                    .to_path_buf();
+            #[cfg(not(unix))]
+            let path = PathBuf::from(String::from_utf8_lossy(path).into_owned());
+            // Only what is below the top, as git keeps it.
+            path.components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+                .then(|| top.join(path))
+        })
+        .collect()
 }
 
 /// A repository's `config`, the other files that decide what git runs
@@ -285,6 +398,15 @@ fn pointed(path: &Path) -> Option<PathBuf> {
     (!dir.is_empty() && !dir.contains('\n')).then(|| path.parent().unwrap_or(path).join(dir))
 }
 
+/// The common git directory of the repository at `top`, made real: the
+/// one a linked worktree's `commondir` names, else `top`'s `.git`.
+fn common(top: &Path) -> Option<PathBuf> {
+    let dir = perch_agent::linked_git_dirs(top)
+        .pop()
+        .unwrap_or_else(|| top.join(".git"));
+    dir.canonicalize().ok()
+}
+
 /// The `modules/` of each git directory `top` uses, where git keeps its
 /// submodules' repositories: a linked worktree's own (`git submodule
 /// update` there puts them under `worktrees/<name>/modules`) and the
@@ -324,12 +446,16 @@ fn submodules(top: &Path) -> BTreeSet<PathBuf> {
 /// `now`, or a worktree too big to look through. Git there runs what that
 /// `.git`'s config says, outside the sandbox: `git add -A` looks inside a
 /// submodule with its `core.fsmonitor`. A submodule checked out since is
-/// asked about too. None when nothing has.
+/// asked about too, but not a worktree of the top's own repository. So is
+/// a `.git` that can't be found where it was, and a folder that can't be
+/// listed now: git reaches a `.git` by its path, through either. None
+/// when nothing has.
 pub(crate) fn unsettled(top: &Path, before: &Nested, now: &Nested) -> Option<String> {
-    let named = |path: &Path| path.strip_prefix(top).unwrap_or(path).display().to_string();
+    let named = |path: &Path| named(top, path);
     let why = " Git outside the sandbox would run what it holds, so the commit grant doesn't answer for this.";
     for (path, held) in &now.gits {
         match before.gits.get(path) {
+            None if matches!(held, Held::Pointer(..)) && before.linked_to_top(path) => {}
             None => {
                 return Some(format!(
                     "A Git repository appeared at {} during this run.{why}",
@@ -345,21 +471,41 @@ pub(crate) fn unsettled(top: &Path, before: &Nested, now: &Nested) -> Option<Str
             Some(_) => {}
         }
     }
-    (!now.whole).then(|| format!(
-        "The worktree has more than {MOST_LOOKED} folders and Git hooks, more than Perch looks through for a Git repository made inside it, so the commit grant doesn't answer for this."
-    ))
+    if !now.whole {
+        return Some(format!(
+            "The worktree has more than {MOST_LOOKED} folders and Git hooks, more than Perch looks through for a Git repository made inside it, so the commit grant doesn't answer for this."
+        ));
+    }
+    if let Some(path) = before
+        .gits
+        .keys()
+        .find(|path| !now.gits.contains_key(*path))
+    {
+        return Some(format!(
+            "The Git repository at {} can't be found where it was as this run started.{why}",
+            named(path)
+        ));
+    }
+    if let Some(dir) = now.unread.difference(&before.unread).next() {
+        return Some(format!(
+            "Perch can't look inside {} since this run started, and a Git repository there would still be found by git.{why}",
+            named(dir)
+        ));
+    }
+    None
 }
 
 /// The `.git`s in `after` that were not in `before`, or hold something
 /// else, and what the run's record says about them: None when there are
 /// none.
 pub(crate) fn appeared(top: &Path, before: &Nested, after: &Nested) -> Option<String> {
-    let named = |path: &Path| path.strip_prefix(top).unwrap_or(path).display().to_string();
+    let named = |path: &Path| named(top, path);
     let mut new = Vec::new();
     let mut changed = Vec::new();
     for (path, held) in &after.gits {
         match before.gits.get(path) {
-            None if matches!(held, Held::Pointer(..)) && before.checked_out(path) => {}
+            None if matches!(held, Held::Pointer(..))
+                && (before.checked_out(path) || before.linked_to_top(path)) => {}
             None => new.push(named(path)),
             Some(was) if was != held => changed.push(named(path)),
             Some(_) => {}
@@ -380,19 +526,44 @@ pub(crate) fn appeared(top: &Path, before: &Nested, after: &Nested) -> Option<St
         )),
     }
     let said = said.join(", and ");
+    let unread: Vec<_> = after
+        .unread
+        .difference(&before.unread)
+        .map(|dir| named(dir))
+        .collect();
+    let unread = (!unread.is_empty()).then(|| format!(
+        "Perch couldn't look inside {} after this Work run, and a Git repository there would still be found by git, so look before running git there.",
+        unread.join(", ")
+    ));
     let mut said = said.chars();
     let Some(first) = said.next() else {
+        if unread.is_some() {
+            return unread;
+        }
         // Past the most looked through, what was not looked at could hold
         // one. A worktree that was that big before is not the run's doing.
         return (before.whole && !after.whole).then(|| format!(
             "This Work run took the worktree past {MOST_LOOKED} folders and Git hooks, more than Perch looks through for a Git repository made below its top. The sandbox cannot stop every way a run can make one, so look for any before running git there."
         ));
     };
-    Some(format!(
+    let said = format!(
         "{}{}, below the worktree's top, during this Work run. The sandbox cannot stop every way a run can do that, so look at what it holds before running git there.",
         first.to_uppercase(),
         said.as_str()
-    ))
+    );
+    Some(match unread {
+        Some(unread) => format!("{said} {unread}"),
+        None => said,
+    })
+}
+
+/// A path as the reader knows it: from the worktree's top.
+fn named(top: &Path, path: &Path) -> String {
+    match path.strip_prefix(top) {
+        Ok(inside) if inside.as_os_str().is_empty() => ".".to_string(),
+        Ok(inside) => inside.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -706,6 +877,127 @@ mod tests {
         let said = appeared(top, &before, &after).unwrap();
         assert!(
             said.starts_with("This Work run took the worktree past"),
+            "{said}"
+        );
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// Dependencies are passed over, but git looks inside a submodule
+    /// the index has wherever it is, so a repository staged as one in
+    /// `node_modules` is found.
+    #[test]
+    fn a_submodule_staged_in_a_folder_passed_over_is_found() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        git(top, &["init", "-q"]);
+        let before = below(top);
+        std::fs::create_dir_all(top.join("node_modules/x")).unwrap();
+        git(&top.join("node_modules/x"), &["init", "-q"]);
+        assert_eq!(unsettled(top, &before, &below(top)), None);
+        git(
+            top,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,1111111111111111111111111111111111111111,node_modules/x",
+            ],
+        );
+        let said = unsettled(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("A Git repository appeared at node_modules/x/.git during this run."),
+            "{said}"
+        );
+        assert!(appeared(top, &before, &below(top)).is_some());
+    }
+
+    /// Git reaches `sub/.git` by its path with search permission alone,
+    /// so a folder the look can't list is a reason to ask, and is named
+    /// after the run.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_can_t_be_listed_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            // Root lists any folder.
+            return;
+        }
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        let before = below(top);
+        std::fs::create_dir_all(top.join("sub/.git")).unwrap();
+        std::fs::set_permissions(top.join("sub"), std::fs::Permissions::from_mode(0o311)).unwrap();
+        let now = below(top);
+        std::fs::set_permissions(top.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(now.gits.is_empty());
+        let said = unsettled(top, &before, &now).unwrap();
+        assert!(
+            said.starts_with("Perch can't look inside sub since"),
+            "{said}"
+        );
+        let said = appeared(top, &before, &now).unwrap();
+        assert!(
+            said.starts_with("Perch couldn't look inside sub after"),
+            "{said}"
+        );
+    }
+
+    /// A `.git` that was there as the run started and can't be found
+    /// now, hidden or moved, is a reason to ask.
+    #[test]
+    fn a_git_gone_from_where_it_was_is_unsettled() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        std::fs::create_dir_all(top.join("old/.git")).unwrap();
+        let before = below(top);
+        std::fs::rename(top.join("old"), top.join("node_modules")).unwrap();
+        let said = unsettled(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("The Git repository at old/.git can't be found where it was"),
+            "{said}"
+        );
+    }
+
+    /// A worktree `git worktree add` makes from the top's own repository
+    /// below the top, as another Claude Code session does in
+    /// `.claude/worktrees/`, takes its config and hooks from the top's,
+    /// so it neither fails the run nor holds back the grant; a `.git`
+    /// file pointing into `worktrees/` at a directory with no way back
+    /// to the top's repository is still named.
+    #[test]
+    fn a_worktree_of_the_top_s_own_repository_is_not_the_run_s() {
+        let top = tempfile::tempdir().unwrap();
+        let top = top.path();
+        git(top, &["init", "-q"]);
+        git(top, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        let before = below(top);
+        git(top, &["worktree", "add", "-q", ".claude/worktrees/w"]);
+        let after = below(top);
+        assert!(after
+            .gits
+            .contains_key(&top.join(".claude/worktrees/w/.git")));
+        assert_eq!(unsettled(top, &before, &after), None);
+        assert_eq!(appeared(top, &before, &after), None);
+
+        std::fs::create_dir_all(top.join(".git/worktrees/evil")).unwrap();
+        std::fs::write(top.join(".git/worktrees/evil/config"), "[core]\n").unwrap();
+        std::fs::create_dir(top.join("x")).unwrap();
+        std::fs::write(top.join("x/.git"), "gitdir: ../.git/worktrees/evil\n").unwrap();
+        let said = appeared(top, &before, &below(top)).unwrap();
+        assert!(
+            said.starts_with("A Git repository appeared at x/.git,"),
             "{said}"
         );
     }

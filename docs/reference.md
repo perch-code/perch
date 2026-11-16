@@ -1187,17 +1187,23 @@ run goes). On Linux, where that last rule can't be kept, a linked worktree's
 run gets only its own directory and the repository's `objects/`, `refs/` and
 `logs/`; git there prints that it can't lock `packed-refs` and commits anyway.
 The run is told it may commit but not push.
-While a Work run goes, the grant doesn't answer a commit once a `.git` has
-appeared or changed below the worktree's top since the run started, or the
-worktree is too big to look through: git outside the sandbox would run what
-that repository's config says. You're asked, and the card says why.
+The grant doesn't answer a Claude Code or Codex run's request to run git
+outside the sandbox: the run keeps working inside the sandbox while git runs,
+so it could move a repository into the worktree, and git outside the sandbox
+would run what that repository's config says. You're asked, and the card says
+why. Gemini, which has no sandbox and asks before every command, commits by
+the grant, except while a commit would run hooks, or once a `.git` has
+appeared, changed or gone out of sight below the worktree's top since the run
+started, or the worktree is too big to look through.
 With or without the grant, a Work run, Claude Code's or Codex's, can't write a
 `.git` below the top of its worktree: git would take a directory holding one
 for a submodule and, the next time it runs there outside the sandbox, use a
 config the run wrote. Codex can't read one there either, since its profile
 only denies a pattern outright. A run that needs a repository of its own makes
-it in the temporary directory. Neither sandbox stops a run moving in a
-directory that already holds a `.git`, so Perch's own `git status` and
+it in the temporary directory. A worktree that `git worktree add` makes from
+the same repository below the top, as another Claude Code session does in
+`.claude/worktrees/`, is the repository's own and doesn't count. Neither
+sandbox stops a run moving in a directory that already holds a `.git`, so Perch's own `git status` and
 `git diff` never look inside a submodule for edits: one shows as changed only
 when its commit does, and one with a `.git` in it keeps its worktree from
 being reset or removed.

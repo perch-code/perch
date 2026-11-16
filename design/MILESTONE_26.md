@@ -294,6 +294,19 @@ Where the implementation went its own way, and why:
   The commit grant keeps each git directory's `modules/` read-only, the
   run's own `worktrees/<name>/modules` included, where a linked worktree's
   submodules live.
+- No look before git runs can stop a sandboxed run changing the worktree
+  while it does: the run can stage a submodule, then move a repository in
+  after the look and before `git add -A` reads the index. So the commit
+  grant no longer answers a Claude Code or Codex run's git outside the
+  sandbox; its grant opens the sandbox to the git directories, and a request
+  to run git outside it is asked, the card saying why. Gemini's grant still
+  answers, past the hooks and nested `.git` checks: it has no sandbox and asks
+  before every command. The look also finds a `.git` where the index has a
+  submodule (`ls-files --stage`), through `node_modules` and the other
+  folders it passes over, counts a folder it can't list (git reaches
+  `sub/.git` with search permission alone) and a `.git` gone from where it
+  was, and passes over a linked worktree of the top's own repository, a
+  `.git` file into the top's `worktrees/` whose `commondir` leads back.
 - The window frame moved out of the database into `window-frame` in the
   Mac's own Perch home, read and written there whatever the engine; the
   old meta key is still read when there is no file. Remote, the frame had

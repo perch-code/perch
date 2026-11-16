@@ -18725,25 +18725,25 @@ async fn on_approval(
         );
         return;
     }
-    // A commit outside the sandbox that would run hooks is asked about,
-    // grant or not: they may be what the sandboxed run wrote. So is one
-    // in a worktree where a `.git` appeared or changed below the top
-    // since the run started: git runs what its config says there, and
-    // the sandbox cannot stop every way a run can put one there.
     let covered = crate::approvals::covering(&grants, request).is_some();
     let git_write = matches!(request.kind, perch_agent::ApprovalKind::Command)
         && crate::approvals::is_git_write(&request.subject);
     let mut why = None;
-    let ask_anyway = covered && git_write && {
-        let hooked = match run.working_directory.as_deref() {
-            Some(dir) => crate::approvals::runs_hooks(Path::new(dir)).await,
-            None => true,
+    let ask_anyway = covered
+        && git_write
+        && match commit_grant_answers(
+            perch_agent::Backend::parse(&run.backend),
+            run.working_directory.as_deref().map(Path::new),
+            nested,
+        )
+        .await
+        {
+            Ok(()) => false,
+            Err(said) => {
+                why = said;
+                true
+            }
         };
-        if !hooked {
-            why = nested_since(nested).await;
-        }
-        hooked || why.is_some()
-    };
     if covered && !ask_anyway {
         handle.answer(id, perch_agent::Decision::Allow);
         record_approval_step(
@@ -18804,6 +18804,45 @@ async fn on_approval(
         tokio::time::sleep(wait).await;
         settle(&ctx, &run_id, &id, Settle::TimedOut(wait), Some(asking)).await;
     });
+}
+
+/// What the commit grant says to a git write outside the sandbox: Ok to
+/// answer it, or why the reader is asked instead, for the card.
+///
+/// Claude Code and Codex commit inside their sandbox, which the grant
+/// opens to the git directories; one asking to run git outside it is
+/// asked about, always. Their run goes on acting inside the sandbox
+/// while git runs, so it can stage a submodule and move a repository in
+/// after any look, and git would run that repository's `core.fsmonitor`
+/// outside the sandbox. Gemini has no sandbox and asks before each
+/// command, so nothing changes the worktree between the look and git
+/// that the reader didn't allow. There a commit that would run hooks is
+/// asked about (they may be what the run wrote), and so is one where a
+/// `.git` appeared or changed below the top since the run started.
+async fn commit_grant_answers(
+    backend: Option<perch_agent::Backend>,
+    worktree: Option<&Path>,
+    nested: Option<(&Path, &crate::nested_git::Nested)>,
+) -> Result<(), Option<String>> {
+    const IN_THE_SANDBOX: &str = "The commit grant lets this agent commit inside its sandbox, not outside it: the run can change the worktree while git runs there, and git would run what a repository it put there holds.";
+    if backend != Some(perch_agent::Backend::Gemini) {
+        return Err(Some(
+            nested_since(nested)
+                .await
+                .unwrap_or_else(|| IN_THE_SANDBOX.to_string()),
+        ));
+    }
+    let hooked = match worktree {
+        Some(dir) => crate::approvals::runs_hooks(dir).await,
+        None => true,
+    };
+    if hooked {
+        return Err(None);
+    }
+    match nested_since(nested).await {
+        Some(why) => Err(Some(why)),
+        None => Ok(()),
+    }
 }
 
 /// Why a commit the grant covers must be asked about instead, from the
@@ -28146,13 +28185,13 @@ read eof || true
             .is_empty());
     }
 
-    /// The commit grant answers a commit outside the sandbox, but not
-    /// once a `.git` has appeared below the worktree's top since the run
-    /// started, as one moved in does past either sandbox: `git add -A`
-    /// would run its `core.fsmonitor` outside the sandbox. The card says
-    /// why.
+    /// The commit grant doesn't answer Claude Code's commit outside the
+    /// sandbox: the run could move a repository in while git runs, and
+    /// `git add -A` would run its `core.fsmonitor` outside the sandbox.
+    /// The card says why, naming a `.git` that appeared below the
+    /// worktree's top since the run started when there is one.
     #[tokio::test]
-    async fn the_commit_grant_asks_once_a_git_appeared_inside_the_worktree() {
+    async fn the_commit_grant_asks_for_claude_s_commit_outside_the_sandbox() {
         let commit = r#"{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git add -A && git commit -m x","dangerouslyDisableSandbox":true}}"#;
         for appear in [false, true] {
             let dir = tempfile::tempdir().unwrap();
@@ -28201,22 +28240,6 @@ read eof || true
                     .await
                 }
             });
-            if !appear {
-                running.await.unwrap();
-                assert!(
-                    !received
-                        .try_iter()
-                        .any(|e| matches!(e, Event::ApprovalRequested(_))),
-                    "the grant answered"
-                );
-                let steps = step_summaries(&ctx, &item);
-                assert!(
-                    steps.iter().any(|s| s
-                        == "Allowed by a grant: Run outside the sandbox: git add -A && git commit -m x [ok]"),
-                    "{steps:?}"
-                );
-                continue;
-            }
             let view = next_event(&received, |e| match e {
                 Event::ApprovalRequested(view) => Some(view),
                 _ => None,
@@ -28224,7 +28247,11 @@ read eof || true
             .await;
             assert_eq!(
                 view.detail.as_deref(),
-                Some("A Git repository appeared at sub/.git during this run. Git outside the sandbox would run what it holds, so the commit grant doesn't answer for this.")
+                Some(if appear {
+                    "A Git repository appeared at sub/.git during this run. Git outside the sandbox would run what it holds, so the commit grant doesn't answer for this."
+                } else {
+                    "The commit grant lets this agent commit inside its sandbox, not outside it: the run can change the worktree while git runs there, and git would run what a repository it put there holds."
+                })
             );
             settle_approval(
                 &ctx,
@@ -28237,6 +28264,46 @@ read eof || true
             let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
             assert!(answers.contains("\"behavior\":\"deny\""), "{answers}");
         }
+    }
+
+    /// Gemini has no sandbox and asks before every command, so its grant
+    /// answers a commit while no `.git` has appeared below the top; the
+    /// sandboxed agents' grant never answers one outside the sandbox.
+    #[tokio::test]
+    async fn only_gemini_s_commit_grant_answers_git_outside_a_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path();
+        git(worktree, &["init", "-q"]);
+        let before = crate::nested_git::below(worktree);
+        let nested = Some((worktree, &before));
+        let gemini = Some(perch_agent::Backend::Gemini);
+        assert_eq!(
+            commit_grant_answers(gemini, Some(worktree), nested).await,
+            Ok(())
+        );
+        for backend in [
+            Some(perch_agent::Backend::ClaudeCode),
+            Some(perch_agent::Backend::Codex),
+            None,
+        ] {
+            let said = commit_grant_answers(backend, Some(worktree), nested)
+                .await
+                .unwrap_err()
+                .unwrap();
+            assert!(
+                said.starts_with("The commit grant lets this agent commit inside its sandbox"),
+                "{said}"
+            );
+        }
+        std::fs::create_dir_all(worktree.join("sub/.git")).unwrap();
+        let said = commit_grant_answers(gemini, Some(worktree), nested)
+            .await
+            .unwrap_err()
+            .unwrap();
+        assert!(
+            said.starts_with("A Git repository appeared at sub/.git"),
+            "{said}"
+        );
     }
 
     #[tokio::test]
