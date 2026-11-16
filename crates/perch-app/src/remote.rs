@@ -182,7 +182,7 @@ pub fn editor_command(host: &str, path: &Path, zed: Option<&Path>) -> (PathBuf, 
             let slash = if path.starts_with('/') { "" } else { "/" };
             (
                 zed.to_path_buf(),
-                vec![format!("ssh://{host}{slash}{path}")],
+                vec![format!("ssh://{host}{slash}{}", url_path(&path))],
             )
         }
         None => (
@@ -194,6 +194,22 @@ pub fn editor_command(host: &str, path: &Path, zed: Option<&Path>) -> (PathBuf, 
             ],
         ),
     }
+}
+
+/// `path` as a URL's path: every byte but the unreserved ones and `/`
+/// percent-encoded. Zed parses an `ssh://` argument as a URL and decodes
+/// its path, so a raw `#` or `?` cut the path short there and a raw `%41`
+/// came back as `A`.
+fn url_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 /// Zed's command line tool, if Zed is installed: `zed` on `PATH`, or the
@@ -350,6 +366,15 @@ mod tests {
                     "/home/chris/Code/perch".to_string()
                 ]
             )
+        );
+    }
+
+    #[test]
+    fn a_zed_url_s_path_is_percent_encoded() {
+        let path = Path::new("/home/chris/fix #12?/100%41 é");
+        assert_eq!(
+            editor_command("halo", path, Some(Path::new("zed"))).1,
+            vec!["ssh://halo/home/chris/fix%20%2312%3F/100%2541%20%C3%A9".to_string()]
         );
     }
 
