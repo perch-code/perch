@@ -104,6 +104,7 @@ fn make_way(
     since: SystemTime,
 ) -> Result<UnixStream, Ended> {
     let own = wire::build().to_string();
+    let asked = Socket::of(socket);
     let answer = ask_to_stop(stream, replace == Replace::IfIdle, own.clone())
         .map_err(|why| Ended::Failed(format!("could not ask the engine to stop: {why}")))?;
     match answer {
@@ -114,15 +115,18 @@ fn make_way(
         },
         Answer::Busy(about) => Err(Ended::Busy(about)),
         Answer::Stopping(about) => {
-            wait_let_go(socket, STOPPING).map_err(|()| {
-                Ended::Failed(format!(
+            let home = perch_github::config::perch_home();
+            let held = || EngineLock::holder(&home).is_some();
+            match wait_let_go(socket, asked, STOPPING, held) {
+                Ok(Some(next)) => Ok(next),
+                Ok(None) => start_and_connect(socket, since).map_err(Ended::Failed),
+                Err(()) => Err(Ended::Failed(format!(
                     "perchd {} said it would stop to make way for {own}, and was still running after {} s; its log is in {}",
                     about.build,
                     STOPPING.as_secs(),
                     perch_engine::log_file::dir().display(),
-                ))
-            })?;
-            start_and_connect(socket, since).map_err(Ended::Failed)
+                ))),
+            }
         }
         Answer::Refused { reason, about } if about.protocol == 0 => Err(Ended::Failed(format!(
             "the engine running here is from before Perch could replace one, and would not stop ({reason}); stop its perchd serve on this host and connect again"
@@ -152,14 +156,46 @@ fn ask_to_stop(stream: UnixStream, if_idle: bool, own: String) -> Result<Answer,
     })
 }
 
-/// Wait up to `within` for an engine stopping to let the home go: its
-/// socket no longer answering, and its lock free.
-fn wait_let_go(socket: &Path, within: Duration) -> Result<(), ()> {
-    let home = perch_github::config::perch_home();
+/// Which socket file an engine listens on. A stopping engine removes its
+/// socket at once, and the next one makes a new file at the same path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Socket {
+    inode: u64,
+    changed: (i64, i64),
+}
+
+impl Socket {
+    fn of(path: &Path) -> Option<Socket> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Socket {
+            inode: meta.ino(),
+            changed: (meta.ctime(), meta.ctime_nsec()),
+        })
+    }
+}
+
+/// Wait up to `within` for an engine stopping, which listened on `asked`,
+/// to let the home go: its socket no longer answering, and `held` false.
+/// Or for another engine to answer in its place, the one another bridge
+/// started once the home was free, which this one joins rather than
+/// waiting out the minute: `Some` of a stream to it.
+fn wait_let_go(
+    socket: &Path,
+    asked: Option<Socket>,
+    within: Duration,
+    held: impl Fn() -> bool,
+) -> Result<Option<UnixStream>, ()> {
     let deadline = Instant::now() + within;
+    let mut gone = false;
     loop {
-        if UnixStream::connect(socket).is_err() && EngineLock::holder(&home).is_none() {
-            return Ok(());
+        match UnixStream::connect(socket) {
+            Ok(stream) if gone || Socket::of(socket).is_some_and(|now| Some(now) != asked) => {
+                return Ok(Some(stream));
+            }
+            Ok(_) => {}
+            Err(_) if !held() => return Ok(None),
+            Err(_) => gone = true,
         }
         if Instant::now() >= deadline {
             return Err(());
@@ -311,6 +347,56 @@ fn start() -> Result<Child, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn a_replacing_bridge_joins_an_engine_started_in_the_old_one_s_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("engine.sock");
+        let quick = Duration::from_millis(400);
+
+        // The old engine still listening: the wait runs out.
+        let old = UnixListener::bind(&socket).unwrap();
+        let asked = Socket::of(&socket);
+        assert!(asked.is_some());
+        assert!(wait_let_go(&socket, asked, quick, || true).is_err());
+
+        // Gone, and the home let go: this bridge starts its own.
+        drop(old);
+        std::fs::remove_file(&socket).unwrap();
+        assert!(matches!(
+            wait_let_go(&socket, asked, quick, || false),
+            Ok(None)
+        ));
+
+        // Gone, and another bridge's engine already listening at the same
+        // path, holding the home: joined, though the gap was never seen.
+        let next = UnixListener::bind(&socket).unwrap();
+        assert_ne!(Socket::of(&socket), asked);
+        let joined = wait_let_go(&socket, asked, quick, || true).unwrap();
+        assert!(joined.is_some());
+        drop(next);
+    }
+
+    #[test]
+    fn a_replacing_bridge_that_saw_the_socket_go_joins_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("engine.sock");
+        let old = UnixListener::bind(&socket).unwrap();
+        let asked = Socket::of(&socket);
+        drop(old);
+        std::fs::remove_file(&socket).unwrap();
+        let path = socket.clone();
+        let next = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            UnixListener::bind(&path).unwrap()
+        });
+        // The home stays held throughout, by the old engine and then the
+        // next: only the socket coming back ends the wait.
+        let joined = wait_let_go(&socket, asked, Duration::from_secs(5), || true).unwrap();
+        assert!(joined.is_some());
+        drop(next.join().unwrap());
+    }
 
     #[test]
     fn the_flags_the_app_passes_are_the_ones_taken() {

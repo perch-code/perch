@@ -503,6 +503,30 @@ button to Settings when anything required is missing.
   next write to stderr was a SIGPIPE, and dash, Debian's `sh`, runs no
   EXIT trap for a signal that kills it. Only a script killed outright now
   leaves one for the bridge's cleanup.
+- A stop is also answered `Staying` by an engine of a newer version
+  than the hello's `app_version`. The app weighs the engine when it
+  connects, and a Restart can be pressed hours later, by when another Mac
+  may have put a newer engine there; the check and the stop have to be
+  one exchange, as with `unless_build`. The bridge joins the engine that
+  stayed, and the app weighs it as newer.
+- A replacing bridge that sees another engine on the socket while it
+  waits for the old one to let go joins it: another bridge started it as
+  soon as the home was free. The socket file is told apart by its inode
+  and change time, as the new engine can bind before the bridge looks.
+- A `--replace-if-idle` that finds busy an engine that had let the app in
+  dials again at once without replacing, and connects with the restart
+  offered. Only one that refused the app's protocol leaves it
+  disconnected.
+- An install on the way to a replace or a restart dials again still
+  replacing.
+- logind's `KillOnlyUsers` decides by itself when it names anyone,
+  whatever `KillUserProcesses` says; `KillExcludeUsers` wins over both.
+  Root is taken as excluded when `loginctl` prints nothing of
+  `KillExcludeUsers`, as logind does.
+- The strip's run and client counts are the welcome's, not brought up to
+  date while connected. The engine sends no client count, and the run
+  events are per window and partial; keeping them current is left for
+  later.
 
 ## Acceptance
 

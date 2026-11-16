@@ -1523,8 +1523,10 @@ included, whatever its libc. The app installs it on a host itself (see
   another build is asked over the socket to stop, and stops as SIGTERM
   stops it. The bridge waits up to a minute for its socket to stop
   answering and the home's lock to be free, then starts its own engine
-  and carries on as a bridge. An engine of its own build is joined as it
-  is. `--replace-if-idle` does the same only when the engine has no runs
+  and carries on as a bridge; if another bridge has started an engine
+  there meanwhile, it joins that one. An engine of its own build is
+  joined as it is, and so is one of a newer version than the bridge's,
+  which never stops for an older one. `--replace-if-idle` does the same only when the engine has no runs
   and no clients; otherwise it writes `perch-busy: <version> <runs>
   <clients>` to stderr and exits 98, leaving the engine running. Nothing
   is ever signalled or killed by its pid. The Perch app running on the
@@ -1548,7 +1550,8 @@ keep it stopped: the app reconnects and its bridge starts another. Quit
 the app, or set it to This Mac, first. On Linux the engine needs logind's
 `KillUserProcesses=no`, the default on most distributions; with `yes`, it
 is killed when the ssh session that started it ends, its runs with it,
-unless the user is in `KillExcludeUsers`. The engine checks this (see
+unless the user is in `KillExcludeUsers`. A user `KillOnlyUsers` names is
+killed whatever `KillUserProcesses` says. The engine checks this (see
 [What the app checks](#what-the-app-checks)).
 
 The app says it is still there every 15 seconds it has nothing else to
@@ -1680,7 +1683,12 @@ the host is the old build, and the app weighs it against its own:
   the old engine whatever it is doing: its runs are recorded Interrupted,
   as when the app quits, and other Macs connected to it reconnect to the
   new one. An engine that comes into use between the app's look and its
-  `--replace-if-idle` is left running, and the strip offers the restart.
+  `--replace-if-idle` is left running, and the strip offers the restart;
+  the app connects to it when it speaks the app's protocol. A restart
+  that reaches an engine newer than the app, started meanwhile by another
+  Mac, leaves it running, and the app connects to it as to any newer one.
+  The counts the strip names are from when the app connected, and are not
+  brought up to date while it stays connected.
 - Newer than the app, by version: the app never stops it. The strip says
   "<host>'s engine is perchd 1.0.0, newer than this app's 0.9.0. Update
   Perch on this Mac."; while it speaks the app's protocol the app is still

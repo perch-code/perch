@@ -127,8 +127,9 @@ pub(crate) struct AgentFound {
 /// What logind does with a user's processes at logout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Logind {
-    /// Whether it kills them: `KillUserProcesses=yes`, with the user not
-    /// in `KillExcludeUsers` and in `KillOnlyUsers` when that names any.
+    /// Whether it kills them: never for a user in `KillExcludeUsers`;
+    /// else, when `KillOnlyUsers` names any, for those it names, whatever
+    /// `KillUserProcesses` says; else as `KillUserProcesses` says.
     pub kills: bool,
     /// What `KillUserProcesses` says, for the page.
     pub kill_user_processes: bool,
@@ -308,7 +309,12 @@ pub(crate) fn checks(found: &Found) -> Vec<HostCheck> {
                 ok: false,
                 required: true,
                 detail: format!(
-                    "KillUserProcesses=yes: {user}'s processes are killed when the ssh session that started the engine ends, the engine and its runs with them."
+                    "{}: {user}'s processes are killed when the ssh session that started the engine ends, the engine and its runs with them.",
+                    if logind.kill_user_processes {
+                        "KillUserProcesses=yes".to_string()
+                    } else {
+                        format!("KillUserProcesses=no, but KillOnlyUsers names {user}")
+                    }
                 ),
                 fix: Some(format!(
                     "sudo mkdir -p /etc/systemd/logind.conf.d && printf '[Login]\\nKillExcludeUsers=root {user}\\n' | sudo tee /etc/systemd/logind.conf.d/perch.conf && sudo systemctl restart systemd-logind"
@@ -401,13 +407,16 @@ fn shell_word(root: &str) -> String {
 
 /// Read what `loginctl show-session -p KillUserProcesses -p KillOnlyUsers
 /// -p KillExcludeUsers` printed, the manager's settings, for `user`. As
-/// logind decides it: not when `KillUserProcesses` is off, nor for a user
-/// it excludes, and with `KillOnlyUsers` set, only for those. `None` when
-/// the output does not say.
+/// logind decides it: never for a user it excludes; else, with
+/// `KillOnlyUsers` set, for those it names and no others, whatever
+/// `KillUserProcesses` says; else as `KillUserProcesses` says. logind
+/// excludes root when `KillExcludeUsers` is not set, and `loginctl` prints
+/// that; when it prints nothing of it, root is taken as excluded. `None`
+/// when the output does not say.
 pub(crate) fn logind_said(shown: &str, user: &str) -> Option<Logind> {
     let mut kill = None;
     let mut only: Vec<&str> = Vec::new();
-    let mut exclude: Vec<&str> = Vec::new();
+    let mut exclude: Vec<&str> = vec!["root"];
     for line in shown.lines() {
         let Some((key, value)) = line.trim().split_once('=') else {
             continue;
@@ -420,9 +429,13 @@ pub(crate) fn logind_said(shown: &str, user: &str) -> Option<Logind> {
         }
     }
     let kill_user_processes = kill?;
-    let kills = kill_user_processes
-        && !exclude.contains(&user)
-        && (only.is_empty() || only.contains(&user));
+    let kills = if exclude.contains(&user) {
+        false
+    } else if !only.is_empty() {
+        only.contains(&user)
+    } else {
+        kill_user_processes
+    };
     Some(Logind {
         kills,
         kill_user_processes,
@@ -874,6 +887,39 @@ mod tests {
             said("KillUserProcesses=yes\nKillOnlyUsers=alice chris\n")
                 .unwrap()
                 .kills
+        );
+        // KillOnlyUsers decides by itself, whatever KillUserProcesses says.
+        let only =
+            said("KillUserProcesses=no\nKillOnlyUsers=chris\nKillExcludeUsers=root\n").unwrap();
+        assert!(only.kills && !only.kill_user_processes);
+        assert!(
+            !said("KillUserProcesses=no\nKillOnlyUsers=alice\nKillExcludeUsers=root\n")
+                .unwrap()
+                .kills
+        );
+        // Excluded wins over KillOnlyUsers.
+        assert!(
+            !said("KillUserProcesses=yes\nKillOnlyUsers=chris\nKillExcludeUsers=chris\n")
+                .unwrap()
+                .kills
+        );
+        // Root is excluded unless KillExcludeUsers says otherwise.
+        let root = |text: &str| logind_said(text, "root").unwrap().kills;
+        assert!(!root("KillUserProcesses=yes\n"));
+        assert!(!root("KillUserProcesses=yes\nKillExcludeUsers=root\n"));
+        assert!(root("KillUserProcesses=yes\nKillExcludeUsers=\n"));
+        let killed = checks(&Found {
+            logind: Some(only),
+            ..all_there()
+        });
+        let killed = named(&killed, "logind");
+        assert!(killed.blocks());
+        assert!(
+            killed
+                .detail
+                .starts_with("KillUserProcesses=no, but KillOnlyUsers names chris: "),
+            "{}",
+            killed.detail
         );
         // Nothing said of it: no check.
         assert_eq!(said("Docked=no\n"), None);
