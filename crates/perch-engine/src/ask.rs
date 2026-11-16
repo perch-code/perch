@@ -485,12 +485,17 @@ reader's own question comes last, after `Question:`.";
 /// its sandbox lets it do and that it can ask for more, whether it may
 /// commit, and the same rules for untrusted text. `network` is what the
 /// sandbox lets it reach, as the sentence should say it.
+/// `packed_refs_closed` is whether git there can't lock `packed-refs`
+/// (see `perch_agent::packed_refs_closed`): a run that may commit is told
+/// git's complaint about it is no failure, or it asks to commit again
+/// outside the sandbox and waits on a reader who may be away.
 pub fn work_framing(
     repository: &str,
     branch: &str,
     base: &str,
     network: &str,
     commit: bool,
+    packed_refs_closed: bool,
     approvals: perch_github::Approvals,
 ) -> String {
     let who = match approvals {
@@ -502,7 +507,12 @@ pub fn work_framing(
             "the request is allowed without the reader seeing it first"
         }
     };
-    let git = if commit {
+    let git = if commit && packed_refs_closed {
+        "You may commit on this branch; do not push, switch branches, or change git's config or \
+hooks. The sandbox keeps git from locking `packed-refs`, so each commit prints `error: Unable \
+to create '.../packed-refs.lock'` and lands all the same: that line is expected, so do not run \
+the commit again or ask to run it outside the sandbox. Check with `git log` if in doubt."
+    } else if commit {
         "You may commit on this branch; do not push, switch branches, or change git's config or \
 hooks."
     } else {
@@ -1001,6 +1011,28 @@ fn quoted(text: &str) -> String {
 mod tests {
     use super::*;
     use perch_github::Side;
+
+    /// A run whose sandbox keeps git from locking `packed-refs` is told
+    /// the complaint is no failure, and only when it may commit.
+    #[test]
+    fn a_run_is_told_when_git_can_t_lock_packed_refs() {
+        let framing = |commit, closed| {
+            work_framing(
+                "acme/widgets",
+                "fix",
+                "main",
+                "reaches no host without asking",
+                commit,
+                closed,
+                perch_github::Approvals::Ask,
+            )
+        };
+        let told = framing(true, true);
+        assert!(told.contains("packed-refs.lock"), "{told}");
+        assert!(told.contains("do not run the commit again"), "{told}");
+        assert!(!framing(true, false).contains("packed-refs"));
+        assert!(!framing(false, true).contains("packed-refs"));
+    }
 
     fn pr() -> PullRequest {
         PullRequest {

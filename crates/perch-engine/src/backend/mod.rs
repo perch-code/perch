@@ -19180,12 +19180,20 @@ fn work_setup(
         .as_ref()
         .map(|c| (c.branch.clone(), c.base_ref.clone()))
         .unwrap_or_default();
+    // Claude Code on Linux can't open a linked worktree's whole
+    // repository to a commit, and git says so on each one.
+    let packed_refs_closed = backend == perch_agent::Backend::ClaudeCode
+        && item
+            .checkout
+            .as_ref()
+            .is_some_and(|c| perch_agent::packed_refs_closed(&c.path));
     let framing = crate::ask::work_framing(
         &config.display_name(&item.repo_full_name),
         &branch,
         &base,
         &network,
         grant.commit,
+        packed_refs_closed,
         approvals,
     );
     Ok((perch_agent::Mode::Work(grant), framing, approvals))

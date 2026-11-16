@@ -1185,7 +1185,10 @@ repositories), and the repository's other worktrees' directories under
 `worktrees/` (and the `commondir` and `config.worktree` of any added while the
 run goes). On Linux, where that last rule can't be kept, a linked worktree's
 run gets only its own directory and the repository's `objects/`, `refs/` and
-`logs/`; git there prints that it can't lock `packed-refs` and commits anyway.
+`logs/`; git there prints that it can't lock `packed-refs` and commits anyway,
+and the run is told to expect that line. A command that rewrites `packed-refs`,
+such as deleting a packed branch, fails there, and the run can ask to run it
+outside the sandbox.
 The run is told it may commit but not push.
 The grant doesn't answer a Claude Code or Codex run's request to run git
 outside the sandbox: the run keeps working inside the sandbox while git runs,

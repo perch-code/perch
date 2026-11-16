@@ -467,6 +467,17 @@ fn commit_paths(worktree: &std::path::Path, globs_hold: bool) -> (Vec<PathBuf>, 
     (open, guarded)
 }
 
+/// Whether git in a Claude Code Work run that may commit in `worktree`
+/// can't lock `packed-refs` (see [`commit_paths`]). The run is told, so
+/// it doesn't take git's complaint for a failed commit.
+pub fn packed_refs_closed(worktree: &std::path::Path) -> bool {
+    packed_refs_closed_where(worktree, GLOBS_HOLD)
+}
+
+fn packed_refs_closed_where(worktree: &std::path::Path, globs_hold: bool) -> bool {
+    !globs_hold && linked_git_dirs(worktree).len() > 1
+}
+
 /// The `--settings` a Work run starts with. The shell's sandbox is the
 /// boundary: a sandboxed command runs without asking, and one that asks
 /// to leave it, or a connection to a host the grant does not list, comes
@@ -3005,6 +3016,10 @@ mod tests {
                 assert!(has(&deny, &guarded), "{} in {deny:?}", guarded.display());
             }
         }
+
+        assert!(packed_refs_closed_where(&worktree, false));
+        assert!(!packed_refs_closed_where(&worktree, true));
+        assert!(!packed_refs_closed_where(&real, false));
 
         let (allow, deny) = lists(claude_work_settings_where(&worktree, &grant, false));
         assert!(!has(&allow, &common), "{allow:?}");

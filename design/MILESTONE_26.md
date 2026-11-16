@@ -216,7 +216,10 @@ What the host needs that the Mac didn't:
   That is what a commit, a branch or a tag writes, checked with git 2.50
   under a macOS sandbox profile allowing only those. Git also tries to lock
   `packed-refs` on each ref update; it prints that it can't and the commit
-  lands. Deleting a packed branch fails. A main checkout's `.git` stays
+  lands. No git setting quiets that (it is the ref update, not
+  maintenance), so the run's framing says the line is expected, or the
+  run would ask to commit again outside the sandbox and wait on a reader
+  who is away. Deleting a packed branch fails. A main checkout's `.git` stays
   open, with `worktrees/` denied whole.
 
 ### Beside T3 Code
