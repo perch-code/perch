@@ -1837,8 +1837,9 @@ shortcuts can be changed, so a host named wrong can be put right. A Mac
 file that stops parsing keeps the Mac's settings read last, with the
 error among the warnings, as the engine does with its own. Each file
 turns off only its own rows: with the host's broken, the engine,
-appearance, display and shortcuts can still be changed, and with the
-Mac's broken, only they can't.
+appearance, display and shortcuts can still be changed, with the
+Mac's broken, only they can't, and with both broken, nothing can, as the
+banner at the top of the page says.
 Add repository… would offer the Mac's folders, so with a host it says to add
 the `[[repo]]` to the host's config.toml instead.
 

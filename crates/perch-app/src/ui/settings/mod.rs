@@ -1039,19 +1039,14 @@ fn error_banner(page: Page) -> impl IntoView {
             .with(|file| file.as_ref().and_then(|file| file.error.clone()))
     };
     // With the engine on a host, once it has sent its settings the error
-    // is its file's, and this Mac's rows can still be changed.
+    // is its file's.
     let host_s = || crate::remote::host().is_some() && crate::windows::engine_settings_heard();
-    let text = move || match error() {
-        Some(error) if host_s() => format!(
-            "Perch can't use the host's config.toml: {error}. Fix it in your editor. Until \
-             then the engine keeps the settings it read last, and only this Mac's can be \
-             changed here."
-        ),
-        Some(error) => format!(
-            "Perch can't use config.toml: {error}. Fix it in your editor. Until then Perch \
-             keeps the settings it read last, and they can't be changed here."
-        ),
-        None => String::new(),
+    let text = move || {
+        banner_text(
+            error(),
+            host_s(),
+            host_s() && crate::windows::client_file_broken(),
+        )
     };
     Stack::horizontal((
         sidebar_glyph(SidebarIcon::Warning, theme::alert_caution)
@@ -1079,6 +1074,31 @@ fn error_banner(page: Page) -> impl IntoView {
             .border_radius(theme::CARD_RADIUS)
             .apply_if(error().is_none(), |s| s.hide())
     })
+}
+
+/// The error banner's words for the file's `error`. With the engine on a
+/// host (`host_s`), the error is the host file's, and this Mac's rows can
+/// still be changed, unless this Mac's file doesn't parse either
+/// (`mine_broken`): its error is then among the warnings, and nothing can
+/// be changed here.
+fn banner_text(error: Option<String>, host_s: bool, mine_broken: bool) -> String {
+    match error {
+        Some(error) if host_s && mine_broken => format!(
+            "Perch can't use the host's config.toml: {error}. This Mac's doesn't parse either. \
+             Fix both in your editor. Until then Perch keeps the settings it read last, and \
+             they can't be changed here."
+        ),
+        Some(error) if host_s => format!(
+            "Perch can't use the host's config.toml: {error}. Fix it in your editor. Until \
+             then the engine keeps the settings it read last, and only this Mac's can be \
+             changed here."
+        ),
+        Some(error) => format!(
+            "Perch can't use config.toml: {error}. Fix it in your editor. Until then Perch \
+             keeps the settings it read last, and they can't be changed here."
+        ),
+        None => String::new(),
+    }
 }
 
 /// What loading the file had to say, such as a zoom out of range or a
@@ -1209,6 +1229,20 @@ mod tests {
     use super::*;
     use crate::backend::{Command, SettingsFile};
     use crate::review::model::ReviewState;
+
+    /// With the engine on a host, the banner says only this Mac's rows can
+    /// be changed while this Mac's file parses, and that none can when
+    /// both files are broken.
+    #[test]
+    fn the_banner_says_what_can_still_be_changed() {
+        let error = || Some("line 1".to_string());
+        assert!(banner_text(error(), true, false).ends_with("only this Mac's can be changed here."));
+        let both = banner_text(error(), true, true);
+        assert!(both.contains("This Mac's doesn't parse either."), "{both}");
+        assert!(both.ends_with("they can't be changed here."), "{both}");
+        assert!(banner_text(error(), false, false).starts_with("Perch can't use config.toml"));
+        assert_eq!(banner_text(None, true, true), "");
+    }
 
     /// With the engine on a host, the client's rows go by this machine's
     /// file and the engine's by the host's: a broken host file leaves the
