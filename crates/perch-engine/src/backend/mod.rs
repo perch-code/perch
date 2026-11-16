@@ -1887,7 +1887,6 @@ impl Event {
                 | Event::OpenReferenceResolved { .. }
                 | Event::OpenReferenceFailed { .. }
                 | Event::Bases { .. }
-                | Event::Grants { .. }
                 | Event::FeedbackStep { .. }
                 | Event::FeedbackReady(_)
                 | Event::FeedbackSent { .. }

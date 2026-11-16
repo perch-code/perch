@@ -301,6 +301,15 @@ fn two_connections_keep_their_own_windows() {
     // from a home as from a window.
     hub.route(3, Event::Items(Vec::new()));
     hub.route(2, Event::Repos(Vec::new()));
+    // A repository's grants show wherever its item is open, so a revoke
+    // in one window is seen in the others.
+    hub.route(
+        3,
+        Event::Grants {
+            repo: "r".into(),
+            grants: Vec::new(),
+        },
+    );
     hub.route(NO_WINDOW, notice("everyone"));
     // A resync's goes to its asker alone, whatever it is.
     hub.route(RESYNC | 2, Event::Notifications(Vec::new()));
@@ -310,6 +319,7 @@ fn two_connections_keep_their_own_windows() {
             (1, "a's".into()),
             (1, "Items([])".into()),
             (NO_WINDOW, "Repos([])".into()),
+            (1, "Grants { repo: \"r\", ".into()),
             (NO_WINDOW, "everyone".into()),
         ]
     );
@@ -320,6 +330,7 @@ fn two_connections_keep_their_own_windows() {
             (NO_WINDOW, "b's home".into()),
             (NO_WINDOW, "Items([])".into()),
             (NO_WINDOW, "Repos([])".into()),
+            (NO_WINDOW, "Grants { repo: \"r\", ".into()),
             (NO_WINDOW, "everyone".into()),
             (NO_WINDOW, "Notifications([])".into()),
         ]
