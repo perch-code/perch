@@ -7,16 +7,18 @@ use std::sync::{Arc, Mutex};
 
 use perch_github::{GitHub, ReleaseAsset};
 
-/// Each request's path and `Accept` header, in the order they came.
-type Requests = Arc<Mutex<Vec<(String, String)>>>;
+/// Each request's path, its `Accept` header and whether it carried an
+/// `Authorization`, in the order they came.
+type Requests = Arc<Mutex<Vec<(String, String, bool)>>>;
 
-/// A request's path and its `Accept` header.
-fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+/// A request's path, its `Accept` header and whether it was authorized.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String, bool)> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut start = String::new();
     reader.read_line(&mut start).ok()?;
     let path = start.split_whitespace().nth(1)?.to_string();
     let mut accept = String::new();
+    let mut authorized = false;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).ok()? == 0 || line.trim_end().is_empty() {
@@ -26,9 +28,12 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
             if name.eq_ignore_ascii_case("accept") {
                 accept = value.trim().to_string();
             }
+            if name.eq_ignore_ascii_case("authorization") {
+                authorized = true;
+            }
         }
     }
-    Some((path, accept))
+    Some((path, accept, authorized))
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &[u8]) {
@@ -42,7 +47,8 @@ fn respond(stream: &mut TcpStream, status: &str, body: &[u8]) {
 }
 
 /// Answers `/releases/latest` with `latest` (a 404 when it is `None`) and
-/// any other path with `file`, keeping each request's path and `Accept`.
+/// any other path with `file`, keeping each request's path, `Accept` and
+/// whether it was authorized.
 fn spawn(latest: Option<String>, file: &'static [u8]) -> (String, Requests) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -51,11 +57,11 @@ fn spawn(latest: Option<String>, file: &'static [u8]) -> (String, Requests) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let Some((path, accept)) = read_request(&mut stream) else {
+            let Some((path, accept, authorized)) = read_request(&mut stream) else {
                 continue;
             };
             let latest_asked = path.ends_with("/releases/latest");
-            seen.lock().unwrap().push((path, accept));
+            seen.lock().unwrap().push((path, accept, authorized));
             match (latest_asked, &latest) {
                 (true, Some(body)) => respond(&mut stream, "200 OK", body.as_bytes()),
                 (true, None) => {
@@ -74,6 +80,7 @@ fn asset(base: &str, size: u64) -> ReleaseAsset {
         name: "Perch-macos-arm64.tar.gz".into(),
         size,
         url: format!("{base}/repos/perch-code/perch/releases/assets/7"),
+        browser_download_url: String::new(),
     }
 }
 
@@ -102,6 +109,43 @@ async fn the_latest_release_lists_its_downloads() {
 }
 
 #[tokio::test]
+async fn perchs_latest_release_is_asked_after_with_no_token() {
+    let latest = r#"{"tag_name":"v0.2.0","html_url":"https://github.com/perch-code/perch/releases/tag/v0.2.0",
+      "assets":[{"id":7,"name":"Perch-macos-arm64.tar.gz","size":5,
+        "url":"https://api.github.com/repos/perch-code/perch/releases/assets/7",
+        "browser_download_url":"https://github.com/perch-code/perch/releases/download/v0.2.0/Perch-macos-arm64.tar.gz"}]}"#;
+    let (base, requests) = spawn(Some(latest.into()), b"");
+    let url = format!("{base}/repos/perch-code/perch/releases/latest");
+
+    let release = perch_github::releases::latest(&url).await.unwrap().unwrap();
+    assert_eq!(release.tag_name, "v0.2.0");
+    let tarball = release.asset("Perch-macos-arm64.tar.gz").unwrap();
+    assert_eq!(tarball.size, 5);
+    assert_eq!(
+        tarball.browser_download_url,
+        "https://github.com/perch-code/perch/releases/download/v0.2.0/Perch-macos-arm64.tar.gz"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.as_slice(),
+        [(
+            "/repos/perch-code/perch/releases/latest".to_string(),
+            "application/vnd.github+json".to_string(),
+            false
+        )]
+    );
+}
+
+#[tokio::test]
+async fn with_no_token_a_repository_with_no_release_has_no_latest() {
+    let (base, _) = spawn(None, b"");
+    let url = format!("{base}/repos/perch-code/perch/releases/latest");
+
+    assert_eq!(perch_github::releases::latest(&url).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn a_repository_with_no_release_has_no_latest() {
     let (base, _) = spawn(None, b"");
     let gh = GitHub::with_base_uri("t", &base).unwrap();
@@ -122,7 +166,8 @@ async fn a_download_asks_for_the_file_itself() {
         requests.as_slice(),
         [(
             "/repos/perch-code/perch/releases/assets/7".to_string(),
-            "application/octet-stream".to_string()
+            "application/octet-stream".to_string(),
+            false
         )]
     );
 }

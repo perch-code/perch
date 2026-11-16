@@ -321,6 +321,13 @@ matches it over the same ssh it connects with, so a host needs nothing
 from Perch beforehand, and updating the app updates the host on its next
 connect. VS Code's Remote SSH, Zed and T3 Code work the same way.
 
+The app updates itself on the Mac, with or without a host: the host's
+engine has no app of the Mac's to replace, so Check for Updates… and
+Restart to update never go to it. With an engine on a host, the app asks
+GitHub for the latest release with no token (the repository is public),
+using the same update helpers as the app's own engine, and a host's
+engine runs no update clock.
+
 ### Build order
 
 1. A static `perchd`: the release builds it for

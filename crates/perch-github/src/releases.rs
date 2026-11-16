@@ -1,6 +1,7 @@
 //! A repository's releases: what Perch's updater asks after, the newest
-//! build of Perch and the tarball it ships in; and the download of a file
-//! from one of Perch's own, which is how a host gets its `perchd`.
+//! build of Perch and the tarball it ships in; and, with no token, Perch's
+//! own latest release and the download of a file from one, which is how a
+//! host gets its `perchd` and how an app whose engine is on a host updates.
 
 use serde::Deserialize;
 
@@ -33,6 +34,10 @@ pub struct ReleaseAsset {
     /// with a redirect to the file. A private repository's downloads are
     /// only reachable this way, with the token.
     pub url: String,
+    /// Its address on github.com, which a public repository's answers
+    /// with no token.
+    #[serde(default)]
+    pub browser_download_url: String,
 }
 
 /// Where Perch's own releases are downloaded from. The repository is
@@ -44,6 +49,9 @@ pub const PERCH_DOWNLOADS: &str = "https://github.com/perch-code/perch/releases/
 pub fn perch_download_url(version: &str, name: &str) -> String {
     format!("{PERCH_DOWNLOADS}/v{version}/{name}")
 }
+
+/// Where Perch's latest release is asked after with no token.
+pub const PERCH_LATEST: &str = "https://api.github.com/repos/perch-code/perch/releases/latest";
 
 /// Why a download did not come.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,18 +72,51 @@ impl std::fmt::Display for DownloadError {
     }
 }
 
-/// The file at `url`, fetched with no token, following redirects (GitHub
-/// sends a release's files from another host), and refused past `limit`
-/// bytes.
-pub async fn download(url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
-    let client = reqwest::Client::builder()
+/// A client that sends no token, following redirects (GitHub sends a
+/// release's files from another host).
+fn anonymous() -> Result<reqwest::Client, DownloadError> {
+    reqwest::Client::builder()
         .user_agent(concat!("perch/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::limited(10))
         .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(600))
         .build()
-        .map_err(|e| DownloadError::Failed(e.to_string()))?;
-    let mut response = client
+        .map_err(|e| DownloadError::Failed(e.to_string()))
+}
+
+/// The release `url` answers with, [`PERCH_LATEST`] in the app, asked
+/// with no token. `None` when there is none: GitHub answers a repository
+/// with no release with a 404. GitHub allows 60 of these an hour from one
+/// address, far more than the updater asks.
+pub async fn latest(url: &str) -> Result<Option<Release>, DownloadError> {
+    let response = anonymous()?
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| DownloadError::Failed(format!("couldn't ask {url}: {e}")))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(DownloadError::Failed(format!(
+            "couldn't ask {url}: the server answered {status}"
+        )));
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|e| DownloadError::Failed(format!("couldn't ask {url}: {e}")))?;
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|e| DownloadError::Failed(format!("{url} answered something else: {e}")))
+}
+
+/// The file at `url`, fetched with no token, following redirects, and
+/// refused past `limit` bytes.
+pub async fn download(url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
+    let mut response = anonymous()?
         .get(url)
         .send()
         .await

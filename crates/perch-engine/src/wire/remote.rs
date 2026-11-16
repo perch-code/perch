@@ -39,6 +39,13 @@
 //!   running, and otherwise left running with a restart offered; one of a
 //!   newer build is never stopped (see `keep_connected`).
 //!
+//! - Perch's own updates are this Mac's to look for and install: the
+//!   engine on the host has no app here to replace. Check for Updates…
+//!   and Restart to update never go to it, connected or not; the app asks
+//!   GitHub itself, with no token, and the clock that looks every six
+//!   hours runs here (`over_ssh`). The next connection after the app
+//!   updates installs the `perchd` of its new build.
+//!
 //! How the connection stands goes to the windows as `Event::Link`, with
 //! the engine's own events, in order.
 
@@ -54,7 +61,10 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::provision::{self, Arch, Failed, Replace, Source};
 use super::{handshake, WireError, PROTOCOL, VERSION};
 use crate::backend::client::Navigations;
-use crate::backend::{Backend, Command, EngineLink, Event, OtherEngine, WindowId, NO_WINDOW};
+use crate::backend::update::{self, Releases};
+use crate::backend::{
+    Backend, Command, EngineLink, Event, EventSender, OtherEngine, WindowId, NO_WINDOW,
+};
 
 /// How often a refused command is said, at most: a pointer moving over
 /// code asks for hovers many times a second.
@@ -154,6 +164,9 @@ pub struct Link {
     retry: tokio::sync::Notify,
     /// Told when the reader asks for the restart offered.
     restart: tokio::sync::Notify,
+    /// What the app's own updates run on, and ask GitHub through.
+    runtime: tokio::runtime::Handle,
+    releases: Releases,
 }
 
 struct Linked {
@@ -203,6 +216,10 @@ impl Link {
     /// connection. A window opening, closing or becoming key is kept
     /// either way: the reader did none of those against the engine.
     pub(crate) fn send(&self, window: WindowId, command: Command) -> Result<(), ()> {
+        let command = match self.update_here(window, command) {
+            Some(command) => command,
+            None => return Ok(()),
+        };
         let mut linked = self.linked();
         match command {
             Command::WindowOpened if window != NO_WINDOW => {
@@ -250,6 +267,26 @@ impl Link {
             self.refuse(&mut linked, window);
         }
         Err(())
+    }
+
+    /// Look for or install an update of this app here, rather than send
+    /// the command to the engine on the host, which would look for one of
+    /// its own. Any other command comes back.
+    fn update_here(&self, window: WindowId, command: Command) -> Option<Command> {
+        let events = EventSender::routed(self.events.clone()).for_window(window);
+        let releases = self.releases.clone();
+        match command {
+            Command::CheckForUpdate => {
+                self.runtime
+                    .spawn(async move { update::check_now(&releases, &events).await });
+            }
+            Command::InstallUpdate { version } => {
+                self.runtime
+                    .spawn(async move { update::install(&releases, &events, version).await });
+            }
+            command => return Some(command),
+        }
+        None
     }
 
     /// Tell `window` a command of its was not done, unless it was told
@@ -402,6 +439,18 @@ pub fn link(
     backoff: Backoff,
     runtime: &tokio::runtime::Handle,
 ) -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
+    let (link, received) = start(host, dial, install, backoff, runtime);
+    (Backend::linked(link), received)
+}
+
+/// What `link` does, with the connection kept for `over_ssh`.
+fn start(
+    host: &str,
+    dial: Dial,
+    install: Option<Install>,
+    backoff: Backoff,
+    runtime: &tokio::runtime::Handle,
+) -> (Arc<Link>, std::sync::mpsc::Receiver<(WindowId, Event)>) {
     let (events, received) = std::sync::mpsc::channel();
     let link = Arc::new(Link {
         host: host.to_string(),
@@ -410,9 +459,11 @@ pub fn link(
         state: Mutex::default(),
         retry: tokio::sync::Notify::new(),
         restart: tokio::sync::Notify::new(),
+        runtime: runtime.clone(),
+        releases: Releases::anonymous(),
     });
     runtime.spawn(keep_connected(link.clone(), dial, install, backoff));
-    (Backend::linked(link), received)
+    (link, received)
 }
 
 /// Make the connection, and make it again each time it is lost, until the
@@ -1228,7 +1279,14 @@ pub fn over_ssh(
         },
     };
     let (dial, install) = dial_for(host, bridge);
-    link(host, dial, install, Backoff::default(), runtime.handle())
+    let (link, received) = start(host, dial, install, Backoff::default(), runtime.handle());
+    // This app's own updates, looked for here: the engine on the host
+    // looks for none.
+    runtime.spawn(update::clock(
+        link.releases.clone(),
+        EventSender::routed(link.events.clone()),
+    ));
+    (Backend::linked(link), received)
 }
 
 #[cfg(test)]
@@ -1562,6 +1620,74 @@ mod tests {
             far.command().await,
             Some((_, Command::RefreshOpenItem { .. }))
         ));
+    }
+
+    /// What `window` hears of its update commands, ignoring the link.
+    async fn update_answer(
+        events: &std::sync::mpsc::Receiver<(WindowId, Event)>,
+        window: WindowId,
+    ) -> Event {
+        loop {
+            match next_event(events).await {
+                (_, Event::Link(_)) => {}
+                (to, event @ (Event::UpdateChecked(_) | Event::Update(_))) => {
+                    assert_eq!(to, window);
+                    return event;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_apps_own_updates_are_looked_for_here_and_never_sent_to_the_host() {
+        use crate::update::{Checked, UpdateStatus};
+        let (dial, mut pipes) = pipes();
+        *pipes.failing.lock().unwrap() = Some("ssh: connect to host halo: refused".into());
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        while !matches!(next_link(&events).await, EngineLink::Down { .. }) {}
+        let window = backend.open_window();
+
+        // Not connected, the look is still made, here, and not refused. A
+        // test runs from no app, which is what it finds.
+        window.check_for_update();
+        assert!(matches!(
+            update_answer(&events, window.window()).await,
+            Event::UpdateChecked(Checked::NotARelease)
+        ));
+
+        *pipes.failing.lock().unwrap() = None;
+        let mut far = pipes.next().await;
+        far.welcome(1).await;
+        for _ in 0..3 {
+            far.command().await.unwrap();
+        }
+        while !matches!(next_link(&events).await, EngineLink::Up { .. }) {}
+
+        // Connected, neither goes to the engine.
+        window.check_for_update();
+        assert!(matches!(
+            update_answer(&events, window.window()).await,
+            Event::UpdateChecked(Checked::NotARelease)
+        ));
+        window.install_update("9.9.9");
+        let Event::Update(failed) = update_answer(&events, window.window()).await else {
+            panic!("not an update");
+        };
+        assert_eq!(
+            failed,
+            UpdateStatus::Failed {
+                version: "9.9.9".into(),
+                error: "Perch isn't running from an app it can replace.".into(),
+            }
+        );
+        assert!(far.quiet(Duration::from_millis(200)).await);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

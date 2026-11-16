@@ -45,7 +45,7 @@ pub mod reviews;
 pub(crate) mod runs;
 mod settings;
 mod star;
-mod update;
+pub(crate) mod update;
 mod windows;
 
 /// How many avatar downloads may be in flight at once.
@@ -5899,11 +5899,11 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
             }
             Command::InstallUpdate { version } => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { update::install(&ctx, version).await });
+                tokio::spawn(async move { update::install_in(&ctx, version).await });
             }
             Command::CheckForUpdate => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { update::check_now(&ctx).await });
+                tokio::spawn(async move { update::check_in(&ctx).await });
             }
             Command::StarDue => {
                 let ctx = ctx.clone();
@@ -22519,7 +22519,7 @@ mod tests {
 
     /// A GitHub that answers each request by its method and path, and
     /// writes down the paths.
-    fn serve_by_method(
+    pub(super) fn serve_by_method(
         answer: impl Fn(&str, &str, &[String]) -> (&'static str, String) + Send + 'static,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
         serve_by_body(move |method, path, headers, _sent| answer(method, path, headers))

@@ -1676,6 +1676,11 @@ newest one (see [perchd](#perchd)).
 
 ### When the app is updated
 
+The app on the Mac looks for its own updates, as it does with no host:
+Check for Updates… and Restart to update work while disconnected, and
+never go to the host's engine. It asks GitHub with no token, since the
+host has the token and the repository is public.
+
 Updating the app changes the build it wants, so its next connection
 installs the new `perchd` beside the old. The engine already running on
 the host is the old build, and the app weighs it against its own:
