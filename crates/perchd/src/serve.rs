@@ -61,13 +61,29 @@ fn serve() -> Result<(), String> {
     tracing::info!(socket = %socket.display(), "listening");
     runtime.spawn(accept(listener, engine.clone()));
 
+    // An engine that stops by itself has failed: its thread panicked. The
+    // service manager hears that from the exit, and can start another.
+    let (stopped, stopped_by_itself) = tokio::sync::oneshot::channel();
+    std::thread::spawn({
+        let engine = engine.clone();
+        move || {
+            engine.wait_stopped();
+            let _ = stopped.send(());
+        }
+    });
     let (mut term, mut int) = signals;
     let signal = runtime.block_on(async {
         tokio::select! {
-            _ = term.recv() => "SIGTERM",
-            _ = int.recv() => "SIGINT",
+            biased;
+            _ = stopped_by_itself => None,
+            Some(()) = term.recv() => Some("SIGTERM"),
+            Some(()) = int.recv() => Some("SIGINT"),
         }
     });
+    let Some(signal) = signal else {
+        let _ = std::fs::remove_file(&socket);
+        return Err("the engine stopped by itself; the log says why".into());
+    };
     tracing::info!(signal, "stopping");
     // Gone first, and not after: a bridge that comes while this engine
     // stops starts the next one, which takes the home once this one has
