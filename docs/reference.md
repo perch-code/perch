@@ -1494,8 +1494,9 @@ toolkit, so it needs no GTK. Releases carry it for Linux as
   `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`, whether a bridge started it
   or it was run by hand in a login: it outlives the session, and every
   agent it starts would get them. git over ssh on the host uses the
-  host's own keys. An engine started outside an ssh session, by a systemd
-  unit say, keeps `SSH_AUTH_SOCK`, which is then the host's own agent.
+  host's own keys. An engine run by hand outside an ssh session, from a
+  desktop login on the host say, keeps `SSH_AUTH_SOCK`, which is then the
+  host's own agent.
 - `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
   until either side closes. It is what `ssh <host> perchd bridge` runs. With
   no engine answering it starts `perchd serve` in a session of its own, so
@@ -1512,22 +1513,13 @@ toolkit, so it needs no GTK. Releases carry it for Linux as
 A socket file left by an engine that was killed is removed when the next
 one starts, once nothing answers on it.
 
-To start the engine at boot rather than at the first bridge, install
-`scripts/perchd.service` as a systemd user unit:
-
-```sh
-mkdir -p ~/.config/systemd/user
-cp scripts/perchd.service ~/.config/systemd/user/
-systemctl --user enable --now perchd
-loginctl enable-linger "$USER"  # keep it running with nobody logged in
-```
-
-The unit does not restart while another engine has the home (exit 75).
-Stopping it while the app is connected does not keep the engine stopped:
-the app reconnects, and its bridge starts an engine of its own outside
-systemd. Quit the app, or set it to This Mac, first. With logind's
-`KillUserProcesses=yes`, an engine a bridge started is killed when the ssh
-session ends, its runs with it; run it from the unit there.
+A bridge is the only thing that starts an engine on a host. After the
+host boots, or after an engine crashes, nothing runs there until the app
+next connects. Stopping the engine while the app is connected does not
+keep it stopped: the app reconnects and its bridge starts another. Quit
+the app, or set it to This Mac, first. On Linux the engine needs logind's
+`KillUserProcesses=no`, the default on most distributions; with `yes`, it
+is killed when the ssh session that started it ends, its runs with it.
 
 The app says it is still there every 15 seconds it has nothing else to
 send, and the engine hangs up on a client it has heard nothing from in a
@@ -1555,9 +1547,6 @@ On it:
 4. Write `~/.perch/config.toml` on the host with a `[[repo]]` for each
    repository and a `root` that is a clone on the host. Add repository… in
    the app can't do this for a host; edit the file there.
-5. Optionally, install the systemd unit and `loginctl enable-linger` (see
-   [perchd](#perchd)) so the engine starts at boot. Without it the first
-   connection starts one.
 
 Then on the Mac, set `[remote] host` in `~/.perch/config.toml` to the name
 you `ssh` to, or type it into Settings > General > Engine, and restart Perch.

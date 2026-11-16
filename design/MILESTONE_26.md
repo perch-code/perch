@@ -144,9 +144,9 @@ the Mac without a host.
   stopped and recorded Interrupted, children are reaped.
 - `perchd bridge` connects its stdin and stdout to the socket. If no
   engine is listening it starts `perchd serve` detached (its own session,
-  output to the log) and waits for the socket. So a host needs no
-  service manager, but `scripts/perchd.service` is a systemd user unit
-  for one that should start at boot (`loginctl enable-linger`).
+  output to the log) and waits for the socket. This is the only way an
+  engine starts on a host: no service manager, so nothing runs there
+  until the first connection after a boot.
 - `perchd status` says whether an engine is running, its version and
   how many clients and runs it has.
 - `perchd` does not link GTK. Its release artefact is a Linux tarball

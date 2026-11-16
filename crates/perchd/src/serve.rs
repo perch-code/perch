@@ -13,10 +13,8 @@ use tokio::net::UnixListener;
 
 use crate::socket;
 
-/// The exit when another engine has the Perch home. A service manager
-/// told not to restart on it (`RestartPreventExitStatus=` in
-/// `scripts/perchd.service`) does not try every few seconds while an
-/// engine a bridge started holds the home.
+/// The exit when another engine has the Perch home, so a script can tell
+/// "one is already running" from a failure.
 pub const HOME_HELD: u8 = 75;
 
 /// What an ssh session sets that the engine, which outlives the session,
@@ -101,7 +99,7 @@ fn serve() -> Result<(), Failed> {
     runtime.spawn(accept(listener, engine.clone()));
 
     // An engine that stops by itself has failed: its thread panicked. The
-    // service manager hears that from the exit, and can start another.
+    // exit says so, and the next bridge starts another.
     let (stopped, stopped_by_itself) = tokio::sync::oneshot::channel();
     std::thread::spawn({
         let engine = engine.clone();
@@ -212,7 +210,8 @@ fn prepare_environment() {
     for name in from_a_session(|name| std::env::var_os(name).is_some()) {
         std::env::remove_var(name);
     }
-    // A systemd unit, like a Finder launch, gets a bare PATH.
+    // The agents' install dirs, as the app adds them, for a login shell
+    // whose PATH leaves them out.
     if let Some(path) = perch_agent::path_with_install_dirs(
         std::env::var_os("PATH").as_deref(),
         &perch_agent::install_dirs(),
@@ -223,9 +222,9 @@ fn prepare_environment() {
 
 /// Which of [`SESSION_ONLY`] `perchd serve` drops, given which are set:
 /// all of them in an ssh session, run by hand in a login or in a tmux
-/// started from one. Outside one, an agent socket is the host's own (a
-/// systemd unit's `ssh-agent.socket`, gnome-keyring), and git over ssh
-/// with a key behind a passphrase needs it.
+/// started from one. Outside one, run from a desktop login on the host,
+/// an agent socket is the host's own (gnome-keyring, say), and git over
+/// ssh with a key behind a passphrase needs it.
 fn from_a_session(set: impl Fn(&str) -> bool) -> &'static [&'static str] {
     if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
         .into_iter()
@@ -237,7 +236,7 @@ fn from_a_session(set: impl Fn(&str) -> bool) -> &'static [&'static str] {
     }
 }
 
-/// To stderr, which a service manager keeps, and to the log file a day in
+/// To stderr, for a person running it by hand, and to the log file a day in
 /// `$PERCH_HOME/logs`, which a detached engine's stderr is not. Never to
 /// stdout, which a bridge's client reads as the wire.
 fn init_logging() {
@@ -249,7 +248,7 @@ fn init_logging() {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "perch=info,warn".into())
     };
-    // Colour only for a person: a journal or a file would keep the codes.
+    // Colour only for a person: a file would keep the codes.
     let stderr = tracing_subscriber::fmt::layer()
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
@@ -272,15 +271,14 @@ mod tests {
     use super::*;
 
     /// A forwarded agent comes with an ssh session's own variables; a
-    /// host's own agent, under systemd or a desktop login, comes alone and
-    /// is kept.
+    /// host's own agent, from a desktop login, comes alone and is kept.
     #[test]
     fn only_an_ssh_session_s_agent_is_dropped() {
         let session = |name: &str| matches!(name, "SSH_AUTH_SOCK" | "SSH_CONNECTION" | "SSH_TTY");
         assert_eq!(from_a_session(session), SESSION_ONLY);
         let tmux = |name: &str| matches!(name, "SSH_AUTH_SOCK" | "SSH_CLIENT");
         assert_eq!(from_a_session(tmux), SESSION_ONLY);
-        let systemd = |name: &str| name == "SSH_AUTH_SOCK";
-        assert!(from_a_session(systemd).is_empty());
+        let desktop = |name: &str| name == "SSH_AUTH_SOCK";
+        assert!(from_a_session(desktop).is_empty());
     }
 }

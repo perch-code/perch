@@ -386,7 +386,7 @@ async fn two_bridged_clients_share_a_served_engine_that_stops_cleanly() {
         .await
         .expect("a second serve kept running")
         .unwrap();
-    // With its own exit, which the systemd unit does not restart on.
+    // With its own exit, so a script can tell it from a failure.
     assert_eq!(second.status.code(), Some(75));
     let said = String::from_utf8_lossy(&second.stderr);
     assert!(!said.contains('\x1b'), "colour off a terminal: {said:?}");
