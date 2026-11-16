@@ -336,6 +336,22 @@ async fn has_ref(git: &Git, root: &Path, full_ref: &str) -> bool {
     .is_ok()
 }
 
+/// Whether the repository at `dir` has a local branch named `branch`.
+/// An error is git failing, not the answer no.
+pub async fn branch_exists(git: &Git, dir: &Path, branch: &str) -> Result<bool, Error> {
+    // A pattern also matches the refs below it, `<branch>/x`, so the
+    // lines are compared whole.
+    let full = format!("refs/heads/{branch}");
+    let out = git
+        .run(
+            Some(dir),
+            ["for-each-ref", "--format=%(refname)", full.as_str()],
+            QUERY_TIMEOUT,
+        )
+        .await?;
+    Ok(out.lines().any(|line| line.trim() == full))
+}
+
 /// Lines added and removed on a worktree's branch since it left `base_ref`:
 /// `git diff base...HEAD`, summed over files. Binary files count for
 /// nothing. The `+12 −3` a branch row shows.

@@ -488,6 +488,11 @@ pub struct WorkDefaults {
     /// only from `[repo.work]`, one repository at a time.
     #[serde(default)]
     pub approvals: Approvals,
+    /// How many minutes a request to the reader waits before it is
+    /// denied. Unset, the engine decides: 15 in the app, 480 under
+    /// `perchd`, where nobody may be connected to answer.
+    #[serde(default)]
+    pub approval_timeout_mins: Option<u32>,
 }
 
 /// Who decides a Work run's requests to go past its sandbox.
@@ -1094,6 +1099,13 @@ impl Config {
                     .to_string(),
             );
         }
+        if c.work.approval_timeout_mins == Some(0) {
+            c.work.approval_timeout_mins = None;
+            c.warnings.push(
+                "config.toml: [work] approval_timeout_mins = 0 was left out; a request needs at least a minute to be answered"
+                    .to_string(),
+            );
+        }
         Ok(c)
     }
 
@@ -1418,6 +1430,20 @@ mod tests {
         );
         assert!(!config.lsp_trusted("a/undeclared"));
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn the_approval_wait_is_read_and_zero_left_out() {
+        assert_eq!(Config::parse("").unwrap().work.approval_timeout_mins, None);
+        let set = Config::parse("[work]\napproval_timeout_mins = 30\n").unwrap();
+        assert_eq!(set.work.approval_timeout_mins, Some(30));
+        let zero = Config::parse("[work]\napproval_timeout_mins = 0\n").unwrap();
+        assert_eq!(zero.work.approval_timeout_mins, None);
+        assert!(
+            zero.warnings[0].contains("approval_timeout_mins = 0"),
+            "{:?}",
+            zero.warnings
+        );
     }
 
     #[test]

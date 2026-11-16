@@ -3522,6 +3522,13 @@ impl AppState {
                     });
                 }
             }
+            // A resync's: what is waiting now, which a card left from
+            // before a reconnect, settled while away, is not.
+            Event::Approvals(views) => {
+                if let Some(review) = self.review.get_untracked() {
+                    review.approvals.set(views);
+                }
+            }
             Event::ApprovalSettled {
                 run_id,
                 approval_id,

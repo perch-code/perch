@@ -29,7 +29,7 @@ pub use review_snapshot::{
     BASE_TIP_REF, HEAD_REF, MERGE_BASE_REF,
 };
 pub use scan::{
-    branch_churn, branch_readiness, github_remote, head_commit_time, parse_remotes,
+    branch_churn, branch_exists, branch_readiness, github_remote, head_commit_time, parse_remotes,
     parse_worktree_list, remotes, repo_from_remote, scan_root, BranchReadiness, RootScan,
     WorktreeEntry,
 };

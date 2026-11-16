@@ -7,11 +7,46 @@
 //! database needs no idea of kinds: `network:<host>`, `command:<text>`,
 //! `tool:<name>:<what>`, and `commit`.
 
+use std::time::Duration;
+
 use perch_agent::{ApprovalKind, ApprovalRequest};
 use perch_github::WorkGrantRecord;
 
-/// How long a request waits for the reader before it is denied.
-pub const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+use crate::backend::Lifetime;
+
+/// How long a request waits for the reader before it is denied, in the
+/// app: the reader is at the window that started the run.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// The same under `perchd`, where nobody may be connected when a run
+/// asks: a night, so a run started before bed is still waiting in the
+/// morning.
+pub const SERVICE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(8 * 60 * 60);
+
+/// How long a request waits: `[work] approval_timeout_mins` when it is
+/// set, else what suits how the engine lives.
+pub fn timeout(minutes: Option<u32>, lifetime: Lifetime) -> Duration {
+    match (minutes, lifetime) {
+        (Some(minutes), _) => Duration::from_secs(u64::from(minutes) * 60),
+        (None, Lifetime::WhileConnected) => APPROVAL_TIMEOUT,
+        (None, Lifetime::Service) => SERVICE_APPROVAL_TIMEOUT,
+    }
+}
+
+/// A wait as the denial says it: "15 minutes", "8 hours", "90 minutes".
+pub fn wait_words(wait: Duration) -> String {
+    let minutes = wait.as_secs() / 60;
+    let (count, unit) = if minutes >= 60 && minutes % 60 == 0 {
+        (minutes / 60, "hour")
+    } else {
+        (minutes, "minute")
+    };
+    if count == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{count} {unit}s")
+    }
+}
 
 /// What the agent is told when the reader says no.
 pub const DENIED: &str = "The reader said no.";
@@ -243,6 +278,27 @@ pub fn commits_granted(grants: &[WorkGrantRecord]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_wait_is_the_setting_else_the_engine_s_own() {
+        use super::{timeout, wait_words, Lifetime};
+        assert_eq!(timeout(None, Lifetime::WhileConnected).as_secs(), 15 * 60);
+        assert_eq!(timeout(None, Lifetime::Service).as_secs(), 480 * 60);
+        for lifetime in [Lifetime::WhileConnected, Lifetime::Service] {
+            assert_eq!(timeout(Some(45), lifetime).as_secs(), 45 * 60);
+        }
+        assert_eq!(
+            wait_words(timeout(None, Lifetime::WhileConnected)),
+            "15 minutes"
+        );
+        assert_eq!(wait_words(timeout(None, Lifetime::Service)), "8 hours");
+        assert_eq!(wait_words(timeout(Some(1), Lifetime::Service)), "1 minute");
+        assert_eq!(wait_words(timeout(Some(60), Lifetime::Service)), "1 hour");
+        assert_eq!(
+            wait_words(timeout(Some(90), Lifetime::Service)),
+            "90 minutes"
+        );
+    }
+
     use super::*;
 
     fn request(kind: ApprovalKind, subject: &str) -> ApprovalRequest {

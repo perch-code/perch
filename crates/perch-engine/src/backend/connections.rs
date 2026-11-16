@@ -224,6 +224,10 @@ impl Hub {
         }
     }
 
+    pub(super) fn lifetime(&self) -> Lifetime {
+        self.lifetime
+    }
+
     fn sending(&self) -> std::sync::MutexGuard<'_, ()> {
         self.sending
             .lock()

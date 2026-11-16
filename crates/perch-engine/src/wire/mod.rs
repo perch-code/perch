@@ -6,9 +6,11 @@
 //! sends `{ window, command }` lines and the engine `{ window, event }`
 //! lines, the window ids the client's own (see `backend::connections`).
 //! A line that does not parse is dropped, with the reason in the log, and
-//! the lines after it still go: framing is by the line. Only a handshake
-//! that fails, or the stream itself, ends a connection. Logs never go on
-//! the stream.
+//! the lines after it still go: framing is by the line. An empty line is
+//! a keepalive, which the client sends every `KEEPALIVE` and the engine
+//! reads past; a client the engine has heard nothing from in `IDLE` is
+//! hung up on. Otherwise only a handshake that fails, or the stream
+//! itself, ends a connection. Logs never go on the stream.
 //!
 //! The types and their wire form live in this crate together so they
 //! cannot drift apart: what goes over is `Command` and `Event` as serde
@@ -19,12 +21,17 @@ pub mod pairs;
 pub mod remote;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
+use tokio::time::Instant;
 
 use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, WindowId};
 
@@ -32,7 +39,8 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// peer would read wrong, or not at all, moves it on. 2: `Welcome` counts
 /// the engine's other clients and its runs. 3: scope picks carry the
 /// handle's ids, a resync's runs and kept settings replace a window's.
-pub const PROTOCOL: u32 = 3;
+/// 4: keepalive lines, and a resync's waiting approvals.
+pub const PROTOCOL: u32 = 4;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -51,11 +59,23 @@ pub const MAX_BACKLOG: usize = 256 << 20;
 /// what it was sent to be written.
 const LAST_WRITES: Duration = Duration::from_secs(5);
 
-/// How far a client may fall behind, and how long its last writes get.
+/// How often a client says it is still there, with an empty line, when it
+/// has nothing else to say.
+pub const KEEPALIVE: Duration = Duration::from_secs(15);
+
+/// How long the engine waits to hear anything from a client before it
+/// hangs up. A laptop asleep, or a network gone, leaves a connection
+/// half-open, which TCP gives up on only after hours; until then the
+/// client's windows, and the language servers they hold, would stay.
+pub const IDLE: Duration = Duration::from_secs(60);
+
+/// How far a client may fall behind, how long its last writes get, and
+/// how long it may say nothing.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Limits {
     pub(crate) backlog: usize,
     pub(crate) last_writes: Duration,
+    pub(crate) idle: Duration,
 }
 
 impl Default for Limits {
@@ -63,6 +83,7 @@ impl Default for Limits {
         Limits {
             backlog: MAX_BACKLOG,
             last_writes: LAST_WRITES,
+            idle: IDLE,
         }
     }
 }
@@ -127,6 +148,8 @@ pub enum WireError {
     Refused(String),
     /// The client fell more than `MAX_BACKLOG` behind.
     Behind,
+    /// Nothing came from the client, not even a keepalive, in `IDLE`.
+    Silent,
 }
 
 impl std::fmt::Display for WireError {
@@ -137,6 +160,7 @@ impl std::fmt::Display for WireError {
             WireError::Closed => f.write_str("the connection closed during the handshake"),
             WireError::Refused(reason) => f.write_str(reason),
             WireError::Behind => f.write_str("the client fell too far behind"),
+            WireError::Silent => f.write_str("the client said nothing for too long"),
         }
     }
 }
@@ -213,18 +237,46 @@ async fn next_line<R: AsyncBufRead + Unpin>(
 }
 
 /// Read one message: `None` at the end of the stream, and the reason for
-/// a line that is not one, which the caller drops and reads past.
+/// a line that is not one, which the caller drops and reads past. An
+/// empty line, a keepalive, is read past here.
 async fn next_message<R: AsyncBufRead + Unpin, T: for<'de> Deserialize<'de>>(
     read: &mut R,
     line: &mut Vec<u8>,
 ) -> std::io::Result<Option<Result<T, String>>> {
-    Ok(match next_line(read, line, MAX_LINE).await? {
-        None => None,
-        Some(Line::TooLong) => Some(Err(format!("a line longer than {MAX_LINE} bytes"))),
-        Some(Line::Read) => {
-            Some(serde_json::from_slice(line.trim_ascii_end()).map_err(|error| error.to_string()))
+    loop {
+        return Ok(match next_line(read, line, MAX_LINE).await? {
+            None => None,
+            Some(Line::TooLong) => Some(Err(format!("a line longer than {MAX_LINE} bytes"))),
+            Some(Line::Read) if line.trim_ascii().is_empty() => continue,
+            Some(Line::Read) => Some(
+                serde_json::from_slice(line.trim_ascii_end()).map_err(|error| error.to_string()),
+            ),
+        });
+    }
+}
+
+/// A stream's read side that notes when it last gave anything, which is
+/// how long the engine has heard nothing from a client.
+struct Heard<R> {
+    read: R,
+    at: Arc<Mutex<Instant>>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for Heard<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut self.read).poll_read(cx, buf);
+        if matches!(polled, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            if let Ok(mut at) = self.at.lock() {
+                *at = Instant::now();
+            }
         }
-    })
+        polled
+    }
 }
 
 /// The first message, which has to be one: the handshake has nothing to
@@ -314,7 +366,11 @@ where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (read, mut write) = tokio::io::split(stream);
-    let mut read = BufReader::new(read);
+    let heard = Arc::new(Mutex::new(Instant::now()));
+    let mut read = BufReader::new(Heard {
+        read,
+        at: heard.clone(),
+    });
     let mut line = Vec::new();
     let hello = first_message::<_, serde_json::Value>(&mut read, &mut line)
         .await
@@ -402,6 +458,24 @@ where
             let _ = write.shutdown().await;
         }
     });
+    // A client that has said nothing, not even a keepalive, in `idle` is
+    // asleep or cut off, and is done with as one that hung up.
+    let silent = Arc::new(AtomicBool::new(false));
+    let watchdog = tokio::spawn({
+        let (done, silent) = (done.clone(), silent.clone());
+        async move {
+            loop {
+                let due = *heard.lock().unwrap_or_else(|e| e.into_inner()) + limits.idle;
+                if Instant::now() >= due {
+                    tracing::info!(idle = ?limits.idle, "heard nothing from a client; closing it");
+                    silent.store(true, Ordering::Relaxed);
+                    done.notify_one();
+                    return;
+                }
+                tokio::time::sleep_until(due).await;
+            }
+        }
+    });
 
     let ended = loop {
         let next = tokio::select! {
@@ -426,6 +500,7 @@ where
     };
     // The windows close and the sink goes; the encoder ends with what is
     // left, and the writer writes it if the client is still reading.
+    watchdog.abort();
     drop(connection);
     let behind = encoder.await.unwrap_or(false);
     if tokio::time::timeout(limits.last_writes, &mut writer)
@@ -436,6 +511,9 @@ where
     }
     if behind {
         return Err(WireError::Behind);
+    }
+    if silent.load(Ordering::Relaxed) {
+        return Err(WireError::Silent);
     }
     ended
 }
@@ -469,6 +547,8 @@ pub(crate) struct Session<S> {
     read: BufReader<tokio::io::ReadHalf<S>>,
     write: tokio::io::WriteHalf<S>,
     line: Vec<u8>,
+    /// How often to say it is still there: `KEEPALIVE`, but for a test.
+    pub(crate) keepalive: Duration,
 }
 
 /// Say hello on `stream` and hear the engine's answer.
@@ -512,7 +592,15 @@ where
         }
     };
     match answer {
-        Answer::Welcome(welcome) => Ok((welcome, Session { read, write, line })),
+        Answer::Welcome(welcome) => Ok((
+            welcome,
+            Session {
+                read,
+                write,
+                line,
+                keepalive: KEEPALIVE,
+            },
+        )),
         Answer::Refused { reason } => Err(WireError::Refused(reason)),
     }
 }
@@ -547,17 +635,40 @@ where
             mut read,
             mut write,
             mut line,
+            keepalive,
         } = self;
         // Told when every handle has gone. The reader stops then too: the two
         // halves share the stream, which closes only when both have let go of
         // it, and a stream whose shutdown does nothing, as a child's stdin's
         // does, would otherwise stay open until the engine next said something.
         let hung_up = Arc::new(tokio::sync::Notify::new());
-        // Ends when every handle has gone, which hangs up.
+        // Ends when every handle has gone, which hangs up. Says it is still
+        // there every `keepalive` it has said nothing else, so the engine
+        // can tell a quiet client from one that has gone.
         tokio::spawn({
             let hung_up = hung_up.clone();
             async move {
-                while let Some((window, command)) = outgoing.recv().await {
+                let mut quiet = tokio::time::interval_at(Instant::now() + keepalive, keepalive);
+                quiet.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    let (window, command) = tokio::select! {
+                        next = outgoing.recv() => match next {
+                            Some(next) => next,
+                            None => break,
+                        },
+                        _ = quiet.tick() => {
+                            let said = async {
+                                write.write_all(b"\n").await?;
+                                write.flush().await
+                            };
+                            if let Err(error) = said.await {
+                                tracing::info!(%error, "engine stopped reading");
+                                return;
+                            }
+                            continue;
+                        }
+                    };
+                    quiet.reset();
                     match write_line(&mut write, &CommandLine { window, command }).await {
                         Ok(()) => {}
                         Err(WireError::Malformed(error)) => {

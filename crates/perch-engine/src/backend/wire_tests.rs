@@ -693,6 +693,7 @@ async fn a_client_that_stops_reading_is_hung_up_on_once_it_is_too_far_behind() {
     let limits = wire::Limits {
         backlog: 64 << 10,
         last_writes: Duration::from_millis(100),
+        ..wire::Limits::default()
     };
     // Never read again: the pipe fills, and then the backlog.
     let (_read, _write, served) = raw_client(&engine, limits).await;
@@ -710,6 +711,86 @@ async fn a_client_that_stops_reading_is_hung_up_on_once_it_is_too_far_behind() {
     // The engine and its other client go on.
     other.open_window().rename_item("missing", None);
     assert_eq!(wait(&other_events, is_gone_notice), 1);
+}
+
+/// An engine with no command loop: enough for what the wire itself does.
+fn bare_engine() -> (Engine, UnboundedReceiver<Inbound>) {
+    let (tx, commands) = unbounded_channel();
+    let engine = Engine {
+        hub: Arc::new(Hub::new(tx, Lifetime::Service, Fencing::default())),
+        runtime: tokio::runtime::Handle::current(),
+    };
+    (engine, commands)
+}
+
+#[tokio::test]
+async fn a_client_is_kept_while_it_keeps_alive_and_hung_up_on_once_silent() {
+    let (engine, _commands) = bare_engine();
+    let limits = wire::Limits {
+        idle: Duration::from_millis(400),
+        ..wire::Limits::default()
+    };
+    let (_read, mut write, served) = raw_client(&engine, limits).await;
+    // Keepalives alone hold the connection, for far longer than the wait.
+    for _ in 0..12 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write.write_all(b"\n").await.unwrap();
+    }
+    assert!(!served.is_finished());
+    assert_eq!(engine.connections(), 1);
+
+    // Then nothing: asleep, or the network gone with the stream still
+    // open. The engine stops waiting, and the client's windows close.
+    let silent_from = tokio::time::Instant::now();
+    let ended = tokio::time::timeout(Duration::from_secs(10), served)
+        .await
+        .expect("the engine kept a silent client")
+        .unwrap();
+    assert!(matches!(ended, Err(wire::WireError::Silent)), "{ended:?}");
+    assert!(silent_from.elapsed() >= Duration::from_millis(300));
+    assert_eq!(engine.connections(), 0);
+}
+
+#[tokio::test]
+async fn a_quiet_client_says_it_is_there_every_little_while() {
+    let (near, far) = tokio::io::duplex(1 << 16);
+    let (read, mut write) = tokio::io::split(far);
+    let mut read = BufReader::new(read);
+    let engine_side = async {
+        let hello = line(&mut read).await.unwrap();
+        assert!(hello.contains("\"protocol\""), "{hello}");
+        let welcome = serde_json::to_string(&Answer::Welcome(wire::Welcome {
+            protocol: PROTOCOL,
+            engine_version: VERSION.into(),
+            connection: 1,
+            host: "halo".into(),
+            home: "/home/chris".into(),
+            data_root: "/home/chris/.perch".into(),
+            clients: 0,
+            runs: 0,
+        }))
+        .unwrap();
+        write
+            .write_all(format!("{welcome}\n").as_bytes())
+            .await
+            .unwrap();
+    };
+    let (shaken, ()) = tokio::join!(wire::handshake(near), engine_side);
+    let (welcome, mut session) = shaken.unwrap();
+    session.keepalive = Duration::from_millis(50);
+    let (commands, outgoing) = unbounded_channel();
+    let (backend, navigations) = Backend::over_wire(commands, welcome.connection);
+    let (events, _received) = std::sync::mpsc::channel();
+    let _ending = session.carry(outgoing, navigations, events);
+    let since = tokio::time::Instant::now();
+    for _ in 0..3 {
+        assert_eq!(line(&mut read).await.as_deref(), Some("\n"));
+    }
+    assert!(since.elapsed() >= Duration::from_millis(150));
+    // A command is said in its place, and the keepalives go on after it.
+    backend.resync();
+    assert!(line(&mut read).await.unwrap().contains("Resync"));
+    assert_eq!(line(&mut read).await.as_deref(), Some("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

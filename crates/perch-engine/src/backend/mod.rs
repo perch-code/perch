@@ -897,19 +897,25 @@ pub struct ApprovalView {
     pub always: String,
 }
 
-/// A request waiting on the reader, and what answering it needs.
+/// A request waiting on the reader, and what answering it needs. The
+/// engine holds it, not a window: a client that connects while it waits
+/// is sent its card in the resync.
 #[derive(Clone)]
 struct PendingApproval {
     run: perch_agent::Run,
     repo: String,
     request: perch_agent::ApprovalRequest,
+    view: ApprovalView,
+    /// When it was asked, so a resync lists the cards in that order.
+    asked: std::time::Instant,
 }
 
 /// How a request was settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Settle {
     Answered(ApprovalAnswer),
-    TimedOut,
+    /// Nobody answered in this long.
+    TimedOut(Duration),
     RunEnded,
 }
 
@@ -1067,6 +1073,9 @@ pub enum Event {
     RepositoryAdded(String),
     /// A Work run asks the reader something.
     ApprovalRequested(ApprovalView),
+    /// Every request waiting on the reader, oldest first, in a resync:
+    /// it replaces the cards a window has.
+    Approvals(Vec<ApprovalView>),
     /// A request was answered, by the reader, a grant, a timeout or the
     /// run's end: its buttons go.
     ApprovalSettled {
@@ -4650,7 +4659,7 @@ async fn run(
         asked_participants: Default::default(),
         participants: Default::default(),
         approvals: Default::default(),
-        approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
+        approval_timeout: crate::approvals::timeout(None, hub.lifetime()),
         approval_picks: Default::default(),
         window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         window: NO_WINDOW,
@@ -6938,7 +6947,9 @@ struct Ctx {
     /// Requests Work runs are waiting on the reader for, by run and
     /// request id.
     approvals: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PendingApproval>>>,
-    /// How long a request waits before it is denied.
+    /// How long a request waits before it is denied when config does not
+    /// say: the default for how this engine lives (see
+    /// `approvals::timeout`).
     approval_timeout: Duration,
     /// Who the reader picked to decide each item's Work requests, by item
     /// id, over config. Kept until Perch quits.
@@ -7047,6 +7058,25 @@ impl Ctx {
     /// else config's for its repository.
     fn approvals_for(&self, item_id: &str, repo: &str) -> perch_github::Approvals {
         self.work_approvals().for_item(item_id, repo)
+    }
+
+    /// How long a request asked now waits: `[work] approval_timeout_mins`,
+    /// else this engine's default.
+    fn approval_wait(&self) -> Duration {
+        match self.config().work.approval_timeout_mins {
+            Some(minutes) => Duration::from_secs(u64::from(minutes) * 60),
+            None => self.approval_timeout,
+        }
+    }
+
+    /// The requests waiting on the reader, oldest first.
+    fn pending_approvals(&self) -> Vec<ApprovalView> {
+        let Ok(pending) = self.approvals.lock() else {
+            return Vec::new();
+        };
+        let mut waiting: Vec<_> = pending.values().collect();
+        waiting.sort_by_key(|p| p.asked);
+        waiting.into_iter().map(|p| p.view.clone()).collect()
     }
 
     /// Tell every window who decides Work requests.
@@ -8412,6 +8442,9 @@ fn send_standing(ctx: &Ctx) {
     }
     let usage = perch_agent::usage::subscribe().borrow().clone();
     let _ = ctx.events.send(Event::Usage(usage));
+    // Requests a run asked while this client was away, or before it
+    // came, still waiting: its cards, which it can answer.
+    let _ = ctx.events.send(Event::Approvals(ctx.pending_approvals()));
     if let Some(status) = ctx.status() {
         ctx.send_status(status);
     }
@@ -15588,6 +15621,11 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     let mut failed_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
     let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    // The rows as they were before this scan, for a worktree whose branch
+    // was renamed under its row to find it by its directory.
+    let rows = ctx
+        .with_cache(|c| c.load_items().unwrap_or_default())
+        .unwrap_or_default();
 
     for declared in &ctx.config().repo {
         // Every entry has its identity by the time the backend runs. One
@@ -15657,6 +15695,47 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                 let existing = ctx
                     .with_cache(|c| c.find_item_by_branch(identity, &branch).ok().flatten())
                     .flatten();
+                let renamed = renamed_row(git, &rows, identity, &path, &branch).await;
+                let existing = match (existing, renamed) {
+                    (None, Some(mut item)) => {
+                        // The same worktree on a new name: the row is
+                        // renamed, and what hangs off it stays.
+                        let Some(c) = item.checkout.as_mut() else {
+                            continue;
+                        };
+                        let old = std::mem::replace(&mut c.branch, branch.clone());
+                        c.head_sha = entry.head_sha.clone();
+                        c.on_disk = true;
+                        c.churn = churn;
+                        c.path = path.clone();
+                        match ctx.with_cache(|cache| cache.update_item(&item)) {
+                            Some(Ok(())) => {
+                                tracing::info!(item = %item.id, %old, new = %branch, "a worktree's branch was renamed; renamed its row");
+                                count_divergence(git, &mut item).await;
+                                ctx.with_cache(|cache| cache.update_item(&item));
+                                changed = true;
+                                continue;
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(item = %item.id, %old, new = %branch, error = %e, "could not rename a row with its worktree's branch; a new row instead");
+                            }
+                            None => {}
+                        }
+                        None
+                    }
+                    (Some(holder), Some(renamed)) if holder.id != renamed.id => {
+                        let old = renamed.checkout.as_ref().map(|c| c.branch.as_str());
+                        tracing::info!(
+                            item = %renamed.id,
+                            old,
+                            new = %branch,
+                            holder = %holder.id,
+                            "a worktree's branch was renamed to one another row has; its row is not renamed"
+                        );
+                        Some(holder)
+                    }
+                    (existing, _) => existing,
+                };
                 match existing {
                     Some(mut item) => {
                         let Some(c) = item.checkout.as_mut() else {
@@ -15765,6 +15844,40 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         changed = true;
     }
     changed
+}
+
+/// The unowned row for the worktree at `path` when the worktree is on
+/// `branch` and the row on a branch that is not there any more: the branch
+/// was renamed under the row, as T3 Code renames a thread's `t3/<hex>`
+/// branch once the thread has a title. A branch still there means the
+/// reader switched branches in the worktree, which puts the old row away
+/// instead. A row the reader archived stays theirs.
+async fn renamed_row(
+    git: &perch_git::cmd::Git,
+    rows: &[Item],
+    identity: &str,
+    path: &Path,
+    branch: &str,
+) -> Option<Item> {
+    let row = rows.iter().find(|item| {
+        let Some(c) = item.checkout.as_ref() else {
+            return false;
+        };
+        item.repo_full_name.eq_ignore_ascii_case(identity)
+            && !c.owned
+            && !item.is_archived()
+            && c.branch != branch
+            && c.path.canonicalize().unwrap_or_else(|_| c.path.clone()) == path
+    })?;
+    let old = &row.checkout.as_ref()?.branch;
+    match perch_git::branch_exists(git, path, old).await {
+        Ok(false) => Some(row.clone()),
+        Ok(true) => None,
+        Err(error) => {
+            tracing::warn!(%error, branch = %old, "could not tell whether a branch is still there");
+            None
+        }
+    }
 }
 
 /// For each item with a branch and no subject, ask GitHub whether a pull
@@ -18516,6 +18629,17 @@ async fn on_approval(
         );
         return;
     }
+    let view = ApprovalView {
+        run_id: run.id.clone(),
+        id: id.to_string(),
+        item_id: item_id.to_string(),
+        thread_id: thread_id.to_string(),
+        title: crate::approvals::title(request),
+        command: matches!(request.kind, perch_agent::ApprovalKind::Command)
+            .then(|| request.subject.clone()),
+        detail: request.detail.clone(),
+        always: crate::approvals::always_button(request),
+    };
     if let Ok(mut pending) = ctx.approvals.lock() {
         pending.insert(
             (run.id.clone(), id.to_string()),
@@ -18523,6 +18647,8 @@ async fn on_approval(
                 run: handle.clone(),
                 repo,
                 request: request.clone(),
+                view: view.clone(),
+                asked: std::time::Instant::now(),
             },
         );
     }
@@ -18533,22 +18659,18 @@ async fn on_approval(
         &format!("Asked: {line}"),
         None,
     );
-    let _ = ctx.events.send(Event::ApprovalRequested(ApprovalView {
-        run_id: run.id.clone(),
-        id: id.to_string(),
-        item_id: item_id.to_string(),
-        thread_id: thread_id.to_string(),
-        title: crate::approvals::title(request),
-        command: matches!(request.kind, perch_agent::ApprovalKind::Command)
-            .then(|| request.subject.clone()),
-        detail: request.detail.clone(),
-        always: crate::approvals::always_button(request),
-    }));
+    // Every client's, whichever window started the run: any of them may
+    // answer, and the first answer settles it for all.
+    let _ = ctx
+        .events
+        .for_window(NO_WINDOW)
+        .send(Event::ApprovalRequested(view));
+    let wait = ctx.approval_wait();
     let ctx = ctx.clone();
     let (run_id, id) = (run.id.clone(), id.to_string());
     tokio::spawn(async move {
-        tokio::time::sleep(ctx.approval_timeout).await;
-        settle_approval(&ctx, &run_id, &id, Settle::TimedOut).await;
+        tokio::time::sleep(wait).await;
+        settle_approval(&ctx, &run_id, &id, Settle::TimedOut(wait)).await;
     });
 }
 
@@ -18587,14 +18709,14 @@ async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
             false,
             "Denied".to_string(),
         ),
-        Settle::TimedOut => {
-            let minutes = ctx.approval_timeout.as_secs() / 60;
+        Settle::TimedOut(wait) => {
+            let wait = crate::approvals::wait_words(wait);
             (
                 Some(perch_agent::Decision::deny(format!(
-                    "The reader did not answer in {minutes} minutes."
+                    "The reader did not answer in {wait}."
                 ))),
                 false,
-                format!("Denied: no answer in {minutes} minutes"),
+                format!("Denied: no answer in {wait}"),
             )
         }
         Settle::RunEnded => (None, false, "The run ended before an answer".to_string()),
@@ -18619,10 +18741,13 @@ async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
         &format!("{summary}: {line}"),
         Some(ok),
     );
-    let _ = ctx.events.send(Event::ApprovalSettled {
-        run_id: run_id.to_string(),
-        approval_id: id.to_string(),
-    });
+    let _ = ctx
+        .events
+        .for_window(NO_WINDOW)
+        .send(Event::ApprovalSettled {
+            run_id: run_id.to_string(),
+            approval_id: id.to_string(),
+        });
 }
 
 /// A request, or what became of it, as a step of its run, so it is in
@@ -27692,6 +27817,91 @@ read eof || true
     }
 
     #[tokio::test]
+    async fn a_waiting_request_is_in_every_resync_until_it_is_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = asking_claude(
+            dir.path(),
+            r#"{"subtype":"can_use_tool","tool_name":"SandboxNetworkAccess","input":{"host":"example.com"}}"#,
+        );
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let item = work_branch(&ctx, &worktree);
+        let running = tokio::spawn({
+            let (ctx, id) = (ctx.clone(), item.id.clone());
+            async move {
+                ask(
+                    &ctx,
+                    id,
+                    None,
+                    None,
+                    "Fetch it".into(),
+                    perch_agent::Backend::ClaudeCode,
+                    "sonnet".into(),
+                    perch_agent::Effort::Medium,
+                    RunMode::Work,
+                )
+                .await
+            }
+        });
+        let asked = next_event(&received, |e| match e {
+            Event::ApprovalRequested(view) => Some(view),
+            _ => None,
+        })
+        .await;
+
+        // A client that connects now is given the card.
+        received.try_iter().for_each(drop);
+        send_standing(&ctx);
+        let resynced = received
+            .try_iter()
+            .find_map(|e| match e {
+                Event::Approvals(views) => Some(views),
+                _ => None,
+            })
+            .expect("the resync lists what is waiting");
+        assert_eq!(resynced, vec![asked.clone()]);
+
+        // Answered from anywhere, it is settled for everyone, and the next
+        // resync has nothing waiting.
+        settle_approval(
+            &ctx,
+            &asked.run_id,
+            &asked.id,
+            Settle::Answered(ApprovalAnswer::Once),
+        )
+        .await;
+        running.await.unwrap();
+        assert!(received.try_iter().any(|e| matches!(
+            e,
+            Event::ApprovalSettled { ref approval_id, .. } if *approval_id == asked.id
+        )));
+        send_standing(&ctx);
+        assert_eq!(
+            received.try_iter().find_map(|e| match e {
+                Event::Approvals(views) => Some(views),
+                _ => None,
+            }),
+            Some(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_waits_as_config_says_else_as_the_engine_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        assert_eq!(ctx.approval_wait(), crate::approvals::APPROVAL_TIMEOUT);
+        ctx.approval_timeout = crate::approvals::timeout(None, Lifetime::Service);
+        assert_eq!(ctx.approval_wait(), Duration::from_secs(480 * 60));
+        let mut config = Config::default();
+        config.work.approval_timeout_mins = Some(30);
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        assert_eq!(ctx.approval_wait(), Duration::from_secs(30 * 60));
+    }
+
+    #[tokio::test]
     async fn a_repository_set_to_never_has_every_request_allowed_without_asking() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
@@ -32668,6 +32878,70 @@ read eof || true
             !scan_roots(&ctx).await,
             "a second scan over the same tree changes nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_root_branch_renamed_under_its_row_renames_the_row() {
+        // T3 Code makes a thread's worktree on `t3/<hex>` and renames the
+        // branch once the thread has a title. The row follows, by its
+        // directory, and keeps its id and what hangs off it.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "t3abcd").canonicalize().unwrap();
+        git(&worktree, &["branch", "-m", "t3/abcd1234"]);
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        let items = || ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        let branch_of = |item: &Item| item.checkout.as_ref().unwrap().branch.clone();
+        assert!(scan_roots(&ctx).await);
+        let mut found = items().remove(0);
+        assert_eq!(branch_of(&found), "t3/abcd1234");
+        found.name = Some("named".into());
+        ctx.with_cache(|c| c.update_item(&found)).unwrap().unwrap();
+
+        git(&worktree, &["branch", "-m", "fix-the-flaky-test"]);
+        assert!(scan_roots(&ctx).await);
+        let after = items();
+        assert_eq!(after.len(), 1, "no second row, archived or not: {after:?}");
+        assert_eq!(after[0].id, found.id);
+        assert_eq!(branch_of(&after[0]), "fix-the-flaky-test");
+        assert!(!after[0].is_archived());
+        assert_eq!(after[0].name.as_deref(), Some("named"));
+        assert!(!scan_roots(&ctx).await, "and it holds still");
+
+        // Switching branches is not a rename: the old branch is still
+        // there, and its row is put away as before.
+        git(&worktree, &["checkout", "-q", "-b", "elsewhere"]);
+        assert!(scan_roots(&ctx).await);
+        let switched = items();
+        assert_eq!(switched.len(), 2, "{switched:?}");
+        let old = switched.iter().find(|i| i.id == found.id).unwrap();
+        assert_eq!(branch_of(old), "fix-the-flaky-test");
+        assert!(old.is_archived());
+
+        // A rename onto a branch another row holds leaves the rows as they
+        // were: the unique branch is that row's.
+        git(&worktree, &["checkout", "-q", "fix-the-flaky-test"]);
+        assert!(scan_roots(&ctx).await);
+        let back = items();
+        let row = back.iter().find(|i| i.id == found.id).unwrap();
+        assert!(!row.is_archived(), "the scan brings it back");
+        let mut holder = Item::new("local/notes", Timestamp::now());
+        let mut held = row.checkout.clone().unwrap();
+        held.branch = "taken".into();
+        held.path = dir.path().join("elsewhere");
+        held.owned = true;
+        holder.checkout = Some(held);
+        ctx.with_cache(|c| c.insert_item(&holder)).unwrap().unwrap();
+        git(&worktree, &["branch", "-m", "taken"]);
+        scan_roots(&ctx).await;
+        let rows = items();
+        let row = rows.iter().find(|i| i.id == found.id).unwrap();
+        assert_eq!(branch_of(row), "fix-the-flaky-test");
+        assert!(row.is_archived());
+        let holder = rows.iter().find(|i| i.id == holder.id).unwrap();
+        assert_eq!(branch_of(holder), "taken");
     }
 
     #[tokio::test]

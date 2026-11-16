@@ -59,13 +59,19 @@ struct Window {
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
     /// Where the last window moved or was resized to, for the next one
-    /// opened with none open to go. Read from the database at launch.
+    /// opened with none open to go. Read from `FRAME_FILE` at launch.
     static LEFT_AT: Cell<Option<Rect>> = const { Cell::new(None) };
 }
 
-/// The meta key a window's frame is kept under: `x,y,width,height`, in
-/// points, the top-left from the top of the main screen, as floem places
-/// windows.
+/// The file in this machine's Perch home a window's frame is kept in:
+/// `x,y,width,height`, in points, the top-left from the top of the main
+/// screen, as floem places windows. It is the client's, wherever the
+/// engine is: an engine on a host has its own database, which knows
+/// nothing of this machine's screens.
+const FRAME_FILE: &str = "window-frame";
+/// The meta key the frame was kept under in the database before
+/// `FRAME_FILE`, read when there is no file so that nobody's window
+/// moves after an upgrade.
 const FRAME_KEY: &str = "window.frame";
 const DEFAULT_SIZE: Size = Size::new(1280.0, 820.0);
 const MIN_SIZE: Size = Size::new(900.0, 600.0);
@@ -80,10 +86,27 @@ const DRAG_STRIP: f64 = 40.0;
 /// Read where the last window was left. Before the backend starts, so
 /// that it is not opening the database, a migration say, at the time.
 pub fn load_frame() {
-    let frame = perch_github::config::db_path()
-        .and_then(|db| perch_github::Cache::peek_meta(&db, FRAME_KEY))
-        .and_then(|value| parse_frame(&value));
-    LEFT_AT.set(frame);
+    LEFT_AT.set(read_frame(&perch_github::config::perch_home()));
+}
+
+/// The frame kept in `home`: the file, else the old meta key in this
+/// machine's database, if it has one.
+fn read_frame(home: &std::path::Path) -> Option<Rect> {
+    if let Ok(value) = std::fs::read_to_string(home.join(FRAME_FILE)) {
+        return parse_frame(value.trim());
+    }
+    perch_github::Cache::peek_meta(&home.join("perch.db"), FRAME_KEY)
+        .and_then(|value| parse_frame(&value))
+}
+
+/// Keep `frame` in `home`, whole or not at all: written beside the file
+/// and moved over it.
+fn write_frame(home: &std::path::Path, frame: Rect) -> std::io::Result<()> {
+    std::fs::create_dir_all(home)?;
+    let path = home.join(FRAME_FILE);
+    let partial = path.with_extension("partial");
+    std::fs::write(&partial, format_frame(frame))?;
+    std::fs::rename(&partial, &path)
 }
 
 fn parse_frame(value: &str) -> Option<Rect> {
@@ -374,12 +397,10 @@ pub fn view(
     let frame = Rc::new(Cell::new(frame));
     let timer = Rc::new(Cell::new(None::<TimerToken>));
     let remember = {
-        let backend = backend.clone();
         move |at: Rect| {
             if let Some(timer) = timer.take() {
                 timer.cancel();
             }
-            let backend = backend.clone();
             timer.set(Some(floem::action::exec_after(SAVE_AFTER, move |_| {
                 // A full-screen window is the screen's size; the next one
                 // should open at the size it came out of full screen to.
@@ -387,7 +408,10 @@ pub fn view(
                     return;
                 }
                 LEFT_AT.set(Some(at));
-                backend.set_meta(FRAME_KEY, &format_frame(at));
+                let home = perch_github::config::perch_home();
+                if let Err(error) = write_frame(&home, at) {
+                    tracing::warn!(%error, "could not keep where the window is");
+                }
             })));
         }
     };
@@ -923,6 +947,23 @@ mod tests {
         LEFT_AT.set(Some(Rect::new(0.0, 0.0, 400.0, 300.0)));
         assert_eq!(placement().size(), MIN_SIZE);
         LEFT_AT.set(None);
+    }
+
+    #[test]
+    fn the_frame_is_kept_on_this_machine_and_an_old_one_still_read() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(read_frame(home.path()), None);
+        // Kept in the database, as before the file.
+        let old = Rect::new(10.0, 20.0, 1010.0, 820.0);
+        let cache = perch_github::Cache::open(&home.path().join("perch.db"), None).unwrap();
+        cache.set_meta(FRAME_KEY, &format_frame(old)).unwrap();
+        drop(cache);
+        assert_eq!(read_frame(home.path()), Some(old));
+        // Kept in the file, which wins from then on.
+        let new = Rect::new(120.0, 80.0, 1520.0, 980.0);
+        write_frame(home.path(), new).unwrap();
+        assert_eq!(read_frame(home.path()), Some(new));
+        assert!(!home.path().join("window-frame.partial").exists());
     }
 
     #[test]
