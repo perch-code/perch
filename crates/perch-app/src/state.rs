@@ -248,6 +248,9 @@ pub struct AppState {
     /// While the file doesn't parse, its `config` is the one read last,
     /// which is what Perch goes on with.
     pub settings_file: RwSignal<Option<crate::backend::SettingsFile>>,
+    /// How the connection to an engine on another machine stands, as the
+    /// client last said. `None` with the engine in process.
+    pub link: RwSignal<Option<crate::backend::EngineLink>>,
     /// Open…'s box.
     pub open_box: crate::ui::open_box::OpenBox,
     /// The Settings page over the window.
@@ -491,6 +494,7 @@ impl AppState {
             repos_known: RwSignal::new(false),
             github_hosts: RwSignal::new(vec!["github.com".to_string()]),
             settings_file: RwSignal::new(None),
+            link: RwSignal::new(None),
             open_box: crate::ui::open_box::OpenBox::new(),
             settings: crate::ui::settings::SettingsState::new(),
             browse: RwSignal::new(HashMap::new()),
@@ -589,6 +593,7 @@ impl AppState {
         copy(self.trusted_servers, data.trusted_servers);
         copy(self.github_hosts, data.github_hosts);
         copy(self.settings_file, data.settings_file);
+        copy(self.link, data.link);
         copy(self.browse, data.browse);
         copy(self.items, data.items);
         copy(self.notifications, data.notifications);
@@ -686,6 +691,88 @@ impl AppState {
 
     /// Replace the summaries loaded at startup or by History pagination.
     /// Active records win by id; repeated pages are harmless.
+    /// Every run there is to show, in place of what the window has: what
+    /// startup and a resync send. A row's transcript, read when it was
+    /// opened, stays.
+    pub fn replace_agent_runs(&self, runs: impl IntoIterator<Item = perch_github::RunSummary>) {
+        self.agent_runs.update(|current| {
+            let replaced = runs
+                .into_iter()
+                .map(|run| {
+                    let mut summary = AgentRunSummary::from_summary(&run);
+                    if let Some(held) = current.iter().find(|held| held.id == summary.id) {
+                        summary.steps = held.steps.clone();
+                        summary.response = held.response.clone();
+                        summary.response_truncated = held.response_truncated;
+                    }
+                    summary
+                })
+                .collect();
+            *current = Arc::new(replaced);
+        });
+    }
+
+    /// A kept setting, or `None` for one not kept, which goes back to its
+    /// default: a resync says every key, and a window that held a value
+    /// another client has since taken out has to drop it.
+    fn take_meta(&self, key: &str, value: Option<String>) {
+        match key {
+            "item_filters" => match value.as_deref().map(crate::items::ItemFilters::parse) {
+                Some(Ok(f)) => self.item_filters.set(f),
+                Some(Err(e)) => tracing::warn!(error = %e, "ignoring saved item filters"),
+                None => self.item_filters.set(crate::items::ItemFilters::default()),
+            },
+            "review.layout" => {
+                if let Some(review) = self.review.get_untracked() {
+                    match value.as_deref() {
+                        Some(value) => {
+                            if let Some(layout) = crate::review::model::Layout::parse(value) {
+                                review.layout.set(layout);
+                            }
+                        }
+                        None => review.layout.set(crate::review::model::Layout::Stacked),
+                    }
+                }
+            }
+            "review.wrap" => {
+                if let Some(review) = self.review.get_untracked() {
+                    review
+                        .wrap
+                        .set(value.is_some_and(|value| value.trim() == "on"));
+                }
+            }
+            "drawer.view" => {
+                self.tree_open
+                    .set(value.is_some_and(|value| crate::ui::drawer::saved_open(&value)));
+            }
+            "drawer.width" => match value.map(|value| value.parse::<f64>()) {
+                Some(Ok(width)) => self.drawer_width.set(width.clamp(
+                    crate::theme::DRAWER_MIN_WIDTH,
+                    crate::theme::DRAWER_MAX_WIDTH,
+                )),
+                Some(Err(e)) => tracing::warn!(error = %e, "ignoring saved drawer width"),
+                None => self.drawer_width.set(crate::theme::DRAWER_WIDTH),
+            },
+            // The two arrive one after the other; whichever comes second
+            // completes the pair. No login is nobody known.
+            "viewer.login" => self.viewer.update(|v| match value {
+                Some(login) => {
+                    let avatar = v.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
+                    *v = Some((login, avatar));
+                }
+                None => *v = None,
+            }),
+            "viewer.avatar_url" => self.viewer.update(|v| {
+                if let Some((_, avatar)) = v.as_mut() {
+                    *avatar = value.unwrap_or_default();
+                } else if let Some(avatar) = value {
+                    *v = Some((String::new(), avatar));
+                }
+            }),
+            _ => {}
+        }
+    }
+
     pub fn merge_agent_runs(&self, runs: impl IntoIterator<Item = perch_github::RunSummary>) {
         self.agent_runs.update(|current| {
             let mut merged = current.as_ref().clone();
@@ -2011,7 +2098,8 @@ impl AppState {
                 );
                 review.apply_steer(&run_id, &text);
             }
-            Event::AgentRuns { runs } => self.merge_agent_runs(runs),
+            Event::AgentRuns { runs, whole: false } => self.merge_agent_runs(runs),
+            Event::AgentRuns { runs, whole: true } => self.replace_agent_runs(runs),
             Event::ItemRuns {
                 item_id,
                 runs,
@@ -3005,6 +3093,7 @@ impl AppState {
             Event::CommitsReady {
                 navigation_id,
                 scope_gen,
+                scope_id: _,
                 item_id,
                 commits,
                 dirt,
@@ -3021,9 +3110,12 @@ impl AppState {
                     review.last_run.set(last_run);
                 }
             }
+            // An answer from before the engine heard of the window's latest
+            // scope pick never gets here: the handle drops it.
             Event::ScopeReady {
                 navigation_id,
                 scope_gen,
+                scope_id: _,
                 item_id,
                 scope,
                 files,
@@ -3410,46 +3502,7 @@ impl AppState {
             } => self
                 .browse
                 .update(|all| all.entry(query).or_default().take(page, poll, result)),
-            Event::Meta { key, value } => match key.as_str() {
-                "item_filters" => match crate::items::ItemFilters::parse(&value) {
-                    Ok(f) => self.item_filters.set(f),
-                    Err(e) => tracing::warn!(error = %e, "ignoring saved item filters"),
-                },
-                "review.layout" => {
-                    if let (Some(layout), Some(review)) = (
-                        crate::review::model::Layout::parse(&value),
-                        self.review.get_untracked(),
-                    ) {
-                        review.layout.set(layout);
-                    }
-                }
-                "review.wrap" => {
-                    if let Some(review) = self.review.get_untracked() {
-                        review.wrap.set(value.trim() == "on");
-                    }
-                }
-                "drawer.view" => {
-                    self.tree_open.set(crate::ui::drawer::saved_open(&value));
-                }
-                "drawer.width" => match value.parse::<f64>() {
-                    Ok(width) => self.drawer_width.set(width.clamp(
-                        crate::theme::DRAWER_MIN_WIDTH,
-                        crate::theme::DRAWER_MAX_WIDTH,
-                    )),
-                    Err(e) => tracing::warn!(error = %e, "ignoring saved drawer width"),
-                },
-                // The two arrive one after the other; whichever comes second
-                // completes the pair.
-                "viewer.login" => self.viewer.update(|v| {
-                    let avatar = v.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
-                    *v = Some((value, avatar));
-                }),
-                "viewer.avatar_url" => self.viewer.update(|v| {
-                    let login = v.as_ref().map(|(l, _)| l.clone()).unwrap_or_default();
-                    *v = Some((login, value));
-                }),
-                _ => {}
-            },
+            Event::Meta { key, value } => self.take_meta(&key, value),
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
             Event::Notice(message) => self.complain(message),
@@ -3588,6 +3641,9 @@ impl AppState {
             | Event::ScopeReady { .. }
             | Event::ViewedReady { .. }
             | Event::LspReferences { .. } => {}
+            // Reopening each window's item when connected again is the
+            // window list's, which holds the handles.
+            Event::Link(link) => self.link.set(Some(link)),
             Event::Status(status) => {
                 // Polls are quiet once one has gone through.
                 if status == Status::Refreshing
@@ -5919,6 +5975,7 @@ mod tests {
         };
         let ready =
             |scope_gen, scope, files: Vec<perch_git::ChangedFile>, reread_all| Event::ScopeReady {
+                scope_id: 0,
                 navigation_id: 81,
                 scope_gen,
                 item_id: "same".into(),
@@ -6034,6 +6091,7 @@ mod tests {
 
         app.apply_with_review(
             Event::ScopeReady {
+                scope_id: 0,
                 navigation_id: 70,
                 scope_gen: 711,
                 item_id: "same".into(),
@@ -6048,6 +6106,7 @@ mod tests {
 
         app.apply_with_review(
             Event::ScopeReady {
+                scope_id: 0,
                 navigation_id: 71,
                 scope_gen: 712,
                 item_id: "same".into(),
@@ -6062,6 +6121,7 @@ mod tests {
 
         app.apply_with_review(
             Event::CommitsReady {
+                scope_id: 0,
                 navigation_id: 71,
                 scope_gen: 710,
                 item_id: "same".into(),
@@ -6074,6 +6134,7 @@ mod tests {
         );
         app.apply_with_review(
             Event::CommitsReady {
+                scope_id: 0,
                 navigation_id: 70,
                 scope_gen: 712,
                 item_id: "same".into(),
@@ -6088,6 +6149,7 @@ mod tests {
 
         app.apply_with_review(
             Event::CommitsReady {
+                scope_id: 0,
                 navigation_id: 71,
                 scope_gen: 712,
                 item_id: "same".into(),

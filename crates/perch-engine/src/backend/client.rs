@@ -6,6 +6,14 @@
 //! three places, and says so in an event each time, which the handle
 //! reads on its way to the window.
 //!
+//! Scope picks are numbered here too, by window, as navigations are. A
+//! scope pick or a look at the checkout carries the window's latest, and
+//! the engine says which it had heard of in each `ScopeReady` and
+//! `CommitsReady`. One that names an older pick than the window's latest
+//! was sent before the engine heard of the newer one, and is dropped here:
+//! in process that cannot happen, but over a wire the answer to an
+//! earlier look can be on its way as the reader picks.
+//!
 //! Merge and review attempts are numbered here too, for the whole client,
 //! and must not collide with another client's: their events reach every
 //! client, and a window takes the latest it has heard of (see
@@ -41,6 +49,8 @@ struct Navigation {
     historical: Option<(u64, Option<u64>)>,
     /// The fence each archive was sent with, by item.
     archive_fences: HashMap<String, u64>,
+    /// The window's latest scope pick, 0 before its first.
+    scope: u64,
 }
 
 impl Navigation {
@@ -60,7 +70,7 @@ impl Navigation {
 }
 
 impl Navigations {
-    pub(super) fn connected_as(&self, connection: u64) {
+    pub(crate) fn connected_as(&self, connection: u64) {
         self.connection.store(connection, Ordering::Relaxed);
     }
 
@@ -137,6 +147,35 @@ impl Navigations {
         self.with(window, |nav| nav.archive_fences.remove(item_id));
     }
 
+    /// A scope pick: an id after every one the window has had.
+    pub(super) fn begin_scope(&self, window: WindowId) -> u64 {
+        self.with(window, |nav| {
+            let id = nav.next_id();
+            nav.scope = id;
+            id
+        })
+    }
+
+    /// The window's latest scope pick, which a look at the checkout is
+    /// made under.
+    pub(super) fn scope(&self, window: WindowId) -> u64 {
+        self.lookup(window, |nav| nav.scope).unwrap_or(0)
+    }
+
+    /// The engine has gone and another one, or the same one again, is
+    /// connected: it has heard of none of the windows' scope picks, so
+    /// what it says carries none, and must not be taken for stale.
+    pub(crate) fn reconnected(&self, connection: u64) {
+        self.connected_as(connection);
+        let mut windows = self
+            .windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for nav in windows.values_mut() {
+            nav.scope = 0;
+        }
+    }
+
     pub(super) fn current(&self, window: WindowId) -> Option<u64> {
         self.lookup(window, |nav| nav.current).flatten()
     }
@@ -148,6 +187,19 @@ impl Navigations {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         windows.get_mut(&window).map(f)
+    }
+
+    /// Whether `event` is still news to `window`: not an answer about the
+    /// checkout made before the engine heard of the window's latest scope
+    /// pick. Every event goes past `observe` either way.
+    pub(crate) fn pass(&self, window: WindowId, event: &Event) -> bool {
+        self.observe(window, event);
+        match event {
+            Event::ScopeReady { scope_id, .. } | Event::CommitsReady { scope_id, .. } => self
+                .lookup(window, |nav| *scope_id >= nav.scope)
+                .unwrap_or(true),
+            _ => true,
+        }
     }
 
     /// Follow the engine where it moves a window's navigation itself, and
@@ -268,6 +320,55 @@ mod tests {
         assert_eq!(navigations.current(2), Some(fence));
         // Another window's ids are its own.
         assert!(navigations.begin(3) > 3 << 40);
+    }
+
+    fn scope_ready(scope_id: u64) -> Event {
+        Event::ScopeReady {
+            navigation_id: 1,
+            scope_gen: 1,
+            scope_id,
+            item_id: "item".into(),
+            scope: perch_git::Scope::Branch,
+            files: Default::default(),
+            reread_all: false,
+        }
+    }
+
+    fn commits_ready(scope_id: u64) -> Event {
+        Event::CommitsReady {
+            navigation_id: 1,
+            scope_gen: 1,
+            scope_id,
+            item_id: "item".into(),
+            commits: Default::default(),
+            dirt: Default::default(),
+            since: None,
+            last_run: Default::default(),
+        }
+    }
+
+    #[test]
+    fn an_answer_from_before_the_engine_heard_of_the_latest_scope_pick_is_dropped() {
+        let navigations = Navigations::default();
+        navigations.begin(1);
+        // Nothing picked yet: whatever the engine says goes through.
+        assert!(navigations.pass(1, &scope_ready(0)));
+        let first = navigations.begin_scope(1);
+        assert_eq!(navigations.scope(1), first);
+        assert!(navigations.pass(1, &scope_ready(first)));
+        let second = navigations.begin_scope(1);
+        assert!(second > first);
+        // A look the engine finished before it heard of the second pick.
+        assert!(!navigations.pass(1, &scope_ready(first)));
+        assert!(!navigations.pass(1, &commits_ready(first)));
+        assert!(navigations.pass(1, &scope_ready(second)));
+        assert!(navigations.pass(1, &commits_ready(second)));
+        // Another window's picks are its own.
+        assert!(navigations.pass(2, &scope_ready(0)));
+        // A new engine has heard of no pick: what it says is not stale.
+        navigations.reconnected(7);
+        assert!(navigations.pass(1, &scope_ready(0)));
+        assert!(navigations.next_attempt() & ((1 << CONNECTION_BITS) - 1) == 7);
     }
 
     #[test]

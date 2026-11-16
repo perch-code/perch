@@ -351,6 +351,9 @@ pub enum Command {
         item_id: String,
         scope: perch_git::Scope,
         navigation_id: u64,
+        /// The pick's id, the window's latest from here on.
+        #[serde(default)]
+        scope_id: u64,
     },
     /// Fetch again what the open item shows from GitHub, as the reader
     /// asked after hearing it changed.
@@ -368,6 +371,9 @@ pub enum Command {
     RefreshScope {
         item_id: String,
         navigation_id: u64,
+        /// The window's latest scope pick.
+        #[serde(default)]
+        scope_id: u64,
     },
     /// Check or uncheck a file's content as viewed.
     SetViewed {
@@ -771,6 +777,9 @@ pub enum Command {
         original: crate::review::suggestion::Original,
         lines: Vec<String>,
         navigation_id: u64,
+        /// The window's latest scope pick.
+        #[serde(default)]
+        scope_id: u64,
     },
     /// Commit a suggestion on the open pull request's head branch, as
     /// Apply suggestion does on github.com, and resolve its thread.
@@ -1103,11 +1112,12 @@ pub enum Event {
     OpenItemChanged {
         item_id: String,
     },
-    /// A remembered setting, sent once at startup for each key the UI
-    /// asked to keep.
+    /// A remembered setting: at startup and on a resync for each key the
+    /// UI asked to keep, `None` for one never kept, which goes back to its
+    /// default; after a change, the new value.
     Meta {
         key: String,
-        value: String,
+        value: Option<String>,
     },
     /// An issue is open: its snapshot, its comments, and the item.
     IssueReady {
@@ -1162,6 +1172,11 @@ pub enum Event {
     /// history is the requested newest-first prefix.
     AgentRuns {
         runs: Vec<RunSummary>,
+        /// Every run there is to show, in place of what the window has:
+        /// at startup and on a resync. Otherwise the runs are merged into
+        /// what it has, whose older history a refresh does not repeat.
+        #[serde(default)]
+        whole: bool,
     },
     /// One item's active runs and a page of its history, newest first.
     ItemRuns {
@@ -1324,6 +1339,10 @@ pub enum Event {
         message: String,
     },
     Status(Status),
+    /// How the app's connection to an engine on another machine stands.
+    /// Made by the client as the connection comes and goes, never sent by
+    /// an engine.
+    Link(EngineLink),
 
     /// A step of preparing a checkout.
     ReviewProgress {
@@ -1665,6 +1684,10 @@ pub enum Event {
     CommitsReady {
         navigation_id: u64,
         scope_gen: u64,
+        /// The window's latest scope pick the engine had heard of as it
+        /// sent this; see `client::Navigations::pass`.
+        #[serde(default)]
+        scope_id: u64,
         item_id: String,
         commits: Arc<Vec<perch_git::Commit>>,
         dirt: perch_git::Dirt,
@@ -1675,6 +1698,9 @@ pub enum Event {
     ScopeReady {
         navigation_id: u64,
         scope_gen: u64,
+        /// As `CommitsReady`'s.
+        #[serde(default)]
+        scope_id: u64,
         item_id: String,
         scope: perch_git::Scope,
         files: Arc<Vec<perch_git::ChangedFile>>,
@@ -1850,6 +1876,41 @@ impl Event {
     }
 }
 
+/// The app's connection to an engine on another machine: see
+/// `wire::remote`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum EngineLink {
+    /// The first try is under way.
+    Connecting { host: String },
+    /// Let in. `again` when the client had been connected before and lost
+    /// it: the engine has been asked for everything again, and each window
+    /// reopens what it had open.
+    Up {
+        host: String,
+        welcome: crate::wire::Welcome,
+        again: bool,
+    },
+    /// Not connected, and why. The next try is in `retry_in`; `None` when
+    /// no more are made until the reader asks, as after the engine refused
+    /// the app's protocol. `ever` when it had been connected.
+    Down {
+        host: String,
+        why: String,
+        retry_in: Option<Duration>,
+        ever: bool,
+    },
+}
+
+impl EngineLink {
+    pub fn host(&self) -> &str {
+        match self {
+            EngineLink::Connecting { host }
+            | EngineLink::Up { host, .. }
+            | EngineLink::Down { host, .. } => host,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     /// No usable token. The app shows setup instructions instead of a list.
@@ -1882,6 +1943,9 @@ pub struct Backend {
     /// review attempts, shared by the handles and the connection's events
     /// on their way to the window.
     navigations: Arc<client::Navigations>,
+    /// The connection to an engine on another machine, which can be lost
+    /// and made again. `None` in process.
+    link: Option<Arc<crate::wire::remote::Link>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2475,6 +2539,9 @@ struct ScopeRequest {
 #[derive(Debug, Default)]
 pub struct ScopeRequests {
     state: std::sync::Mutex<ScopeRequestState>,
+    /// The latest scope pick the window's handle has sent, by its id,
+    /// which what is said about the checkout carries back.
+    heard: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -2485,6 +2552,17 @@ struct ScopeRequestState {
 }
 
 impl ScopeRequests {
+    /// The handle sent `scope_id` with a command: registered as it is
+    /// sent, so an answer sent after it says the engine had heard of it.
+    fn hear(&self, scope_id: u64) {
+        self.heard
+            .fetch_max(scope_id, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn heard(&self) -> u64 {
+        self.heard.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn begin(&self, item_id: &str) -> u64 {
         let Ok(mut state) = self.state.lock() else {
             return 0;
@@ -2828,6 +2906,15 @@ impl Backend {
             window,
             windows: self.windows.clone(),
             navigations: self.navigations.clone(),
+            link: self.link.clone(),
+        }
+    }
+
+    /// Try the engine on another machine again now, rather than when the
+    /// wait between tries is up. Nothing in process, or while connected.
+    pub fn reconnect(&self) {
+        if let Some(link) = &self.link {
+            link.retry_now();
         }
     }
 
@@ -3328,10 +3415,12 @@ impl Backend {
 
     pub fn set_scope(&self, item_id: &str, scope: perch_git::Scope) {
         let navigation_id = self.navigations.current(self.window).unwrap_or(0);
+        let scope_id = self.navigations.begin_scope(self.window);
         let _ = self.commands.send(Command::SetScope {
             item_id: item_id.to_string(),
             scope,
             navigation_id,
+            scope_id,
         });
     }
 
@@ -3342,6 +3431,7 @@ impl Backend {
         let _ = self.commands.send(Command::RefreshScope {
             item_id: item_id.to_string(),
             navigation_id,
+            scope_id: self.navigations.scope(self.window),
         });
     }
 
@@ -3874,6 +3964,7 @@ impl Backend {
             original,
             lines,
             navigation_id: self.navigations.current(self.window).unwrap_or(0),
+            scope_id: self.navigations.scope(self.window),
         });
         token
     }
@@ -4082,6 +4173,7 @@ impl Backend {
             window: 1,
             windows: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             navigations: Arc::default(),
+            link: None,
         };
         (backend, received)
     }
@@ -4099,7 +4191,20 @@ impl Backend {
             window: NO_WINDOW,
             windows: Arc::default(),
             navigations,
+            link: None,
         }
+    }
+
+    /// A client of an engine on another machine, through `link`, which
+    /// carries its commands while it is connected and refuses them while
+    /// it is not.
+    pub(crate) fn linked(link: Arc<crate::wire::remote::Link>) -> Backend {
+        let mut backend = Self::client(link.navigations(), {
+            let link = link.clone();
+            move |window, command| link.send(window, command)
+        });
+        backend.link = Some(link);
+        backend
     }
 
     /// A client of `engine` in this process: commands and events cross
@@ -4111,8 +4216,9 @@ impl Backend {
         let connection = engine.connect({
             let navigations = navigations.clone();
             move |window, event| {
-                navigations.observe(window, &event);
-                let _ = events.send((window, event));
+                if navigations.pass(window, &event) {
+                    let _ = events.send((window, event));
+                }
             }
         });
         navigations.connected_as(connection.id());
@@ -4541,6 +4647,7 @@ async fn run(
         closed_done_refused: Default::default(),
         run_misses: Default::default(),
         asked_participants: Default::default(),
+        participants: Default::default(),
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
         approval_picks: Default::default(),
@@ -4601,7 +4708,7 @@ async fn run(
                         ctx.with_cache(|c| c.set_meta(key, value));
                         let _ = ctx.events.send(Event::Meta {
                             key: key.into(),
-                            value: value.clone(),
+                            value: Some(value.clone()),
                         });
                     }
                     ctx.want_avatars(std::iter::once(user.avatar_url));
@@ -5607,6 +5714,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 original,
                 lines,
                 navigation_id,
+                ..
             } => {
                 // The scope as the suggestion found it: one that changes
                 // before it lands takes the view elsewhere.
@@ -5872,6 +5980,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 item_id,
                 scope,
                 navigation_id,
+                ..
             } => {
                 // Begun as it was sent; here only for a command that came
                 // some other way.
@@ -5902,6 +6011,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
             Command::RefreshScope {
                 item_id,
                 navigation_id,
+                ..
             } => {
                 // Not while a scope change is still reading: it reads the
                 // checkout itself.
@@ -6297,11 +6407,18 @@ fn register_fences(
             scopes.clear_item(id);
             return Fenced::default();
         }
-        Command::SetScope { item_id, .. } => {
+        Command::SetScope {
+            item_id, scope_id, ..
+        } => {
+            scopes.hear(*scope_id);
             return Fenced {
                 suspended_navigation: None,
                 scope_request: Some(scopes.begin(item_id)),
             };
+        }
+        Command::RefreshScope { scope_id, .. } | Command::ApplySuggestion { scope_id, .. } => {
+            scopes.hear(*scope_id);
+            return Fenced::default();
         }
         _ => return Fenced::default(),
     }
@@ -6862,6 +6979,9 @@ struct Ctx {
     /// about for an item or a search hit, by repository, number and when
     /// each last moved.
     asked_participants: Arc<std::sync::Mutex<std::collections::HashSet<(String, u64, Timestamp)>>>,
+    /// What those looks found, the latest for each subject: sent whole to
+    /// a client that resyncs, since it is not asked after again.
+    participants: Arc<std::sync::Mutex<ParticipantsFound>>,
     /// Whether this window is the key window, as the UI last said.
     window_key: Arc<std::sync::atomic::AtomicBool>,
     /// The window whose view `slot`, `language_servers`, the request
@@ -7396,6 +7516,9 @@ impl Ctx {
                         ctx.want_avatars(found.iter().flat_map(|(_, participants)| {
                             participants.iter().map(|p| p.avatar_url.clone())
                         }));
+                        if let Ok(mut known) = ctx.participants.lock() {
+                            known.extend(found.iter().cloned());
+                        }
                         let _ = ctx.events.send(Event::Participants(found));
                     }
                     Err(e) => {
@@ -8161,6 +8284,10 @@ struct RowFaces {
     subjects: Vec<(String, u64, Timestamp)>,
 }
 
+/// Who acted last on each pull request or issue looked at, by repository
+/// and number.
+type ParticipantsFound = std::collections::HashMap<(String, u64), Vec<perch_github::Participant>>;
+
 /// What every window starts from, and where to read it.
 struct Standing<'a> {
     config: &'a Config,
@@ -8226,17 +8353,22 @@ fn send_standing_state(standing: Standing, events: &EventSender<Event>) -> Seede
                 }
                 Err(e) => tracing::warn!(error = %e, "could not load snoozed notifications"),
             }
+            // Every key, a missing one too: a client that reconnects may
+            // hold a value another client has since taken out.
             for key in UI_META_KEYS {
-                if let Ok(Some(value)) = guard.meta(key) {
-                    let _ = events.send(Event::Meta {
-                        key: key.to_string(),
-                        value,
-                    });
+                match guard.meta(key) {
+                    Ok(value) => {
+                        let _ = events.send(Event::Meta {
+                            key: key.to_string(),
+                            value,
+                        });
+                    }
+                    Err(e) => tracing::warn!(key, error = %e, "could not read a kept setting"),
                 }
             }
         }
     }
-    send_agent_runs_from_cache(cache, events, 50);
+    send_agent_runs_from_cache(cache, events, 50, true);
     seeded
 }
 
@@ -8257,6 +8389,26 @@ fn send_standing(ctx: &Ctx) {
         )
     });
     let _ = ctx.events.send(Event::AgentConfig(config.agent.clone()));
+    // Each subject is asked after once, so a client that connects after
+    // the look hears what it found only from here.
+    let participants: Vec<_> = ctx
+        .participants
+        .lock()
+        .map(|known| {
+            known
+                .iter()
+                .map(|(subject, found)| (subject.clone(), found.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !participants.is_empty() {
+        ctx.want_avatars(participants.iter().flat_map(
+            |(_, found): &(_, Vec<perch_github::Participant>)| {
+                found.iter().map(|p| p.avatar_url.clone())
+            },
+        ));
+        let _ = ctx.events.send(Event::Participants(participants));
+    }
     let usage = perch_agent::usage::subscribe().borrow().clone();
     let _ = ctx.events.send(Event::Usage(usage));
     if let Some(status) = ctx.status() {
@@ -8533,15 +8685,18 @@ fn send_agent_runs(ctx: &Ctx, history_limit: usize) {
     // transiently unavailable. Any list refresh is an opportunity to heal
     // that projection before publishing the active set.
     ctx.runs.reconcile_finished();
-    send_agent_runs_from_cache(&ctx.cache, &ctx.events, history_limit);
+    send_agent_runs_from_cache(&ctx.cache, &ctx.events, history_limit, false);
 }
 
 const AGENT_HISTORY_PAGE: usize = 100;
 
+/// `whole` when the runs are to replace what a window has: see
+/// `Event::AgentRuns`.
 fn send_agent_runs_from_cache(
     cache: &SharedCache,
     events: &EventSender<Event>,
     history_limit: usize,
+    whole: bool,
 ) {
     let Some(cache) = cache.as_ref() else {
         return;
@@ -8617,7 +8772,7 @@ fn send_agent_runs_from_cache(
             }
         }
     }
-    let _ = events.send(Event::AgentRuns { runs });
+    let _ = events.send(Event::AgentRuns { runs, whole });
 }
 
 /// One item's runs, for the Agents dropdown's group for the open item and
@@ -10472,6 +10627,7 @@ async fn send_commits(
     let event = Event::CommitsReady {
         navigation_id,
         scope_gen,
+        scope_id: ctx.scope_requests.heard(),
         item_id: item_id.to_string(),
         commits: Arc::new(commits),
         dirt,
@@ -10622,6 +10778,7 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
                         let _ = ctx.events.send(Event::ScopeReady {
                             navigation_id,
                             scope_gen: committed_gen,
+                            scope_id: ctx.scope_requests.heard(),
                             item_id: item_id.to_string(),
                             scope: scope.clone(),
                             files: files.clone(),
@@ -13456,6 +13613,7 @@ async fn set_scope(
                 let _ = ctx.navigation_requests.with_current(navigation_id, || {
                     ctx.scope_requests.with_current(item_id, request_id, || {
                         ctx.notice(format!("Could not read that scope: {error}"));
+                        say_scope_again(ctx, item_id, navigation_id);
                     })
                 });
                 ctx.scope_requests.settle(item_id, request_id);
@@ -13492,6 +13650,7 @@ async fn set_scope(
                         let _ = ctx.events.send(Event::ScopeReady {
                             navigation_id,
                             scope_gen,
+                            scope_id: ctx.scope_requests.heard(),
                             item_id: item_id.to_string(),
                             scope: scope.clone(),
                             files: files.clone(),
@@ -13518,9 +13677,40 @@ async fn set_scope(
     let _ = ctx.navigation_requests.with_current(navigation_id, || {
         ctx.scope_requests.with_current(item_id, request_id, || {
             ctx.notice("The checkout changed while switching scope; try again");
+            say_scope_again(ctx, item_id, navigation_id);
         })
     });
     ctx.scope_requests.settle(item_id, request_id);
+}
+
+/// A scope pick that came to nothing. The window drops what it hears
+/// about the checkout under an older pick than its latest, and this one
+/// will send no `ScopeReady` of its own, so the open scope is said again
+/// under it: the window then has what the engine has, a rescope it dropped
+/// while the pick was on its way included. Called with the pick's fences
+/// held.
+fn say_scope_again(ctx: &Ctx, item_id: &str, navigation_id: u64) {
+    let Ok(slot) = ctx.slot.lock() else {
+        return;
+    };
+    let Some(open) = slot.as_ref().filter(|open| {
+        open.item_id == item_id
+            && open.navigation_id == navigation_id
+            && open.review_snapshot_id.is_none()
+            && open.review_group_id.is_none()
+            && open.review_request_id.is_none()
+    }) else {
+        return;
+    };
+    let _ = ctx.events.send(Event::ScopeReady {
+        navigation_id,
+        scope_gen: open.scope_gen,
+        scope_id: ctx.scope_requests.heard(),
+        item_id: item_id.to_string(),
+        scope: open.scope.clone(),
+        files: open.files.clone(),
+        reread_all: false,
+    });
 }
 
 /// Why a branch cannot be cut for a local repository, or None when it can.
@@ -22192,6 +22382,7 @@ mod tests {
             closed_done_refused: Default::default(),
             run_misses: Default::default(),
             asked_participants: Default::default(),
+            participants: Default::default(),
             approvals: Default::default(),
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
             approval_picks: Default::default(),
@@ -31701,7 +31892,7 @@ read eof || true
         let events: Vec<_> = received.try_iter().collect();
         assert!(events.iter().any(|event| matches!(
             event,
-            Event::AgentRuns { runs } if runs.iter().any(|stored| stored.id == run.id)
+            Event::AgentRuns { runs, .. } if runs.iter().any(|stored| stored.id == run.id)
         )));
         assert!(events.iter().any(|event| matches!(
             event,

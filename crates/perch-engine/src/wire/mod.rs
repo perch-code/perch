@@ -16,6 +16,7 @@
 
 pub mod bytes;
 pub mod pairs;
+pub mod remote;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,8 +30,9 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 
 /// The wire's version. A change to `Command` or `Event` that an older
 /// peer would read wrong, or not at all, moves it on. 2: `Welcome` counts
-/// the engine's other clients and its runs.
-pub const PROTOCOL: u32 = 2;
+/// the engine's other clients and its runs. 3: scope picks carry the
+/// handle's ids, a resync's runs and kept settings replace a window's.
+pub const PROTOCOL: u32 = 3;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -454,6 +456,26 @@ pub async fn connect<S>(
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
+    let (welcome, session) = handshake(stream).await?;
+    let (commands, outgoing) = tokio::sync::mpsc::unbounded_channel::<(WindowId, Command)>();
+    let (backend, navigations) = Backend::over_wire(commands, welcome.connection);
+    let (events, received) = std::sync::mpsc::channel();
+    session.carry(outgoing, navigations, events);
+    Ok((backend, received, welcome))
+}
+
+/// A connection past its handshake, not yet carrying anything.
+pub(crate) struct Session<S> {
+    read: BufReader<tokio::io::ReadHalf<S>>,
+    write: tokio::io::WriteHalf<S>,
+    line: Vec<u8>,
+}
+
+/// Say hello on `stream` and hear the engine's answer.
+pub(crate) async fn handshake<S>(stream: S) -> Result<(Welcome, Session<S>), WireError>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
     let mut line = Vec::new();
@@ -465,68 +487,111 @@ where
         },
     )
     .await?;
-    let welcome = match first_message::<_, Answer>(&mut read, &mut line).await? {
-        Answer::Welcome(welcome) => welcome,
-        Answer::Refused { reason } => return Err(WireError::Refused(reason)),
+    // A login shell on the far side of ssh may say something of its own
+    // before the bridge starts, a profile's greeting say: it is passed
+    // over, up to a point.
+    let mut said = 0;
+    let answer = loop {
+        match next_message::<_, Answer>(&mut read, &mut line).await? {
+            Some(Ok(answer)) => break answer,
+            Some(Err(why)) if said >= MAX_SAID_FIRST => return Err(WireError::Malformed(why)),
+            Some(Err(_)) => {
+                said += 1;
+                tracing::info!(
+                    line = %String::from_utf8_lossy(line.trim_ascii_end()),
+                    "passed over a line before the engine's answer"
+                );
+            }
+            None => return Err(WireError::Closed),
+        }
     };
+    match answer {
+        Answer::Welcome(welcome) => Ok((welcome, Session { read, write, line })),
+        Answer::Refused { reason } => Err(WireError::Refused(reason)),
+    }
+}
 
-    let (commands, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<(WindowId, Command)>();
-    let (backend, navigations) = Backend::over_wire(commands, welcome.connection);
-    let (events, received) = std::sync::mpsc::channel();
-    // Told when every handle has gone. The reader stops then too: the two
-    // halves share the stream, which closes only when both have let go of
-    // it, and a stream whose shutdown does nothing, as a child's stdin's
-    // does, would otherwise stay open until the engine next said something.
-    let hung_up = Arc::new(tokio::sync::Notify::new());
-    // Ends when every handle has gone, which hangs up.
-    tokio::spawn({
-        let hung_up = hung_up.clone();
-        async move {
-            while let Some((window, command)) = outgoing.recv().await {
-                match write_line(&mut write, &CommandLine { window, command }).await {
-                    Ok(()) => {}
-                    Err(WireError::Malformed(error)) => {
-                        tracing::error!(%error, "a command would not serialize; dropped")
+/// How many lines before the engine's answer a client passes over.
+const MAX_SAID_FIRST: usize = 64;
+
+impl<S> Session<S>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    /// Write what comes from `outgoing` and hand what the engine says,
+    /// past `navigations`, to `events`, on tasks of their own. The
+    /// returned receiver resolves, with an error, once the engine has
+    /// hung up or its stream has failed, or every sender to `outgoing`
+    /// has gone.
+    pub(crate) fn carry(
+        self,
+        mut outgoing: tokio::sync::mpsc::UnboundedReceiver<(WindowId, Command)>,
+        navigations: Arc<crate::backend::client::Navigations>,
+        events: std::sync::mpsc::Sender<(WindowId, Event)>,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let Session {
+            mut read,
+            mut write,
+            mut line,
+        } = self;
+        // Told when every handle has gone. The reader stops then too: the two
+        // halves share the stream, which closes only when both have let go of
+        // it, and a stream whose shutdown does nothing, as a child's stdin's
+        // does, would otherwise stay open until the engine next said something.
+        let hung_up = Arc::new(tokio::sync::Notify::new());
+        // Ends when every handle has gone, which hangs up.
+        tokio::spawn({
+            let hung_up = hung_up.clone();
+            async move {
+                while let Some((window, command)) = outgoing.recv().await {
+                    match write_line(&mut write, &CommandLine { window, command }).await {
+                        Ok(()) => {}
+                        Err(WireError::Malformed(error)) => {
+                            tracing::error!(%error, "a command would not serialize; dropped")
+                        }
+                        Err(error) => {
+                            tracing::info!(%error, "engine stopped reading");
+                            return;
+                        }
+                    }
+                }
+                let _ = write.shutdown().await;
+                drop(write);
+                hung_up.notify_one();
+            }
+        });
+        // Dropped as the reader ends, which is what the caller waits on.
+        let (ended, ending) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ended = ended;
+            loop {
+                let next = tokio::select! {
+                    next = next_message::<_, EventLine>(&mut read, &mut line) => next,
+                    () = hung_up.notified() => return,
+                };
+                match next {
+                    Ok(Some(Ok(EventLine { window, event }))) => {
+                        if navigations.pass(window, &event) && events.send((window, event)).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(Some(Err(why))) => {
+                        tracing::error!(%why, "an event line that does not parse; dropped")
+                    }
+                    Ok(None) => {
+                        tracing::info!("engine hung up");
+                        return;
                     }
                     Err(error) => {
-                        tracing::info!(%error, "engine stopped reading");
+                        tracing::error!(%error, "closing the connection to the engine");
                         return;
                     }
                 }
             }
-            let _ = write.shutdown().await;
-            drop(write);
-            hung_up.notify_one();
-        }
-    });
-    tokio::spawn(async move {
-        loop {
-            let next = tokio::select! {
-                next = next_message::<_, EventLine>(&mut read, &mut line) => next,
-                () = hung_up.notified() => return,
-            };
-            match next {
-                Ok(Some(Ok(EventLine { window, event }))) => {
-                    navigations.observe(window, &event);
-                    if events.send((window, event)).is_err() {
-                        return;
-                    }
-                }
-                Ok(Some(Err(why))) => {
-                    tracing::error!(%why, "an event line that does not parse; dropped")
-                }
-                Ok(None) => {
-                    tracing::info!("engine hung up");
-                    return;
-                }
-                Err(error) => {
-                    tracing::error!(%error, "closing the connection to the engine");
-                    return;
-                }
-            }
-        }
-    });
-    Ok((backend, received, welcome))
+        });
+        ending
+    }
 }
 
 /// The app's engine in this process, reached through the wire over a pipe

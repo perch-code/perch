@@ -36,6 +36,7 @@ fn commands_cross_the_wire_whole() {
             item_id: "i".into(),
             scope: perch_git::Scope::Commit { sha: "abc".into() },
             navigation_id: 4,
+            scope_id: 1 << 40 | 5,
         },
         Command::ArchiveItem {
             id: "i".into(),
@@ -435,7 +436,13 @@ fn the_app_s_engine_stops_with_its_last_connection() {
 /// An engine running its command loop on a test context, with no GitHub
 /// and one item, a pull request. Lives as a host's would.
 fn engine(dir: &Path) -> (Engine, String) {
+    engine_with(dir, |_| {})
+}
+
+/// `engine`, with `prepare` run on its context before the loop starts.
+fn engine_with(dir: &Path, prepare: impl FnOnce(&Ctx)) -> (Engine, String) {
     let (mut ctx, _untagged) = ctx(dir, &nowhere(), &[]);
+    prepare(&ctx);
     let item = pr_item();
     ctx.with_cache(|cache| cache.insert_item(&item))
         .unwrap()
@@ -723,4 +730,67 @@ async fn real_commands_go_through_the_json_wire() {
     while engine.connections() > 0 {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resync_gives_a_late_client_what_one_there_all_along_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, _) = engine_with(dir.path(), |ctx| {
+        // A look at who acted last happened before the client came.
+        ctx.participants.lock().unwrap().insert(
+            ("a/b".into(), 7),
+            vec![perch_github::Participant {
+                login: "octocat".into(),
+                avatar_url: String::new(),
+            }],
+        );
+        ctx.with_cache(|cache| cache.set_meta("drawer.width", "300"))
+            .unwrap()
+            .unwrap();
+    });
+    let (backend, events) = Backend::in_process(&engine);
+    backend.resync();
+    let mut meta = std::collections::BTreeMap::new();
+    let mut whole_runs = None;
+    let participants = wait(&events, |_, event| {
+        match event {
+            Event::Meta { key, value } => {
+                meta.insert(key.clone(), value.clone());
+            }
+            Event::AgentRuns { whole, .. } => whole_runs = Some(*whole),
+            Event::Participants(found) => return Some(found.clone()),
+            _ => {}
+        }
+        None
+    });
+    assert_eq!(participants[0].0, ("a/b".to_string(), 7));
+    // The runs replace what the client has, and every kept setting is
+    // said, one never kept as none, so a reconnecting client's goes back.
+    assert_eq!(whole_runs, Some(true));
+    assert_eq!(meta.len(), UI_META_KEYS.len());
+    assert_eq!(meta["drawer.width"].as_deref(), Some("300"));
+    assert_eq!(meta["review.layout"], None);
+}
+
+#[test]
+fn a_rescope_says_which_scope_pick_the_engine_had_heard_of() {
+    let (tx, _commands) = unbounded_channel();
+    let fencing = Fencing::default();
+    let engine = Engine {
+        hub: Arc::new(Hub::new(tx, Lifetime::Service, fencing.clone())),
+        runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
+    };
+    let (backend, _events) = Backend::in_process(&engine);
+    let window = backend.open_window();
+    window.open_item("a");
+    let scopes = view(&fencing, 2).scope_requests;
+    assert_eq!(scopes.heard(), 0);
+    window.set_scope("a", perch_git::Scope::Branch);
+    let picked = scopes.heard();
+    assert!(picked > 0);
+    // A look at the checkout carries the latest pick, and moves nothing.
+    window.refresh_scope("a");
+    assert_eq!(scopes.heard(), picked);
+    window.set_scope("a", perch_git::Scope::Uncommitted);
+    assert!(scopes.heard() > picked);
 }
