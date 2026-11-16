@@ -492,7 +492,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                             })
                     }
                 })
-                .item(crate::ui::widgets::FILE_MANAGER, move |i| {
+                .item(crate::ui::widgets::reveal_app_label(), move |i| {
                     let p = reveal.clone();
                     i.icon(SidebarIcon::Folder)
                         .enabled(on_disk)

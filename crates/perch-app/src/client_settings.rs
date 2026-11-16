@@ -1,0 +1,217 @@
+//! The settings that are the client's, `[ui]`, `[display]`,
+//! `[keybindings]` and `[remote]`, live in this machine's config.toml
+//! whatever the engine. In process that is the engine's file too, and
+//! every write goes through the engine as it always has. With the engine
+//! on a host, the client's are written here and read from here, and the
+//! Settings page shows the engine's file with the client's tables put in
+//! from this one.
+
+use std::sync::Arc;
+
+use perch_github::{is_client_key, Config, Setting};
+
+use crate::backend::SettingsFile;
+
+/// `changes` split by whose they are: those this machine's file takes,
+/// then those the engine's does. In process the engine takes them all.
+pub fn route(changes: Vec<Setting>, remote: bool) -> (Vec<Setting>, Vec<Setting>) {
+    if !remote {
+        return (Vec::new(), changes);
+    }
+    changes.into_iter().partition(Setting::is_client_s)
+}
+
+/// This machine's config.toml, as the client reads it.
+#[derive(Debug, Clone, Default)]
+pub struct Local {
+    /// The file's text, empty with no file.
+    pub text: String,
+    /// What it loads as, with what is wrong with its `[keybindings]` in
+    /// its warnings; the defaults when it does not parse.
+    pub config: Config,
+    /// Why it does not parse.
+    pub error: Option<String>,
+}
+
+impl Local {
+    /// Read this machine's file.
+    pub fn read() -> Self {
+        let Some(path) = perch_github::config::config_path() else {
+            return Self::default();
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Local {
+                    error: Some(format!("can't read {}: {e}", path.display())),
+                    ..Self::default()
+                }
+            }
+        };
+        Self::of(text)
+    }
+
+    pub fn of(text: String) -> Self {
+        match Config::parse_text(&text) {
+            Ok(mut config) => {
+                // The engine's check of its file is for the app in
+                // process; the keys are this machine's, so checked here.
+                config.warnings.clear();
+                crate::keymap::add_warnings(&mut config);
+                Local {
+                    text,
+                    config,
+                    error: None,
+                }
+            }
+            Err(error) => Local {
+                text,
+                config: Config::parse_text("").unwrap_or_default(),
+                error: Some(error),
+            },
+        }
+    }
+}
+
+/// The engine's Settings with the client's tables, the keys of them the
+/// file sets and what is wrong with them, taken from this machine's file.
+pub fn merge(engine: SettingsFile, local: &Local) -> SettingsFile {
+    let config = engine.config.map(|config| {
+        let mut config = Config::clone(&config);
+        config.ui = local.config.ui.clone();
+        config.display = local.config.display.clone();
+        config.keybindings = local.config.keybindings.clone();
+        config.remote = local.config.remote.clone();
+        config
+            .warnings
+            .extend(local.config.warnings.iter().cloned());
+        Arc::new(config)
+    });
+    let mut present: std::collections::BTreeSet<String> = engine
+        .present
+        .into_iter()
+        .filter(|key| !is_client_key(key))
+        .collect();
+    present.extend(
+        perch_github::present_keys(&local.text, &[])
+            .into_iter()
+            .filter(|key| is_client_key(key)),
+    );
+    let mut warnings = engine.warnings;
+    warnings.extend(local.config.warnings.iter().cloned());
+    if let Some(error) = &local.error {
+        warnings.push(format!("This Mac's config.toml: {error}"));
+    }
+    SettingsFile {
+        path: engine.path,
+        config,
+        error: engine.error,
+        present,
+        warnings,
+    }
+}
+
+/// Write the client's `changes` to this machine's file. Err says why the
+/// file would not take them.
+pub fn write_here(changes: &[Setting]) -> Result<(), String> {
+    let Some(path) = perch_github::config::config_path() else {
+        return Err("Perch has no home folder to keep config.toml in.".to_string());
+    };
+    perch_github::write_settings(&path, changes, &[]).map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn with_the_engine_on_a_host_the_client_s_settings_stay_here() {
+        let changes = vec![
+            Setting::Zoom(Some(1.2)),
+            Setting::PollIntervalSecs(Some(30)),
+            Setting::Keybinding {
+                action: "go-to-file".into(),
+                keys: None,
+            },
+            Setting::RemoteHost(Some("halo".into())),
+            Setting::AgentModel(Some("opus".into())),
+        ];
+        let (here, engine) = route(changes.clone(), true);
+        assert_eq!(
+            here,
+            [
+                Setting::Zoom(Some(1.2)),
+                Setting::Keybinding {
+                    action: "go-to-file".into(),
+                    keys: None,
+                },
+                Setting::RemoteHost(Some("halo".into())),
+            ]
+        );
+        assert_eq!(
+            engine,
+            [
+                Setting::PollIntervalSecs(Some(30)),
+                Setting::AgentModel(Some("opus".into())),
+            ]
+        );
+        // In process the one file is the engine's, as it always was.
+        assert_eq!(route(changes.clone(), false), (Vec::new(), changes));
+    }
+
+    #[test]
+    fn the_page_shows_the_engine_s_file_with_this_machine_s_tables() {
+        let engine_text =
+            "poll_interval_secs = 120\n[display]\nzoom = 2.0\n[ui]\nappearance = \"dark\"\n";
+        let engine_config = Config::parse_text(engine_text).unwrap();
+        let engine = SettingsFile {
+            path: "/home/chris/.perch/config.toml".into(),
+            present: perch_github::present_keys(engine_text, &[]),
+            warnings: Vec::new(),
+            config: Some(Arc::new(engine_config)),
+            error: None,
+        };
+        let local = Local::of(
+            "poll_interval_secs = 5\n[display]\ncode_font_size = 14\n[keybindings]\nno-such-action = \"cmd-k\"\n[remote]\nhost = \"halo\"\n"
+                .to_string(),
+        );
+        let merged = merge(engine, &local);
+        let config = merged.config.unwrap();
+        assert_eq!(config.poll_interval_secs, 120);
+        assert_eq!(
+            config.display.zoom,
+            Config::parse_text("").unwrap().display.zoom
+        );
+        assert_eq!(
+            config.ui.appearance,
+            perch_github::config::Appearance::System
+        );
+        assert_eq!(config.remote.host(), Some("halo"));
+        assert_eq!(
+            merged.present,
+            // The engine's keys are the engine's file's, this machine's
+            // poll interval included.
+            [
+                "display.code_font_size",
+                "keybindings.no-such-action",
+                "poll_interval_secs",
+                "remote.host",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>()
+        );
+        // This machine's keys are checked here.
+        assert!(
+            merged.warnings.iter().any(|w| w.contains("no-such-action")),
+            "{:?}",
+            merged.warnings
+        );
+        assert_eq!(
+            merged.path,
+            std::path::PathBuf::from("/home/chris/.perch/config.toml")
+        );
+    }
+}

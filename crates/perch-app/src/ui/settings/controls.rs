@@ -826,10 +826,8 @@ pub(crate) fn open_in_editor_button(page: Page, debug: &'static str) -> impl Vie
     )
 }
 
-/// A path as the reader would type it, with the home folder as `~`.
+/// One of the engine's paths as the reader would type it, with the
+/// engine's home as `~`: a host's, with the engine on one.
 pub(crate) fn tilde(path: &std::path::Path) -> String {
-    match path.strip_prefix(perch_github::config::home_dir()) {
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
-    }
+    crate::remote::tilde(path)
 }

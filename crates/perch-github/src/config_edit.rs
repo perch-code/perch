@@ -68,12 +68,42 @@ pub enum Setting {
         action: String,
         keys: Option<Vec<String>>,
     },
+    /// `[remote] host`: None, or a blank, takes it out, back to the engine
+    /// on this machine.
+    RemoteHost(Option<String>),
     /// A key of the `[[repo]]` whose identity this is, compared without
     /// regard to case.
     Repo {
         identity: String,
         change: RepoSetting,
     },
+}
+
+/// The tables that are the client's: how its windows look and what its
+/// keys do, and where its engine is. Read from the file on the machine the
+/// window is on, whatever the engine; in process that is the one file.
+pub const CLIENT_TABLES: [&str; 4] = ["ui", "display", "keybindings", "remote"];
+
+impl Setting {
+    /// Whether the setting lives in one of [`CLIENT_TABLES`].
+    pub fn is_client_s(&self) -> bool {
+        matches!(
+            self,
+            Setting::Appearance(_)
+                | Setting::CodeFont(_)
+                | Setting::Zoom(_)
+                | Setting::CodeFontSize(_)
+                | Setting::Keybinding { .. }
+                | Setting::RemoteHost(_)
+        )
+    }
+}
+
+/// Whether a key as `present_keys` gives it, such as `display.zoom`, is in
+/// one of [`CLIENT_TABLES`].
+pub fn is_client_key(key: &str) -> bool {
+    let table = key.split('.').next().unwrap_or(key);
+    CLIENT_TABLES.contains(&table)
 }
 
 /// A key of one `[[repo]]`, or of its `[repo.work]` or `[repo.lsp]`. A
@@ -323,6 +353,7 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             top(&["lsp"], "max_memory_mb".into()),
             integer(*mb, "max_memory_mb")?,
         ),
+        Setting::RemoteHost(host) => (top(&["remote"], "host".into()), string(host)),
         Setting::Keybinding { action, keys } => (
             top(&["keybindings"], action.clone().into()),
             keys.as_deref().map(keybinding),
@@ -1521,6 +1552,39 @@ mod tests {
         assert_eq!(written.config.display.zoom, 2.0);
         assert_eq!(written.warnings.len(), 1, "{:?}", written.warnings);
         assert_eq!(read(&path), "[display]\nzoom = 3.0\n");
+    }
+
+    #[test]
+    fn the_client_s_settings_are_told_from_the_engine_s() {
+        assert!(Setting::Zoom(Some(1.2)).is_client_s());
+        assert!(Setting::RemoteHost(Some("halo".into())).is_client_s());
+        assert!(Setting::Keybinding {
+            action: "x".into(),
+            keys: None
+        }
+        .is_client_s());
+        assert!(!Setting::PollIntervalSecs(Some(30)).is_client_s());
+        assert!(!Setting::AgentModel(None).is_client_s());
+        assert!(is_client_key("display.zoom"));
+        assert!(is_client_key("keybindings.go-to-file"));
+        assert!(is_client_key("remote.host"));
+        assert!(!is_client_key("agent.codex.binary"));
+        assert!(!is_client_key("repo.a/ui.root"));
+    }
+
+    #[test]
+    fn a_remote_host_is_written_and_a_blank_one_taken_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_settings(&path, &[Setting::RemoteHost(Some(" halo ".into()))], &[]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let config = Config::parse_text(&text).unwrap();
+        assert_eq!(config.remote.host(), Some("halo"));
+        assert_eq!(config.remote.command(), "perchd bridge");
+        assert!(present_keys(&text, &[]).contains("remote.host"));
+        write_settings(&path, &[Setting::RemoteHost(Some("  ".into()))], &[]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(Config::parse_text(&text).unwrap().remote.host(), None);
     }
 
     #[test]

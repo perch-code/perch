@@ -240,9 +240,21 @@ impl Page {
     }
 
     /// Write one setting to the file. The page shows the new value once
-    /// the backend reads the file again.
+    /// the backend reads the file again. With the engine on a host, the
+    /// client's own settings go to this machine's file instead (see
+    /// `client_settings`).
     pub(crate) fn write(&self, setting: Setting) {
-        self.backend.write_settings(vec![setting]);
+        let (here, engine) =
+            crate::client_settings::route(vec![setting], crate::remote::host().is_some());
+        if !here.is_empty() {
+            match crate::client_settings::write_here(&here) {
+                Ok(()) => crate::windows::client_settings_written(),
+                Err(message) => self.state.complain(message),
+            }
+        }
+        if !engine.is_empty() {
+            self.backend.write_settings(engine);
+        }
     }
 
     /// Where config.toml is.

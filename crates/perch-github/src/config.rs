@@ -43,6 +43,11 @@ pub struct Config {
     /// bad entry is a warning there rather than a refused file here.
     #[serde(default)]
     pub keybindings: BTreeMap<String, toml::Value>,
+    /// `[remote]`: the engine on another machine the app connects to. The
+    /// client's own, as `[ui]`, `[display]` and `[keybindings]` are: read
+    /// from the file on the machine the window is on, whatever the engine.
+    #[serde(default)]
+    pub remote: RemoteConfig,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
     /// by name: with no field for it, toml would drop the table without a
     /// word and the reader would see an empty sidebar and no reason.
@@ -292,6 +297,50 @@ pub fn is_local(identity: &str) -> bool {
     match identity.split_once('/') {
         Some((owner, _)) => owner.eq_ignore_ascii_case(LOCAL_OWNER),
         None => false,
+    }
+}
+
+/// `[remote]`: where the engine is. With no host, in the app, on this
+/// machine.
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
+pub struct RemoteConfig {
+    /// An SSH host, as `ssh` is given it: a name from `~/.ssh/config`,
+    /// `user@host`, or an address. ssh's own config, keys and agent apply.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// What ssh runs there, in the login shell: the bridge to the engine.
+    #[serde(default = "default_remote_command")]
+    pub command: String,
+}
+
+fn default_remote_command() -> String {
+    "perchd bridge".to_string()
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        RemoteConfig {
+            host: None,
+            command: default_remote_command(),
+        }
+    }
+}
+
+impl RemoteConfig {
+    /// The host to connect to, when one is named: an empty one is none.
+    pub fn host(&self) -> Option<&str> {
+        self.host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+    }
+
+    /// The command, or the default for one left empty.
+    pub fn command(&self) -> &str {
+        match self.command.trim() {
+            "" => "perchd bridge",
+            command => command,
+        }
     }
 }
 
@@ -958,9 +1007,15 @@ pub fn home_dir() -> PathBuf {
 }
 
 fn expand_home(path: &str) -> PathBuf {
+    expand_home_in(path, &home_dir())
+}
+
+/// `path` with a leading `~` read as `home`: another machine's, for a
+/// path from its config.
+pub fn expand_home_in(path: &str, home: &Path) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => home_dir().join(rest),
-        None if path == "~" => home_dir(),
+        Some(rest) => home.join(rest),
+        None if path == "~" => home.to_path_buf(),
         None => PathBuf::from(path),
     }
 }
@@ -1174,6 +1229,7 @@ impl Config {
             display: DisplayConfig::default(),
             ui: UiConfig::default(),
             keybindings: BTreeMap::new(),
+            remote: RemoteConfig::default(),
             project: Vec::new(),
             warnings: Vec::new(),
         }

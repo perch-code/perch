@@ -32,8 +32,7 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
                 network(page, &identity),
                 remove(page, repo, &identity),
             ]);
-            let place = repo
-                .root_path()
+            let place = crate::remote::root_path(repo)
                 .map(|root| controls::tilde(&root))
                 .unwrap_or_default();
             // What the scan resolved, not just `github`: a root-only entry
@@ -203,12 +202,17 @@ fn root(page: &Page, identity: &str) -> Row {
         move || {
             let (page, identity) = (page.clone(), identity.clone());
             controls::button(
-                "Reveal",
+                // A host's checkout opens in an editor that reaches it.
+                if crate::remote::host().is_some() {
+                    "Open in editor"
+                } else {
+                    "Reveal"
+                },
                 format!("settings-{}", row_name(&identity, "reveal")),
                 || true,
                 move || {
                     if let Some(root) =
-                        with_repo(&page, &identity, |r| r.and_then(|r| r.root_path()))
+                        with_repo(&page, &identity, |r| r.and_then(crate::remote::root_path))
                     {
                         crate::ui::widgets::reveal_in_file_manager(&root);
                     }
@@ -223,9 +227,12 @@ fn root(page: &Page, identity: &str) -> Row {
         "Checkout",
         move || {
             with_repo(&described, &identity_owned, |r| {
-                r.and_then(RepoConfig::root_path)
+                r.and_then(crate::remote::root_path)
                     .map(|root| controls::tilde(&root))
-                    .unwrap_or_else(|| "No checkout on this machine.".to_string())
+                    .unwrap_or_else(|| match crate::remote::host() {
+                        Some(host) => format!("No checkout on {host}."),
+                        None => "No checkout on this machine.".to_string(),
+                    })
             })
         },
         control,

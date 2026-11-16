@@ -1489,6 +1489,51 @@ systemctl --user enable --now perchd
 loginctl enable-linger "$USER"  # keep it running with nobody logged in
 ```
 
+## An engine on another machine
+
+With `[remote] host` in the Mac's config.toml, or a host typed into
+Settings > General > Engine, the app starts no engine of its own and takes
+no lock on its Perch home. It runs
+
+```sh
+ssh -T -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <host> 'exec "$SHELL" -lc "perchd bridge"'
+```
+
+and talks to the engine on the host over ssh's stdin and stdout. ssh's own
+config, keys and agent apply; the agent is not forwarded. The command is run
+in your login shell on the host, so a `perchd` your profile puts on `PATH`
+is found; `[remote] command` changes it. What ssh says on stderr goes to the
+log. A change to the host takes effect when Perch restarts.
+
+The host's engine keeps its items, runs and checkouts going with the app
+closed. Paths the app shows are the host's, and `~` in them is the host's
+home. What would open a path on the Mac reaches the host instead:
+
+- Open in Terminal opens Terminal with `ssh -t <host> 'cd <path> && exec $SHELL -l'`.
+- Reveal in Finder becomes Open in Editor: Zed, as `zed ssh://<host>/<path>`,
+  when its `zed` command or the app is installed, else VS Code, as
+  `code --remote ssh-remote+<host> <path>`.
+- Copy Path copies the host's path.
+
+While the host can't be reached, a strip along the foot of every window
+says so: "Disconnected from <host>. Reconnecting…", or "Can't connect to
+<host>" before the first connection, with ssh's last line under it (an
+unknown host, a refused key) and a Reconnect button. Perch tries again after
+a second, then two, doubling to every 30 seconds; Reconnect tries now. The
+windows keep what they showed. A command sent meanwhile, a click or a
+comment, is not done and not kept for later: the window says "Not connected
+to <host>, so that wasn't done." When the connection is back, each window
+catches up on everything (the rows, the inbox, the runs, the settings) and
+opens its item again.
+
+When the app and the engine speak different versions of the wire, the
+engine refuses the app, the strip says which one to update, and Perch stops
+trying until you press Reconnect.
+
+Settings shows the host's config.toml, with the Mac's `[ui]`, `[display]`,
+`[keybindings]` and `[remote]` in place of the host's; the Config file
+group has both files. Keyboard shortcut warnings are about the Mac's file.
+
 ## Development
 
 ```sh

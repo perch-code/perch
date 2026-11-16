@@ -6,7 +6,11 @@
 //! - The handle refuses a command while there is no connection, with a
 //!   notice in the window that sent it. Nothing is kept to send later: a
 //!   click made against what the window showed then could mean something
-//!   else by the time the engine hears it.
+//!   else by the time the engine hears it. The one exception is the app
+//!   starting: what its first windows ask for as they are made goes once
+//!   the first try connects, and is dropped if it fails. Nothing was lost
+//!   then, and a window that asked for its lists and heard nothing would
+//!   sit empty.
 //! - Tries are made 1 s apart at first, doubling to 30 s between, and the
 //!   reader can ask for one now. A refusal of the app's protocol stops
 //!   them: trying again cannot help until one side is updated.
@@ -91,7 +95,6 @@ pub struct Link {
     retry: tokio::sync::Notify,
 }
 
-#[derive(Default)]
 struct Linked {
     /// Where commands go while connected.
     to: Option<UnboundedSender<(WindowId, Command)>>,
@@ -100,6 +103,20 @@ struct Linked {
     windows: BTreeSet<WindowId>,
     /// When a refusal was last said.
     refused_at: Option<Instant>,
+    /// What the windows sent before the first try ended, while it is
+    /// under way; `None` after.
+    starting: Option<Vec<(WindowId, Command)>>,
+}
+
+impl Default for Linked {
+    fn default() -> Self {
+        Linked {
+            to: None,
+            windows: BTreeSet::new(),
+            refused_at: None,
+            starting: Some(Vec::new()),
+        }
+    }
 }
 
 impl Link {
@@ -145,6 +162,10 @@ impl Link {
         ) {
             return Ok(());
         }
+        if let Some(starting) = linked.starting.as_mut() {
+            starting.push((window, command));
+            return Ok(());
+        }
         let now = Instant::now();
         if linked
             .refused_at
@@ -179,6 +200,9 @@ impl Link {
             let _ = to.send((window, Command::WindowOpened));
         }
         let _ = to.send((NO_WINDOW, Command::Resync));
+        for sent in linked.starting.take().into_iter().flatten() {
+            let _ = to.send(sent);
+        }
         linked.to = Some(to);
         linked.refused_at = None;
         self.say(EngineLink::Up {
@@ -189,7 +213,9 @@ impl Link {
     }
 
     fn down(&self) {
-        self.linked().to = None;
+        let mut linked = self.linked();
+        linked.to = None;
+        linked.starting = None;
     }
 
     /// Tell the windows how the connection stands. False once nobody is
@@ -261,6 +287,7 @@ async fn keep_connected(link: Arc<Link>, mut dial: Dial, backoff: Backoff) {
                 Err(WireError::Refused(reason)) => {
                     let _ = hang_up().await;
                     tracing::warn!(host, %reason, "the engine refused the app");
+                    link.down();
                     if !link.say(EngineLink::Down {
                         host: host.clone(),
                         why: reason,
@@ -277,6 +304,7 @@ async fn keep_connected(link: Arc<Link>, mut dial: Dial, backoff: Backoff) {
             },
         };
         tracing::warn!(host, %why, ?wait, "not connected to the engine");
+        link.down();
         if !link.say(EngineLink::Down {
             host: host.clone(),
             why,
@@ -409,29 +437,42 @@ pub fn ssh(host: &str, command: &str) -> Dial {
 }
 
 /// The app's connection to the engine on `host`, by ssh running `command`
-/// there, carried by a runtime of the client's own.
+/// there, carried by a runtime of the client's own. With no runtime to be
+/// had, a handle with nothing behind it, and a status that says why.
 pub fn over_ssh(
     host: &str,
     command: &str,
-) -> std::io::Result<(Backend, std::sync::mpsc::Receiver<(WindowId, Event)>)> {
+) -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     let runtime = match RUNTIME.get() {
         Some(runtime) => runtime,
-        None => {
-            let built = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .thread_name("perch-link")
-                .enable_all()
-                .build()?;
-            RUNTIME.get_or_init(|| built)
-        }
+        None => match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("perch-link")
+            .enable_all()
+            .build()
+        {
+            Ok(built) => RUNTIME.get_or_init(|| built),
+            Err(error) => {
+                tracing::error!(%error, "could not start the runtime the link runs on");
+                let (events, received) = std::sync::mpsc::channel();
+                let _ = events.send((
+                    NO_WINDOW,
+                    Event::Status(crate::backend::Status::Error {
+                        message: format!("Perch could not connect to {host}: {error}."),
+                    }),
+                ));
+                let (backend, _) = Backend::over_wire(tokio::sync::mpsc::unbounded_channel().0, 0);
+                return (backend, received);
+            }
+        },
     };
-    Ok(link(
+    link(
         host,
         ssh(host, command),
         Backoff::default(),
         runtime.handle(),
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -709,13 +750,17 @@ mod tests {
         let (dial, mut pipes) = pipes();
         let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
         let (first, second) = (backend.open_window(), backend.open_window());
+        // Asked for as the app starts, before the first try is through:
+        // it goes once the windows are open and everything asked for.
+        first.refresh_open_item("item");
         let mut far = pipes.next().await;
         far.welcome(1).await;
         let mut opened = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             opened.push(far.command().await.unwrap());
         }
         assert!(matches!(opened[2], (NO_WINDOW, Command::Resync)));
+        assert!(matches!(opened[3], (w, Command::RefreshOpenItem { .. }) if w == first.window()));
         second.close_window();
         assert!(matches!(
             far.command().await,

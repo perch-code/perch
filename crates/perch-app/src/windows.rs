@@ -39,6 +39,10 @@ struct App {
     check_update_on_open: Cell<bool>,
     /// Settings… was, the same way: the next window opens on Settings.
     settings_on_open: Cell<bool>,
+    /// The engine's Settings as it last sent them, before this machine's
+    /// tables were put in: with the engine on a host, they are put in
+    /// again after each write of the client's own.
+    engine_settings: RefCell<Option<crate::backend::SettingsFile>>,
 }
 
 #[derive(Clone)]
@@ -137,6 +141,9 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             });
         });
         floem::action::exec_after(STAR_ASK_AFTER, |_| star_due());
+        if crate::remote::host().is_some() {
+            watch_client_file(None);
+        }
         APP.set(Some(Rc::new(App {
             backend,
             model,
@@ -146,6 +153,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             feedback_on_open: Cell::new(false),
             check_update_on_open: Cell::new(false),
             settings_on_open: Cell::new(false),
+            engine_settings: RefCell::new(None),
         })));
     });
 }
@@ -200,10 +208,22 @@ fn new_state() -> AppState {
     state
 }
 
-fn deliver(window: WindowId, event: Event) {
+fn deliver(window: WindowId, mut event: Event) {
     let Some(app) = app() else {
         return;
     };
+    // With the engine on a host, its Settings have this machine's own
+    // tables put in, which the client reads and writes here.
+    if let Event::Settings(file) = &mut event {
+        if crate::remote::host().is_some() {
+            app.engine_settings.replace(Some(file.clone()));
+            *file =
+                crate::client_settings::merge(file.clone(), &crate::client_settings::Local::read());
+        }
+    }
+    if let Event::Link(link) = &event {
+        linked(&app, link);
+    }
     // `[ui] appearance` and `[keybindings]` are the whole app's, so they
     // are taken up once here rather than by each window's state.
     if let Event::Settings(file) = &event {
@@ -228,6 +248,67 @@ fn deliver(window: WindowId, event: Event) {
     if let Some(review) = app.model.review.get_untracked() {
         app.model.apply_with_review(event, review);
     }
+}
+
+/// The client's own settings were written to this machine's file: every
+/// window is shown the engine's Settings with them put in again.
+pub fn client_settings_written() {
+    let Some(engine) = app().and_then(|app| app.engine_settings.borrow().clone()) else {
+        return;
+    };
+    deliver(crate::backend::NO_WINDOW, Event::Settings(engine));
+}
+
+/// How often this machine's config.toml is looked at for edits made
+/// outside Perch, with the engine on a host: the engine watches its own.
+const CLIENT_FILE_CHECK: Duration = Duration::from_secs(2);
+
+/// Look at this machine's config.toml every [`CLIENT_FILE_CHECK`], and put
+/// its tables in again when it has changed since `seen`.
+fn watch_client_file(seen: Option<(Option<std::time::SystemTime>, u64)>) {
+    floem::action::exec_after(CLIENT_FILE_CHECK, move |_| {
+        let now = perch_github::config::config_path()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|meta| (meta.modified().ok(), meta.len()));
+        if seen.is_some() && now.is_some() && now != seen {
+            client_settings_written();
+        }
+        watch_client_file(now.or(seen));
+    });
+}
+
+/// How the connection to the engine on a host stands. Connected, its home
+/// is what `~` means; connected again, each window opens its item again,
+/// as the engine has forgotten what the windows had open. The engine has
+/// been told of the windows and asked for everything by then.
+fn linked(app: &App, link: &crate::backend::EngineLink) {
+    let crate::backend::EngineLink::Up { welcome, again, .. } = link else {
+        return;
+    };
+    crate::remote::connected(welcome);
+    if !again {
+        return;
+    }
+    for window in app.windows.borrow().iter() {
+        reopen_item(window.state, window.review, &window.backend);
+    }
+}
+
+/// Open again the item a window had open, as a click on its row would.
+pub(crate) fn reopen_item(state: AppState, review: ReviewState, backend: &Backend) {
+    let Some(item_id) = review
+        .item
+        .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+    else {
+        return;
+    };
+    let navigation_id = backend.open_item(&item_id);
+    state.begin_item_review(
+        review,
+        "Reconnected; reading the item again",
+        &item_id,
+        navigation_id,
+    );
 }
 
 /// A window's state and backend handle, from inside its view function.
@@ -867,5 +948,29 @@ mod tests {
     fn a_frame_is_never_under_the_minimum() {
         let frame = Rect::new(100.0, 100.0, 300.0, 300.0);
         assert_eq!(fit(frame, &[SCREEN]).size(), MIN_SIZE);
+    }
+
+    /// Connected again, a window opens its item again: the engine it now
+    /// talks to has no view of it.
+    #[test]
+    fn a_window_reopens_its_item_when_the_engine_is_back() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let (backend, mut commands) = Backend::recording();
+        // A window with nothing open asks for nothing.
+        reopen_item(state, review, &backend);
+        assert!(commands.try_recv().is_err());
+
+        let mut item = perch_github::Item::new("a/b", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = "pr".into();
+        review.item.set(Some(std::sync::Arc::new(item)));
+        reopen_item(state, review, &backend);
+        match commands.try_recv() {
+            Ok(crate::backend::Command::OpenItem { id, navigation_id }) => {
+                assert_eq!(id, "pr");
+                assert!(state.accepts_navigation(navigation_id));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

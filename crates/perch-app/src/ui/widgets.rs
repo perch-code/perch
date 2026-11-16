@@ -185,10 +185,36 @@ pub fn name_label(
 /// Note this deliberately does not make children transparent to the pointer:
 /// a selectable label does not swallow clicks, and `pointer_events_none` on
 /// the view that owns the handler would stop it receiving them at all.
+/// What a menu calls showing one of the engine's paths: the file manager
+/// for this machine's, an editor that reaches the host for a host's.
+pub fn reveal_label() -> String {
+    match crate::remote::host() {
+        Some(_) => "Open in Editor".to_string(),
+        None => format!("Reveal in {FILE_MANAGER}"),
+    }
+}
+
+/// [`reveal_label`] in a list headed Open in: the app alone.
+pub fn reveal_app_label() -> &'static str {
+    match crate::remote::host() {
+        Some(_) => "Editor",
+        None => FILE_MANAGER,
+    }
+}
+
+/// Show one of the engine's paths: on this machine, in the file manager;
+/// on a host, in an editor that reaches it (see `remote::open_editor_on`).
+pub fn reveal_in_file_manager(path: &std::path::Path) {
+    match crate::remote::host() {
+        Some(host) => crate::remote::open_editor_on(&host, path),
+        None => reveal_here(path),
+    }
+}
+
 /// Show a directory in the Finder, selected in its parent. Elsewhere there
 /// is no common way to select a file, so the directory itself opens in
 /// the file manager.
-pub fn reveal_in_file_manager(path: &std::path::Path) {
+pub fn reveal_here(path: &std::path::Path) {
     let mut command = std::process::Command::new(OPENER);
     if cfg!(target_os = "macos") {
         command.arg("-R");
@@ -198,10 +224,19 @@ pub fn reveal_in_file_manager(path: &std::path::Path) {
     }
 }
 
-/// Open a text file in the reader's editor: on macOS the app set for plain
-/// text (`open -t`), since a `.toml` may belong to nothing; elsewhere the
-/// desktop's choice for the file.
+/// Open one of the engine's text files in the reader's editor: on a host,
+/// one that reaches it.
 pub fn open_in_editor(path: &std::path::Path) {
+    match crate::remote::host() {
+        Some(host) => crate::remote::open_editor_on(&host, path),
+        None => open_in_editor_here(path),
+    }
+}
+
+/// Open a text file on this machine in the reader's editor: on macOS the
+/// app set for plain text (`open -t`), since a `.toml` may belong to
+/// nothing; elsewhere the desktop's choice for the file.
+pub fn open_in_editor_here(path: &std::path::Path) {
     let mut command = std::process::Command::new(OPENER);
     if cfg!(target_os = "macos") {
         command.arg("-t");
@@ -217,10 +252,19 @@ pub fn open_in_editor(path: &std::path::Path) {
     }
 }
 
+/// Open a terminal window in one of the engine's directories: on a host,
+/// a shell there by ssh.
+pub fn open_in_terminal(path: &std::path::Path) {
+    match crate::remote::host() {
+        Some(host) => crate::remote::open_terminal_on(&host, path),
+        None => open_terminal_here(path),
+    }
+}
+
 /// Open a terminal window in a directory: Terminal on macOS. Elsewhere
 /// `$TERMINAL`, as the reader set it, then the common ones in turn; each
 /// starts in the directory it is spawned in.
-pub fn open_in_terminal(path: &std::path::Path) {
+fn open_terminal_here(path: &std::path::Path) {
     if cfg!(target_os = "macos") {
         let _ = std::process::Command::new("open")
             .arg("-a")
@@ -306,7 +350,7 @@ pub fn worktree_menu(
     }
     menu = menu
         .separator()
-        .item(format!("Reveal in {FILE_MANAGER}"), move |item| {
+        .item(reveal_label(), move |item| {
             item.icon(SidebarIcon::Folder)
                 .action(move || reveal_in_file_manager(&reveal))
         })

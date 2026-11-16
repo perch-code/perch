@@ -6,6 +6,7 @@ pub mod drawer;
 pub mod feedback;
 pub mod history;
 pub mod items;
+pub mod link;
 pub mod menu;
 pub mod nav_row;
 pub mod new_work;
@@ -372,6 +373,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .width_full()
                 .position(floem::style::Position::Relative)
         }),
+        // While the engine on a host can't be reached, along the foot.
+        link::banner(state, backend.clone()),
         toast::toast(state, review, capture_backend.clone()),
         // An `@`'s list, over the composer it is typed in.
         crate::review::mention::popup(state, review),

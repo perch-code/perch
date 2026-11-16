@@ -5,10 +5,12 @@ mod agents_cli;
 mod app_icon;
 mod app_menu;
 mod ask_cli;
+mod client_settings;
 mod icons;
 mod items_cli;
 mod keymap;
 mod reference;
+mod remote;
 mod review;
 mod scrollers;
 mod snooze;
@@ -107,7 +109,7 @@ fn main() {
     keymap::take_up(&config.keybindings);
 
     windows::load_frame();
-    let (backend, events) = start_engine();
+    let (backend, events) = start_engine(&config.remote);
     let mut started = Some((backend, events));
 
     // A development hook: open a pull request at launch rather than by
@@ -244,13 +246,27 @@ fn main() {
     .run();
 }
 
-/// The engine, in this process. `PERCH_WIRE_LOOPBACK=1` reaches it
+/// The engine on `[remote] host`, reached by ssh, with one named; else
+/// the engine in this process. `PERCH_WIRE_LOOPBACK=1` reaches that one
 /// through the JSON wire over a pipe in memory, as a host's engine is
 /// reached, so a change that breaks the wire form shows here.
-fn start_engine() -> (
+fn start_engine(
+    remote: &perch_github::RemoteConfig,
+) -> (
     backend::Backend,
     std::sync::mpsc::Receiver<(backend::WindowId, backend::Event)>,
 ) {
+    // No engine here, and no lock on this machine's home: the host's
+    // engine has its own.
+    if let Some(host) = remote.host() {
+        tracing::info!(host, command = remote.command(), "engine on a host");
+        remote::set_place(remote::Place::Host {
+            host: host.to_string(),
+            home: Default::default(),
+            data_root: Default::default(),
+        });
+        return perch_engine::wire::remote::over_ssh(host, remote.command());
+    }
     if std::env::var("PERCH_WIRE_LOOPBACK").is_ok_and(|v| v == "1") {
         match perch_engine::wire::loopback(keymap::add_warnings) {
             Ok(started) => return started,

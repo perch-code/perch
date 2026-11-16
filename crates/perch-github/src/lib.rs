@@ -46,10 +46,13 @@ pub use comments::{
 pub use commits::Unreadable;
 pub use config::{
     append_repo, is_local, remove_repo, AgentConfig, Approvals, ApprovalsTable, CodexConfig,
-    Config, DeclaredRepo, GeminiConfig, RepoConfig, RepoLsp, RepoWork, WorkDefaults, CLAUDE_CODE,
-    CODEX, CODEX_DEFAULT_MODEL, GEMINI, LOCAL_OWNER,
+    Config, DeclaredRepo, GeminiConfig, RemoteConfig, RepoConfig, RepoLsp, RepoWork, WorkDefaults,
+    CLAUDE_CODE, CODEX, CODEX_DEFAULT_MODEL, GEMINI, LOCAL_OWNER,
 };
-pub use config_edit::{present_keys, write_settings, AgentBackend, RepoSetting, Setting, Written};
+pub use config_edit::{
+    is_client_key, present_keys, write_settings, AgentBackend, RepoSetting, Setting, Written,
+    CLIENT_TABLES,
+};
 pub use discussion::{
     CommentPlace, Discussion, IssueComment, PullReviewEvent, Review, ReviewComment,
     ReviewCommentDraft, ReviewThreadState,
