@@ -407,7 +407,13 @@ A worktree with no pull request is yours, so it is in **Authored**, whether Perc
 made it or found it under a root; the base branch never becomes a row. Once
 someone else's pull request attaches to it, the row goes by that author.
 Perch never removes a worktree it found under a root, so deleting its row
-lasts only until the next scan finds it again. **Hide** in the row's menu
+lasts only until the next scan finds it again. A worktree whose branch is
+renamed keeps its row: the scan finds the row by the worktree's directory and
+renames its branch, with its threads, runs and name kept. That is what T3
+Code does to a thread's `t3/<hex>` branch once the thread has a title. A
+branch switched rather than renamed, the old one still there, puts the old
+row away as before, and so does a rename onto a branch another row already
+has. **Hide** in the row's menu
 keeps it out of Worktrees without touching it; it's listed under Recent,
 where **Unhide** brings it back.
 A repository with a root and no GitHub remote is `local/<name>`: it has no pull
@@ -1140,8 +1146,13 @@ in the code font and the agent's reason, with three buttons:
   command that writes the repository, **Always let Work commit here**.
 - **Deny** says no. The agent is told "The reader said no." and goes on.
 
-A request not answered in fifteen minutes is denied, and a run that is stopped
-or ends settles whatever it was waiting on. The run's steps keep what was asked
+A request not answered in time is denied: fifteen minutes in the app, eight
+hours under `perchd`, where nobody may be connected, or
+`[work] approval_timeout_mins`. The agent is told how long it waited. A
+request waits in the engine, not in a window, so a window that opens or a Mac
+that connects while it waits shows the card, and the first answer from any
+of them settles it for all. A run that is stopped or ends settles whatever it
+was waiting on. The run's steps keep what was asked
 and what was answered. While it waits, its item's Agents row counts it as
 waiting and the bar's Agents button has a dot.
 
@@ -1509,12 +1520,53 @@ systemd. Quit the app, or set it to This Mac, first. With logind's
 `KillUserProcesses=yes`, an engine a bridge started is killed when the ssh
 session ends, its runs with it; run it from the unit there.
 
-A Mac that sleeps leaves its connection open on the host until sshd notices
-it has gone, two hours by TCP's own keepalive, and its windows' open items
-and language servers with it. `ClientAliveInterval 60` in the host's
-`sshd_config` makes that a few minutes.
+The app says it is still there every 15 seconds it has nothing else to
+send, and the engine hangs up on a client it has heard nothing from in a
+minute: a Mac asleep, or off the network, would otherwise hold its windows'
+open items and language servers until TCP gave up on it, hours later. The
+Mac's windows reconnect when it wakes.
 
 ## An engine on another machine
+
+### Setting up a host
+
+The host is Linux, always on, and reachable from the Mac with `ssh <host>`.
+On it:
+
+1. Unpack `perchd-linux-<arch>.tar.gz` from a release and put `perchd` in
+   `~/.local/bin`, on the `PATH` your login shell sets.
+2. Install bubblewrap and socat (`apt install bubblewrap socat`, or your
+   distribution's), which Claude Code's sandbox needs on Linux.
+3. Sign in to what the engine uses, as the user it runs as: `gh auth login`
+   (or `token` in its config.toml), and each agent CLI you run, `claude`,
+   `codex` or `agy`. Nothing is copied from the Mac.
+4. Write `~/.perch/config.toml` on the host with a `[[repo]]` for each
+   repository and a `root` that is a clone on the host. Add repository… in
+   the app can't do this for a host; edit the file there.
+5. Optionally, install the systemd unit and `loginctl enable-linger` (see
+   [perchd](#perchd)) so the engine starts at boot. Without it the first
+   connection starts one.
+
+Then on the Mac, set `[remote] host` in `~/.perch/config.toml` to the name
+you `ssh` to, or type it into Settings > General > Engine, and restart Perch.
+
+### What runs where
+
+The host runs the engine: the GitHub client and its token, `perch.db`, the
+checkouts and worktrees, the language servers, the agents and their approvals,
+and its config.toml's settings. The Mac runs the windows, draws the code and
+pictures, and keeps its own `[ui]`, `[display]`, `[keybindings]` and
+`[remote]`, and where its windows were left, in its own Perch home.
+
+With the Mac closed or asleep, the engine goes on: the inbox is polled, runs
+started from the Mac keep going, queued ones start as others finish, and checks are watched.
+Reopening the app, or waking the Mac, catches every window up with what
+happened. A Work run that asks something while no Mac is connected waits for
+an answer, up to eight hours by default; the card is there when a window
+connects, and is answered from there as on the Mac. Stopping `perchd`
+interrupts its runs, as quitting the app does.
+
+### Connecting
 
 With `[remote] host` in the Mac's config.toml, or a host typed into
 Settings > General > Engine, the app starts no engine of its own and takes
@@ -1572,6 +1624,16 @@ Settings shows the host's config.toml, with the Mac's `[ui]`, `[display]`,
 group has both files. Keyboard shortcut warnings are about the Mac's file.
 Add repository… would offer the Mac's folders, so with a host it says to add
 the `[[repo]]` to the host's config.toml instead.
+
+### Limits
+
+- The app uses one engine at a time, this Mac's or one host's; changing it
+  takes a restart, and items never move between engines.
+- Nothing updates `perchd` on the host. When the app is updated and the wire
+  changes, the strip says to update the engine; install the new release's
+  `perchd` and restart it.
+- Add repository… doesn't reach the host: edit its config.toml by hand.
+- Windows hosts are not supported.
 
 ## Development
 

@@ -219,17 +219,70 @@ renames the row's branch instead.
 
 ## Build order
 
-1. **Engine crate.** Move the backend and its support into
+All four steps are done.
+
+1. **Engine crate.** (Done.) Move the backend and its support into
    `perch-engine`; the app re-exports it. Pictures become bytes. No
    behaviour change; every existing test passes where it moved to.
-2. **Wire-ready boundary.** serde on both enums and their payloads,
+2. **Wire-ready boundary.** (Done.) serde on both enums and their payloads,
    fences as ids, per-connection window mapping, `Resync`, the framing
    and handshake, the loopback mode and its test.
-3. **perchd and the client.** `serve`, `bridge`, `status`, the lock, the
+3. **perchd and the client.** (Done.) `serve`, `bridge`, `status`, the lock, the
    socket, the unit file; the app's remote mode, banner and reconnect,
    the remote openers, the settings split; the Linux fixes.
-4. **Durable approvals and T3.** Approvals in the resync and their
+4. **Durable approvals and T3.** (Done.) Approvals in the resync and their
    timeout; the scan's rename by path; docs.
+
+## As built
+
+Where the implementation went its own way, and why:
+
+- The wire carries more than the spec named. `Welcome` also has the
+  connection's number (attempt ids carry it), and how many other clients
+  and runs the engine has. An empty line is a keepalive: the client sends
+  one every 15 s it has nothing else to send, and the engine hangs up on a
+  client it has heard nothing from in 60 s, closing its windows, so a Mac
+  asleep on a half-open connection does not hold windows and language
+  servers for the hours TCP takes. The engine also hangs up on a client
+  more than 256 MB behind in what it is sent. The protocol is 4.
+- Fences are taken as a command is sent, at the handle and the hub, not
+  when the engine's loop reaches it, so a window's commands are fenced in
+  the order it sent them. Scope picks are numbered at the handle.
+- Lines a login shell prints before the bridge starts (a greeting, a
+  terminal title) are passed over, up to 64, before the engine's answer.
+- ssh runs with `BatchMode=yes`, `ConnectTimeout=10` and every forwarding
+  off (`ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes`)
+  whatever the ssh config says, and the command goes through
+  `exec "$SHELL" -lc`. `perchd` also drops `SSH_AUTH_SOCK`,
+  `SSH_CONNECTION`, `SSH_CLIENT` and `SSH_TTY` from its environment, since
+  it outlives the session and its agents would inherit them.
+- Reconnects give up a try not answered in 30 s, and a connection lost
+  within a minute of being made does not reset the backoff. What a window
+  asked for while the very first try was under way is sent when it
+  connects, or said not done when it fails; after that, commands while
+  disconnected are refused as specified.
+- `perchd serve` stops on SIGHUP too, a second signal ends it at once,
+  and it exits 75 when another engine has the home. `perchd status` exits
+  3 when nothing answers; `perchd --version` names the protocol.
+- Open in Editor prefers Zed when its command or app is installed, and
+  says so when neither Zed nor VS Code can be run.
+- Add repository… does not reach the host: with a host set it says to add
+  the `[[repo]]` to the host's config.toml by hand.
+- The nested `.git` check on Linux also fails a run whose existing nested
+  `.git` had its config or hooks changed, or whose `.git` file points
+  elsewhere, not only one that appeared.
+- The window frame moved out of the database into `window-frame` in the
+  Mac's own Perch home, read and written there whatever the engine; the
+  old meta key is still read when there is no file. Remote, the frame had
+  been written to the host's database and never read back.
+- Pending approvals go in the resync as `Event::Approvals`, which replaces
+  a window's cards, so one settled while a client was away does not linger.
+  The timeout's default comes from the engine's `Lifetime`, and the denial
+  names the actual wait. `[work] approval_timeout_mins` has no control in
+  Settings > Work, which lists no other numbers.
+- The scan renames a row by path only when the old branch no longer
+  exists; a branch switched in place (the old one still there) puts the old
+  row away as before, as does a rename onto a branch another row holds.
 
 ## Acceptance
 
