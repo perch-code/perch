@@ -1189,7 +1189,9 @@ run gets only its own directory and the repository's `objects/`, `refs/` and
 and the run is told to expect that line. A command that rewrites `packed-refs`,
 such as deleting a packed branch, fails there, and the run can ask to run it
 outside the sandbox.
-The run is told it may commit but not push.
+The run is told it may commit but not push. A follow-up that resumes a
+session begun before the grant says so ahead of the question, since the
+session keeps what it was told when it began.
 The grant doesn't answer a Claude Code or Codex run's request to run git
 outside the sandbox: the run keeps working inside the sandbox while git runs,
 so it could move a repository into the worktree, and git outside the sandbox
@@ -1688,7 +1690,8 @@ same way, and, when that build is not installed, copy the file into `bin`
 as an upload would be: owner-only, asked its version, moved into place
 only when it names the app's version and protocol. A file that changed
 while it was copied, as under a build still running, is not installed, and
-the next try looks again. The path is from the host's home when it starts
+the next try looks again, still replacing or restarting the engine if that
+is what the try was for. The path is from the host's home when it starts
 with `~/` or names no root, and can hold only letters, digits and
 `. _ + - /`.
 

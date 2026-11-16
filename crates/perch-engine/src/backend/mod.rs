@@ -18637,6 +18637,15 @@ async fn ask_as(
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
         *system = framing.clone();
     }
+    // A resumed session keeps the framing it began with, and the reader
+    // may have let Work commit since.
+    if let (Some((perch_agent::Mode::Work(grant), _, _)), None) = (&work, &prompt.system) {
+        if grant.commit {
+            let note =
+                crate::ask::resumed_commit_note(packed_refs_closed(backend, &checkout.worktree));
+            prompt.user = format!("{note}\n\n{}", prompt.user);
+        }
+    }
     // `original_request` stays suitable for a compact row label. The full
     // constructed user prompt captures the source and conversation context
     // which this exact attempt was admitted with.
@@ -19120,6 +19129,13 @@ async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord]) {
     }
 }
 
+/// Whether git in a Work run of `backend` in `worktree` that may commit
+/// can't lock `packed-refs`: Claude Code on Linux can't open a linked
+/// worktree's whole repository to a commit, and git says so on each one.
+fn packed_refs_closed(backend: perch_agent::Backend, worktree: &Path) -> bool {
+    backend == perch_agent::Backend::ClaudeCode && perch_agent::packed_refs_closed(worktree)
+}
+
 /// What a Work run on `item` needs: the sandbox its `[repo.work]`
 /// grants, and the framing that says so. Refused for an item that is not
 /// the reader's own work (see `items::work_allowed`).
@@ -19180,13 +19196,10 @@ fn work_setup(
         .as_ref()
         .map(|c| (c.branch.clone(), c.base_ref.clone()))
         .unwrap_or_default();
-    // Claude Code on Linux can't open a linked worktree's whole
-    // repository to a commit, and git says so on each one.
-    let packed_refs_closed = backend == perch_agent::Backend::ClaudeCode
-        && item
-            .checkout
-            .as_ref()
-            .is_some_and(|c| perch_agent::packed_refs_closed(&c.path));
+    let packed_refs_closed = item
+        .checkout
+        .as_ref()
+        .is_some_and(|c| packed_refs_closed(backend, &c.path));
     let framing = crate::ask::work_framing(
         &config.display_name(&item.repo_full_name),
         &branch,
@@ -26988,6 +27001,37 @@ while True:
             args.contains("--resume"),
             "the Work session is resumed: {args}"
         );
+        let prompts = || -> Vec<String> {
+            ctx.with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+                .unwrap()
+                .iter()
+                .map(|run| run.prompt_snapshot.clone().unwrap_or_default())
+                .collect()
+        };
+        assert!(!prompts()[3].contains("Note from the tool"));
+
+        // The reader lets Work commit, and the session resumed still has
+        // the framing it began with: the follow-up says what changed.
+        ctx.with_cache(|c| {
+            c.insert_grant(&perch_github::WorkGrantRecord {
+                id: "g1".into(),
+                repo: "a/b".into(),
+                key: "commit".into(),
+                label: "commit".into(),
+                created_at: "2026-09-22T10:00:00Z".parse().unwrap(),
+            })
+        })
+        .unwrap()
+        .unwrap();
+        ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
+        let args = std::fs::read_to_string(dir.path().join("args-5")).unwrap();
+        assert!(args.contains("--resume"), "{args}");
+        let told = &prompts()[4];
+        assert!(
+            told.starts_with("Note from the tool, not the reader: the reader lets Work commit"),
+            "{told}"
+        );
+        assert!(told.ends_with("Question: Do it"), "{told}");
     }
 
     /// A Work run that makes a `.git` below the worktree's top fails, with

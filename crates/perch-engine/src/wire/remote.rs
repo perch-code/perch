@@ -499,13 +499,31 @@ async fn keep_connected(
     loop {
         let just_installed = installed.take();
         let asked = std::mem::take(&mut replace);
-        let why = match dial(asked).await {
-            Err(why) => why,
-            Ok(Dialed {
+        // A dial can take a while by itself, when it has the host ready
+        // its own `perchd` first, so the reader's try now gives it up
+        // too: left waiting, the ask would end the connection it made.
+        let dialed = tokio::select! {
+            dialed = dial(asked) => Some(dialed),
+            () = link.retry.notified() => None,
+        };
+        // Whether the try ended before the host's bridge ran: what it
+        // was to replace, it has not, and the next try is still asked to.
+        let mut unreached = false;
+        let why = match dialed {
+            None => {
+                tracing::info!(host, "trying again now, as asked");
+                (replace, installed) = (asked, just_installed);
+                continue;
+            }
+            Some(Err(why)) => {
+                unreached = true;
+                why
+            }
+            Some(Ok(Dialed {
                 stream,
                 hang_up,
                 build: wanted,
-            }) => {
+            })) => {
                 // Given up when the reader asks for a try now, or when the
                 // engine is too long answering.
                 let within = answer_wait(backoff.answer, asked);
@@ -517,6 +535,7 @@ async fn keep_connected(
                     None => {
                         let _ = hang_up().await;
                         tracing::info!(host, "trying again now, as asked");
+                        (replace, installed) = (asked, just_installed);
                         continue;
                     }
                     Some(Err(_)) => hang_up().await.unwrap_or_else(|| {
@@ -736,6 +755,8 @@ async fn keep_connected(
         };
         if asked_now {
             (replace, replaced) = (link.after_wake(), false);
+        } else if unreached {
+            (replace, replacing) = (asked, seen);
         }
         wait = backoff.after(wait);
     }
@@ -1199,7 +1220,26 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                 }
                 let remote = remote_line(&bridge, &build, replace);
                 let installed = matches!(bridge, Bridge::Installed(_)).then_some(build);
-                dial_ssh(&host, &remote, installed).await
+                let mut dialed = dial_ssh(&host, &remote, installed).await?;
+                if matches!(bridge, Bridge::Installed(Source::HostFile(_))) {
+                    // The host readied its own `perchd` a moment ago. If
+                    // it says it has none now, another bridge cleared it
+                    // in between, and the next try readies it again:
+                    // there is nothing of the app's to install.
+                    let hang_up = dialed.hang_up;
+                    dialed.hang_up = Box::new(move || {
+                        Box::pin(async move {
+                            let said = hang_up().await;
+                            match said.as_deref().and_then(provision::install_line) {
+                                Some(_) => Some(format!(
+                                    "The perchd readied on {host} was gone when the connection ran."
+                                )),
+                                None => said,
+                            }
+                        })
+                    });
+                }
+                Ok(dialed)
             })
         }
     });
@@ -1447,6 +1487,9 @@ mod tests {
         last: Arc<Mutex<Option<String>>>,
         /// How each dial was asked to treat another build.
         asked: Arc<Mutex<Vec<Replace>>>,
+        /// How long a dial takes before it has a stream, as one that has
+        /// the host ready its `perchd` first.
+        stall: Arc<Mutex<Duration>>,
     }
 
     /// Dials as a `[remote] command`, which wants no build.
@@ -1462,9 +1505,15 @@ mod tests {
         let failing = Arc::new(Mutex::new(None::<String>));
         let last = Arc::new(Mutex::new(None::<String>));
         let asked = Arc::new(Mutex::new(Vec::new()));
+        let stall = Arc::new(Mutex::new(Duration::ZERO));
         let dial: Dial = Box::new({
-            let (dials, failing, last, asked) =
-                (dials.clone(), failing.clone(), last.clone(), asked.clone());
+            let (dials, failing, last, asked, stall) = (
+                dials.clone(),
+                failing.clone(),
+                last.clone(),
+                asked.clone(),
+                stall.clone(),
+            );
             move |replace| {
                 dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 asked.lock().unwrap().push(replace);
@@ -1472,7 +1521,9 @@ mod tests {
                 let said = last.lock().unwrap().clone();
                 let to_test = to_test.clone();
                 let build = build.clone();
+                let stall = *stall.lock().unwrap();
                 Box::pin(async move {
+                    tokio::time::sleep(stall).await;
                     if let Some(why) = failing {
                         return Err(why);
                     }
@@ -1499,6 +1550,7 @@ mod tests {
                 failing,
                 last,
                 asked,
+                stall,
             },
         )
     }
@@ -2563,6 +2615,106 @@ mod tests {
             assert_eq!(installs.lock().unwrap().len(), 1);
             drop(first);
         }
+    }
+
+    /// A replace, or a restart the reader asked for, whose dial fails
+    /// before the host's bridge runs, as when the host's own `perchd` is
+    /// being rebuilt under it, is still a replace on the try after.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dial_that_fails_on_the_way_to_a_replace_keeps_the_replace() {
+        for restart in [false, true] {
+            let (backend, events, mut pipes) = installed_link();
+            let runs = usize::from(restart);
+            let mut first = pipes.next().await;
+            if !restart {
+                *pipes.failing.lock().unwrap() = Some("no perchd there just now".into());
+            }
+            first
+                .welcome_as(1, &engine("0.0.1", "0.0.1", runs, 0))
+                .await;
+            if restart {
+                assert!(matches!(next_said(&events).await, EngineLink::Up { .. }));
+                *pipes.failing.lock().unwrap() = Some("no perchd there just now".into());
+                backend.restart_engine();
+            }
+            assert!(matches!(
+                next_said(&events).await,
+                EngineLink::Restarting { .. }
+            ));
+            let EngineLink::Down { why, .. } = next_said(&events).await else {
+                panic!("not down");
+            };
+            assert_eq!(why, "no perchd there just now");
+            *pipes.failing.lock().unwrap() = None;
+            let mut kept = pipes.next().await;
+            kept.welcome_as(2, &engine(VERSION, WANTED, 0, 0)).await;
+            assert!(matches!(
+                next_said(&events).await,
+                EngineLink::Up { other: None, .. }
+            ));
+            let asked = if restart {
+                Replace::Always
+            } else {
+                Replace::IfIdle
+            };
+            let dials = pipes.asked.lock().unwrap().clone();
+            assert_eq!(dials[0], Replace::No);
+            assert!(dials[1..].iter().all(|dial| *dial == asked), "{dials:?}");
+            assert!(dials.len() >= 3, "{dials:?}");
+            drop(first);
+        }
+    }
+
+    /// A try now asked for while a dial is still on its way gives that
+    /// dial up for another, rather than waiting to end the connection it
+    /// makes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_try_now_during_a_slow_dial_does_not_end_the_connection_after_it() {
+        let (dial, mut pipes) = pipes_for(Some(WANTED));
+        *pipes.failing.lock().unwrap() = Some("unreachable".into());
+        let backoff = Backoff {
+            // Long enough that only the reader's ask ends the wait.
+            first: Duration::from_secs(30),
+            ..QUICK
+        };
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            backoff,
+            &tokio::runtime::Handle::current(),
+        );
+        assert!(matches!(next_said(&events).await, EngineLink::Down { .. }));
+        // The second dial stalls, and the reader asks again during it.
+        *pipes.failing.lock().unwrap() = None;
+        *pipes.stall.lock().unwrap() = Duration::from_millis(300);
+        backend.reconnect();
+        for _ in 0..200 {
+            if pipes.dials() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(pipes.dials(), 2);
+        *pipes.stall.lock().unwrap() = Duration::ZERO;
+        backend.reconnect();
+        // The dial given up is dropped before it has a stream; the one
+        // after it connects, and stays connected.
+        let mut kept = pipes.next().await;
+        kept.welcome_as(1, &engine(VERSION, WANTED, 0, 0)).await;
+        assert!(matches!(
+            next_said(&events).await,
+            EngineLink::Up { other: None, .. }
+        ));
+        assert_eq!(pipes.dials(), 3);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, (_, Event::Link(EngineLink::Down { .. }))),
+                "the connection was ended"
+            );
+        }
+        drop(kept);
     }
 
     /// An engine from before the frozen handshake says nothing of itself,

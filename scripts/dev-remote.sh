@@ -65,17 +65,57 @@ target="$(on_host_run 'cargo metadata --format-version 1 --no-deps' |
   sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 built="${target:-$dir/target}/debug/perchd"
 
+# The app reads where its engine is from config.toml, so say when that is
+# not the host and the build just made, rather than run against another.
 config="${PERCH_HOME:-$HOME/.perch}/config.toml"
-if ! grep -q '^[[:space:]]*perchd_on_host[[:space:]]*=' "$config" 2>/dev/null; then
+remote_value() {
+  awk -v key="$1" '
+    /^[[:space:]]*\[/ { inside = ($0 ~ /^[[:space:]]*\[remote\][[:space:]]*(#.*)?$/); next }
+    inside && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      sub(/[[:space:]]*(#.*)?$/, "")
+      gsub(/^["\047]|["\047]$/, "")
+      print
+      exit
+    }' "$config" 2>/dev/null || true
+}
+wrong() {
+  echo "dev-remote: $1" >&2
+  if grep -q '^[[:space:]]*\[remote\]' "$config" 2>/dev/null; then
+    echo "Under [remote] in $config, set:" >&2
+  else
+    echo "Add to $config:" >&2
+    echo >&2
+    echo "  [remote]" >&2
+  fi
   cat >&2 <<NOTE
-dev-remote: $config names no perchd_on_host. Add:
 
-  [remote]
   host = "$host"
   perchd_on_host = "$built"
 
 NOTE
   exit 1
+}
+set_host="$(remote_value host)"
+set_path="$(remote_value perchd_on_host)"
+if [[ -n "$(remote_value command)" ]]; then
+  wrong "[remote] command is set, and the app runs that instead of perchd_on_host; take it out."
+elif [[ "$set_host" != "$host" ]]; then
+  wrong "[remote] host is \"$set_host\", not \"$host\"."
+elif [[ -z "$set_path" ]]; then
+  wrong "[remote] names no perchd_on_host."
+fi
+# The same file, however each names it.
+set_from_home="${set_path#\~/}"
+if [[ "$set_from_home" =~ ^[A-Za-z0-9._+/-]+$ && "$built" =~ ^[A-Za-z0-9._+/-]+$ ]]; then
+  case "$set_from_home" in
+    /*) set_on_host="$set_from_home" ;;
+    *) set_on_host="\$HOME/$set_from_home" ;;
+  esac
+  real="$(on_host_run "readlink -f \"$set_on_host\" \"$built\"" || true)"
+  if [[ "$(sed -n 1p <<<"$real")" != "$(sed -n 2p <<<"$real")" ]]; then
+    wrong "[remote] perchd_on_host is \"$set_path\", not the perchd just built."
+  fi
 fi
 
 exec cargo run -p perch-app -- "$@"

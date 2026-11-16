@@ -588,6 +588,18 @@ button to Settings when anything required is missing.
   fetch the host checkout's commit, build `perchd` there, run the app.
   Both sides keep the default home: the dev build is the one in daily
   use, so a second home for it was left out.
+- A dial can now take seconds, where it used to only start ssh, so the
+  link's loop changed with it. The reader's try now gives up a dial under
+  way as it does a handshake: left waiting, the ask ended the connection
+  that dial went on to make. A try that ends before the host's bridge
+  runs, a failed dial or one given up, keeps what it was to replace for
+  the try after, where it used to fall back to joining the old engine.
+  A build already in place is touched as it is staged, so another
+  bridge's cleanup keeps it; if it is gone by the connection anyway, the
+  strip says so rather than showing the host's `perch-install:` line.
+- A Work follow-up that resumes a session is told it may commit, ahead
+  of the question, when the repository has the commit grant: the session
+  keeps the framing it began with, which may say to ask.
 
 ## Acceptance
 

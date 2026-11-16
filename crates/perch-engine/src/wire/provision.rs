@@ -209,7 +209,8 @@ const STAGED_SAID: &str = "perch-staged:";
 /// file into place the way an upload is: a temporary file, owner-only,
 /// asked its version, moved only when that is the version and protocol
 /// expected. A file that changed while it was copied, as under a build
-/// still running, is not installed.
+/// still running, is not installed. A build already in place is touched,
+/// so a bridge clearing older builds keeps it as the newest.
 const STAGE: &str = r#"d="${PERCH_HOME:-$HOME/.perch}/bin"
 case "$1" in
   /*) f="$1" ;;
@@ -233,7 +234,8 @@ case "$h" in
     ;;
 esac
 b="$2-$h"
-if [ -x "$d/perchd-$b" ]; then
+if [ -f "$d/perchd-$b" ] && [ -x "$d/perchd-$b" ]; then
+  touch "$d/perchd-$b" 2>/dev/null || :
   echo "perch-staged: $b"
   exit 0
 fi
@@ -752,15 +754,18 @@ pub async fn upload(host: &str, build: &str, binary: Vec<u8>) -> Result<(), Fail
 /// not already, and give its build: an ssh of its own before the one that
 /// connects, since the build is in the name the connection runs.
 pub async fn stage(host: &str, path: &str) -> Result<String, String> {
+    if let Some(why) = super::remote::bad_host(host) {
+        return Err(why);
+    }
     let path = host_path(path)?;
     let run = tokio::process::Command::new(ssh_program())
         .args(super::remote::ssh_args(host, &stage_command(&path)))
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(120), run)
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), run)
         .await
-        .map_err(|_| format!("Readying perchd on {host} took over two minutes."))?
+        .map_err(|_| format!("Readying perchd on {host} took over a minute."))?
         .map_err(|e| format!("Could not run ssh: {e}"))?;
     let err = String::from_utf8_lossy(&output.stderr);
     for line in err.lines().filter(|line| !line.trim().is_empty()) {
@@ -1151,13 +1156,26 @@ pub(crate) mod tests {
             assert_eq!(mode(&installed), 0o700, "{shell}");
             assert_eq!(mode(&bin), 0o700, "{shell}");
 
-            // Again, by its full path: nothing is copied a second time.
-            let before = std::fs::metadata(&installed).unwrap().modified().unwrap();
+            // Again, by its full path: nothing is copied a second time,
+            // and the build in place is made the newest there.
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+            let file = std::fs::File::options()
+                .write(true)
+                .open(&installed)
+                .unwrap();
+            file.set_modified(old).unwrap();
+            drop(file);
+            let inode = |path: &Path| {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(path).unwrap().ino()
+            };
+            let before = inode(&installed);
             let again = stage(&built.join("perchd").display().to_string());
             assert_eq!(staged(&again), Some(build.clone()), "{shell}");
-            assert_eq!(
-                std::fs::metadata(&installed).unwrap().modified().unwrap(),
-                before
+            assert_eq!(inode(&installed), before, "{shell}");
+            assert!(
+                std::fs::metadata(&installed).unwrap().modified().unwrap() > old,
+                "{shell}"
             );
 
             // Rebuilt: another build, beside the first.
