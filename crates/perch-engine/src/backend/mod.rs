@@ -554,6 +554,12 @@ pub enum Command {
     AddRepository {
         path: PathBuf,
     },
+    /// Add a `[[repo]]` from what the reader typed, where there is no
+    /// folder to pick: a path on the engine's machine, or a repository on
+    /// GitHub to clone there first (see `repos::repo_source`).
+    AddRepositoryFrom {
+        source: String,
+    },
     /// Take a repository's `[[repo]]` out of the config.
     RemoveRepository {
         identity: String,
@@ -3691,6 +3697,12 @@ impl Backend {
         let _ = self.commands.send(Command::AddRepository { path });
     }
 
+    pub fn add_repository_from(&self, source: &str) {
+        let _ = self.commands.send(Command::AddRepositoryFrom {
+            source: source.to_string(),
+        });
+    }
+
     pub fn remove_repository(&self, identity: &str) {
         let _ = self.commands.send(Command::RemoveRepository {
             identity: identity.to_string(),
@@ -5486,6 +5498,27 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                         return;
                     };
                     match add_repository(&ctx, &path, &config).await {
+                        Ok(identity) => {
+                            let _ = ctx.events.send(Event::RepositoryAdded(identity));
+                        }
+                        Err(message) => {
+                            let _ = ctx.events.send(Event::Notice(message));
+                        }
+                    }
+                });
+            }
+            Command::AddRepositoryFrom { source } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let Some(config) = perch_github::config::config_path() else {
+                        let _ = ctx
+                            .events
+                            .send(Event::Notice("There is no place for config.toml".into()));
+                        return;
+                    };
+                    let home = perch_github::config::home_dir();
+                    match add_repository_from(&ctx, &source, &home, &config).await {
                         Ok(identity) => {
                             let _ = ctx.events.send(Event::RepositoryAdded(identity));
                         }
@@ -14179,6 +14212,72 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
         ctx.send_items();
     }
     Ok(identity)
+}
+
+/// [`add_repository`] from what the reader typed. A path is the folder,
+/// with `~` the engine's `home`. A repository on GitHub is cloned first,
+/// with the engine's token, to `<name>` beside the roots already there or
+/// under `~/code` (see `repos::clone_parent`); a folder of that name that
+/// is already a clone of it is used as it is, and any other is left alone.
+async fn add_repository_from(
+    ctx: &Ctx,
+    source: &str,
+    home: &Path,
+    path: &Path,
+) -> Result<String, String> {
+    let id = match crate::repos::repo_source(source)? {
+        crate::repos::RepoSource::Path(typed) => {
+            let folder = perch_github::config::expand_home_in(&typed, home);
+            if !folder.is_dir() {
+                return Err(format!("There is no folder at {}", folder.display()));
+            }
+            return add_repository(ctx, &folder, path).await;
+        }
+        crate::repos::RepoSource::GitHub(id) => id,
+    };
+    let config = ctx.config();
+    let declared = config.repo.iter().find(|entry| {
+        entry
+            .identity()
+            .is_some_and(|i| i.eq_ignore_ascii_case(&id.full_name()))
+    });
+    if let Some(entry) = declared {
+        return Err(match entry.root_path() {
+            Some(root) => format!(
+                "{} is already in config.toml, at {}",
+                id.full_name(),
+                root.display()
+            ),
+            None => format!("{} is already in config.toml", id.full_name()),
+        });
+    }
+    let dest = crate::repos::clone_parent(&config, home).join(&id.repo);
+    if dest.exists() {
+        // One the reader cloned there themselves is theirs to add; any
+        // other folder of the name is not Perch's to write into.
+        let remotes = perch_git::remotes(ctx.preparer.git(), &dest)
+            .await
+            .unwrap_or_default();
+        let there = remotes
+            .iter()
+            .filter_map(|(_, url)| perch_git::repo_from_remote(url, &["github.com"]))
+            .any(|slug| slug.eq_ignore_ascii_case(&id.full_name()));
+        if !there {
+            return Err(format!(
+                "{} is already there and is not a clone of {}. Add it by its path, or clone {} somewhere else and add that.",
+                dest.display(),
+                id.full_name(),
+                id.full_name()
+            ));
+        }
+    } else {
+        tracing::info!(repo = id.full_name(), dest = %dest.display(), "cloning for Add repository");
+        ctx.preparer
+            .clone_checkout(&id.clone_url(), &dest)
+            .await
+            .map_err(|e| format!("Couldn't clone {}: {e}", id.full_name()))?;
+    }
+    add_repository(ctx, &dest, path).await
 }
 
 /// Take a repository's `[[repo]]` out of the config file and drop it from
@@ -33776,6 +33875,52 @@ read eof || true
             elsewhere.contains("is not in a git repository"),
             "{elsewhere}"
         );
+    }
+
+    /// Add repository by what was typed, as with the engine on a host: a
+    /// repository's name uses the clone of it already under `~/code`
+    /// rather than cloning, leaves a folder of that name that is something
+    /// else alone, and is refused once it is declared; a path is the
+    /// folder, with `~` the engine's home.
+    #[tokio::test]
+    async fn adding_a_repository_from_what_was_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let (ctx, _received) = ctx_declaring(&home, &nowhere(), Vec::new());
+        let config = home.join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let add = |typed: &'static str| add_repository_from(&ctx, typed, &home, &config);
+
+        let widgets = home.join("code/widgets");
+        root_with_branch(&widgets, "feature");
+        git(
+            &widgets,
+            &["remote", "add", "origin", "git@github.com:Acme/widgets.git"],
+        );
+        assert_eq!(add("acme/widgets").await.unwrap(), "Acme/widgets");
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.contains(&widgets.display().to_string()), "{text}");
+        let again = add("https://github.com/acme/widgets").await.unwrap_err();
+        assert!(again.contains("is already in config.toml, at"), "{again}");
+
+        // A folder of the name that is some other repository.
+        root_with_branch(&home.join("code/gadgets"), "feature");
+        let other = add("acme/gadgets").await.unwrap_err();
+        assert!(
+            other.contains("is already there and is not a clone of acme/gadgets"),
+            "{other}"
+        );
+
+        root_with_branch(&home.join("notes"), "feature");
+        assert_eq!(add("~/notes").await.unwrap(), "local/notes");
+        let missing = add("~/nowhere").await.unwrap_err();
+        assert!(missing.starts_with("There is no folder at "), "{missing}");
+        let neither = add("notes").await.unwrap_err();
+        assert!(
+            neither.contains("neither a repository on GitHub"),
+            "{neither}"
+        );
+        assert_eq!(ctx.config().declared(), ["Acme/widgets", "local/notes"]);
     }
 
     /// The Settings the backend sent, oldest first.

@@ -52,6 +52,64 @@ pub async fn resolve(config: &mut Config, git: &Git) {
     config.drop_repeated_identities();
 }
 
+/// What a reader typed to add a repository where no folder can be
+/// picked, the engine being on a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoSource {
+    /// A folder on the engine's machine, as typed: `/srv/widgets`,
+    /// `~/code/widgets`.
+    Path(String),
+    /// A repository on github.com, to clone there.
+    GitHub(perch_git::RepoId),
+}
+
+/// Read what was typed: a path when it starts with `/` or `~`, else a
+/// repository on github.com by `owner/name` or by a URL of it. A path has
+/// to start that way so `code/widgets`, meant as a folder, is never
+/// cloned as a repository of that name.
+pub fn repo_source(typed: &str) -> Result<RepoSource, String> {
+    let typed = typed.trim();
+    if typed.starts_with('/') || typed.starts_with('~') {
+        return Ok(RepoSource::Path(typed.to_string()));
+    }
+    let slug = perch_git::repo_from_remote(typed, &["github.com"])
+        .or_else(|| {
+            typed
+                .strip_prefix("github.com/")
+                .map(|rest| rest.trim_matches('/'))
+                .map(|rest| rest.strip_suffix(".git").unwrap_or(rest).to_string())
+        })
+        .unwrap_or_else(|| typed.to_string());
+    let plain = |part: &str, more: &[u8]| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && !part.starts_with('-')
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || more.contains(&b))
+    };
+    match perch_git::RepoId::parse(&slug) {
+        Some(id) if plain(&id.owner, b"") && plain(&id.repo, b"._") => Ok(RepoSource::GitHub(id)),
+        _ => Err(format!(
+            "\"{typed}\" is neither a repository on GitHub, as owner/name, nor a path starting with / or ~/."
+        )),
+    }
+}
+
+/// Where a repository cloned for the reader goes: beside the first root
+/// they already have, since that is where they keep their clones, else
+/// `code` in their home.
+pub fn clone_parent(config: &Config, home: &std::path::Path) -> std::path::PathBuf {
+    config
+        .repo
+        .iter()
+        .filter_map(|entry| entry.root_path())
+        .find(|root| root.is_dir())
+        .and_then(|root| root.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| home.join("code"))
+}
+
 /// `Config::load()` with every entry resolved, for a caller already on a
 /// runtime.
 pub async fn load_resolved_async() -> Config {
@@ -68,6 +126,56 @@ mod tests {
     use perch_github::RepoConfig;
 
     use super::*;
+
+    #[test]
+    fn what_is_typed_is_a_path_or_a_repository_on_github() {
+        let named = |typed: &str| match repo_source(typed) {
+            Ok(RepoSource::GitHub(id)) => id.full_name(),
+            other => panic!("{typed}: {other:?}"),
+        };
+        for typed in [
+            "acme/widgets",
+            " acme/widgets ",
+            "github.com/acme/widgets",
+            "https://github.com/acme/widgets",
+            "https://github.com/acme/widgets.git",
+            "git@github.com:acme/widgets.git",
+        ] {
+            assert_eq!(named(typed), "acme/widgets");
+        }
+        assert_eq!(named("a-b/c.d_e"), "a-b/c.d_e");
+        for typed in ["/srv/widgets", "~/code/widgets", "~"] {
+            assert_eq!(repo_source(typed), Ok(RepoSource::Path(typed.to_string())));
+        }
+        for typed in [
+            "",
+            "widgets",
+            "acme/widgets/extra",
+            "acme/..",
+            "-x/widgets",
+            "acme/wid gets",
+            "acme/$(id)",
+            "https://gitlab.com/acme/widgets",
+            "code/perch;rm",
+        ] {
+            assert!(repo_source(typed).is_err(), "{typed}");
+        }
+    }
+
+    #[test]
+    fn a_clone_goes_beside_the_roots_there_are_or_under_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert_eq!(clone_parent(&Config::default(), home), home.join("code"));
+        std::fs::create_dir_all(home.join("src/widgets")).unwrap();
+        let config = Config::parse_text(&format!(
+            "[[repo]]\nroot = {:?}\n\n[[repo]]\nroot = {:?}\n",
+            home.join("gone/notes").display().to_string(),
+            home.join("src/widgets").display().to_string(),
+        ))
+        .unwrap();
+        assert_eq!(clone_parent(&config, home), home.join("src"));
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let out = Command::new("git")

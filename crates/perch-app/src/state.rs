@@ -3518,7 +3518,14 @@ impl AppState {
             Event::Done(message) => self.notify(message, Tone::Success),
             Event::Bases { repo, bases } => self.new_work.take_bases(repo, bases),
             Event::WorkDefaults(work) => self.new_work.prefix.set(work.branch_prefix),
-            Event::RepositoryAdded(identity) => self.added_repo.set(Some(identity)),
+            Event::RepositoryAdded(identity) => {
+                // With the engine on a host it may have been cloned
+                // first, long enough to have looked away.
+                if let Some(host) = crate::remote::host() {
+                    self.notify(format!("Added {identity} on {host}."), Tone::Success);
+                }
+                self.added_repo.set(Some(identity));
+            }
             Event::ApprovalRequested(view) => {
                 if let Some(review) = self.review.get_untracked() {
                     review.approvals.update(|pending| {

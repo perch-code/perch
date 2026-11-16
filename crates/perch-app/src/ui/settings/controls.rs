@@ -501,6 +501,99 @@ pub(crate) fn setting_text(
         })
 }
 
+/// A one-line box with a button after it, for something to add rather
+/// than a setting to change: Enter or the button hands what was typed to
+/// `submit`, and letting go of the box sends nothing, so a name half
+/// typed is never acted on. The box empties when what `done` reads
+/// changes, which the caller ties to the thing having been added; until
+/// then what was typed stays, to be put right if it was refused.
+pub(crate) fn entry(
+    page: &Page,
+    placeholder: &str,
+    label: &'static str,
+    done: impl Fn() + 'static,
+    submit: impl Fn(String) + 'static,
+    debug: &'static str,
+) -> impl View {
+    let editing = page.state.settings.editing;
+    let draft = RwSignal::new(String::new());
+    Effect::new(move |ran: Option<()>| {
+        done();
+        if ran.is_some() && !draft.get_untracked().is_empty() {
+            draft.set(String::new());
+        }
+    });
+    let send: Rc<dyn Fn()> = Rc::new(move || {
+        let Some(typed) = draft.try_get_untracked() else {
+            return;
+        };
+        let typed = typed.trim();
+        if !typed.is_empty() {
+            submit(typed.to_string());
+        }
+    });
+    let input = TextInput::new(draft)
+        .placeholder(placeholder.to_string())
+        .debug_name(debug);
+    let id = input.view_id();
+    let (writable, enabled) = (page.clone(), page.clone());
+    let (send_key, send_button) = (send.clone(), send);
+    let input = input
+        .on_event_cont(el::FocusGained, move |_, _| editing.set(Some(id)))
+        .on_event_cont(el::FocusLost, move |_, _| {
+            if editing.get_untracked() == Some(id) {
+                editing.set(None);
+            }
+        })
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if !key.modifiers.is_empty() || key.is_composing {
+                return EventPropagation::Continue;
+            }
+            match key.code {
+                Code::Enter | Code::NumpadEnter => {
+                    send_key();
+                    EventPropagation::Stop
+                }
+                Code::Escape => {
+                    draft.set(String::new());
+                    id.clear_focus();
+                    EventPropagation::Stop
+                }
+                _ => EventPropagation::Continue,
+            }
+        })
+        .on_cleanup(move || {
+            if editing.try_get_untracked() == Some(Some(id)) {
+                editing.set(None);
+            }
+        })
+        .style(move |s| {
+            s.width(CONTROL_WIDTH)
+                .max_width_full()
+                .height(CONTROL_HEIGHT)
+                .font_size(theme::TEXT_META)
+                .padding_horiz(10.0)
+                .background(theme::canvas())
+                .border(1.0)
+                .border_color(theme::border())
+                .border_radius(theme::RADIUS)
+                .focus(|s| s.border_color(theme::accent()))
+                .set(SelectionColor, Brush::Solid(theme::selection_bg()))
+                .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
+                .set_disabled(!writable.writable())
+        });
+    Stack::horizontal((
+        input,
+        button(
+            label,
+            format!("{debug}-go"),
+            move || enabled.writable(),
+            move || send_button(),
+        ),
+    ))
+    .style(|s| s.gap(8.0).items_center())
+}
+
 /// The keys macOS keeps for itself: Quit, Hide and Hide Others, which the
 /// app menu holds, and the app switcher. They never reach Perch.
 const TAKEN: [&str; 4] = ["super+q", "super+h", "alt+super+h", "super+tab"];

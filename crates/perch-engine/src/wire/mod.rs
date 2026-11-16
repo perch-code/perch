@@ -43,8 +43,9 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// 4: keepalive lines, and a resync's waiting approvals. 5: the hello and
 /// its answer are frozen (see `Hello`), a hello can ask a host's engine to
 /// stop, and the answers name the engine's build. 6: a host's engine
-/// sends its host checks.
-pub const PROTOCOL: u32 = 6;
+/// sends its host checks. 7: Add repository from what was typed, a path
+/// or a repository to clone.
+pub const PROTOCOL: u32 = 7;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -1599,13 +1599,14 @@ put on it first. On it:
 2. Sign in to what the engine uses, as the user it runs as: `gh auth login`
    (or `token` in its config.toml), and each agent CLI you run, `claude`,
    `codex` or `agy`. Nothing is copied from the Mac.
-3. Write `~/.perch/config.toml` on the host with a `[[repo]]` for each
-   repository and a `root` that is a clone on the host. Add repository… in
-   the app can't do this for a host; edit the file there.
 
 Then on the Mac, set `[remote] host` in `~/.perch/config.toml` to the name
 you `ssh` to, or type it into Settings > General > Engine, and restart Perch.
 Once it connects, the app says what of the above the host still lacks.
+
+Repositories are added from the app (see [Adding a repository on a
+host](#adding-a-repository-on-a-host)); nothing has to be cloned or
+written on the host first.
 
 ### What the app checks
 
@@ -1627,6 +1628,8 @@ the same list. It checks:
 - **Repositories** (required): at least one `[[repo]]` has a `root` that is
   a directory on the host. Roots that are not there are named. For a
   github.com repository the fix is the `git clone` that puts it there.
+  While it fails, its row has an **Add repository…** button, which goes to
+  Settings > Repositories.
 - **Claude Code**, **Codex**, **agy (Gemini)**: each agent CLI as the
   engine's agent discovery found it, with its path and version. None is
   required while another is installed; with none at all, Claude Code is.
@@ -1865,8 +1868,29 @@ turns off only its own rows: with the host's broken, the engine,
 appearance, display and shortcuts can still be changed, with the
 Mac's broken, only they can't, and with both broken, nothing can, as the
 banner at the top of the page says.
-Add repository… would offer the Mac's folders, so with a host it says to add
-the `[[repo]]` to the host's config.toml instead.
+
+### Adding a repository on a host
+
+Add repository… would offer the Mac's folders, which the host has none
+of. With a host, wherever it is asked for, it opens Settings >
+Repositories, where the last row is a box and an **Add** button in place
+of the folder chooser. Type one of:
+
+- A repository on github.com, as `owner/name` or its URL. The engine
+  clones it on the host, with its own GitHub token, to `<name>` beside
+  the first repository root already there, or under `~/code` when there
+  is none yet, and adds it. A folder of that name that is already a clone
+  of it is used as it is; any other is left alone and named. The token is
+  given to that one `git clone` and is not written into the clone, whose
+  later fetches and pushes use the host's own git credentials, as `gh auth
+  login` sets them up.
+- A path on the host, starting with `/` or `~/`: a clone already there.
+
+Enter or **Add** sends it; clicking away sends nothing. The app says a
+named repository is being added, and that it was added, since a clone
+can take a while. What was typed stays in the box until then, so a
+refusal, which the popup explains, can be put right. A repository on a
+GitHub Enterprise host is cloned by hand and added by its path.
 
 ### Limits
 
@@ -1875,7 +1899,6 @@ the `[[repo]]` to the host's config.toml instead.
 - With `[remote] command` set, nothing updates `perchd` on the host. When
   the app is updated and the wire changes, the strip says to update the
   engine; install the new release's `perchd` and restart it.
-- Add repository… doesn't reach the host: edit its config.toml by hand.
 - Windows hosts are not supported.
 
 ## Development

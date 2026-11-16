@@ -573,14 +573,17 @@ fn repo_chip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 
 /// The system folder chooser, then the backend adds what was picked. With
 /// the engine on a host the chooser would offer this Mac's folders, which
-/// the host has none of, so the reader is told where to add one instead.
+/// the host has none of, so Settings opens on Repositories, where one is
+/// added by its name on GitHub or its path there.
 pub(crate) fn add_repository(state: AppState, backend: Rc<Backend>) {
     use floem::platform::file::FileDialogOptions;
 
-    if let Some(host) = crate::remote::host() {
-        state.complain(format!(
-            "Repositories live on {host}: add a [[repo]] with its root to the config.toml there (Settings > General > Config file)."
-        ));
+    if crate::remote::host().is_some() {
+        state
+            .settings
+            .section
+            .set(crate::ui::settings::Section::Repositories);
+        crate::ui::settings::show(state, None);
         return;
     }
 

@@ -120,8 +120,13 @@ fn host_check(page: &Page, check: &HostCheck) -> Row {
     let control = {
         let (what, name) = (what.clone(), name.clone());
         move || {
-            let (mark, style, copy, shown) =
-                (what.clone(), what.clone(), what.clone(), what.clone());
+            let (mark, style, copy, shown, add) = (
+                what.clone(),
+                what.clone(),
+                what.clone(),
+                what.clone(),
+                what.clone(),
+            );
             Stack::horizontal((
                 Label::derived(move || {
                     current(state, &mark)
@@ -152,6 +157,20 @@ fn host_check(page: &Page, check: &HostCheck) -> Row {
                 .style(move |s| {
                     let has_fix = current(state, &shown).is_some_and(|c| !c.ok && c.fix.is_some());
                     s.apply_if(!has_fix, |s| s.hide())
+                }),
+                // No repository yet: the page that adds one.
+                super::controls::button(
+                    "Add repository…",
+                    format!("settings-host-check-add:{name}"),
+                    || true,
+                    move || {
+                        state.settings.section.set(super::Section::Repositories);
+                    },
+                )
+                .style(move |s| {
+                    let adds = current(state, &add)
+                        .is_some_and(|c| !c.ok && c.what == perch_engine::host::REPOSITORIES);
+                    s.apply_if(!adds, |s| s.hide())
                 }),
             ))
             .style(|s| s.gap(10.0).items_center())
@@ -367,6 +386,39 @@ mod tests {
         check.detail = "git version 2.43.0.".into();
         assert_eq!(check_description(&check), "git version 2.43.0.");
         assert_eq!(check_mark(&check), "Found");
+    }
+
+    /// The check for a repository, failing, has a button to the page that
+    /// adds one; the others have none.
+    #[test]
+    fn a_host_with_no_repository_is_a_click_from_adding_one() {
+        use super::super::tests::{click, open_on, shown, window};
+        use super::super::Section;
+        crate::remote::set_place(crate::remote::Place::Host {
+            host: "devbox".into(),
+            home: "/home/dev".into(),
+            data_root: "/home/dev/.perch".into(),
+        });
+        let (mut harness, state, _commands) = window(1400.0, 2000.0, "");
+        let check = |what: &str| HostCheck {
+            what: what.into(),
+            ok: false,
+            required: true,
+            detail: "Missing.".into(),
+            fix: None,
+        };
+        state
+            .host_checks
+            .set(vec![check("git"), check(perch_engine::host::REPOSITORIES)]);
+        open_on(&mut harness, state, Section::General);
+        assert!(!shown(&harness, "settings-host-check-add:git"));
+        assert!(shown(&harness, "settings-host-check-add:repositories"));
+        click(&mut harness, "settings-host-check-add:repositories");
+        assert_eq!(
+            state.settings.section.get_untracked(),
+            Section::Repositories
+        );
+        crate::remote::set_place(crate::remote::Place::ThisMac);
     }
 
     #[test]

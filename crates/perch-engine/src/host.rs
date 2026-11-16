@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use perch_github::Config;
 
+/// What the check for a repository on the host is called.
+pub const REPOSITORIES: &str = "Repositories";
+
 /// One thing the host has or lacks.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostCheck {
@@ -340,7 +343,7 @@ pub(crate) fn checks(found: &Found) -> Vec<HostCheck> {
 /// Whether a `[[repo]]` has its root on the host: the engine lists and
 /// works on nothing without one.
 fn repositories(found: &Found) -> HostCheck {
-    let what = "Repositories".to_string();
+    let what = REPOSITORIES.to_string();
     let here: Vec<&RepoRoot> = found.repos.iter().filter(|r| r.exists).collect();
     let gone: Vec<&RepoRoot> = found.repos.iter().filter(|r| !r.exists).collect();
     let file = found
@@ -369,7 +372,7 @@ fn repositories(found: &Found) -> HostCheck {
             ok: false,
             required: true,
             detail: format!(
-                "No [[repo]] in {file} has a root. Add one whose root is a clone on the host."
+                "No [[repo]] in {file} has a root. Add one in Settings > Repositories: a repository on GitHub by owner/name, or a clone on the host by its path."
             ),
             fix: None,
         };

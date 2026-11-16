@@ -480,7 +480,57 @@ fn remove(page: &Page, repo: &RepoConfig, identity: &str) -> Row {
     .keywords(&["remove", "delete", "forget"])
 }
 
+/// Add repository with the engine on `host`, where the folders are not
+/// this Mac's to pick from: a box for a repository on GitHub, which the
+/// engine clones there, or the path of a clone already there.
+fn add_on_host(page: &Page, host: String) -> Row {
+    let title = format!("A repository on {host}");
+    let said = host.clone();
+    let control = {
+        let page = page.clone();
+        move || {
+            let (state, backend, host) = (page.state, page.backend.clone(), host.clone());
+            controls::entry(
+                &page,
+                "owner/name, or a path",
+                "Add",
+                move || {
+                    state.added_repo.track();
+                },
+                move |typed| match perch_engine::repos::repo_source(&typed) {
+                    Err(why) => state.complain(why),
+                    Ok(source) => {
+                        if let perch_engine::repos::RepoSource::GitHub(id) = source {
+                            state.notify(
+                                format!("Adding {} on {host}…", id.full_name()),
+                                crate::state::Tone::Success,
+                            );
+                        }
+                        backend.add_repository_from(&typed);
+                    }
+                },
+                "settings-add-repository",
+            )
+            .into_any()
+        }
+    };
+    Row::new(
+        "add-repository",
+        title,
+        move || {
+            format!(
+                "Type owner/name to clone it from GitHub on {said}, beside your other repositories there or under ~/code, or the path of a clone already there. Perch adds it to the config.toml on {said}."
+            )
+        },
+        control,
+    )
+    .keywords(&["add", "new", "repository", "folder", "clone", "host"])
+}
+
 fn add(page: &Page) -> Row {
+    if let Some(host) = crate::remote::host() {
+        return add_on_host(page, host);
+    }
     let control = {
         let page = page.clone();
         move || {
@@ -526,6 +576,73 @@ mod tests {
             identity: identity.into(),
             change,
         }
+    }
+
+    /// What Add repository was asked to add from, of the commands sent
+    /// since the last look.
+    fn added(commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<String> {
+        sent(commands)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::AddRepositoryFrom { source } => Some(source),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With the engine on a host there is no folder to pick: the row is a
+    /// box that takes a repository's name on GitHub or a path there, sends
+    /// it on Enter, says a name is being added, keeps what was typed until
+    /// the engine has added it, and sends nothing it can't read. Add
+    /// repository anywhere else in the app opens Settings here.
+    #[test]
+    fn on_a_host_a_repository_is_added_by_its_name_or_its_path() {
+        crate::remote::set_place(crate::remote::Place::Host {
+            host: "devbox".into(),
+            home: "/home/dev".into(),
+            data_root: "/home/dev/.perch".into(),
+        });
+        let (mut harness, state, mut commands) = window(1400.0, 2600.0, FILE);
+        crate::ui::new_work::add_repository(state, Rc::new(Backend::detached()));
+        assert_eq!(
+            state.settings.section.get_untracked(),
+            Section::Repositories
+        );
+        assert!(state.settings.open.get_untracked());
+        open_on(&mut harness, state, Section::Repositories);
+        assert!(shown(&harness, "settings-add-repository-go"));
+
+        enter_in(&mut harness, "settings-add-repository", "acme/gadgets");
+        assert_eq!(added(&mut commands), ["acme/gadgets"]);
+        assert_eq!(
+            state.notice().as_deref(),
+            Some("Adding acme/gadgets on devbox…")
+        );
+
+        // Added: the box is empty again, and what is typed next is all
+        // that is sent. The button sends as Enter does.
+        state.apply(crate::backend::Event::RepositoryAdded(
+            "acme/gadgets".into(),
+        ));
+        super::super::tests::settle(&mut harness);
+        assert_eq!(
+            state.notice().as_deref(),
+            Some("Added acme/gadgets on devbox.")
+        );
+        click(&mut harness, "settings-add-repository");
+        super::super::tests::type_text(&mut harness, "~/code/notes");
+        click(&mut harness, "settings-add-repository-go");
+        assert_eq!(added(&mut commands), ["~/code/notes"]);
+
+        // Neither a name nor a path: said, and not sent.
+        state.apply(crate::backend::Event::RepositoryAdded("local/notes".into()));
+        super::super::tests::settle(&mut harness);
+        enter_in(&mut harness, "settings-add-repository", "notes");
+        assert!(added(&mut commands).is_empty());
+        assert!(state
+            .notice()
+            .is_some_and(|said| said.contains("neither a repository on GitHub")));
+        crate::remote::set_place(crate::remote::Place::ThisMac);
     }
 
     #[test]

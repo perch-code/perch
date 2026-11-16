@@ -1342,7 +1342,10 @@ mod tests {
 
     pub(super) fn type_text(harness: &mut HeadlessHarness, text: &str) {
         for c in text.chars() {
-            let code = Code::from_str(&format!("Key{}", c.to_ascii_uppercase())).unwrap();
+            // A letter's key, or none for anything else: the box takes
+            // the character either way.
+            let code = Code::from_str(&format!("Key{}", c.to_ascii_uppercase()))
+                .unwrap_or(Code::Unidentified);
             harness.dispatch_event(key(code, Key::Character(c.to_string()), Modifiers::empty()));
         }
         settle(harness);

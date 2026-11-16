@@ -564,6 +564,40 @@ impl Preparer {
             .is_ok_and(|partial| partial.contains(&id.full_name().to_lowercase()))
     }
 
+    /// Clone `url` into `dest`, a checkout for the reader to keep as one
+    /// of their own, with Perch's token answering for github.com: only for
+    /// this command, so nothing of it is written into the clone, whose
+    /// later fetches and pushes are the reader's git's. It is built under
+    /// a temporary name beside `dest` and moved into place whole; a clone
+    /// that fails or is dropped leaves nothing. `dest` must not exist.
+    pub async fn clone_checkout(&self, url: &str, dest: &Path) -> Result<(), Error> {
+        if dest.exists() {
+            return Err(Error::Io(format!("{} is already there", dest.display())));
+        }
+        let Some(name) = dest.file_name() else {
+            return Err(Error::Io(format!("{} names no folder", dest.display())));
+        };
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io(e.to_string()))?;
+        }
+        let mut staging = name.to_os_string();
+        staging.push(".partial");
+        let staging = dest.with_file_name(staging);
+        let _ = std::fs::remove_dir_all(&staging);
+        let _partial = RemoveOnDrop(&staging);
+        let args = [
+            "clone".into(),
+            "--progress".into(),
+            "--".into(),
+            std::ffi::OsString::from(url),
+            staging.clone().into_os_string(),
+        ];
+        self.git
+            .run_with_progress(None, args, CLONE_IDLE, |_: Progress| {})
+            .await?;
+        std::fs::rename(&staging, dest).map_err(|e| Error::Io(e.to_string()))
+    }
+
     /// The bare clone, made if it is missing. Every checkout starts here.
     pub async fn ensure_bare(
         &self,
@@ -1617,6 +1651,30 @@ mod tests {
 
     /// A partial clone gets a tree's files ahead of a checkout, saying how
     /// it goes; a full clone is asked for nothing.
+    /// A checkout cloned for the reader lands whole at the place asked,
+    /// leaves no staging folder, and is refused over a folder already
+    /// there; one that fails leaves nothing.
+    #[tokio::test]
+    async fn a_checkout_is_cloned_whole_or_not_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _clone) = clone_with_feature(dir.path());
+        let url = format!("file://{}", remote.display());
+        let preparer = preparer(dir.path());
+        let dest = dir.path().join("code/widgets");
+        preparer.clone_checkout(&url, &dest).await.unwrap();
+        assert!(dest.join(".git").is_dir());
+        assert!(!dir.path().join("code/widgets.partial").exists());
+        let origin = git(&dest, &["remote", "get-url", "origin"]);
+        assert_eq!(origin.trim(), url);
+
+        assert!(preparer.clone_checkout(&url, &dest).await.is_err());
+        let missing = dir.path().join("code/missing");
+        let gone = format!("file://{}", dir.path().join("nowhere.git").display());
+        assert!(preparer.clone_checkout(&gone, &missing).await.is_err());
+        assert!(!missing.exists());
+        assert!(!dir.path().join("code/missing.partial").exists());
+    }
+
     #[tokio::test]
     async fn a_partial_clone_downloads_a_trees_files_before_its_checkout() {
         let dir = tempfile::tempdir().unwrap();

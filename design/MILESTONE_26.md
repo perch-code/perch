@@ -281,8 +281,15 @@ Where the implementation went its own way, and why:
   3 when nothing answers; `perchd --version` names the protocol.
 - Open in Editor prefers Zed when its command or app is installed, and
   says so when neither Zed nor VS Code can be run.
-- Add repository… does not reach the host: with a host set it says to add
-  the `[[repo]]` to the host's config.toml by hand.
+- Add repository… with a host set opens Settings > Repositories, where a
+  box takes `owner/name` on GitHub or a path on the host. The engine
+  clones a named one first, with its token for that one command, to
+  `<name>` beside the roots already there or under `~/code`, then adds it
+  as a folder picked would be. It was a notice saying to edit the host's
+  config.toml, which left a first run on a new host with a step that had
+  no command to copy. A setting for where clones go was left out: the
+  roots already there say where the reader keeps them. `Command` gained
+  `AddRepositoryFrom`, so the wire is at 7.
 - The nested `.git` check on Linux also fails a run whose existing nested
   `.git` had its config or hooks changed, or whose `.git` file points
   elsewhere, not only one that appeared.
