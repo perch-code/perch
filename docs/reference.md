@@ -1091,8 +1091,11 @@ proxy. A Work run or a question on a machine without `bwrap` and `socat` on
 `PATH` is refused before it starts: "Claude Code's sandbox needs bwrap and
 socat on Linux…". Claude Code on Linux also skips the glob that keeps a Work
 run from making a `.git` inside the worktree, so Perch looks itself: a `.git`
-that appeared below the worktree's top during a Work run fails the run, with
-its path named. One that was there before the run is left alone.
+that appeared below the worktree's top during a Work run, or one there before
+whose `config` or hooks changed, or whose `.git` file now points elsewhere,
+fails the run, with its path named. A submodule `.gitmodules` names, checked
+out by the run, is left alone, and `node_modules`, `target`, `.venv` and
+`venv` are not looked through.
 
 ### Approvals
 
@@ -1447,7 +1450,9 @@ while it runs and writes its process id there. A second engine on the same
 home refuses to start and names the process that has it: the app opens its
 window and says "Perch could not start its engine: another Perch engine
 (process …) is running on …", and nothing runs behind it. The lock goes
-with the process however it ends. The commands that only read the cache,
+with the process however it ends. On a file system that has no locks, some
+network ones, the engine runs anyway, warns in the log, and nothing stops a
+second one. The commands that only read the cache,
 `perch --items`, `--agents`, `--timeline`, `--scope` and `--scan`, need no
 lock and run beside an engine.
 
@@ -1461,15 +1466,23 @@ toolkit, so it needs no GTK. Releases carry it for Linux as
 - `perchd serve` runs the engine and listens on
   `$PERCH_HOME/run/perchd.sock` (the directory owner-only, the socket mode
   0600). It keeps polling, sweeping and running agents with no client
-  connected. SIGTERM or SIGINT stops it as quitting the app does: running
-  agents are stopped and recorded Interrupted, the socket is removed and
-  the home let go. It logs to stderr and to `$PERCH_HOME/logs`, never to
-  stdout.
+  connected. SIGTERM, SIGINT or SIGHUP stops it as quitting the app does:
+  running agents are stopped and recorded Interrupted, the socket is
+  removed and the home let go. A second signal while it stops ends it at
+  once. It logs to stderr, in colour only on a terminal, and to
+  `$PERCH_HOME/logs`, never to stdout. With another engine on the home it
+  exits 75.
+- The engine never keeps the ssh session's `SSH_AUTH_SOCK`,
+  `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`: it outlives the session, and
+  every agent it starts would get them. git over ssh on the host uses the
+  host's own keys.
 - `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
   until either side closes. It is what `ssh <host> perchd bridge` runs. With
   no engine answering it starts `perchd serve` in a session of its own, so
   the engine outlives the ssh connection, and waits up to 10 seconds for
-  it. It writes nothing but the engine's messages to stdout.
+  it. When something holds the home's lock without listening, the Perch
+  app running on the host say, it names that process. It writes nothing
+  but the engine's messages to stdout.
 - `perchd status` connects without starting anything and prints whether
   an engine is running, its version and protocol, its Perch home, how many
   other clients are connected and how many agent runs are queued or under
@@ -1489,6 +1502,18 @@ systemctl --user enable --now perchd
 loginctl enable-linger "$USER"  # keep it running with nobody logged in
 ```
 
+The unit does not restart while another engine has the home (exit 75).
+Stopping it while the app is connected does not keep the engine stopped:
+the app reconnects, and its bridge starts an engine of its own outside
+systemd. Quit the app, or set it to This Mac, first. With logind's
+`KillUserProcesses=yes`, an engine a bridge started is killed when the ssh
+session ends, its runs with it; run it from the unit there.
+
+A Mac that sleeps leaves its connection open on the host until sshd notices
+it has gone, two hours by TCP's own keepalive, and its windows' open items
+and language servers with it. `ClientAliveInterval 60` in the host's
+`sshd_config` makes that a few minutes.
+
 ## An engine on another machine
 
 With `[remote] host` in the Mac's config.toml, or a host typed into
@@ -1496,35 +1521,47 @@ Settings > General > Engine, the app starts no engine of its own and takes
 no lock on its Perch home. It runs
 
 ```sh
-ssh -T -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <host> 'exec "$SHELL" -lc "perchd bridge"'
+ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=3 -o ForwardAgent=no -o ForwardX11=no \
+    -o ClearAllForwardings=yes -- <host> 'exec "$SHELL" -lc '\''perchd bridge'\'''
 ```
 
 and talks to the engine on the host over ssh's stdin and stdout. ssh's own
-config, keys and agent apply; the agent is not forwarded. The command is run
-in your login shell on the host, so a `perchd` your profile puts on `PATH`
-is found; `[remote] command` changes it. What ssh says on stderr goes to the
-log. A change to the host takes effect when Perch restarts.
+config, keys and agent apply to logging in, but nothing is forwarded,
+whatever the config says: not the agent, not X11, no ports. Nothing is
+asked either, as there is no terminal: connect once with `ssh <host>` in a
+terminal to accept the host's key, and keep a key with a passphrase in the
+agent or the macOS keychain. The command is run in your login shell on the
+host, so a `perchd` your profile puts on `PATH` is found; `[remote]
+command` changes it. What ssh says on stderr goes to the log. A change to
+the host takes effect when Perch restarts.
 
 The host's engine keeps its items, runs and checkouts going with the app
 closed. Paths the app shows are the host's, and `~` in them is the host's
 home. What would open a path on the Mac reaches the host instead:
 
-- Open in Terminal opens Terminal with `ssh -t <host> 'cd <path> && exec $SHELL -l'`.
+- Open in Terminal opens Terminal with `ssh -t -- <host> 'cd -- <path> && exec $SHELL -l'`.
 - Reveal in Finder becomes Open in Editor: Zed, as `zed ssh://<host>/<path>`,
   when its `zed` command or the app is installed, else VS Code, as
-  `code --remote ssh-remote+<host> <path>`.
+  `code --remote ssh-remote+<host> <path>`. When neither can be run, the
+  window says so.
 - Copy Path copies the host's path.
 
 While the host can't be reached, a strip along the foot of every window
 says so: "Disconnected from <host>. Reconnecting…", or "Can't connect to
 <host>" before the first connection, with ssh's last line under it (an
 unknown host, a refused key) and a Reconnect button. Perch tries again after
-a second, then two, doubling to every 30 seconds; Reconnect tries now. The
-windows keep what they showed. A command sent meanwhile, a click or a
-comment, is not done and not kept for later: the window says "Not connected
-to <host>, so that wasn't done." When the connection is back, each window
-catches up on everything (the rows, the inbox, the runs, the settings) and
-opens its item again.
+a second, then two, doubling to every 30 seconds; Reconnect gives up a try
+under way and tries now. A try the engine has not answered in 30 seconds
+is given up. A connection that is lost within a minute of being made does
+not start the waits again from a second, so an engine that fails as it
+starts is not restarted every second. The windows keep what they showed. A
+command sent meanwhile, a click or a comment, is not done and not kept for
+later: the window says "Not connected to <host>, so that wasn't done." What
+a window asked for while the first try was under way is sent if it
+connects, and said not done if it fails. When the connection is back, each
+window catches up on everything (the rows, the inbox, the runs, the
+settings) and opens its item again, or the one it was opening.
 
 When the app and the engine speak different versions of the wire, the
 engine refuses the app, the strip says which one to update, and Perch stops

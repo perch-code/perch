@@ -10,19 +10,25 @@
 //!   starting: what its first windows ask for as they are made goes once
 //!   the first try connects, and is dropped if it fails. Nothing was lost
 //!   then, and a window that asked for its lists and heard nothing would
-//!   sit empty.
+//!   sit empty. Each window whose asks were dropped is told so.
 //! - Tries are made 1 s apart at first, doubling to 30 s between, and the
-//!   reader can ask for one now. A refusal of the app's protocol stops
-//!   them: trying again cannot help until one side is updated.
+//!   reader can ask for one now, which gives up a try under way. A try
+//!   that has no answer in [`Backoff::answer`] is given up: a host that
+//!   does not answer, or a login shell that ate the hello. A connection
+//!   that ends within [`Backoff::steady`] of being made does not start the
+//!   waits again, so an engine that fails at once is not restarted every
+//!   second. A refusal of the app's protocol stops the tries: trying again
+//!   cannot help until one side is updated.
 //! - A connection made asks for everything again (`Command::Resync`), after
 //!   telling the engine of every window open, so the windows catch up on
 //!   what happened meanwhile. Each window reopens its item when it hears
-//!   it is connected again (`EngineLink::Up`).
+//!   it is connected and something it asked for may have been lost
+//!   (`EngineLink::Up`'s `again`).
 //!
 //! How the connection stands goes to the windows as `Event::Link`, with
 //! the engine's own events, in order.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -66,6 +72,12 @@ pub type Dial = Box<dyn FnMut() -> BoxFuture<Result<Dialed, String>> + Send>;
 pub struct Backoff {
     pub first: Duration,
     pub last: Duration,
+    /// How long a try waits for the engine's answer before it is given up.
+    /// Past ssh's own connect timeout, and past a bridge starting an engine.
+    pub answer: Duration,
+    /// How long a connection has to have lasted for the waits to start
+    /// again from `first` once it ends.
+    pub steady: Duration,
 }
 
 impl Default for Backoff {
@@ -73,6 +85,8 @@ impl Default for Backoff {
         Backoff {
             first: Duration::from_secs(1),
             last: Duration::from_secs(30),
+            answer: Duration::from_secs(30),
+            steady: Duration::from_secs(60),
         }
     }
 }
@@ -101,8 +115,8 @@ struct Linked {
     /// The client's windows that are open, to open again in the engine
     /// each time it is connected.
     windows: BTreeSet<WindowId>,
-    /// When a refusal was last said.
-    refused_at: Option<Instant>,
+    /// When a refusal was last said to each window.
+    refused_at: HashMap<WindowId, Instant>,
     /// What the windows sent before the first try ended, while it is
     /// under way; `None` after.
     starting: Option<Vec<(WindowId, Command)>>,
@@ -113,7 +127,7 @@ impl Default for Linked {
         Linked {
             to: None,
             windows: BTreeSet::new(),
-            refused_at: None,
+            refused_at: HashMap::new(),
             starting: Some(Vec::new()),
         }
     }
@@ -166,17 +180,24 @@ impl Link {
             starting.push((window, command));
             return Ok(());
         }
+        self.refuse(&mut linked, window);
+        Err(())
+    }
+
+    /// Tell `window` a command of its was not done, unless it was told
+    /// just now.
+    fn refuse(&self, linked: &mut Linked, window: WindowId) {
         let now = Instant::now();
         if linked
             .refused_at
-            .is_none_or(|at| now.duration_since(at) >= REFUSALS_APART)
+            .get(&window)
+            .is_none_or(|at| now.duration_since(*at) >= REFUSALS_APART)
         {
-            linked.refused_at = Some(now);
+            linked.refused_at.insert(window, now);
             let _ = self
                 .events
                 .send((window, Event::Notice(refused(&self.host))));
         }
-        Err(())
     }
 
     /// Try now, unless connected.
@@ -188,23 +209,22 @@ impl Link {
 
     /// Connected: the windows are opened in the engine, then everything
     /// is asked for again, before any command from a window can go.
-    fn up(
-        &self,
-        welcome: &super::Welcome,
-        to: UnboundedSender<(WindowId, Command)>,
-        again: bool,
-    ) -> bool {
+    fn up(&self, welcome: &super::Welcome, to: UnboundedSender<(WindowId, Command)>) -> bool {
         let mut linked = self.linked();
         self.navigations.reconnected(welcome.connection);
         for &window in &linked.windows {
             let _ = to.send((window, Command::WindowOpened));
         }
         let _ = to.send((NO_WINDOW, Command::Resync));
-        for sent in linked.starting.take().into_iter().flatten() {
+        // Only the first try has what the windows asked for as they were
+        // made. Any later one may have had commands refused or lost.
+        let starting = linked.starting.take();
+        let again = starting.is_none();
+        for sent in starting.into_iter().flatten() {
             let _ = to.send(sent);
         }
         linked.to = Some(to);
-        linked.refused_at = None;
+        linked.refused_at.clear();
         self.say(EngineLink::Up {
             host: self.host.clone(),
             welcome: welcome.clone(),
@@ -212,10 +232,16 @@ impl Link {
         })
     }
 
+    /// Not connected. What the windows asked for while the first try was
+    /// under way is dropped, and each window that asked is told.
     fn down(&self) {
         let mut linked = self.linked();
         linked.to = None;
-        linked.starting = None;
+        let dropped = linked.starting.take().unwrap_or_default();
+        let windows: BTreeSet<WindowId> = dropped.into_iter().map(|(window, _)| window).collect();
+        for window in windows {
+            self.refuse(&mut linked, window);
+        }
     }
 
     /// Tell the windows how the connection stands. False once nobody is
@@ -263,45 +289,71 @@ async fn keep_connected(link: Arc<Link>, mut dial: Dial, backoff: Backoff) {
     loop {
         let why = match dial().await {
             Err(why) => why,
-            Ok(Dialed { stream, hang_up }) => match handshake(stream).await {
-                Ok((welcome, session)) => {
-                    tracing::info!(
-                        host,
-                        engine = welcome.engine_version,
-                        engine_host = welcome.host,
-                        "connected to the engine"
-                    );
-                    let (to, outgoing) = tokio::sync::mpsc::unbounded_channel();
-                    let ended = session.carry(outgoing, link.navigations(), link.events.clone());
-                    if !link.up(&welcome, to, ever) {
-                        return;
+            Ok(Dialed { stream, hang_up }) => {
+                // Given up when the reader asks for a try now, or when the
+                // engine is too long answering.
+                let answered = tokio::select! {
+                    answered = tokio::time::timeout(backoff.answer, handshake(stream)) => Some(answered),
+                    () = link.retry.notified() => None,
+                };
+                match answered {
+                    None => {
+                        let _ = hang_up().await;
+                        tracing::info!(host, "trying again now, as asked");
+                        continue;
                     }
-                    ever = true;
-                    wait = backoff.first;
-                    let _ = ended.await;
-                    link.down();
-                    hang_up()
-                        .await
-                        .unwrap_or_else(|| "The connection was lost.".to_string())
-                }
-                Err(WireError::Refused(reason)) => {
-                    let _ = hang_up().await;
-                    tracing::warn!(host, %reason, "the engine refused the app");
-                    link.down();
-                    if !link.say(EngineLink::Down {
-                        host: host.clone(),
-                        why: reason,
-                        retry_in: None,
-                        ever,
-                    }) {
-                        return;
+                    Some(Err(_)) => hang_up().await.unwrap_or_else(|| {
+                        format!(
+                            "{host} did not answer within {} s.",
+                            backoff.answer.as_secs()
+                        )
+                    }),
+                    Some(Ok(Ok((welcome, session)))) => {
+                        tracing::info!(
+                            host,
+                            engine = welcome.engine_version,
+                            engine_host = welcome.host,
+                            "connected to the engine"
+                        );
+                        let (to, outgoing) = tokio::sync::mpsc::unbounded_channel();
+                        let ended =
+                            session.carry(outgoing, link.navigations(), link.events.clone());
+                        if !link.up(&welcome, to) {
+                            return;
+                        }
+                        ever = true;
+                        let since = Instant::now();
+                        let _ = ended.await;
+                        // A connection that lasted starts the waits again;
+                        // one that ended at once, an engine failing as it
+                        // is asked for everything say, keeps doubling them.
+                        if since.elapsed() >= backoff.steady {
+                            wait = backoff.first;
+                        }
+                        link.down();
+                        hang_up()
+                            .await
+                            .unwrap_or_else(|| "The connection was lost.".to_string())
                     }
-                    link.retry.notified().await;
-                    wait = backoff.first;
-                    continue;
+                    Some(Ok(Err(WireError::Refused(reason)))) => {
+                        let _ = hang_up().await;
+                        tracing::warn!(host, %reason, "the engine refused the app");
+                        link.down();
+                        if !link.say(EngineLink::Down {
+                            host: host.clone(),
+                            why: reason,
+                            retry_in: None,
+                            ever,
+                        }) {
+                            return;
+                        }
+                        link.retry.notified().await;
+                        wait = backoff.first;
+                        continue;
+                    }
+                    Some(Ok(Err(error))) => hang_up().await.unwrap_or_else(|| error.to_string()),
                 }
-                Err(error) => hang_up().await.unwrap_or_else(|| error.to_string()),
-            },
+            }
         };
         tracing::warn!(host, %why, ?wait, "not connected to the engine");
         link.down();
@@ -359,13 +411,32 @@ pub fn in_login_shell(command: &str) -> String {
 /// ssh's arguments to run `command` on `host`: no terminal, so nothing
 /// but the wire is on its stdout, and a check every 15 s that the host is
 /// still there, given up after three go unanswered.
+///
+/// Whatever the reader's ssh config says, the agent and X11 are not
+/// forwarded and no port forwardings are made: the engine outlives this
+/// session and would hand a forwarded agent to every run it starts, and
+/// a forwarding made again on each reconnect can collide with the last.
+/// Nothing is asked of the reader either, as there is no terminal to ask
+/// in: a host whose key ssh has not seen, or a key with no agent to
+/// unlock it, fails the try with ssh's reason.
 pub fn ssh_args(host: &str, command: &str) -> Vec<String> {
     [
         "-T",
         "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "--",
         host,
     ]
     .into_iter()
@@ -427,7 +498,16 @@ pub fn ssh(host: &str, command: &str) -> Dial {
                         {
                             let _ = child.kill().await;
                         }
-                        let _ = tokio::time::timeout(Duration::from_secs(1), said).await;
+                        // A master connection ssh shares (ControlPersist)
+                        // keeps its stderr open past it: the reader is
+                        // stopped rather than left with the pipe.
+                        let mut said = said;
+                        if tokio::time::timeout(Duration::from_secs(1), &mut said)
+                            .await
+                            .is_err()
+                        {
+                            said.abort();
+                        }
                         last.lock().ok().and_then(|last| last.clone())
                     })
                 }),
@@ -503,9 +583,20 @@ mod tests {
             [
                 "-T",
                 "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
                 "ServerAliveInterval=15",
                 "-o",
                 "ServerAliveCountMax=3",
+                "-o",
+                "ForwardAgent=no",
+                "-o",
+                "ForwardX11=no",
+                "-o",
+                "ClearAllForwardings=yes",
+                "--",
                 "halo",
                 "exec \"$SHELL\" -lc 'perchd bridge'",
             ]
@@ -647,6 +738,8 @@ mod tests {
     const QUICK: Backoff = Backoff {
         first: Duration::from_millis(20),
         last: Duration::from_millis(80),
+        answer: Duration::from_secs(10),
+        steady: Duration::from_secs(10),
     };
 
     /// The next event the windows would get, waiting for it.
@@ -728,7 +821,9 @@ mod tests {
         loop {
             match next_event(&events).await {
                 (_, Event::Link(EngineLink::Up { again, welcome, .. })) => {
-                    assert!(!again);
+                    // A command was refused on the way, so the windows
+                    // open again what they had.
+                    assert!(again);
                     assert_eq!(welcome.home, std::path::PathBuf::from("/home/chris"));
                     break;
                 }
@@ -799,6 +894,124 @@ mod tests {
             far.command().await,
             Some((_, Command::SetScope { scope_id, .. })) if scope_id > 0
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_the_windows_asked_for_as_a_failed_first_try_ran_is_said_dropped() {
+        let (dial, mut pipes) = pipes();
+        let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (first, second) = (backend.open_window(), backend.open_window());
+        first.refresh_open_item("item");
+        // The first try is under way, and fails.
+        let far = pipes.next().await;
+        drop(far);
+        let mut told = Vec::new();
+        loop {
+            match next_event(&events).await {
+                (to, Event::Notice(message)) => {
+                    assert_eq!(message, refused("halo"));
+                    told.push(to);
+                }
+                (_, Event::Link(EngineLink::Down { .. })) => break,
+                (_, Event::Link(_)) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        // Only the window that asked.
+        assert_eq!(told, [first.window()]);
+        // Refusals are said to each window on its own clock.
+        first.refresh_open_item("item");
+        second.refresh_open_item("item");
+        let mut told = Vec::new();
+        while told.is_empty() {
+            if let (to, Event::Notice(_)) = next_event(&events).await {
+                told.push(to);
+            }
+        }
+        assert_eq!(told, [second.window()]);
+
+        let mut far = pipes.next().await;
+        far.welcome(1).await;
+        loop {
+            if let EngineLink::Up { again, .. } = next_link(&events).await {
+                assert!(again, "the windows open again what they had");
+                break;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_that_ends_at_once_keeps_doubling_the_wait() {
+        let (dial, mut pipes) = pipes();
+        let (_backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let mut waits = Vec::new();
+        for connection in 1..=3 {
+            let mut far = pipes.next().await;
+            far.welcome(connection).await;
+            // The engine takes the resync, and fails.
+            far.command().await;
+            drop(far);
+            loop {
+                if let EngineLink::Down { retry_in, .. } = next_link(&events).await {
+                    waits.push(retry_in.unwrap());
+                    break;
+                }
+            }
+        }
+        assert_eq!(waits, [QUICK.first, QUICK.first * 2, QUICK.first * 4]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_try_with_no_answer_is_given_up() {
+        let (dial, mut pipes) = pipes();
+        let backoff = Backoff {
+            answer: Duration::from_secs(1),
+            ..QUICK
+        };
+        let (_backend, events) = link("halo", dial, backoff, &tokio::runtime::Handle::current());
+        // A host that hears the hello and never answers.
+        let mut far = pipes.next().await;
+        far.hello().await;
+        loop {
+            if let EngineLink::Down { why, .. } = next_link(&events).await {
+                assert_eq!(why, "halo did not answer within 1 s.");
+                break;
+            }
+        }
+        // And the next try is made.
+        pipes.next().await.welcome(2).await;
+        loop {
+            if let EngineLink::Up { .. } = next_link(&events).await {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_reader_can_give_up_a_try_under_way() {
+        let (dial, mut pipes) = pipes();
+        let backoff = Backoff {
+            answer: Duration::from_secs(60),
+            ..QUICK
+        };
+        let (backend, events) = link("halo", dial, backoff, &tokio::runtime::Handle::current());
+        let mut stuck = pipes.next().await;
+        stuck.hello().await;
+        backend.reconnect();
+        // A new try at once, not after a minute.
+        let mut far = pipes.next().await;
+        far.welcome(2).await;
+        assert_eq!(pipes.dials(), 2);
+        loop {
+            if let EngineLink::Up { .. } = next_link(&events).await {
+                break;
+            }
+        }
+        // Connected, a click on Reconnect leaves the connection be.
+        backend.reconnect();
+        tokio::time::sleep(QUICK.last).await;
+        assert_eq!(pipes.dials(), 2);
+        drop((far, stuck));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

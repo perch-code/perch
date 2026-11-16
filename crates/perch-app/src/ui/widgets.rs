@@ -175,16 +175,6 @@ pub fn name_label(
     super::profile_card::with_profile_card(label, login)
 }
 
-/// Style a row that behaves as a button.
-///
-/// floem's theme turns a label's `Selectable` flag into a text cursor, and
-/// cursor resolution is deepest-hovered-wins, so a label inside a row
-/// overrides the row's own pointer cursor. `selectable` is inherited, so
-/// clearing it once on the row covers every label inside it.
-///
-/// Note this deliberately does not make children transparent to the pointer:
-/// a selectable label does not swallow clicks, and `pointer_events_none` on
-/// the view that owns the handler would stop it receiving them at all.
 /// What a menu calls showing one of the engine's paths: the file manager
 /// for this machine's, an editor that reaches the host for a host's.
 pub fn reveal_label() -> String {

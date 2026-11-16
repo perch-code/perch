@@ -250,6 +250,12 @@ fn deliver(window: WindowId, mut event: Event) {
     }
 }
 
+/// Tell every window `text`: for what the app did itself, away from the
+/// engine, such as opening an editor on the engine's host.
+pub fn notice(text: String) {
+    deliver(crate::backend::NO_WINDOW, Event::Notice(text));
+}
+
 /// The client's own settings were written to this machine's file: every
 /// window is shown the engine's Settings with them put in again.
 pub fn client_settings_written() {
@@ -278,9 +284,10 @@ fn watch_client_file(seen: Option<(Option<std::time::SystemTime>, u64)>) {
 }
 
 /// How the connection to the engine on a host stands. Connected, its home
-/// is what `~` means; connected again, each window opens its item again,
-/// as the engine has forgotten what the windows had open. The engine has
-/// been told of the windows and asked for everything by then.
+/// is what `~` means; connected again, or after a first try that failed,
+/// each window opens its item again, as the engine has forgotten what the
+/// windows had open, or never heard them ask. The engine has been told of
+/// the windows and asked for everything by then.
 fn linked(app: &App, link: &crate::backend::EngineLink) {
     let crate::backend::EngineLink::Up { welcome, again, .. } = link else {
         return;
@@ -294,12 +301,15 @@ fn linked(app: &App, link: &crate::backend::EngineLink) {
     }
 }
 
-/// Open again the item a window had open, as a click on its row would.
+/// Open again the item a window had open, or was opening, as a click on
+/// its row would. One being opened is the window's latest ask, and the
+/// one its progress card waits for.
 pub(crate) fn reopen_item(state: AppState, review: ReviewState, backend: &Backend) {
-    let Some(item_id) = review
-        .item
-        .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
-    else {
+    let Some(item_id) = state.open_item.get_untracked().or_else(|| {
+        review
+            .item
+            .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+    }) else {
         return;
     };
     let navigation_id = backend.open_item(&item_id);
@@ -968,6 +978,18 @@ mod tests {
         match commands.try_recv() {
             Ok(crate::backend::Command::OpenItem { id, navigation_id }) => {
                 assert_eq!(id, "pr");
+                assert!(state.accepts_navigation(navigation_id));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A window still opening another item, whose ask was lost with the
+        // connection, opens that one: its card waits for it.
+        state.begin_item_review(review, "Opening", "branch", 1);
+        reopen_item(state, review, &backend);
+        match commands.try_recv() {
+            Ok(crate::backend::Command::OpenItem { id, navigation_id }) => {
+                assert_eq!(id, "branch");
                 assert!(state.accepts_navigation(navigation_id));
             }
             other => panic!("{other:?}"),

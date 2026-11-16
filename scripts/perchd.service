@@ -13,6 +13,10 @@
 #
 # perchd logs to the journal (journalctl --user -u perchd) and to
 # ~/.perch/logs. Set PERCH_HOME below to use another Perch home.
+#
+# Stopping the unit while the app is connected does not keep the engine
+# stopped: the app reconnects, and its `perchd bridge` starts an engine of
+# its own, outside systemd. Quit the app, or set it to This Mac, first.
 
 [Unit]
 Description=Perch engine
@@ -22,6 +26,10 @@ ExecStart=%h/.local/bin/perchd serve
 #Environment=PERCH_HOME=%h/.perch
 Restart=on-failure
 RestartSec=5
+# 75: another engine has the Perch home, most likely one a `perchd bridge`
+# started while this unit was stopped. Trying again cannot help until it
+# stops.
+RestartPreventExitStatus=75
 # SIGTERM goes to perchd alone, which stops its agents and records them
 # Interrupted; whatever is left once it has exited is killed.
 KillMode=mixed

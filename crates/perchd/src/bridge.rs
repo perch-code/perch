@@ -14,6 +14,8 @@ use std::path::Path;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
+use perch_engine::lock::EngineLock;
+
 use crate::socket;
 
 /// How long an engine started here gets to answer.
@@ -97,8 +99,17 @@ fn start_and_connect(socket: &Path) -> Result<UnixStream, String> {
             last_start = Some(Instant::now());
         }
         if Instant::now() >= deadline {
+            let home = perch_github::config::perch_home();
+            let holder = match EngineLock::holder(&home) {
+                Some(holder) => format!(
+                    "; {} holds {} without listening, as the Perch app does when it runs on this machine",
+                    holder.map_or("another process".to_string(), |pid| format!("process {pid}")),
+                    perch_engine::lock::path(&home).display()
+                ),
+                None => String::new(),
+            };
             return Err(format!(
-                "no engine answered on {} within {} s; its log is in {}",
+                "no engine answered on {} within {} s{holder}; the engine's log is in {}",
                 socket.display(),
                 STARTING.as_secs(),
                 perch_engine::log_file::dir().display(),
@@ -107,6 +118,12 @@ fn start_and_connect(socket: &Path) -> Result<UnixStream, String> {
         std::thread::sleep(POLL);
     }
 }
+
+/// What an ssh session sets that the engine, which outlives the session,
+/// must not keep: an agent socket that may be forwarded from the client's
+/// machine, which every run the engine starts would be handed, and the
+/// session's own addresses and terminal.
+const SESSION_ONLY: [&str; 4] = ["SSH_AUTH_SOCK", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"];
 
 /// `perchd serve`, detached: a session of its own, so the ssh session
 /// ending does not end it, and no stdio of the bridge's, which belongs to
@@ -119,6 +136,9 @@ fn start() -> Result<Child, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    for name in SESSION_ONLY {
+        command.env_remove(name);
+    }
     // SAFETY: setsid is async-signal-safe, and nothing else runs between
     // the fork and the exec.
     unsafe {

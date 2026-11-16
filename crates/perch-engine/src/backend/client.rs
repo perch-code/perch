@@ -9,10 +9,13 @@
 //! Scope picks are numbered here too, by window, as navigations are. A
 //! scope pick or a look at the checkout carries the window's latest, and
 //! the engine says which it had heard of in each `ScopeReady` and
-//! `CommitsReady`. One that names an older pick than the window's latest
-//! was sent before the engine heard of the newer one, and is dropped here:
-//! in process that cannot happen, but over a wire the answer to an
-//! earlier look can be on its way as the reader picks.
+//! `CommitsReady`. A `ScopeReady` that names an older pick than the
+//! window's latest was sent before the engine heard of the newer one, and
+//! is dropped here: in process that cannot happen, but over a wire the
+//! answer to an earlier look can be on its way as the reader picks.
+//! `CommitsReady` is let through: the commits are the same under every
+//! scope, its `scope_gen` fences it in the window, and a pick sends none
+//! again, so one dropped here would be gone until the next refresh.
 //!
 //! Merge and review attempts are numbered here too, for the whole client,
 //! and must not collide with another client's: their events reach every
@@ -195,7 +198,7 @@ impl Navigations {
     pub(crate) fn pass(&self, window: WindowId, event: &Event) -> bool {
         self.observe(window, event);
         match event {
-            Event::ScopeReady { scope_id, .. } | Event::CommitsReady { scope_id, .. } => self
+            Event::ScopeReady { scope_id, .. } => self
                 .lookup(window, |nav| *scope_id >= nav.scope)
                 .unwrap_or(true),
             _ => true,
@@ -360,7 +363,8 @@ mod tests {
         assert!(second > first);
         // A look the engine finished before it heard of the second pick.
         assert!(!navigations.pass(1, &scope_ready(first)));
-        assert!(!navigations.pass(1, &commits_ready(first)));
+        // The commits are the same under any scope, and none come again.
+        assert!(navigations.pass(1, &commits_ready(first)));
         assert!(navigations.pass(1, &scope_ready(second)));
         assert!(navigations.pass(1, &commits_ready(second)));
         // Another window's picks are its own.

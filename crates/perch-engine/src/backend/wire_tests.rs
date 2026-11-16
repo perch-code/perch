@@ -194,6 +194,20 @@ fn the_token_stays_with_the_engine() {
         panic!("not settings");
     };
     assert_eq!((back.token.as_deref(), back.poll_interval_secs), (None, 90));
+
+    // A file that doesn't parse because of its token line is said by line
+    // number and toml's message, which never quotes the line, so its
+    // reason crosses the wire with no token in it.
+    for line in [
+        "token = ghp_unquoted",
+        "token = \"ghp_unquoted\" trailing",
+        "token = [\"ghp_unquoted\"]",
+        "token = { value = \"ghp_unquoted\" }",
+    ] {
+        let error = Config::parse_text(&format!("poll_interval_secs = 90\n{line}\n")).unwrap_err();
+        assert!(error.starts_with("line 2: "), "{error}");
+        assert!(!error.contains("ghp_unquoted"), "{error}");
+    }
 }
 
 type Heard = UnboundedReceiver<(WindowId, Event)>;

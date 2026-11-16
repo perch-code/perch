@@ -25,7 +25,16 @@ pub struct EngineLock {
     /// Closing it lets the lock go. Opened close-on-exec, as Rust opens
     /// every file, so the agents and servers the engine starts never
     /// inherit it and keep it past the engine.
-    _file: File,
+    file: File,
+}
+
+/// The pid is taken out before the lock goes, so an engine refused
+/// between the next one taking the lock and writing its own pid names
+/// nobody rather than this process.
+impl Drop for EngineLock {
+    fn drop(&mut self) {
+        let _ = self.file.set_len(0);
+    }
 }
 
 /// Why an engine could not take its home.
@@ -92,6 +101,13 @@ impl EngineLock {
                     path,
                 });
             }
+            // A home on a file system that has no locks, some network
+            // ones: the engine runs as it did before there was a lock,
+            // rather than not at all.
+            if unlockable(&error) {
+                tracing::warn!(%error, path = %path.display(), "the Perch home cannot be locked; nothing stops a second engine using it");
+                return Ok(EngineLock { file });
+            }
             return Err(io(error));
         }
         let written = (|| {
@@ -105,8 +121,31 @@ impl EngineLock {
         if let Err(error) = written {
             tracing::warn!(%error, path = %path.display(), "could not write the engine's pid");
         }
-        Ok(EngineLock { _file: file })
+        Ok(EngineLock { file })
     }
+
+    /// Whether an engine holds `home`'s lock, and its pid when the file
+    /// names one, without taking the lock or writing anything: `None` when
+    /// none does.
+    pub fn holder(home: &Path) -> Option<Option<u32>> {
+        let mut file = File::open(path(home)).ok()?;
+        // A shared lock is refused only while an engine has its own.
+        // SAFETY: the descriptor is the open file's, alive for the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+            // Closing the file lets the shared lock go.
+            return None;
+        }
+        let error = std::io::Error::last_os_error();
+        (error.kind() == std::io::ErrorKind::WouldBlock).then(|| holder(&mut file))
+    }
+}
+
+/// Whether `error` says the file system has no locks to give.
+fn unlockable(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code) if code == libc::ENOLCK || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
+    )
 }
 
 /// The pid the lock's file names. None while the holder is still writing
@@ -141,8 +180,17 @@ mod tests {
         );
         assert!(said.contains("engine.lock"), "{said}");
 
-        // Let go, it is the next engine's.
+        // Looked at, it is named, and still held.
+        assert_eq!(
+            EngineLock::holder(home.path()),
+            Some(Some(std::process::id()))
+        );
+        assert!(EngineLock::take(home.path()).is_err());
+
+        // Let go, it names nobody, and it is the next engine's.
         drop(held);
+        assert_eq!(std::fs::read_to_string(path(home.path())).unwrap(), "");
+        assert_eq!(EngineLock::holder(home.path()), None);
         EngineLock::take(home.path()).unwrap();
     }
 

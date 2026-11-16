@@ -489,13 +489,19 @@ where
     .await?;
     // A login shell on the far side of ssh may say something of its own
     // before the bridge starts, a profile's greeting say: it is passed
-    // over, up to a point.
+    // over, up to a point. What it said with no newline after, a terminal
+    // title say, is on the answer's line, before it.
     let mut said = 0;
     let answer = loop {
         match next_message::<_, Answer>(&mut read, &mut line).await? {
             Some(Ok(answer)) => break answer,
-            Some(Err(why)) if said >= MAX_SAID_FIRST => return Err(WireError::Malformed(why)),
-            Some(Err(_)) => {
+            Some(Err(why)) => {
+                if let Some(answer) = answer_within(&line) {
+                    break answer;
+                }
+                if said >= MAX_SAID_FIRST {
+                    return Err(WireError::Malformed(why));
+                }
                 said += 1;
                 tracing::info!(
                     line = %String::from_utf8_lossy(line.trim_ascii_end()),
@@ -513,6 +519,14 @@ where
 
 /// How many lines before the engine's answer a client passes over.
 const MAX_SAID_FIRST: usize = 64;
+
+/// The engine's answer at the end of `line`, after something else.
+fn answer_within(line: &[u8]) -> Option<Answer> {
+    let line = line.trim_ascii_end();
+    (1..line.len())
+        .filter(|&at| line[at..].starts_with(b"{\""))
+        .find_map(|at| serde_json::from_slice(&line[at..]).ok())
+}
 
 impl<S> Session<S>
 where
@@ -674,5 +688,24 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(hello.app_version, "1.2.3");
+    }
+
+    /// What a login shell says before the bridge starts is passed over,
+    /// a terminal title with no newline after it on the answer's line too.
+    #[tokio::test]
+    async fn the_answer_is_found_after_what_a_login_shell_said() {
+        let refused = encode(&Answer::Refused {
+            reason: "no".into(),
+        })
+        .unwrap();
+        let mut far_says = b"Welcome to halo\n\x1b]0;chris@halo\x07".to_vec();
+        far_says.extend_from_slice(&refused);
+        let (near, mut far) = tokio::io::duplex(1 << 16);
+        far.write_all(&far_says).await.unwrap();
+        match handshake(near).await {
+            Err(WireError::Refused(reason)) => assert_eq!(reason, "no"),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("welcomed"),
+        }
     }
 }

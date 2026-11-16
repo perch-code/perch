@@ -1,8 +1,10 @@
-//! `perchd serve`: the engine as a service. It lives until SIGTERM or
-//! SIGINT, whoever connects and leaves, and stops then as quitting the app
-//! does: runs stopped and recorded Interrupted, children reaped, the home
-//! let go and the socket removed.
+//! `perchd serve`: the engine as a service. It lives until SIGTERM, SIGINT
+//! or SIGHUP, whoever connects and leaves, and stops then as quitting the
+//! app does: runs stopped and recorded Interrupted, children reaped, the
+//! home let go and the socket removed. A second signal while it stops
+//! ends it at once.
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use perch_engine::backend::{Engine, Lifetime};
@@ -10,6 +12,25 @@ use perch_engine::log_file;
 use tokio::net::UnixListener;
 
 use crate::socket;
+
+/// The exit when another engine has the Perch home. A service manager
+/// told not to restart on it (`RestartPreventExitStatus=` in
+/// `scripts/perchd.service`) does not try every few seconds while an
+/// engine a bridge started holds the home.
+pub const HOME_HELD: u8 = 75;
+
+/// Why serve failed.
+enum Failed {
+    /// Another engine has the home.
+    Held(String),
+    Other(String),
+}
+
+impl From<String> for Failed {
+    fn from(why: String) -> Self {
+        Failed::Other(why)
+    }
+}
 
 pub fn run() -> ExitCode {
     prepare_environment();
@@ -20,17 +41,31 @@ pub fn run() -> ExitCode {
             tracing::info!("perchd stopped");
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            tracing::error!("perchd could not start: {error}");
+        Err(Failed::Held(why)) => {
+            tracing::error!("perchd could not start: {why}");
+            ExitCode::from(HOME_HELD)
+        }
+        Err(Failed::Other(why)) => {
+            tracing::error!("perchd could not start: {why}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn serve() -> Result<(), String> {
+fn serve() -> Result<(), Failed> {
     // The home first: a second engine is turned away before it touches
     // the socket the first one listens on.
-    let unstarted = Engine::build(Lifetime::Service).map_err(|e| e.to_string())?;
+    let unstarted = Engine::build(Lifetime::Service).map_err(|error| {
+        let held = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<perch_engine::lock::LockError>())
+            .is_some_and(|lock| matches!(lock, perch_engine::lock::LockError::Held { .. }));
+        if held {
+            Failed::Held(error.to_string())
+        } else {
+            Failed::Other(error.to_string())
+        }
+    })?;
     let engine = unstarted.engine().clone();
     let runtime = engine.runtime().clone();
     let socket = socket::path();
@@ -43,16 +78,13 @@ fn serve() -> Result<(), String> {
             .and_then(|()| UnixListener::from_std(listener))
             .map_err(|e| format!("could not listen on {}: {e}", socket.display()))?
     };
-    let signals = {
-        use tokio::signal::unix::{signal, SignalKind};
+    let mut signals = {
         let _in_runtime = runtime.enter();
-        let term = signal(SignalKind::terminate());
-        let int = signal(SignalKind::interrupt());
-        match (term, int) {
-            (Ok(term), Ok(int)) => (term, int),
-            (Err(e), _) | (_, Err(e)) => {
+        match Signals::take() {
+            Ok(signals) => signals,
+            Err(e) => {
                 let _ = std::fs::remove_file(&socket);
-                return Err(format!("could not take SIGTERM and SIGINT: {e}"));
+                return Err(format!("could not take SIGTERM, SIGINT and SIGHUP: {e}").into());
             }
         }
     };
@@ -71,27 +103,69 @@ fn serve() -> Result<(), String> {
             let _ = stopped.send(());
         }
     });
-    let (mut term, mut int) = signals;
     let signal = runtime.block_on(async {
         tokio::select! {
             biased;
             _ = stopped_by_itself => None,
-            Some(()) = term.recv() => Some("SIGTERM"),
-            Some(()) = int.recv() => Some("SIGINT"),
+            signal = signals.next() => Some(signal.unwrap_or("no signal; the runtime went")),
         }
     });
     let Some(signal) = signal else {
         let _ = std::fs::remove_file(&socket);
-        return Err("the engine stopped by itself; the log says why".into());
+        return Err("the engine stopped by itself; the log says why"
+            .to_string()
+            .into());
     };
     tracing::info!(signal, "stopping");
     // Gone first, and not after: a bridge that comes while this engine
     // stops starts the next one, which takes the home once this one has
     // let it go and listens on a socket of its own at the same path.
     let _ = std::fs::remove_file(&socket);
+    // Stopping waits for the command before it, which can be a long one:
+    // a second signal is the reader saying not to wait. The kernel lets
+    // the home go as the process ends.
+    runtime.spawn(async move {
+        // None as the runtime goes, the engine stopped: nothing to cut short.
+        if let Some(again) = signals.next().await {
+            tracing::warn!(signal = again, "stopping at once");
+            std::process::exit(1);
+        }
+    });
     engine.shutdown();
     engine.wait_stopped();
     Ok(())
+}
+
+/// The signals that stop the engine. SIGHUP is one: an engine started by
+/// hand in an ssh session that drops would otherwise die there with its
+/// runs left recorded as running.
+struct Signals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    /// Called inside the runtime.
+    fn take() -> std::io::Result<Signals> {
+        use tokio::signal::unix::{signal, SignalKind};
+        Ok(Signals {
+            term: signal(SignalKind::terminate())?,
+            int: signal(SignalKind::interrupt())?,
+            hup: signal(SignalKind::hangup())?,
+        })
+    }
+
+    /// The next one to come, by name. None once no more can: the runtime
+    /// is going.
+    async fn next(&mut self) -> Option<&'static str> {
+        tokio::select! {
+            Some(()) = self.term.recv() => Some("SIGTERM"),
+            Some(()) = self.int.recv() => Some("SIGINT"),
+            Some(()) = self.hup.recv() => Some("SIGHUP"),
+            else => None,
+        }
+    }
 }
 
 /// Serve each client that connects, for as long as the engine runs.
@@ -143,7 +217,9 @@ fn init_logging() {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "perch=info,warn".into())
     };
+    // Colour only for a person: a journal or a file would keep the codes.
     let stderr = tracing_subscriber::fmt::layer()
+        .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .with_filter(filter());
     let file = log_file::appender(&log_file::dir()).ok().map(|file| {

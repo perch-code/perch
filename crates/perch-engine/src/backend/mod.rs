@@ -1882,9 +1882,10 @@ impl Event {
 pub enum EngineLink {
     /// The first try is under way.
     Connecting { host: String },
-    /// Let in. `again` when the client had been connected before and lost
-    /// it: the engine has been asked for everything again, and each window
-    /// reopens what it had open.
+    /// Let in. `again` when something a window asked for may have been
+    /// lost: the client had been connected before and lost it, or its
+    /// first try failed. The engine has been asked for everything again,
+    /// and each window reopens what it had open, or was opening.
     Up {
         host: String,
         welcome: crate::wire::Welcome,
