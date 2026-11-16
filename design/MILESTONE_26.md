@@ -291,6 +291,117 @@ Where the implementation went its own way, and why:
 - The hello has the same minute as the keepalives. The loopback wire has
   no idle limit, and the app opts out of App Nap while on a host.
 
+## Provisioning the host
+
+Added after the first build. A bridge is the only way an engine starts
+on a host: there is no systemd unit. The app installs the `perchd` that
+matches it over the same ssh it connects with, so a host needs nothing
+from Perch beforehand, and updating the app updates the host on its next
+connect. VS Code's Remote SSH, Zed and T3 Code work the same way.
+
+### Build order
+
+1. A static `perchd`: the release builds it for
+   `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (rustls
+   and bundled SQLite, no OpenSSL), checks it is static, and publishes a
+   `SHA256SUMS` beside the assets. `perchd-linux-<arch>.tar.gz` keeps its
+   name.
+2. Probe and upload (below).
+3. Versioned installs and their cleanup (below).
+4. Replacing an older engine (below).
+5. Host checks (below).
+
+### Modes
+
+- `[remote] command` unset or empty: provisioned. Set: run as given, as
+  before, with no install, replace or cleanup. `command` becomes an
+  `Option`; a config that spells out `command = "perchd bridge"` keeps
+  the old behaviour.
+- `[remote] perchd = "<path on the Mac>"`: a Linux `perchd` binary or
+  release tarball to upload instead of downloading, for dev builds and
+  hosts with no release. The default downloads the app's own version.
+- `PERCH_SSH`: the ssh program, for tests (a wrapper adding `-F`).
+
+### Layout on the host
+
+`${PERCH_HOME:-$HOME/.perch}/bin/perchd-<build>`, directory 0700, file
+0700. `<build>` is the version (`0.9.0`) for a release download, and
+`<version>-<first 12 hex of its SHA-256>` for a `[remote] perchd` file,
+so a rebuilt dev binary is uploaded again. The app always knows the
+`<build>` it wants before it dials.
+
+### Probe and upload
+
+- In provisioned mode the login shell runs a POSIX `sh` script, passed
+  the build as `$1`: run `$dir/perchd-$1 bridge` if it is executable,
+  else write `perch-install: <uname -s> <uname -m>` to stderr and exit
+  97. It must work with bash, zsh and fish as the login shell, so the
+  outer quoting holds no single quotes and the logic is all in `sh`.
+- On that line the link installs and redials at once, outside the
+  backoff. `Linux x86_64` maps to `linux-x86_64`, `Linux aarch64|arm64`
+  to `linux-arm64`; anything else is an error naming what was found and
+  saying to install `perchd` by hand and set `[remote] command`.
+- The tarball is cached on the Mac in
+  `~/.perch/perchd/<version>/perchd-linux-<arch>.tar.gz`, downloaded with
+  no token from
+  `https://github.com/perch-code/perch/releases/download/v<version>/`
+  (the repository is public) and checked against that release's
+  `SHA256SUMS`. A release with no such asset is an error that says to
+  set `[remote] perchd`.
+- A second ssh uploads the binary on stdin to a script that writes it to
+  a temporary file in the directory (umask 077), runs it with
+  `--version`, and renames it into place only when that names the
+  expected version and protocol. The temporary file is removed on any
+  failure.
+- The link strip says "Installing perchd 0.9.0 on halo…" meanwhile.
+- `perch --connect <host>` does all this headless, prints the welcome
+  and the host checks, and exits: for testing and for the reader.
+
+### Cleanup
+
+A provisioned bridge (its own exe is `$dir/perchd-*`) removes the other
+`perchd-*` in its directory but the newest one, and temporary files over
+an hour old. A running engine's binary can be removed on Linux.
+
+### Replacing an older engine
+
+- The hello and the answer are frozen from here: later protocols only
+  add optional fields. `Hello` gains `intent`, `Connect` (the default)
+  or `Stop { if_idle }`. The refusal gains the engine's version,
+  protocol, build, runs and clients, and the welcome its build (the
+  exe's `<build>`, or its version when not provisioned). `PROTOCOL`
+  goes to 5.
+- An engine under `perchd serve` answers `Stop` whatever the protocol:
+  `Busy` with its runs and clients when `if_idle` and it has either,
+  else `Stopping`, and then stops as SIGTERM does, runs recorded
+  Interrupted. The app's own engine never stops for the wire.
+- `perchd bridge --replace` and `--replace-if-idle` send that stop to an
+  engine of another build, wait up to a minute for the home to be let
+  go, then start their own and carry on as a bridge. A busy engine makes
+  `--replace-if-idle` write `perch-busy: <version> <runs> <clients>` to
+  stderr and exit 98. An engine of the same build is just joined.
+- The app, provisioned, compares the build it wants with the engine's.
+  Older, with no runs and no other client: it redials with
+  `--replace-if-idle`. Older and busy: if the protocol matches it stays
+  connected and the strip says the engine is older, with how many runs a
+  restart would stop and a Restart button (`--replace`); if it does not
+  match, the same strip, without the connection. An engine newer than
+  the app is never stopped: the strip says to update Perch on the Mac.
+- An older `perchd` refuses a `perch.db` a newer one migrated (the
+  cache's newer-schema error). The bridge says why an engine it started
+  did not answer, from what `serve` left in `$PERCH_HOME/run`, rather
+  than only pointing at the log.
+
+### Host checks
+
+The engine under `perchd serve` works out what the host lacks, at start
+and when its config changes, and sends it in the resync: a GitHub token,
+`git`, a `[[repo]]` whose root is on the host, each agent CLI, on Linux
+bubblewrap and socat when Claude Code is there, and logind's
+`KillUserProcesses=yes`. Each says what to run to fix it. Settings >
+General > Engine lists them; the strip says "halo needs setup" with a
+button to Settings when anything required is missing.
+
 ## Acceptance
 
 - `cargo tree -p perch-engine -e normal` names no floem, winit, gtk,
