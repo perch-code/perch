@@ -3654,7 +3654,7 @@ impl AppState {
                 // What a progress card waited for went with the
                 // connection: the engine answers on the one it was asked on.
                 if let crate::backend::EngineLink::Down { host, .. } = &link {
-                    self.drop_lost_open(host);
+                    self.drop_lost_open(host, true);
                 }
                 self.link.set(Some(link));
             }
@@ -3743,7 +3743,7 @@ impl AppState {
             _ => None,
         });
         if let Some(host) = down {
-            self.drop_lost_open(&host);
+            self.drop_lost_open(&host, false);
         }
     }
 
@@ -3752,7 +3752,10 @@ impl AppState {
     /// the engine on `host` went before the answer came. An item being
     /// opened is opened again once connected; what these began, Start
     /// work say, is not, since doing it twice is not the same as once.
-    pub fn drop_lost_open(&self, host: &str) {
+    /// `sent` is whether the ask went to the engine before the connection
+    /// did: then it may have been done, and Start work tried again would
+    /// cut a second branch.
+    pub fn drop_lost_open(&self, host: &str, sent: bool) {
         let Some(review) = self.review.get_untracked() else {
             return;
         };
@@ -3771,9 +3774,15 @@ impl AppState {
             self.apply_with_review(
                 Event::ReviewFailed {
                     navigation_id,
-                    message: format!(
-                        "The connection to {host} was lost before this opened. Try it again."
-                    ),
+                    message: if sent {
+                        format!(
+                            "The connection to {host} was lost before this opened, and it may have been done. Look for it in the list before trying again."
+                        )
+                    } else {
+                        format!(
+                            "The connection to {host} was lost before this opened. Try it again."
+                        )
+                    },
                 },
                 review,
             );

@@ -254,8 +254,9 @@ Where the implementation went its own way, and why:
   off (`ForwardAgent=no`, `ForwardX11=no`, `ClearAllForwardings=yes`)
   whatever the ssh config says, and the command goes through
   `exec "$SHELL" -lc`. `perchd` also drops `SSH_AUTH_SOCK`,
-  `SSH_CONNECTION`, `SSH_CLIENT` and `SSH_TTY` from its environment, since
-  it outlives the session and its agents would inherit them.
+  `SSH_CONNECTION`, `SSH_CLIENT` and `SSH_TTY` from its environment when
+  started in an ssh session, since it outlives the session and its agents
+  would inherit them; outside one, the agent socket is the host's own.
 - Reconnects give up a try not answered in 30 s, and a connection lost
   within a minute of being made does not reset the backoff. What a window
   asked for while the very first try was under way is sent when it

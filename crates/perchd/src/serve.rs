@@ -22,8 +22,8 @@ pub const HOME_HELD: u8 = 75;
 /// What an ssh session sets that the engine, which outlives the session,
 /// must not keep: an agent socket that may be forwarded from the client's
 /// machine, which every run the engine starts would be handed, and the
-/// session's own addresses and terminal. Dropped however the engine was
-/// started, by a bridge or by hand in a login.
+/// session's own addresses and terminal. A bridge drops them all from the
+/// engine it starts; `perchd serve` drops what [`from_a_session`] says.
 pub const SESSION_ONLY: [&str; 4] = ["SSH_AUTH_SOCK", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"];
 
 /// Why serve failed.
@@ -209,7 +209,7 @@ fn prepare_environment() {
     for name in ["RUSTUP_TOOLCHAIN", "RUSTUP_TOOLCHAIN_SOURCE", "CARGO"] {
         std::env::remove_var(name);
     }
-    for name in SESSION_ONLY {
+    for name in from_a_session(|name| std::env::var_os(name).is_some()) {
         std::env::remove_var(name);
     }
     // A systemd unit, like a Finder launch, gets a bare PATH.
@@ -218,6 +218,22 @@ fn prepare_environment() {
         &perch_agent::install_dirs(),
     ) {
         std::env::set_var("PATH", path);
+    }
+}
+
+/// Which of [`SESSION_ONLY`] `perchd serve` drops, given which are set:
+/// all of them in an ssh session, run by hand in a login or in a tmux
+/// started from one. Outside one, an agent socket is the host's own (a
+/// systemd unit's `ssh-agent.socket`, gnome-keyring), and git over ssh
+/// with a key behind a passphrase needs it.
+fn from_a_session(set: impl Fn(&str) -> bool) -> &'static [&'static str] {
+    if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .into_iter()
+        .any(set)
+    {
+        &SESSION_ONLY
+    } else {
+        &[]
     }
 }
 
@@ -249,4 +265,22 @@ fn init_logging() {
         .with(file)
         .init();
     log_file::install_panic_hook();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A forwarded agent comes with an ssh session's own variables; a
+    /// host's own agent, under systemd or a desktop login, comes alone and
+    /// is kept.
+    #[test]
+    fn only_an_ssh_session_s_agent_is_dropped() {
+        let session = |name: &str| matches!(name, "SSH_AUTH_SOCK" | "SSH_CONNECTION" | "SSH_TTY");
+        assert_eq!(from_a_session(session), SESSION_ONLY);
+        let tmux = |name: &str| matches!(name, "SSH_AUTH_SOCK" | "SSH_CLIENT");
+        assert_eq!(from_a_session(tmux), SESSION_ONLY);
+        let systemd = |name: &str| name == "SSH_AUTH_SOCK";
+        assert!(from_a_session(systemd).is_empty());
+    }
 }

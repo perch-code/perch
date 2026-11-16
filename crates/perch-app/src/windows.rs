@@ -348,7 +348,7 @@ pub(crate) fn reopen_item(state: AppState, review: ReviewState, backend: &Backen
         .item
         .with_untracked(|item| item.as_ref().map(|item| item.id.clone()));
     let Some(item_id) = state.open_item.get_untracked().or_else(|| showing.clone()) else {
-        state.drop_lost_open(host);
+        state.drop_lost_open(host, true);
         return;
     };
     let navigation_id = backend.open_item(&item_id);
@@ -1081,7 +1081,9 @@ mod tests {
             Preparing::Failed { message } if message.contains("halo")
         ));
 
-        // The link dropping says so at once.
+        // The link dropping says so at once. The ask had gone to the
+        // engine, so it may have been done: Start work again would cut a
+        // second branch.
         state.begin_open("Cutting a branch", 8);
         state.apply(crate::backend::Event::Link(
             crate::backend::EngineLink::Down {
@@ -1093,14 +1095,16 @@ mod tests {
         ));
         assert!(matches!(
             review.preparing.get_untracked(),
-            Preparing::Failed { .. }
+            Preparing::Failed { message }
+                if message.contains("may have been done") && !message.contains("Try it again")
         ));
 
-        // Begun while down, its ask was refused.
+        // Begun while down, its ask was refused, and nothing was done.
         state.begin_open("Reading the issue", 9);
         assert!(matches!(
             review.preparing.get_untracked(),
-            Preparing::Failed { .. }
+            Preparing::Failed { message }
+                if message.ends_with("Try it again.") && !message.contains("may have been done")
         ));
     }
 }

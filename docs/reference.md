@@ -1105,8 +1105,9 @@ or whose `.git` file now points elsewhere, fails the run, with its path
 named. A submodule `.gitmodules` names, checked out by the run, is left
 alone, and `node_modules`, `target`, `.venv` and `venv` are not looked
 through. The look follows no link and opens nothing but plain files, a link
-or a FIFO counting by what it is, and goes through at most 200,000 folders:
-a run that takes the worktree past that fails too.
+or a FIFO counting by what it is, `.gitmodules` included, and goes through
+at most 200,000 folders and hooks in nested repositories: a run that takes
+the worktree past that fails too.
 
 ### Approvals
 
@@ -1493,7 +1494,8 @@ toolkit, so it needs no GTK. Releases carry it for Linux as
   `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`, whether a bridge started it
   or it was run by hand in a login: it outlives the session, and every
   agent it starts would get them. git over ssh on the host uses the
-  host's own keys.
+  host's own keys. An engine started outside an ssh session, by a systemd
+  unit say, keeps `SSH_AUTH_SOCK`, which is then the host's own agent.
 - `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
   until either side closes. It is what `ssh <host> perchd bridge` runs. With
   no engine answering it starts `perchd serve` in a session of its own, so
@@ -1632,10 +1634,11 @@ everything (the rows, the inbox, the runs, the settings) and reads its item
 again, or opens the one it was opening. An item showing is read again
 under what shows, so text typed into its composer or review is kept.
 Opening a notification, the Open box, a search result or Start work while
-disconnected, or losing the connection before it answers, puts "The
-connection to <host> was lost before this opened. Try it again." on the
-progress card: it is not done again by itself, since Start work done twice
-makes two branches.
+disconnected puts "The connection to <host> was lost before this opened.
+Try it again." on the progress card. Losing the connection after asking,
+before the engine answers, says instead that it may have been done and to
+look for it in the list before trying again. Neither is done again by
+itself, since Start work done twice makes two branches.
 
 When the app and the engine speak different versions of the wire, the
 engine refuses the app, the strip says which one to update, and Perch stops
