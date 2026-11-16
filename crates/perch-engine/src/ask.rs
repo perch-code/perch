@@ -376,6 +376,17 @@ pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
     }
 }
 
+/// Why this machine cannot run `backend` at all, said before a run
+/// starts rather than left to the agent's exit: Claude Code on Linux
+/// without bubblewrap and socat for its sandbox. Not in this crate's
+/// tests, whose fake agents need no sandbox and whose CI has neither.
+pub fn host_refusal(backend: perch_agent::Backend) -> Option<String> {
+    if backend == perch_agent::Backend::ClaudeCode && cfg!(target_os = "linux") && !cfg!(test) {
+        return perch_agent::linux_sandbox_refusal(std::env::var_os("PATH").as_deref());
+    }
+    None
+}
+
 /// What to say when a run would not start: a refusal as it stands, and
 /// anything else with where to point Perch at the binary.
 pub fn spawn_failure(error: &perch_agent::Error, backend: perch_agent::Backend) -> String {

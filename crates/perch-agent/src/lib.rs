@@ -663,6 +663,32 @@ fn scrub_env(command: &mut Command) {
     }
 }
 
+/// Why Claude Code cannot run sandboxed on Linux, with `path` for `PATH`,
+/// when it cannot: its sandbox is bubblewrap with socat carrying the
+/// network proxy, and without them Claude Code exits with an error of its
+/// own, or, told to fall back, runs unsandboxed. The engine asks before
+/// it starts a run on Linux; on the Mac the sandbox is the system's.
+pub fn linux_sandbox_refusal(path: Option<&std::ffi::OsStr>) -> Option<String> {
+    let dirs: Vec<PathBuf> = path.into_iter().flat_map(std::env::split_paths).collect();
+    let missing: Vec<&str> = ["bwrap", "socat"]
+        .into_iter()
+        .filter(|tool| {
+            !dirs
+                .iter()
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .any(|dir| dir.join(tool).is_file())
+        })
+        .collect();
+    let lacks = match missing.as_slice() {
+        [] => return None,
+        [one] => format!("no {one}"),
+        _ => "neither".to_string(),
+    };
+    Some(format!(
+        "Claude Code's sandbox needs bwrap and socat on Linux, and this machine has {lacks} on PATH. Install bubblewrap and socat, then run it again."
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSpec {
     pub backend: Backend,
@@ -3195,6 +3221,30 @@ mod tests {
             .args()
             .windows(2)
             .any(|w| w == ["--conversation", "c-1"]));
+    }
+
+    #[test]
+    fn claude_code_on_linux_needs_bwrap_and_socat_on_path() {
+        let neither = tempfile::tempdir().unwrap();
+        let bwrap = tempfile::tempdir().unwrap();
+        std::fs::write(bwrap.path().join("bwrap"), "").unwrap();
+        let socat = tempfile::tempdir().unwrap();
+        std::fs::write(socat.path().join("socat"), "").unwrap();
+        let path = |dirs: &[&std::path::Path]| std::env::join_paths(dirs).unwrap();
+
+        let said = linux_sandbox_refusal(Some(&path(&[neither.path()]))).unwrap();
+        assert!(
+            said.starts_with("Claude Code's sandbox needs bwrap and socat on Linux"),
+            "{said}"
+        );
+        assert!(said.contains("has neither on PATH"), "{said}");
+        let said = linux_sandbox_refusal(Some(&path(&[bwrap.path()]))).unwrap();
+        assert!(said.contains("has no socat on PATH"), "{said}");
+        assert_eq!(
+            linux_sandbox_refusal(Some(&path(&[bwrap.path(), socat.path()]))),
+            None
+        );
+        assert!(linux_sandbox_refusal(None).is_some());
     }
 
     #[test]

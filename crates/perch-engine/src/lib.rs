@@ -11,7 +11,9 @@ pub mod context;
 pub mod feedback;
 pub mod inbox;
 pub mod items;
+pub mod lock;
 pub mod log_file;
+mod nested_git;
 pub mod repos;
 pub mod review;
 #[cfg(any(test, feature = "test-support"))]

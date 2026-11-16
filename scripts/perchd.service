@@ -1,0 +1,31 @@
+# perchd as a systemd user service, for a host whose engine should run from
+# boot rather than from the first `perchd bridge`.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/perchd.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now perchd
+#
+# A user's services stop when their last login session ends. Lingering keeps
+# them running with nobody logged in, which is the point of a host:
+#
+#   loginctl enable-linger "$USER"
+#
+# perchd logs to the journal (journalctl --user -u perchd) and to
+# ~/.perch/logs. Set PERCH_HOME below to use another Perch home.
+
+[Unit]
+Description=Perch engine
+
+[Service]
+ExecStart=%h/.local/bin/perchd serve
+#Environment=PERCH_HOME=%h/.perch
+Restart=on-failure
+RestartSec=5
+# SIGTERM goes to perchd alone, which stops its agents and records them
+# Interrupted; whatever is left once it has exited is killed.
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

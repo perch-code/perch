@@ -29,7 +29,7 @@
 //! connected, as the app's own is.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -92,6 +92,54 @@ impl Engine {
     pub fn connections(&self) -> usize {
         self.hub.state().connections.len()
     }
+
+    /// How many agent runs are queued or under way: none before the
+    /// engine has started them.
+    pub fn active_runs(&self) -> usize {
+        self.hub.runs.get().map_or(0, |runs| runs.active())
+    }
+
+    /// Wait until the engine has stopped: its runs stopped and recorded,
+    /// its tasks dropped and its home let go.
+    pub fn wait_stopped(&self) {
+        let mut stopped = self
+            .hub
+            .stopped
+            .done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        while !*stopped {
+            stopped = self
+                .hub
+                .stopped
+                .changed
+                .wait(stopped)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// Whether the engine's thread has finished.
+#[derive(Default)]
+pub(super) struct Stopped {
+    done: Mutex<bool>,
+    changed: Condvar,
+}
+
+/// Says the engine stopped when dropped, so an engine thread that panics
+/// still lets its waiters go.
+pub(super) struct StopGuard(pub(super) Arc<Hub>);
+
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        *self
+            .0
+            .stopped
+            .done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = true;
+        self.0.stopped.changed.notify_all();
+    }
 }
 
 /// One client's way in. Dropping it closes the client's windows in the
@@ -135,6 +183,9 @@ pub(super) struct Hub {
     /// never wait on routing.
     sending: Mutex<()>,
     state: Mutex<HubState>,
+    /// The engine's runs, once it has started them, for counting.
+    pub(super) runs: OnceLock<super::runs::RunManager>,
+    pub(super) stopped: Stopped,
 }
 
 #[derive(Default)]
@@ -168,6 +219,8 @@ impl Hub {
             fencing,
             sending: Mutex::default(),
             state: Mutex::default(),
+            runs: OnceLock::new(),
+            stopped: Stopped::default(),
         }
     }
 

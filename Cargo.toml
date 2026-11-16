@@ -9,6 +9,7 @@ members = [
     "crates/perch-syntax",
     "crates/perch-engine",
     "crates/perch-app",
+    "crates/perchd",
 ]
 
 [workspace.package]

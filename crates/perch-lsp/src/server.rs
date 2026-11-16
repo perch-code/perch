@@ -965,21 +965,41 @@ pub(crate) fn gopls_install(go: &Path, env: &Env) -> Install {
 /// tarball's name and the SHA-256 Astral publishes for it. 0.0.86 is the
 /// first release whose macOS binaries are signed and notarized.
 const TY_PIN: &str = "0.0.86";
-const TY_AARCH64: (&str, &str) = (
-    "aarch64",
+
+/// A release tarball: its target triple and its SHA-256.
+type TyRelease = (&'static str, &'static str);
+
+const TY_MAC_AARCH64: TyRelease = (
+    "aarch64-apple-darwin",
     "ba782554d855aa69ce6ec8fa5898f5256a8603eb81f35d1927434576a434ae4e",
 );
-const TY_X86_64: (&str, &str) = (
-    "x86_64",
+const TY_MAC_X86_64: TyRelease = (
+    "x86_64-apple-darwin",
     "6b7908dec8629f9c18fe8c76fdcc22497ff823b14c351636aebe4d552d0e1fe9",
 );
+// The musl builds are static, so they run whatever the host's glibc.
+const TY_LINUX_AARCH64: TyRelease = (
+    "aarch64-unknown-linux-musl",
+    "ff3f848d01d6849131ed712fc946c026b33a95720408eaece26d28d3c2e52c45",
+);
+const TY_LINUX_X86_64: TyRelease = (
+    "x86_64-unknown-linux-musl",
+    "cedbbe26a4f12533cfa728e07c8f053c86c7642548c72e92971e1154a94f3583",
+);
 
-/// The release tarball for the processor Perch runs on: arm64 or x86_64.
-fn ty_release() -> (&'static str, &'static str) {
-    if std::env::consts::ARCH == "aarch64" {
-        TY_AARCH64
-    } else {
-        TY_X86_64
+/// The release tarball for the machine Perch runs on.
+fn ty_release() -> TyRelease {
+    ty_release_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// The release tarball for `os` on `arch`: Linux's for Linux, the Mac's
+/// otherwise, and x86_64's for anything but arm64.
+fn ty_release_for(os: &str, arch: &str) -> TyRelease {
+    match (os, arch) {
+        ("linux", "aarch64") => TY_LINUX_AARCH64,
+        ("linux", _) => TY_LINUX_X86_64,
+        (_, "aarch64") => TY_MAC_AARCH64,
+        _ => TY_MAC_X86_64,
     }
 }
 
@@ -1012,17 +1032,17 @@ fn find_ty(env: &Env) -> Result<ServerSpec, Missing> {
 /// The ty binary in an install's folder. The release tarball unpacks to a
 /// folder named for its target, as `ty-aarch64-apple-darwin/ty`.
 fn ty_binary(dir: &Path) -> PathBuf {
-    let (arch, _) = ty_release();
-    dir.join(format!("ty-{arch}-apple-darwin")).join("ty")
+    let (triple, _) = ty_release();
+    dir.join(format!("ty-{triple}")).join("ty")
 }
 
 /// The download of the pinned ty for this processor, into Perch's
 /// directory.
 fn ty_install(env: &Env) -> Install {
-    let (arch, sha256) = ty_release();
+    let (triple, sha256) = ty_release();
     Install::Download {
         url: format!(
-            "https://github.com/astral-sh/ty/releases/download/{TY_PIN}/ty-{arch}-apple-darwin.tar.gz"
+            "https://github.com/astral-sh/ty/releases/download/{TY_PIN}/ty-{triple}.tar.gz"
         ),
         sha256: sha256.into(),
         into: env.servers.join(ServerKind::Ty.name()).join(TY_PIN),
@@ -1561,12 +1581,38 @@ mod tests {
         assert_eq!(ty(&fake).unwrap().binary, users);
     }
 
+    /// A Linux host downloads ty built for Linux, not for the Mac.
+    #[test]
+    fn ty_is_downloaded_for_the_hosts_triple() {
+        assert_eq!(ty_release_for("macos", "aarch64").0, "aarch64-apple-darwin");
+        assert_eq!(ty_release_for("macos", "x86_64").0, "x86_64-apple-darwin");
+        assert_eq!(
+            ty_release_for("linux", "aarch64").0,
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            ty_release_for("linux", "x86_64").0,
+            "x86_64-unknown-linux-musl"
+        );
+        let fake = Fake::new();
+        let Install::Download { url, .. } = ty_install(&fake.env()) else {
+            panic!("ty is a download");
+        };
+        let (triple, _) = ty_release();
+        assert!(url.ends_with(&format!("/ty-{triple}.tar.gz")), "{url}");
+        assert_eq!(
+            triple.contains("linux"),
+            cfg!(target_os = "linux"),
+            "{triple}"
+        );
+    }
+
     /// Only Perch's own ty, older than the pin, is offered the pin.
     #[test]
     fn an_old_install_of_ty_is_offered_the_pin() {
         let fake = Fake::new();
-        let (arch, _) = ty_release();
-        let old = fake.path(&format!("servers/ty/0.0.85/ty-{arch}-apple-darwin/ty"));
+        let (triple, _) = ty_release();
+        let old = fake.path(&format!("servers/ty/0.0.85/ty-{triple}/ty"));
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
         std::fs::write(&old, "").unwrap();
         let spec = find(ServerKind::Ty, &fake.path("checkout"), &fake.env()).unwrap();

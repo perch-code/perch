@@ -1,0 +1,24 @@
+[package]
+name = "perchd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Perch's engine with no window: a host's long-lived service, and the
+# bridge that ssh runs to reach it. No UI toolkit, so it builds and runs
+# on a box with no GTK.
+[dependencies]
+perch-engine = { path = "../perch-engine" }
+# The Perch home, and where agents are installed: both the engine's own
+# answers, from the crates it is built on.
+perch-github = { path = "../perch-github" }
+perch-agent = { path = "../perch-agent" }
+tokio = { workspace = true, features = ["net", "signal", "io-util"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"

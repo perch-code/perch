@@ -293,12 +293,24 @@ pub(super) fn let_go(client: Arc<perch_lsp::Client>) {
 /// when `ps` can't be run.
 async fn process_tree_memory(pids: &[u32]) -> HashMap<u32, u64> {
     let mut command = tokio::process::Command::new("ps");
-    command.args(["-axo", "pid=,ppid=,rss="]).kill_on_drop(true);
+    command
+        .args(every_process(std::env::consts::OS, "pid=,ppid=,rss="))
+        .kill_on_drop(true);
     let out = match tokio::time::timeout(Duration::from_secs(5), command.output()).await {
         Ok(Ok(out)) if out.status.success() => out.stdout,
         _ => return HashMap::new(),
     };
     tree_memory(&String::from_utf8_lossy(&out), pids)
+}
+
+/// `ps`'s arguments for `columns` of every process: BSD's `-ax` on the
+/// Mac, `-e` on Linux, whose procps takes `-ax` for a bad mix of styles.
+pub(super) fn every_process<'a>(os: &str, columns: &'a str) -> [&'a str; 2] {
+    if os == "linux" {
+        ["-eo", columns]
+    } else {
+        ["-axo", columns]
+    }
 }
 
 /// `ps -o pid=,ppid=,rss=` output as `process_tree_memory` gives it, for
@@ -341,6 +353,28 @@ fn tree_memory(ps: &str, pids: &[u32]) -> HashMap<u32, u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Linux's procps reads every process with `-e`; the Mac's ps with
+    /// `-ax`. Both list the columns asked for, and only them.
+    #[test]
+    fn every_process_is_asked_for_in_the_hosts_dialect() {
+        assert_eq!(
+            every_process("linux", "pid=,ppid=,rss="),
+            ["-eo", "pid=,ppid=,rss="]
+        );
+        assert_eq!(
+            every_process("macos", "pid=,ppid=,rss="),
+            ["-axo", "pid=,ppid=,rss="]
+        );
+    }
+
+    /// The real ps, on whatever this is, lists this process.
+    #[tokio::test]
+    async fn the_hosts_ps_measures_this_process() {
+        let me = std::process::id();
+        let memory = process_tree_memory(&[me]).await;
+        assert!(memory.get(&me).is_some_and(|&kb| kb > 0), "{memory:?}");
+    }
 
     #[test]
     fn a_process_counts_everything_under_it() {

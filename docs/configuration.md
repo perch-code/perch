@@ -3,6 +3,12 @@
 Perch reads `~/.perch/config.toml`, or `$PERCH_HOME/config.toml` when
 `PERCH_HOME` is set. Every setting is optional.
 
+`PERCH_HOME` is also where the cache, the checkouts and the logs live, and
+only one engine may use it at a time: a second Perch, or a `perchd`, on the
+same home refuses to start and says which process has it (see
+[One engine to a Perch home](reference.md#one-engine-to-a-perch-home)).
+`perchd` reads the config.toml of the machine it runs on.
+
 Settings (`Cmd-,`, or the gear at the foot of the sidebar) edits this file.
 It changes only the keys you touch, so your comments and layout stay. Edits
 you make by hand while Perch runs are taken up within a couple of seconds.

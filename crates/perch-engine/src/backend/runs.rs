@@ -186,6 +186,15 @@ impl RunManager {
         target.limit = limit;
     }
 
+    /// How many runs are queued or under way.
+    pub(crate) fn active(&self) -> usize {
+        self.inner
+            .entries
+            .lock()
+            .map(|entries| entries.len())
+            .unwrap_or(0)
+    }
+
     /// How many runs could start now.
     #[cfg(test)]
     pub(crate) fn free_slots(&self) -> usize {

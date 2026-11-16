@@ -3834,6 +3834,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "perchd"
+version = "0.8.0"
+dependencies = [
+ "libc",
+ "perch-agent",
+ "perch-engine",
+ "perch-github",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

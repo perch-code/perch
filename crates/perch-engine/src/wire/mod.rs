@@ -28,8 +28,9 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWrite
 use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, WindowId};
 
 /// The wire's version. A change to `Command` or `Event` that an older
-/// peer would read wrong, or not at all, moves it on.
-pub const PROTOCOL: u32 = 1;
+/// peer would read wrong, or not at all, moves it on. 2: `Welcome` counts
+/// the engine's other clients and its runs.
+pub const PROTOCOL: u32 = 2;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -85,6 +86,10 @@ pub struct Welcome {
     pub home: PathBuf,
     /// Where the engine keeps its checkouts and runs.
     pub data_root: PathBuf,
+    /// How many other clients were connected as this one was let in.
+    pub clients: usize,
+    /// How many agent runs were queued or under way then.
+    pub runs: usize,
 }
 
 /// The engine's answer to a `Hello`.
@@ -233,8 +238,8 @@ async fn first_message<R: AsyncBufRead + Unpin, T: for<'de> Deserialize<'de>>(
     }
 }
 
-/// What this engine tells a client it lets in.
-fn welcome(connection: u64) -> Welcome {
+/// What this engine tells a client it lets in, once it is connected.
+fn welcome(engine: &Engine, connection: u64) -> Welcome {
     Welcome {
         protocol: PROTOCOL,
         engine_version: VERSION.to_string(),
@@ -242,6 +247,8 @@ fn welcome(connection: u64) -> Welcome {
         host: host_name(),
         home: perch_github::config::home_dir(),
         data_root: perch_github::config::data_dir().unwrap_or_default(),
+        clients: engine.connections().saturating_sub(1),
+        runs: engine.active_runs(),
     }
 }
 
@@ -338,7 +345,11 @@ where
     let connection = engine.connect(move |window, event| {
         let _ = events.send((window, event));
     });
-    write_line(&mut write, &Answer::Welcome(welcome(connection.id()))).await?;
+    write_line(
+        &mut write,
+        &Answer::Welcome(welcome(&engine, connection.id())),
+    )
+    .await?;
     // Told when the client cannot be written to any more, or has fallen
     // too far behind: either way it is done.
     let done = Arc::new(tokio::sync::Notify::new());
@@ -462,25 +473,39 @@ where
     let (commands, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<(WindowId, Command)>();
     let (backend, navigations) = Backend::over_wire(commands, welcome.connection);
     let (events, received) = std::sync::mpsc::channel();
+    // Told when every handle has gone. The reader stops then too: the two
+    // halves share the stream, which closes only when both have let go of
+    // it, and a stream whose shutdown does nothing, as a child's stdin's
+    // does, would otherwise stay open until the engine next said something.
+    let hung_up = Arc::new(tokio::sync::Notify::new());
     // Ends when every handle has gone, which hangs up.
-    tokio::spawn(async move {
-        while let Some((window, command)) = outgoing.recv().await {
-            match write_line(&mut write, &CommandLine { window, command }).await {
-                Ok(()) => {}
-                Err(WireError::Malformed(error)) => {
-                    tracing::error!(%error, "a command would not serialize; dropped")
-                }
-                Err(error) => {
-                    tracing::info!(%error, "engine stopped reading");
-                    return;
+    tokio::spawn({
+        let hung_up = hung_up.clone();
+        async move {
+            while let Some((window, command)) = outgoing.recv().await {
+                match write_line(&mut write, &CommandLine { window, command }).await {
+                    Ok(()) => {}
+                    Err(WireError::Malformed(error)) => {
+                        tracing::error!(%error, "a command would not serialize; dropped")
+                    }
+                    Err(error) => {
+                        tracing::info!(%error, "engine stopped reading");
+                        return;
+                    }
                 }
             }
+            let _ = write.shutdown().await;
+            drop(write);
+            hung_up.notify_one();
         }
-        let _ = write.shutdown().await;
     });
     tokio::spawn(async move {
         loop {
-            match next_message::<_, EventLine>(&mut read, &mut line).await {
+            let next = tokio::select! {
+                next = next_message::<_, EventLine>(&mut read, &mut line) => next,
+                () = hung_up.notified() => return,
+            };
+            match next {
                 Ok(Some(Ok(EventLine { window, event }))) => {
                     navigations.observe(window, &event);
                     if events.send((window, event)).is_err() {

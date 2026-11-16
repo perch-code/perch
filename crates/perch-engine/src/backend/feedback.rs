@@ -865,7 +865,8 @@ struct Process {
 }
 
 async fn processes() -> Vec<Process> {
-    let Ok(out) = run(Path::new("ps"), &["-axo", "pid=,rss=,comm="]).await else {
+    let args = super::kept_servers::every_process(std::env::consts::OS, "pid=,rss=,comm=");
+    let Ok(out) = run(Path::new("ps"), &args).await else {
         return Vec::new();
     };
     out.lines()

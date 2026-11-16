@@ -1086,6 +1086,14 @@ Neither is given a token or a route to GitHub. A machine without the sandbox
 refuses the run. One Work run at a time runs in a worktree; another waits,
 saying so, without taking a slot, and questions go on beside it.
 
+On Linux, Claude Code's sandbox is bubblewrap with socat for its network
+proxy. A Work run or a question on a machine without `bwrap` and `socat` on
+`PATH` is refused before it starts: "Claude Code's sandbox needs bwrap and
+socat on Linux…". Claude Code on Linux also skips the glob that keeps a Work
+run from making a `.git` inside the worktree, so Perch looks itself: a `.git`
+that appeared below the worktree's top during a Work run fails the run, with
+its path named. One that was there before the run is left alone.
+
 ### Approvals
 
 When a Work run needs something its sandbox refuses, it asks. By default
@@ -1429,6 +1437,57 @@ read as types do when the block is Rust, a diff, output or of no language
 named. A name links
 once rust-analyzer has answered, a moment after the text is drawn; while
 the server is absent, failed or waiting for trust, only files do.
+
+## One engine to a Perch home
+
+Everything below the window, the GitHub client, the cache, the checkouts,
+the language servers and the agents, is Perch's engine. Whatever runs it,
+the app or `perchd`, holds an exclusive lock on `$PERCH_HOME/engine.lock`
+while it runs and writes its process id there. A second engine on the same
+home refuses to start and names the process that has it: the app opens its
+window and says "Perch could not start its engine: another Perch engine
+(process …) is running on …", and nothing runs behind it. The lock goes
+with the process however it ends. The commands that only read the cache,
+`perch --items`, `--agents`, `--timeline`, `--scope` and `--scan`, need no
+lock and run beside an engine.
+
+## perchd
+
+`perchd` runs the engine with no window, for an always-on machine the Mac
+reaches over ssh. It is built from the same crates as the app, without a UI
+toolkit, so it needs no GTK. Releases carry it for Linux as
+`perchd-linux-<arch>.tar.gz`; put `perchd` in `~/.local/bin`.
+
+- `perchd serve` runs the engine and listens on
+  `$PERCH_HOME/run/perchd.sock` (the directory owner-only, the socket mode
+  0600). It keeps polling, sweeping and running agents with no client
+  connected. SIGTERM or SIGINT stops it as quitting the app does: running
+  agents are stopped and recorded Interrupted, the socket is removed and
+  the home let go. It logs to stderr and to `$PERCH_HOME/logs`, never to
+  stdout.
+- `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
+  until either side closes. It is what `ssh <host> perchd bridge` runs. With
+  no engine answering it starts `perchd serve` in a session of its own, so
+  the engine outlives the ssh connection, and waits up to 10 seconds for
+  it. It writes nothing but the engine's messages to stdout.
+- `perchd status` connects without starting anything and prints whether
+  an engine is running, its version and protocol, its Perch home, how many
+  other clients are connected and how many agent runs are queued or under
+  way. It exits 0 when one answers and 3 when none does.
+- `perchd --version` prints the version and the wire protocol.
+
+A socket file left by an engine that was killed is removed when the next
+one starts, once nothing answers on it.
+
+To start the engine at boot rather than at the first bridge, install
+`scripts/perchd.service` as a systemd user unit:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp scripts/perchd.service ~/.config/systemd/user/
+systemctl --user enable --now perchd
+loginctl enable-linger "$USER"  # keep it running with nobody logged in
+```
 
 ## Development
 

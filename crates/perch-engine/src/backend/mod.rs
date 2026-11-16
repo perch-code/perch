@@ -4207,12 +4207,16 @@ pub fn spawn(check: CheckConfig) -> (Backend, std::sync::mpsc::Receiver<(WindowI
             unstarted.start(check);
             client
         }
+        // Another engine on the home, most likely: the windows open and
+        // say so, with nothing behind them, rather than a second engine
+        // starting on the first one's runs.
         Err(e) => {
+            tracing::error!("could not start the engine: {e}");
             let (events, received) = std::sync::mpsc::channel();
             let _ = events.send((
                 NO_WINDOW,
                 Event::Status(Status::Error {
-                    message: format!("could not start the network runtime: {e}"),
+                    message: format!("Perch could not start its engine: {e}."),
                 }),
             ));
             let (backend, _) = Backend::over_wire(tokio::sync::mpsc::unbounded_channel().0, 0);
@@ -4229,11 +4233,22 @@ pub struct Unstarted {
     commands: UnboundedReceiver<connections::Inbound>,
     /// Shared with the connections, which fence as commands are sent.
     fencing: Fencing,
+    /// The Perch home, this engine's alone until it stops.
+    lock: crate::lock::EngineLock,
 }
 
+/// How long a stopped engine's tasks get to go once its command loop has
+/// returned. Dropping them kills what they started: a language server, a
+/// git process.
+const STOPPING: Duration = Duration::from_secs(5);
+
 impl Engine {
-    /// The engine's runtime and its connection layer. `start` runs it.
+    /// The engine's runtime and its connection layer, with the Perch
+    /// home locked to it. `start` runs it. Fails when another engine has
+    /// the home, saying which.
     pub fn build(lifetime: Lifetime) -> std::io::Result<Unstarted> {
+        let lock = crate::lock::EngineLock::take(&perch_github::config::perch_home())
+            .map_err(std::io::Error::other)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
@@ -4249,6 +4264,7 @@ impl Engine {
             runtime,
             commands,
             fencing,
+            lock,
         })
     }
 
@@ -4272,15 +4288,25 @@ impl Unstarted {
             runtime,
             commands,
             fencing,
+            lock,
         } = self;
         let hub = engine.hub.clone();
+        let router = hub.clone();
         let events = EventSender::to(move |window, event| {
-            hub.route(window, event);
+            router.route(window, event);
             Ok(())
         });
         std::thread::Builder::new()
             .name("perch-backend".into())
-            .spawn(move || runtime.block_on(run(commands, events, check, fencing)))
+            .spawn(move || {
+                let stopped = connections::StopGuard(hub.clone());
+                runtime.block_on(run(commands, events, check, fencing, hub));
+                // The tasks left go, and with them the children they hold,
+                // before the home is let go and waiters hear it stopped.
+                runtime.shutdown_timeout(STOPPING);
+                drop(lock);
+                drop(stopped);
+            })
             .expect("spawn backend thread");
         engine
     }
@@ -4291,6 +4317,7 @@ async fn run(
     events: EventSender<Event>,
     check: CheckConfig,
     fencing: Fencing,
+    hub: Arc<connections::Hub>,
 ) {
     tracing::info!("backend started");
     // The file is read once, for the running config and the Settings page
@@ -4467,6 +4494,7 @@ async fn run(
         cache.clone(),
         events.clone(),
     );
+    let _ = hub.runs.set(run_manager.clone());
     let ctx = Ctx {
         session: Arc::new(std::sync::RwLock::new(session)),
         credentials: Arc::new(Credentials {
@@ -18954,7 +18982,22 @@ async fn execute_question(
     }
     run = ctx.runs.load(&run.id).unwrap_or(run);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = match perch_agent::Run::spawn(spec, tx) {
+    let worktree = spec.cwd.clone();
+    // Where the sandbox cannot keep a Work run from making a `.git` below
+    // the worktree's top, the ones there now, to compare with after.
+    let nested_before = if crate::nested_git::WATCHED && run.mode == RunMode::Work {
+        let top = worktree.clone();
+        tokio::task::spawn_blocking(move || crate::nested_git::below(&top))
+            .await
+            .ok()
+    } else {
+        None
+    };
+    let spawned = match crate::ask::host_refusal(spec.backend) {
+        Some(why) => Err(perch_agent::Error::Refused(why)),
+        None => perch_agent::Run::spawn(spec, tx),
+    };
+    let handle = match spawned {
         Ok(handle) => handle,
         Err(error) => {
             let message = crate::ask::spawn_failure(
@@ -19101,6 +19144,18 @@ async fn execute_question(
         let (ctx, run) = (ctx.clone(), run.clone());
         tokio::spawn(async move { follow_last_run(&ctx, &run).await });
     }
+    let nested = match nested_before {
+        Some(before) => {
+            let top = worktree.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::nested_git::appeared(&top, &before, &crate::nested_git::below(&top))
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        None => None,
+    };
     let (mut status, mut reason, error, session, cost, duration) =
         if let Some(message) = persistence_error {
             (
@@ -19163,6 +19218,20 @@ async fn execute_question(
                 }
             }
         };
+    // A `.git` the run made fails it, whatever else it says, ahead of
+    // anything else that went wrong.
+    let error = match nested {
+        Some(found) => {
+            tracing::warn!(run = %run.id, %found, "a Work run made a nested .git");
+            status = RunStatus::Failed;
+            reason = TerminalReason::Other;
+            Some(match error {
+                Some(also) => format!("{found} {also}"),
+                None => found,
+            })
+        }
+        None => error,
+    };
     // A run whose last act was a tool call has no closing words; its
     // narration is all it said.
     let final_text = if answer.is_empty() {
@@ -26382,6 +26451,84 @@ while True:
             args.contains("--resume"),
             "the Work session is resumed: {args}"
         );
+    }
+
+    /// A Work run that makes a `.git` below the worktree's top fails, with
+    /// the path named, however it says it went: on Linux Claude Code's
+    /// sandbox cannot stop it. One that was there before is not the run's.
+    #[tokio::test]
+    async fn a_work_run_that_makes_a_nested_git_fails_naming_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let claude = dir.path().join("claude");
+        std::fs::write(
+            &claude,
+            concat!(
+                "#!/bin/sh\n",
+                "mkdir -p vendor/lib/.git\n",
+                "echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"sonnet\"}'\n",
+                "echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done.\",\"session_id\":\"s1\"}'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = Config::default();
+        config.agent.binary = claude.to_string_lossy().into_owned();
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        std::fs::create_dir_all(worktree.join("old/.git")).unwrap();
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(ItemCheckout {
+            branch: "chris/readme".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: worktree.clone(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+        open_in_slot(&ctx, &branch);
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+        let ask_it = |thread: Option<String>| {
+            ask(
+                &ctx,
+                branch.id.clone(),
+                thread,
+                None,
+                "Vendor it".to_string(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+                RunMode::Work,
+            )
+        };
+        ask_it(None).await;
+        let thread = ctx
+            .with_cache(|c| c.load_comment_threads(&branch.id).unwrap())
+            .unwrap()
+            .remove(0);
+        let runs = || {
+            ctx.with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+                .unwrap()
+        };
+        let run = runs().remove(0);
+        assert_eq!(run.status, RunStatus::Failed);
+        let error = run.error.unwrap_or_default();
+        assert!(
+            error.starts_with("A Git repository appeared at vendor/lib/.git, below"),
+            "{error}"
+        );
+
+        // There before the next run, so not that run's.
+        ask_it(Some(thread.id.clone())).await;
+        let run = runs().remove(1);
+        assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error);
     }
 
     /// Work on a review finding goes in the live worktree with the finding
