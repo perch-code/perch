@@ -25,7 +25,7 @@ use tokio::sync::{watch, Notify};
 use crate::Backend;
 
 /// One CLI's limits as it last reported them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     /// "Pro", "Plus". Codex says; Claude's report does not.
     pub plan: Option<String>,
@@ -41,7 +41,7 @@ pub struct Usage {
 }
 
 /// One rolling limit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Window {
     /// The same window whichever source reported it: `session`, `weekly`,
     /// `weekly:Fable`.
@@ -54,7 +54,7 @@ pub struct Window {
 }
 
 /// What is known of one CLI's limits.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Account {
     pub usage: Option<Usage>,
     /// Why the last poll found nothing, until one succeeds. `usage`, if
@@ -63,7 +63,7 @@ pub struct Account {
 }
 
 /// Every CLI's limits.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Board {
     pub claude: Account,
     pub codex: Account,

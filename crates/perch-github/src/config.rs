@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct Config {
     /// Last-resort token, used only when env vars and `gh` come up empty.
     #[serde(default)]
@@ -48,7 +48,7 @@ pub struct Config {
     project: Vec<toml::Value>,
     /// Things wrong with the file that are worth one line in the status
     /// bar. Filled by `load`, never by the file.
-    #[serde(skip)]
+    #[serde(default)]
     pub warnings: Vec<String>,
 }
 
@@ -60,13 +60,13 @@ pub struct Config {
 /// `[agent.gemini]`. A model name picks the backend: one listed only under
 /// Codex goes to Codex, one listed only under Gemini to Gemini, anything
 /// else to Claude Code.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
 pub struct AgentConfig {
     /// The Claude Code executable. Found on `PATH` unless a path is given here.
     #[serde(default = "default_binary")]
     pub binary: String,
     /// Filled by startup discovery and copied into durable run provenance.
-    #[serde(skip)]
+    #[serde(default)]
     pub binary_version: Option<String>,
     /// What the picker starts on.
     #[serde(default = "default_model")]
@@ -91,13 +91,13 @@ pub struct AgentConfig {
 /// The second backend. Absent from an old file is the usual case: the
 /// binary is looked for, and the models come from Codex's own catalog.
 /// Naming models here pins the list instead.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
 pub struct CodexConfig {
     /// The Codex executable. Found on `PATH` unless a path is given here.
     #[serde(default = "default_codex_binary")]
     pub binary: String,
     /// Filled by startup discovery and copied into durable run provenance.
-    #[serde(skip)]
+    #[serde(default)]
     pub binary_version: Option<String>,
     /// The Codex models the picker offers, after the Claude Code ones.
     /// Empty in the file means ask Codex; empty after that means Codex
@@ -107,20 +107,20 @@ pub struct CodexConfig {
     /// The effort names each model takes, from the catalog, keyed by
     /// model. Filled by discovery, never by the file. A model
     /// not listed here is assumed to take every level.
-    #[serde(skip)]
+    #[serde(default)]
     pub efforts: BTreeMap<String, Vec<String>>,
 }
 
 /// The third backend: Gemini, through the Antigravity CLI. Like Codex, its
 /// models come from the CLI's own catalog (`agy models`) unless the file
 /// names them.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
 pub struct GeminiConfig {
     /// The `agy` executable. Found on `PATH` unless a path is given here.
     #[serde(default = "default_gemini_binary")]
     pub binary: String,
     /// Filled by startup discovery and copied into durable run provenance.
-    #[serde(skip)]
+    #[serde(default)]
     pub binary_version: Option<String>,
     /// The Gemini models the picker offers, after the others. Empty in
     /// the file means ask agy; empty after that means Gemini is not
@@ -129,7 +129,7 @@ pub struct GeminiConfig {
     pub models: Vec<String>,
     /// The effort names each model takes, from the catalog. Filled by
     /// discovery, never by the file.
-    #[serde(skip)]
+    #[serde(default)]
     pub efforts: BTreeMap<String, Vec<String>>,
 }
 
@@ -294,7 +294,7 @@ pub fn is_local(identity: &str) -> bool {
 }
 
 /// `[ui]`: how the window looks.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
 pub struct UiConfig {
     /// The family code is set in, by its installed name. Off macOS only:
     /// there it is SF Mono, as the rest of the system's code is.
@@ -307,7 +307,7 @@ pub struct UiConfig {
 }
 
 /// `[ui] appearance`.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
     /// The system's, followed as it changes. Where the system says
@@ -332,7 +332,7 @@ impl Appearance {
 }
 
 /// `[lsp]`: the language servers Perch runs.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
 pub struct LspConfig {
     /// What every language server Perch runs may use between them, in
     /// megabytes, before the ones kept for a return to an earlier item are
@@ -356,7 +356,7 @@ impl Default for LspConfig {
 
 /// `[display]`: how big Perch draws, as an editor sets a window zoom and
 /// a code font size apart.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
 pub struct DisplayConfig {
     /// Everything in the window, text, code and spacing, times this.
     #[serde(default = "default_zoom")]
@@ -427,7 +427,7 @@ impl DisplayConfig {
 }
 
 /// `[work]`: settings for new work in any repository.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
 pub struct WorkDefaults {
     /// Put before a branch name the new-work view fills in, such as
     /// `chris/`. A name the reader types is taken as typed.
@@ -440,7 +440,7 @@ pub struct WorkDefaults {
 }
 
 /// Who decides a Work run's requests to go past its sandbox.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Approvals {
     /// The CLI's own automatic reviewer: Claude Code's auto permission
@@ -484,7 +484,7 @@ impl Approvals {
 /// Who decides Work requests in each repository, as config.toml says:
 /// `[work] approvals`, and each `[repo.work] approvals` over it. What the
 /// window needs to show the level a repository starts on.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct ApprovalsTable {
     pub default: Approvals,
     /// By identity, lowercased.
@@ -503,7 +503,7 @@ impl ApprovalsTable {
 
 /// `[repo.work]`: what a Work run may reach outside its worktree, in one
 /// repository. Both lists are empty unless the file fills them.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
 pub struct RepoWork {
     /// Directories the run may write, such as a package manager's cache.
     /// A leading `~` is the home directory.
@@ -530,7 +530,7 @@ impl RepoWork {
 }
 
 /// `[repo.lsp]`: the language servers in one repository.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
 pub struct RepoLsp {
     /// Start rust-analyzer and jdtls on every item here without asking,
     /// anyone's pull request included. They run the checkout's build
@@ -723,7 +723,7 @@ fn repo_table(text: &str, entry: &RepoConfig) -> Option<std::ops::Range<usize>> 
 /// either way it is compared without regard to case, and everything
 /// downstream splits it on its one slash. `name` is what the sidebar
 /// shows and nothing more.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
 pub struct RepoConfig {
     /// `owner/repo` on GitHub. Absent for a repository that lives only on
     /// this machine.
@@ -755,7 +755,7 @@ pub struct RepoConfig {
     pub lsp: RepoLsp,
     /// The identity once known: `github` when given, else set by `resolve`
     /// from the first root's scan.
-    #[serde(skip)]
+    #[serde(default)]
     identity: Option<String>,
 }
 
@@ -818,7 +818,7 @@ impl RepoConfig {
 
 /// One declared repository as the sidebar needs it: the identity its items
 /// carry, and the name its section shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeclaredRepo {
     pub identity: String,
     pub name: String,
@@ -1016,6 +1016,9 @@ impl Config {
     /// line saying why.
     pub(crate) fn parse(text: &str) -> Result<Self, toml::de::Error> {
         let mut c = toml::from_str::<Config>(text)?;
+        // What startup fills in travels with the config to a window over
+        // the wire, so it is a field serde reads; the file never sets it.
+        c.forget_derived();
         if !c.project.is_empty() {
             let mut refused = Self::fallback();
             refused.warnings.push(
@@ -1055,6 +1058,20 @@ impl Config {
     ///
     /// A file from before `root` said `roots = [..]`. Its first entry reads
     /// as `root`, with a notice when there were more, which are not read.
+    /// Clear what discovery and `resolve` fill in, should the file name
+    /// it: those are serde fields only so a config can cross the wire.
+    fn forget_derived(&mut self) {
+        self.warnings.clear();
+        self.agent.binary_version = None;
+        self.agent.codex.binary_version = None;
+        self.agent.codex.efforts.clear();
+        self.agent.gemini.binary_version = None;
+        self.agent.gemini.efforts.clear();
+        for repo in &mut self.repo {
+            repo.identity = None;
+        }
+    }
+
     fn keep_well_formed_repos(&mut self) {
         let mut kept: Vec<RepoConfig> = Vec::new();
         for mut r in std::mem::take(&mut self.repo) {
@@ -2233,5 +2250,44 @@ network = ["index.crates.io"]
     #[test]
     fn a_malformed_file_is_an_error_not_a_config() {
         assert!(Config::parse("poll_interval_secs = = 3").is_err());
+    }
+
+    #[test]
+    fn the_file_cannot_set_what_discovery_fills_in() {
+        // These are fields serde reads so a window across the wire gets
+        // them, but only startup sets them.
+        let text = r#"
+[agent]
+binary_version = "9.9"
+
+[agent.codex]
+binary_version = "9.9"
+efforts = { gpt = ["low"] }
+
+[agent.gemini]
+efforts = { pro = ["high"] }
+
+[[repo]]
+root = "/srv/notes"
+identity = "someone/else"
+"#;
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.agent.binary_version, None);
+        assert_eq!(config.agent.codex.binary_version, None);
+        assert!(config.agent.codex.efforts.is_empty());
+        assert!(config.agent.gemini.efforts.is_empty());
+        assert_eq!(config.repo[0].identity(), None);
+
+        // What discovery filled in does survive a trip through serde.
+        let mut found = config.clone();
+        found
+            .agent
+            .codex
+            .efforts
+            .insert("gpt".into(), vec!["low".into()]);
+        found.repo[0].resolve(Some("me/notes".into()));
+        let back: Config = serde_json::from_value(serde_json::to_value(&found).unwrap()).unwrap();
+        assert_eq!(back.agent.codex.efforts, found.agent.codex.efforts);
+        assert_eq!(back.repo[0].identity(), Some("me/notes"));
     }
 }

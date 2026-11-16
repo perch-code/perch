@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::Error;
 
 /// One entry of the worktree tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TreeEntry {
     /// Path relative to the worktree root, with `/` separators.
     pub path: String,

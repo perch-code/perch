@@ -3720,8 +3720,10 @@ dependencies = [
 name = "perch-engine"
 version = "0.8.0"
 dependencies = [
+ "base64",
  "image",
  "jiff",
+ "libc",
  "perch-agent",
  "perch-git",
  "perch-github",
@@ -3815,6 +3817,7 @@ dependencies = [
 name = "perch-syntax"
 version = "0.8.0"
 dependencies = [
+ "serde",
  "tracing",
  "tree-sitter",
  "tree-sitter-go",

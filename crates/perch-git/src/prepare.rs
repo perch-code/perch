@@ -40,7 +40,7 @@ pub struct Prefetched {
 }
 
 /// A prepared checkout, on a branch Perch owns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Checkout {
     pub worktree: PathBuf,
     /// The bare clone the worktree belongs to. Blob reads go here.
@@ -72,7 +72,7 @@ pub struct Cut {
 }
 
 /// A branch new work can start from, as the base picker lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BaseBranch {
     /// The branch's name, without a remote: `main`, `chris/fix`.
     pub name: String,

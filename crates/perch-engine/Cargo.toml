@@ -30,6 +30,10 @@ toml.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 # A feedback report has tokens and secrets scrubbed out by pattern.
 regex = "1"
+# Bytes travel the wire as base64 rather than as JSON arrays.
+base64 = "0.22"
+# The host name a Welcome gives.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

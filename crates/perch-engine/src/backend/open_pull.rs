@@ -23,7 +23,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How a branch stands for a pull request, and what the form fills in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PullRequestReadiness {
     /// The branch the item is about.
     pub branch: String,
@@ -43,7 +43,7 @@ pub struct PullRequestReadiness {
 }
 
 /// Where opening a pull request has got to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OpenStep {
     Checking,
     Committing,
@@ -559,7 +559,7 @@ fn git_says(e: perch_git::Error) -> String {
 }
 
 /// What a description run came to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DescriptionOutcome {
     Written {
         title: String,

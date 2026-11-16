@@ -51,7 +51,7 @@ pub use review::{
     REPORT_DELIMITER, REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Backend {
     ClaudeCode,
     Codex,
@@ -87,7 +87,7 @@ impl Backend {
 
 /// How hard the agent thinks. The top rung, `Ultra`, also lets it
 /// delegate: Claude Code gets its orchestration tools, Codex its helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Effort {
     Low,
     #[default]
@@ -1179,7 +1179,7 @@ impl Parser {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RunEvent {
     Started {
         session_id: String,

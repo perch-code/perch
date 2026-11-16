@@ -5,7 +5,7 @@
 //! `review::suggestion`.
 
 /// The lines a suggestion replaces, and the number of the first.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Original {
     pub first: u32,
     pub lines: Vec<String>,
@@ -14,7 +14,7 @@ pub struct Original {
 /// A suggestion to commit on a pull request's head: the thread it is
 /// in, the lines it replaces and what they become, and the commit's
 /// message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Commit {
     pub thread_id: String,
     pub path: String,

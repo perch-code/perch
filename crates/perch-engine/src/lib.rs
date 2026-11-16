@@ -17,3 +17,4 @@ pub mod review;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod update;
+pub mod wire;

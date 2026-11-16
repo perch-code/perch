@@ -12,7 +12,7 @@ use crate::review::picture::PictureSource;
 /// Where a file is from: the worktree, which is what the review is of, or
 /// outside it, a dependency or the standard library reached from a
 /// definition, which is a place to read and no part of the review.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Origin {
     Worktree,
     Outside {
@@ -52,6 +52,7 @@ impl Origin {
 
 /// A file prepared for the editor: text to render, and everything needed to
 /// colour it and map a rendered line back to a real one.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LoadedFile {
     pub path: String,
     pub origin: Origin,
@@ -116,7 +117,7 @@ impl std::fmt::Debug for LoadedFile {
 /// of its name and its last line, and a hash of the lines they are
 /// counted in, which is the file on disk when the server was asked, or
 /// a deleted file's removed lines.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outline {
     pub lines: u64,
     pub blocks: Vec<(usize, usize)>,
@@ -218,7 +219,7 @@ impl LoadedFile {
 /// is over, and what the caret is on. `column` is where it starts on the
 /// line and `end` where it ends, both byte columns as the protocol counts
 /// them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
     pub path: String,
     /// 0-based line in the head file, or in the base file when `base` is true.
@@ -232,7 +233,7 @@ pub struct Symbol {
 
 /// Every use in the file of the symbol the caret rests on, on each side of
 /// the diff, as zero-based line, start column and end column. Empty is none.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Highlights {
     pub head: Vec<(usize, usize, usize)>,
     pub base: Vec<(usize, usize, usize)>,
@@ -248,7 +249,7 @@ impl Highlights {
 /// impl. `path` is relative to the worktree for a file in it and absolute
 /// for one outside, in a dependency or the standard library, which then
 /// carries the label its tab's chip shows.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Located {
     pub path: String,
     /// The chip's label when `path` is outside the worktree.
@@ -456,7 +457,7 @@ impl Direction {
 /// One function the server named in the call hierarchy: a caller or a
 /// callee of the row above it, or the root. The item goes back to the
 /// server as it came when the row is expanded.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Call {
     pub item: perch_lsp::lsp_types::CallHierarchyItem,
     /// Where the call is made: the file and line of the call, with the
@@ -472,14 +473,14 @@ pub type AgentChoice = (perch_agent::Backend, String, perch_agent::Effort);
 /// One effective reviewer captured by a launch. A disabled (`None`) row is
 /// omitted from `ReviewLaunchRequest::reviewers`; it is a UI preference, not
 /// an effort understood by the native CLI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewLaunchChoice {
     pub backend: perch_agent::Backend,
     pub model: String,
     pub effort: perch_agent::ReviewEffort,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewLaunchRequest {
     pub item_id: String,
     pub base_ref: String,
@@ -493,7 +494,7 @@ pub struct ReviewLaunchRequest {
 /// The launcher's editable, durable preference for one backend. An
 /// unavailable backend can retain its model/effort while `enabled` is false
 /// in the effective draft shown by the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewPreferenceChoice {
     pub backend: perch_agent::Backend,
     pub model: Option<String>,
@@ -502,7 +503,7 @@ pub struct ReviewPreferenceChoice {
 }
 
 /// Everything needed to draw one immutable review in Conversation/history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewGroupSummary {
     pub group: perch_github::ReviewGroup,
     pub snapshot: perch_github::ReviewSnapshot,
@@ -518,7 +519,7 @@ impl ReviewGroupSummary {
 
 /// Durable finding state plus the compact provenance needed to identify it
 /// in the ordinary conversation and Files thread surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewFindingSummary {
     pub finding: perch_github::Finding,
     pub severity: perch_github::FindingSeverity,
@@ -552,7 +553,7 @@ impl ReviewFindingSummary {
 /// a rename makes another, and the text of the side they are on as it was
 /// shown. GitHub reads a comment's lines against the merge base and the
 /// head, so a draft for it from here is moved to those first.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Picked {
     pub scope: Scope,
     pub base_path: String,

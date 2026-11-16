@@ -17,31 +17,39 @@ pub type WindowId = u64;
 pub const NO_WINDOW: WindowId = 0;
 
 /// Where events go. A test hands in a plain channel and reads the events
-/// back untagged.
+/// back untagged; the engine hands in its connections' router.
 pub struct EventSender<T> {
     tx: EventTx<T>,
     window: WindowId,
 }
 
+/// What takes a tagged event: Err gives it back when nobody can.
+type Route<T> = Arc<dyn Fn(WindowId, T) -> Result<(), T> + Send + Sync>;
+
 enum EventTx<T> {
     Plain(std::sync::mpsc::Sender<T>),
-    Routed(std::sync::mpsc::Sender<(WindowId, T)>),
+    Routed(Route<T>),
 }
 
-impl<T> EventSender<T> {
+impl<T: Send + 'static> EventSender<T> {
     pub fn routed(tx: std::sync::mpsc::Sender<(WindowId, T)>) -> Self {
+        Self::to(move |window, event| tx.send((window, event)).map_err(|e| e.0 .1))
+    }
+
+    /// Events handed to `route`, each with its window.
+    pub fn to(route: impl Fn(WindowId, T) -> Result<(), T> + Send + Sync + 'static) -> Self {
         Self {
-            tx: EventTx::Routed(tx),
+            tx: EventTx::Routed(Arc::new(route)),
             window: NO_WINDOW,
         }
     }
+}
 
+impl<T> EventSender<T> {
     pub fn send(&self, event: T) -> Result<(), std::sync::mpsc::SendError<T>> {
         match &self.tx {
             EventTx::Plain(tx) => tx.send(event),
-            EventTx::Routed(tx) => tx
-                .send((self.window, event))
-                .map_err(|e| std::sync::mpsc::SendError(e.0 .1)),
+            EventTx::Routed(route) => route(self.window, event).map_err(std::sync::mpsc::SendError),
         }
     }
 
@@ -67,7 +75,7 @@ impl<T> Clone for EventTx<T> {
     fn clone(&self) -> Self {
         match self {
             Self::Plain(tx) => Self::Plain(tx.clone()),
-            Self::Routed(tx) => Self::Routed(tx.clone()),
+            Self::Routed(route) => Self::Routed(route.clone()),
         }
     }
 }
@@ -81,31 +89,41 @@ impl<T> From<std::sync::mpsc::Sender<T>> for EventSender<T> {
     }
 }
 
-/// Where a window's commands go. A recording test reads them back
-/// untagged.
+/// Where a window's commands go: a connection to the engine, or, for a
+/// recording test, a channel it reads back untagged.
 #[derive(Clone)]
 pub(super) enum CommandSender {
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     Plain(tokio::sync::mpsc::UnboundedSender<Command>),
     Routed {
-        tx: tokio::sync::mpsc::UnboundedSender<(WindowId, Command)>,
+        to: Arc<dyn Fn(WindowId, Command) -> Result<(), ()> + Send + Sync>,
         window: WindowId,
     },
 }
 
 impl CommandSender {
-    /// Err when the worker has gone.
+    pub(super) fn routed(
+        to: impl Fn(WindowId, Command) -> Result<(), ()> + Send + Sync + 'static,
+    ) -> Self {
+        Self::Routed {
+            to: Arc::new(to),
+            window: NO_WINDOW,
+        }
+    }
+
+    /// Err when the engine has gone.
     pub(super) fn send(&self, command: Command) -> Result<(), ()> {
         match self {
             Self::Plain(tx) => tx.send(command).map_err(drop),
-            Self::Routed { tx, window } => tx.send((*window, command)).map_err(drop),
+            Self::Routed { to, window } => to(*window, command),
         }
     }
 
     pub(super) fn for_window(&self, window: WindowId) -> Self {
         match self {
             Self::Plain(tx) => Self::Plain(tx.clone()),
-            Self::Routed { tx, .. } => Self::Routed {
-                tx: tx.clone(),
+            Self::Routed { to, .. } => Self::Routed {
+                to: to.clone(),
                 window,
             },
         }
@@ -126,18 +144,17 @@ pub(super) struct View {
 }
 
 impl View {
-    pub(super) fn new(
-        window: WindowId,
-        navigation_requests: Arc<NavigationRequests>,
-        scope_requests: Arc<ScopeRequests>,
-    ) -> Self {
+    /// The engine's own copy of the window's fences: the handle allocates
+    /// the ids, and each command that carries one registers it here when
+    /// it arrives.
+    pub(super) fn new(window: WindowId) -> Self {
         Self {
             window,
             slot: Default::default(),
             kept_contexts: Default::default(),
             language_servers: Default::default(),
-            navigation_requests,
-            scope_requests,
+            navigation_requests: Default::default(),
+            scope_requests: Default::default(),
             review_navigation: Default::default(),
             // A window is made to be looked at.
             window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),

@@ -17,7 +17,7 @@ use crate::config::{toml_error_line, Appearance, Approvals, Config, RepoConfig};
 /// under `[agent]`, Codex under `[agent.codex]`, Gemini under
 /// `[agent.gemini]`. Its own small enum, since this crate doesn't depend on
 /// perch-agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AgentBackend {
     Claude,
     Codex,
@@ -39,7 +39,7 @@ impl AgentBackend {
 /// One key the Settings page can write. `None`, an empty string or an
 /// empty list takes the key out of the file, which resets it to its
 /// default, except for a keybinding, where an empty list means no keys.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Setting {
     PollIntervalSecs(Option<u64>),
     GithubHost(Option<String>),
@@ -65,7 +65,7 @@ pub enum Setting {
     /// default keys; an empty list writes `[]`, no keys at all; one key is
     /// written as a string and several as a list.
     Keybinding {
-        action: &'static str,
+        action: String,
         keys: Option<Vec<String>>,
     },
     /// A key of the `[[repo]]` whose identity this is, compared without
@@ -78,7 +78,7 @@ pub enum Setting {
 
 /// A key of one `[[repo]]`, or of its `[repo.work]` or `[repo.lsp]`. A
 /// switch that is off is taken out rather than written as false.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RepoSetting {
     Name(Option<String>),
     Base(Option<String>),
@@ -102,7 +102,8 @@ pub struct Written {
 struct Place {
     repo: Option<String>,
     tables: &'static [&'static str],
-    key: &'static str,
+    /// A keybinding's key is its action's id, which the setting carries.
+    key: std::borrow::Cow<'static, str>,
     /// How a message names the key, such as `[agent.codex] binary`.
     label: String,
 }
@@ -271,42 +272,44 @@ fn no_repo(identity: &str) -> String {
 /// Where a change goes, and the value it leaves there: None to take the
 /// key out.
 fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
-    let top = |tables: &'static [&'static str], key: &'static str| Place {
+    let top = |tables: &'static [&'static str], key: std::borrow::Cow<'static, str>| Place {
         repo: None,
         tables,
+        label: label(tables, &key, None),
         key,
-        label: label(tables, key, None),
     };
     Ok(match change {
         Setting::PollIntervalSecs(secs) => (
-            top(&[], "poll_interval_secs"),
+            top(&[], "poll_interval_secs".into()),
             integer(*secs, "poll_interval_secs")?,
         ),
-        Setting::GithubHost(host) => (top(&[], "github_host"), string(host)),
-        Setting::AgentModel(model) => (top(&["agent"], "model"), string(model)),
-        Setting::AgentEffort(effort) => (top(&["agent"], "effort"), string(effort)),
+        Setting::GithubHost(host) => (top(&[], "github_host".into()), string(host)),
+        Setting::AgentModel(model) => (top(&["agent"], "model".into()), string(model)),
+        Setting::AgentEffort(effort) => (top(&["agent"], "effort".into()), string(effort)),
         Setting::AgentMaxConcurrentRuns(runs) => (
-            top(&["agent"], "max_concurrent_runs"),
+            top(&["agent"], "max_concurrent_runs".into()),
             integer(runs.map(|n| n as u64), "max_concurrent_runs")?,
         ),
         Setting::AgentBinary { backend, binary } => {
-            (top(backend.table(), "binary"), string(binary))
+            (top(backend.table(), "binary".into()), string(binary))
         }
         Setting::AgentModels { backend, models } => (
-            top(backend.table(), "models"),
+            top(backend.table(), "models".into()),
             list(models.as_deref().unwrap_or_default()),
         ),
-        Setting::WorkBranchPrefix(prefix) => (top(&["work"], "branch_prefix"), string(prefix)),
+        Setting::WorkBranchPrefix(prefix) => {
+            (top(&["work"], "branch_prefix".into()), string(prefix))
+        }
         Setting::WorkApprovals(approvals) => (
-            top(&["work"], "approvals"),
+            top(&["work"], "approvals".into()),
             approvals.map(|a| Value::from(a.name())),
         ),
         Setting::Appearance(appearance) => (
-            top(&["ui"], "appearance"),
+            top(&["ui"], "appearance".into()),
             appearance.map(|a| Value::from(a.name())),
         ),
-        Setting::CodeFont(font) => (top(&["ui"], "code_font"), string(font)),
-        Setting::Zoom(zoom) => (top(&["display"], "zoom"), float(*zoom, "zoom")?),
+        Setting::CodeFont(font) => (top(&["ui"], "code_font".into()), string(font)),
+        Setting::Zoom(zoom) => (top(&["display"], "zoom".into()), float(*zoom, "zoom")?),
         Setting::CodeFontSize(size) => {
             let value = match size {
                 // A whole size is written as one, as a person would.
@@ -314,14 +317,14 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
                 Some(s) => float(Some(f64::from(*s)), "code_font_size")?,
                 None => None,
             };
-            (top(&["display"], "code_font_size"), value)
+            (top(&["display"], "code_font_size".into()), value)
         }
         Setting::LspMaxMemoryMb(mb) => (
-            top(&["lsp"], "max_memory_mb"),
+            top(&["lsp"], "max_memory_mb".into()),
             integer(*mb, "max_memory_mb")?,
         ),
         Setting::Keybinding { action, keys } => (
-            top(&["keybindings"], action),
+            top(&["keybindings"], action.clone().into()),
             keys.as_deref().map(keybinding),
         ),
         Setting::Repo { identity, change } => {
@@ -337,7 +340,7 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             let place = Place {
                 repo: Some(identity.clone()),
                 tables,
-                key,
+                key: key.into(),
                 label: label(tables, key, Some(identity)),
             };
             (place, value)
@@ -440,7 +443,7 @@ fn edit_in(
     value: Option<Value>,
 ) -> Result<Option<LeftComment>, String> {
     let Some((head, rest)) = tables.split_first() else {
-        let added = value.is_some() && !table.contains_key(place.key);
+        let added = value.is_some() && !table.contains_key(&place.key);
         let left = set_key(table, inline, place, value)?;
         // A key added to an inline table would sit after the old last
         // one's space before the `}`; tidy the table's spacing instead.
@@ -527,20 +530,20 @@ fn set_key(
     value: Option<Value>,
 ) -> Result<Option<String>, String> {
     let Some(mut value) = value else {
-        let index = table.iter().position(|(k, _)| k == place.key);
+        let index = table.iter().position(|(k, _)| *k == place.key);
         let comment = table
-            .key(place.key)
+            .key(&*place.key)
             .and_then(|key| key.leaf_decor().prefix())
             .and_then(|prefix| prefix.as_str())
             .filter(|prefix| prefix.contains('#'))
             .map(str::to_string);
-        table.remove(place.key);
+        table.remove(&*place.key);
         return Ok(match (comment, index) {
             (Some(comment), Some(index)) if !inline => put_above_first(table, index, comment),
             _ => None,
         });
     };
-    match table.get_mut(place.key) {
+    match table.get_mut(&*place.key) {
         // In place, keeping what sat around the old value, such as a
         // comment after it.
         Some(Item::Value(old)) => {
@@ -554,7 +557,7 @@ fn set_key(
             ))
         }
         _ => {
-            table.insert(place.key, Item::Value(value));
+            table.insert(&place.key, Item::Value(value));
         }
     }
     Ok(None)
@@ -1171,7 +1174,7 @@ mod tests {
             Setting::CodeFontSize(Some(11.0)),
             Setting::LspMaxMemoryMb(Some(4096)),
             Setting::Keybinding {
-                action: "go_to_file",
+                action: "go_to_file".into(),
                 keys: Some(vec!["super+t".into()]),
             },
         ];
@@ -1220,7 +1223,7 @@ mod tests {
 
     fn keybinding(action: &'static str, keys: Option<&[&str]>) -> Setting {
         Setting::Keybinding {
-            action,
+            action: action.to_string(),
             keys: keys.map(|keys| keys.iter().map(|k| k.to_string()).collect()),
         }
     }

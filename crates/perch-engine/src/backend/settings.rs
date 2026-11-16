@@ -26,7 +26,7 @@ pub type CheckConfig = fn(&mut Config);
 
 /// config.toml as the Settings page shows it, sent at startup, after every
 /// write and after an edit made outside Perch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SettingsFile {
     pub path: PathBuf,
     /// The file's settings as written: the agents' binaries as typed, not
@@ -210,6 +210,11 @@ impl Held {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file.clone());
         let _ = ctx.events.send(Event::Settings(file));
+    }
+
+    /// The Settings last sent, for a client that asks for it again.
+    pub(super) fn last(&self) -> Option<SettingsFile> {
+        self.last.lock().ok().and_then(|last| last.clone())
     }
 
     fn send_again(&self, ctx: &Ctx) {

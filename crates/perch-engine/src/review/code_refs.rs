@@ -26,7 +26,7 @@ pub fn is_type_like(name: &str) -> bool {
 /// its answer is kept under, its identifiers, qualifiers first, and the
 /// one server to ask when a fence named its language. Asked of every
 /// server otherwise.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NameAsk {
     pub key: String,
     pub segments: Vec<String>,

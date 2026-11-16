@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 /// Someone who can be mentioned, as the suggestion list shows them: the
 /// login, the name on their profile when they gave one, and the avatar.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MentionableUser {
     pub login: String,
     pub name: Option<String>,

@@ -84,14 +84,16 @@ impl Issue {
 }
 
 /// What GitHub lets the reader do to an issue's state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct IssueRights {
     pub close: bool,
     pub reopen: bool,
 }
 
 /// Why an issue is closed, as GitHub's Close issue menu offers it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum IssueCloseReason {
     /// Done, fixed or answered: GitHub's default.
     #[default]
@@ -266,7 +268,7 @@ impl Subject {
 }
 
 /// The two kinds of subject an item can have.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SubjectKind {
     PullRequest,
     Issue,
@@ -282,7 +284,7 @@ impl SubjectKind {
 }
 
 /// A branch checked out somewhere on this machine.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Checkout {
     pub branch: String,
     /// What the diff is taken against.
@@ -351,7 +353,7 @@ impl Diverged {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     pub id: String,
     /// The repository the item is in, which is what the sidebar sections

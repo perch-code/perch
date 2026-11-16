@@ -4,7 +4,7 @@
 
 /// An SVG file's two sides as markup. `head` is `None` for a deletion,
 /// `base` for an added file or one outside the changed list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PictureSource {
     pub head: Option<String>,
     pub base: Option<String>,

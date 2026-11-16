@@ -10,7 +10,7 @@ use jiff::Timestamp;
 use regex::Regex;
 
 /// The colour of a message's dot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tone {
     Error,
     Warning,
@@ -34,7 +34,7 @@ pub const LOG_LINES: usize = 300;
 /// What a redacted value reads as.
 pub const REDACTED: &str = "‹redacted›";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FeedbackKind {
     Bug,
     Idea,
@@ -66,7 +66,7 @@ impl FeedbackKind {
 }
 
 /// An error or warning the session showed, kept after its toast has gone.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Problem {
     pub at: Timestamp,
     pub text: String,
@@ -85,7 +85,7 @@ pub fn remember_problem(problems: &mut VecDeque<Problem>, problem: Problem) {
 }
 
 /// Where the draft is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Step {
     Editing,
     Collecting,
@@ -96,14 +96,14 @@ pub enum Step {
 }
 
 /// One heading of Diagnostics: its lines, each a `Name: value`.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Section {
     pub heading: String,
     pub lines: Vec<String>,
 }
 
 /// What Perch collected, before redaction.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct FeedbackContext {
     /// `Perch 0.1.0 (a1b2c3d) · macOS 15.6 (24G84) arm64 · Claude Code
     /// 2.1.230 · Codex 0.160.0`, or `· Ubuntu 24.04.1 LTS x86_64 ·` on Linux.
@@ -133,14 +133,14 @@ impl FeedbackContext {
 }
 
 /// The agent's notes, and who wrote them.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Notes {
     pub by: String,
     pub text: String,
 }
 
 /// Whether the viewer hears about an issue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Subscription {
     Subscribed,
     Unsubscribed,
@@ -158,7 +158,7 @@ impl Subscription {
 }
 
 /// An open issue whose title looks like the report's.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimilarIssue {
     pub number: u64,
     pub title: String,
@@ -194,7 +194,7 @@ impl SimilarIssue {
 }
 
 /// What went wrong sending, and whether github.com is the way round it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SendError {
     pub message: String,
     /// The token can't write issues on [`REPO`]: offer Open on GitHub.
@@ -202,7 +202,7 @@ pub struct SendError {
 }
 
 /// What the window knows that the backend doesn't, for Diagnostics.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct WindowFacts {
     /// Each screen's size and backing scale, and the window's size.
     pub display: Vec<String>,
@@ -213,7 +213,7 @@ pub struct WindowFacts {
 }
 
 /// Everything Preview… sends the backend.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrepareRequest {
     /// Which Preview… this is: an answer to an older one is dropped.
     pub attempt: u64,
@@ -230,7 +230,7 @@ pub struct PrepareRequest {
 }
 
 /// What Preview… came back with.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Prepared {
     pub attempt: u64,
     pub context: FeedbackContext,
@@ -242,7 +242,7 @@ pub struct Prepared {
 }
 
 /// What a send did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Sent {
     Filed,
     Commented,
@@ -253,7 +253,7 @@ pub enum Sent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Subscribed {
     /// Subscribed now, or already.
     Yes,

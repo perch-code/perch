@@ -31,7 +31,7 @@ use crate::RunEvent;
 
 /// What a request is about, which decides what the card calls it and
 /// what an "Always" grant for it keys on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalKind {
     /// A connection from a sandboxed command to a host.
     Host,
@@ -44,7 +44,7 @@ pub enum ApprovalKind {
 }
 
 /// One thing the agent wants to do that its sandbox would not let it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalRequest {
     pub kind: ApprovalKind,
     /// The host, the command, the path, or what the tool is about.

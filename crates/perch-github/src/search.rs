@@ -12,7 +12,7 @@ use crate::pulls::UserRef;
 pub const SEARCH_RESULT_CAP: u64 = 1000;
 
 /// One pull request or issue a search found, as a Browse row shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchHit {
     pub kind: SubjectKind,
     pub repo_full_name: String,
@@ -51,7 +51,7 @@ impl SearchHit {
 }
 
 /// One page of a search.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchPage {
     pub hits: Vec<SearchHit>,
     /// Whether a next page has anything on it.

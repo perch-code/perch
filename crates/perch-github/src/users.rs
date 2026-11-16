@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 /// An account, as `GET /users/{login}` gives it. Everything but the login
 /// and the face is the account's own to fill in, and often is not.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct Profile {
     pub login: String,
     #[serde(default)]

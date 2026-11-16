@@ -108,7 +108,7 @@ fn row(page: &Page, action: Action) -> Row {
                 move || enabled.writable(),
                 move |keys| {
                     write.write(Setting::Keybinding {
-                        action: action.id(),
+                        action: action.id().to_string(),
                         keys: Some(keys.map(|k| k.to_config()).into_iter().collect()),
                     })
                 },
@@ -126,7 +126,7 @@ fn row(page: &Page, action: Action) -> Row {
     .reset(
         format!("keybindings.{}", action.id()),
         Setting::Keybinding {
-            action: action.id(),
+            action: action.id().to_string(),
             keys: None,
         },
     )
@@ -147,7 +147,7 @@ mod tests {
     /// `keys` as config.toml writes them here: `super` is Ctrl off macOS.
     fn written_as(keys: &str) -> Setting {
         Setting::Keybinding {
-            action: "new_work",
+            action: "new_work".to_string(),
             keys: Some(vec![Shortcut::parse(keys).unwrap().to_config()]),
         }
     }
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(
             written(&mut commands),
             vec![Setting::Keybinding {
-                action: "new_work",
+                action: "new_work".to_string(),
                 keys: Some(vec![]),
             }]
         );
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(
             written(&mut commands),
             vec![Setting::Keybinding {
-                action: "open",
+                action: "open".to_string(),
                 keys: Some(vec!["super+o".to_string()]),
             }]
         );
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(
             written(&mut commands),
             vec![Setting::Keybinding {
-                action: "new_work",
+                action: "new_work".to_string(),
                 keys: Some(vec![]),
             }]
         );
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(
             written(&mut commands),
             vec![Setting::Keybinding {
-                action: "new_work",
+                action: "new_work".to_string(),
                 keys: None,
             }]
         );

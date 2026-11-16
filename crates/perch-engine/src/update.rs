@@ -54,7 +54,7 @@ const TAR: &str = if cfg!(target_os = "macos") {
 };
 
 /// What the updater has to offer the window.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UpdateStatus {
     /// Nothing newer, or not looked yet.
     Current,
@@ -67,7 +67,7 @@ pub enum UpdateStatus {
 }
 
 /// What a look the reader asked for found, for the window they asked in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Checked {
     /// A newer release is coming down, which can take a while.
     Downloading { version: String },

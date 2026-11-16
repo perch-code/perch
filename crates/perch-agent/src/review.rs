@@ -149,7 +149,7 @@ impl fmt::Display for CliVersion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewCapability {
     pub backend: Backend,
     pub version: Option<CliVersion>,

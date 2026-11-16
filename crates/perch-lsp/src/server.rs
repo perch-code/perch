@@ -5,7 +5,9 @@ use std::time::Duration;
 
 /// A language server Perch knows how to run. A worktree runs at most one
 /// of each kind, rooted at the worktree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum ServerKind {
     RustAnalyzer,
     Gopls,
@@ -153,7 +155,7 @@ pub struct ServerSpec {
 }
 
 /// What the status line shows about a server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     /// No server for this language, and what it would take to have one;
     /// the editor works without it.
@@ -256,7 +258,7 @@ impl Env {
 }
 
 /// What a server needs that isn't there, so Perch can't install it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Need {
     Rustup,
     Go,
@@ -266,7 +268,7 @@ pub enum Need {
 
 /// A server that wasn't found: what's missing, and how to install it when
 /// Perch can.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Missing {
     pub kind: ServerKind,
     /// What has to be installed first, by the user. No `install` then.
@@ -312,7 +314,7 @@ fn short_toolchain(toolchain: &str) -> &str {
 
 /// How Perch installs a missing server. A command runs as it is shown,
 /// word for word.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Install {
     /// Run `program` with `args` and `env`. With `into`, the command
     /// writes to `into`'s `.partial` sibling, which is renamed to `into`

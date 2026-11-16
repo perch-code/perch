@@ -26,6 +26,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
 
 pub use avatar::APP_AVATAR_CORNER;
+pub use connections::{Connection, Engine, Lifetime};
 pub use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 pub use settings::{CheckConfig, SettingsFile};
@@ -34,6 +35,8 @@ pub use windows::{EventSender, WindowId, NO_WINDOW};
 
 mod avatar;
 mod check_watch;
+pub(crate) mod client;
+mod connections;
 mod feedback;
 mod issue_draft;
 mod kept_servers;
@@ -63,7 +66,7 @@ pub const UI_META_KEYS: [&str; 7] = [
     "viewer.avatar_url",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Command {
     Refresh,
     /// Open an item's view: the review for a pull request or a branch, the
@@ -167,13 +170,15 @@ pub enum Command {
     /// the backend's own clock.
     WakeSnoozed,
     /// A new window, with a view of its own: nothing open, and its own
-    /// navigation sequence.
-    WindowOpened {
-        navigation_requests: Arc<NavigationRequests>,
-        scope_requests: Arc<ScopeRequests>,
-    },
+    /// navigation sequence, which the handle numbers.
+    WindowOpened,
     /// The window is gone, and its open item with it.
     WindowClosed,
+    /// Send this client what every window starts from: the repositories,
+    /// items, notifications, settings, runs and usage. A client asks once
+    /// it is let in, and again after it reconnects. The answer goes to the
+    /// asking client alone.
+    Resync,
     /// Ignore future notifications for the thread, then remove this one
     /// from GitHub's inbox.
     UnsubscribeNotification {
@@ -345,7 +350,6 @@ pub enum Command {
     SetScope {
         item_id: String,
         scope: perch_git::Scope,
-        request_id: u64,
         navigation_id: u64,
     },
     /// Fetch again what the open item shows from GitHub, as the reader
@@ -364,7 +368,6 @@ pub enum Command {
     RefreshScope {
         item_id: String,
         navigation_id: u64,
-        scope_revision: u64,
     },
     /// Check or uncheck a file's content as viewed.
     SetViewed {
@@ -509,10 +512,12 @@ pub enum Command {
 
     /// Remove Worktree: an owned checkout's directory goes, refused when
     /// there is uncommitted work in it. The row moves to Recent. Hide, on a
-    /// root's checkout: only the row moves.
+    /// root's checkout: only the row moves. `fence_id` is a navigation
+    /// id after every one the window has sent: a navigation to the item
+    /// sent before it waits on the archive, one sent after it does not.
     ArchiveItem {
         id: String,
-        suspended_navigation: SuspendedNavigation,
+        fence_id: u64,
     },
     /// Back to Active, and an owned checkout back on disk.
     RestoreItem {
@@ -659,6 +664,7 @@ pub enum Command {
         attempt_id: String,
     },
     OpenReviewSnapshot {
+        item_id: String,
         group_id: String,
         request_id: u64,
     },
@@ -756,8 +762,8 @@ pub enum Command {
     /// Make `original`'s lines of `path`, in the open item's worktree,
     /// read `lines`: a suggestion on a worktree GitHub has no pull request
     /// for, taken as it is sent. `token` is `PostIssueComment`'s; the
-    /// checkout is looked at after, under the navigation and scope it was
-    /// sent in.
+    /// checkout is looked at after, under the navigation it was sent in
+    /// and the scope it found.
     ApplySuggestion {
         item_id: String,
         token: u64,
@@ -765,7 +771,6 @@ pub enum Command {
         original: crate::review::suggestion::Original,
         lines: Vec<String>,
         navigation_id: u64,
-        scope_revision: Option<u64>,
     },
     /// Commit a suggestion on the open pull request's head branch, as
     /// Apply suggestion does on github.com, and resolve its thread.
@@ -860,7 +865,7 @@ pub enum Command {
 }
 
 /// How the reader answered a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalAnswer {
     Once,
     Always,
@@ -868,7 +873,7 @@ pub enum ApprovalAnswer {
 }
 
 /// A request as its card shows it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalView {
     pub run_id: String,
     pub id: String,
@@ -900,7 +905,7 @@ enum Settle {
 }
 
 /// What the new-work view asks for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewWork {
     /// The `[[repo]]` entry's identity.
     pub repo: String,
@@ -914,7 +919,7 @@ pub struct NewWork {
 }
 
 /// The message the new-work view was given, and who it goes to.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FirstRun {
     pub text: String,
     pub backend: perch_agent::Backend,
@@ -924,7 +929,7 @@ pub struct FirstRun {
 
 /// What deleting an item would lose that git keeps no copy of, for the
 /// reader to see before it goes.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LossPrompt {
     pub item_id: String,
     pub branch: String,
@@ -940,7 +945,7 @@ pub const SCOPE_META_KEY: &str = "review.scope";
 /// What the scope menu's Last run shows: the newest finished Work run on
 /// the item that changed something. A run that changed nothing is passed
 /// over for the one before it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LastRun {
     /// No Work run on the item has finished.
     #[default]
@@ -973,7 +978,7 @@ impl LastRun {
 /// Who decides a Work run's requests: config.toml's level for each
 /// repository, and the reader's pick for an item, which stands over it
 /// until Perch quits.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkApprovals {
     pub config: perch_github::ApprovalsTable,
     pub items: std::collections::HashMap<String, perch_github::Approvals>,
@@ -989,7 +994,7 @@ impl WorkApprovals {
 }
 
 /// What came of asking GitHub who a login is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileAnswer {
     Found(perch_github::Profile),
     /// GitHub has no account by the name.
@@ -998,10 +1003,11 @@ pub enum ProfileAnswer {
     Failed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     Avatar {
         url: String,
+        #[serde(with = "crate::wire::bytes")]
         bytes: Vec<u8>,
     },
     /// What GitHub said of who a login is.
@@ -1843,7 +1849,7 @@ impl Event {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     /// No usable token. The app shows setup instructions instead of a list.
     NoToken {
@@ -1863,16 +1869,20 @@ pub enum Status {
     },
 }
 
-/// Handle the UI keeps, one per window. Dropping the last ends the worker.
+/// Handle the UI keeps, one per window. It holds nothing the engine
+/// reads: what it numbers, it sends. Dropping the last closes its
+/// connection to the engine, and an in-process engine with it.
 pub struct Backend {
     commands: CommandSender,
     window: WindowId,
     /// The last window handed out, shared by every handle.
     windows: Arc<std::sync::atomic::AtomicU64>,
-    navigation_requests: Arc<NavigationRequests>,
-    scope_requests: Arc<ScopeRequests>,
-    merge_attempts: Arc<MergeAttempts>,
-    pull_request_review_attempts: Arc<PullRequestReviewAttempts>,
+    /// Every window's latest navigation, shared by the handles and the
+    /// connection's events on their way to the window.
+    navigations: Arc<client::Navigations>,
+    /// The last merge or review attempt handed out, shared by every
+    /// handle.
+    attempts: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1896,18 +1906,20 @@ enum NavigationTarget {
 /// A same-item navigation held aside while Archive validates the checkout.
 /// If Archive is refused, the exact request is restored so the UI and backend
 /// keep the same correlation id.
-#[doc(hidden)]
 #[derive(Debug, Clone)]
-pub struct SuspendedNavigation {
+struct SuspendedNavigation {
     fence_id: u64,
     item_id: String,
     previous: Option<NavigationRequest>,
 }
 
-/// The latest view navigation is registered synchronously by the UI handle,
-/// before its command reaches the async worker. Current opens, close, Agents
-/// owner jumps, and historical snapshots all share this one sequence so task
-/// scheduling cannot reverse the reader's click order.
+/// A window's latest view navigation, as the engine has it. The handle
+/// numbers each navigation and the command carries the id; the command
+/// loop registers it here as the command arrives, before any task it
+/// starts, so task scheduling cannot reverse the reader's click order.
+/// Current opens, close, Agents owner jumps, and historical snapshots all
+/// share this one sequence. A result that beats a newer command to the
+/// loop still reaches the window, which drops it by id.
 #[derive(Debug, Default)]
 pub struct NavigationRequests {
     next_id: std::sync::atomic::AtomicU64,
@@ -1923,49 +1935,81 @@ struct ArchiveFence {
 }
 
 impl NavigationRequests {
-    /// A window's sequence, in a range of its own, so that no two windows
-    /// ever wait on the same id.
-    fn for_window(window: WindowId) -> Self {
-        Self {
-            next_id: std::sync::atomic::AtomicU64::new(window << 40),
-            ..Self::default()
-        }
+    /// The next id after every one this window has seen.
+    fn next_id(&self) -> u64 {
+        self.next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1)
     }
 
+    /// Keep the engine's own ids, a test's or a closing window's, after
+    /// the handle's.
+    fn saw(&self, id: u64) {
+        self.next_id
+            .fetch_max(id, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
     fn begin_current(&self) -> u64 {
-        self.begin_target(NavigationTarget::Current)
+        self.begin_current_as(self.next_id())
     }
 
+    #[cfg(test)]
     fn begin_item(&self, item_id: &str) -> u64 {
-        self.begin_target(NavigationTarget::Item(item_id.to_string()))
+        self.begin_item_as(self.next_id(), item_id)
     }
 
     fn begin_closed(&self) -> u64 {
-        self.begin_target(NavigationTarget::Closed)
+        self.begin_closed_as(self.next_id())
     }
 
+    #[cfg(test)]
     fn begin_group(&self, item_id: &str, group_id: &str) -> u64 {
-        self.begin_historical_target(NavigationTarget::Group {
-            item_id: item_id.to_string(),
-            group_id: group_id.to_string(),
-        })
+        self.begin_group_as(self.next_id(), item_id, group_id)
     }
 
+    #[cfg(test)]
     fn begin_attempt(&self, item_id: &str, attempt_id: &str) -> u64 {
-        self.begin_historical_target(NavigationTarget::ReviewAttempt {
-            item_id: item_id.to_string(),
-            attempt_id: attempt_id.to_string(),
-        })
+        self.begin_attempt_as(self.next_id(), item_id, attempt_id)
     }
 
-    fn begin_target(&self, target: NavigationTarget) -> u64 {
+    fn begin_current_as(&self, id: u64) -> u64 {
+        self.begin_target(id, NavigationTarget::Current)
+    }
+
+    fn begin_item_as(&self, id: u64, item_id: &str) -> u64 {
+        self.begin_target(id, NavigationTarget::Item(item_id.to_string()))
+    }
+
+    fn begin_closed_as(&self, id: u64) -> u64 {
+        self.begin_target(id, NavigationTarget::Closed)
+    }
+
+    fn begin_group_as(&self, id: u64, item_id: &str, group_id: &str) -> u64 {
+        self.begin_historical_target(
+            id,
+            NavigationTarget::Group {
+                item_id: item_id.to_string(),
+                group_id: group_id.to_string(),
+            },
+        )
+    }
+
+    fn begin_attempt_as(&self, id: u64, item_id: &str, attempt_id: &str) -> u64 {
+        self.begin_historical_target(
+            id,
+            NavigationTarget::ReviewAttempt {
+                item_id: item_id.to_string(),
+                attempt_id: attempt_id.to_string(),
+            },
+        )
+    }
+
+    fn begin_target(&self, id: u64, target: NavigationTarget) -> u64 {
         let Ok(mut latest) = self.latest.lock() else {
             return 0;
         };
-        let id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
+        self.saw(id);
         *latest = Some(NavigationRequest {
             id,
             target,
@@ -1975,7 +2019,7 @@ impl NavigationRequests {
         id
     }
 
-    fn begin_historical_target(&self, target: NavigationTarget) -> u64 {
+    fn begin_historical_target(&self, id: u64, target: NavigationTarget) -> u64 {
         let Ok(mut latest) = self.latest.lock() else {
             return 0;
         };
@@ -1986,10 +2030,7 @@ impl NavigationRequests {
                 Some(Box::new(request.clone()))
             }
         });
-        let id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
+        self.saw(id);
         *latest = Some(NavigationRequest {
             id,
             target,
@@ -2099,11 +2140,13 @@ impl NavigationRequests {
         true
     }
 
+    #[cfg(test)]
     fn suspend_item(&self, item_id: &str) -> SuspendedNavigation {
-        let fence_id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
+        self.suspend_item_as(self.next_id(), item_id)
+    }
+
+    fn suspend_item_as(&self, fence_id: u64, item_id: &str) -> SuspendedNavigation {
+        self.saw(fence_id);
         let mut fences = self.archive_fences.lock().ok();
         if let Some(fences) = fences.as_mut() {
             fences.insert(
@@ -2709,27 +2752,26 @@ impl Drop for DiscussionHold<'_> {
     }
 }
 
-/// Merge attempts are registered synchronously by the UI handle. Keeping the
-/// in-flight item here both assigns an ordering identity and suppresses a
-/// second REST mutation while the first is unresolved.
+/// Merge attempts are numbered by the handle and registered here as the
+/// command arrives. Keeping the in-flight item here suppresses a second
+/// REST mutation while the first is unresolved, from any window or client.
 #[derive(Debug, Default)]
 struct MergeAttempts {
-    next_id: std::sync::atomic::AtomicU64,
     in_flight: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl MergeAttempts {
-    fn begin(&self, item_id: &str) -> Option<u64> {
-        let mut in_flight = self.in_flight.lock().ok()?;
+    /// False when one is in flight for the item already. A refused
+    /// attempt never finishes: another client's may share its id.
+    fn begin(&self, item_id: &str, attempt_id: u64) -> bool {
+        let Ok(mut in_flight) = self.in_flight.lock() else {
+            return false;
+        };
         if in_flight.contains_key(item_id) {
-            return None;
+            return false;
         }
-        let attempt_id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
         in_flight.insert(item_id.to_string(), attempt_id);
-        Some(attempt_id)
+        true
     }
 
     fn finish(&self, item_id: &str, attempt_id: u64) {
@@ -2743,25 +2785,24 @@ impl MergeAttempts {
 
 /// Review submissions are remote mutations, so a double click must not make
 /// two reviews. The attempt identity also lets the UI ignore a late result
-/// after a newer checkout or submission has taken its place.
+/// after a newer checkout or submission has taken its place. Numbered by
+/// the handle, registered here as the command arrives.
 #[derive(Debug, Default)]
 struct PullRequestReviewAttempts {
-    next_id: std::sync::atomic::AtomicU64,
     in_flight: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl PullRequestReviewAttempts {
-    fn begin(&self, item_id: &str) -> Option<u64> {
-        let mut in_flight = self.in_flight.lock().ok()?;
+    /// As `MergeAttempts::begin`.
+    fn begin(&self, item_id: &str, attempt_id: u64) -> bool {
+        let Ok(mut in_flight) = self.in_flight.lock() else {
+            return false;
+        };
         if in_flight.contains_key(item_id) {
-            return None;
+            return false;
         }
-        let attempt_id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
         in_flight.insert(item_id.to_string(), attempt_id);
-        Some(attempt_id)
+        true
     }
 
     fn finish(&self, item_id: &str, attempt_id: u64) {
@@ -2780,27 +2821,34 @@ impl Backend {
             .windows
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(1);
-        let navigation_requests = Arc::new(NavigationRequests::for_window(window));
-        let scope_requests = Arc::<ScopeRequests>::default();
         let commands = self.commands.for_window(window);
-        let _ = commands.send(Command::WindowOpened {
-            navigation_requests: navigation_requests.clone(),
-            scope_requests: scope_requests.clone(),
-        });
+        let _ = commands.send(Command::WindowOpened);
         Backend {
             commands,
             window,
             windows: self.windows.clone(),
-            navigation_requests,
-            scope_requests,
-            merge_attempts: self.merge_attempts.clone(),
-            pull_request_review_attempts: self.pull_request_review_attempts.clone(),
+            navigations: self.navigations.clone(),
+            attempts: self.attempts.clone(),
         }
     }
 
     /// The window is closing: its view goes, and its language server.
     pub fn close_window(&self) {
         let _ = self.commands.send(Command::WindowClosed);
+        self.navigations.forget(self.window);
+    }
+
+    /// Ask for what every window starts from, as the engine sent it at
+    /// startup. A client that connects to a running engine asks once it
+    /// is let in.
+    pub fn resync(&self) {
+        let _ = self.commands.for_window(NO_WINDOW).send(Command::Resync);
+    }
+
+    fn next_attempt(&self) -> u64 {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1)
     }
 
     pub fn window(&self) -> WindowId {
@@ -2824,8 +2872,7 @@ impl Backend {
     /// none yet. The launch hooks and the review header's "Closes #N" chip
     /// come through here; a sidebar row has an id and uses `open_item`.
     pub fn open_subject(&self, repo_full_name: &str, kind: ItemKind, number: u64) -> u64 {
-        let navigation_id = self.navigation_requests.begin_current();
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::OpenSubject {
             repo_full_name: repo_full_name.to_string(),
             kind,
@@ -2838,8 +2885,7 @@ impl Backend {
     /// Open… : open what the reader named, asking GitHub first whether
     /// it is a pull request or an issue when `kind` is not known.
     pub fn open_reference(&self, repo_full_name: &str, number: u64, kind: Option<ItemKind>) -> u64 {
-        let navigation_id = self.navigation_requests.begin_current();
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::OpenReference {
             repo_full_name: repo_full_name.to_string(),
             number,
@@ -2863,10 +2909,8 @@ impl Backend {
             thread.subject.kind,
             SubjectKind::PullRequest | SubjectKind::Issue
         ) && thread.number_hint().is_some();
-        let navigation_id = opens_inside.then(|| self.navigation_requests.begin_current());
-        if navigation_id.is_some() {
-            self.scope_requests.clear();
-        }
+        let navigation_id = opens_inside.then(|| self.navigations.begin(self.window));
+        if navigation_id.is_some() {}
         let _ = self.commands.send(Command::OpenNotification {
             thread: Box::new(thread.clone()),
             navigation_id,
@@ -2947,25 +2991,17 @@ impl Backend {
         bypass_requirements: bool,
         message: Option<CommitMessage>,
     ) {
-        let Some(attempt_id) = self.merge_attempts.begin(item_id) else {
-            return;
-        };
-        if self
-            .commands
-            .send(Command::MergePullRequest {
-                attempt_id,
-                item_id: item_id.to_string(),
-                repo_full_name: repo_full_name.to_string(),
-                number,
-                expected_head_sha: expected_head_sha.to_string(),
-                method,
-                bypass_requirements,
-                message,
-            })
-            .is_err()
-        {
-            self.merge_attempts.finish(item_id, attempt_id);
-        }
+        let attempt_id = self.next_attempt();
+        let _ = self.commands.send(Command::MergePullRequest {
+            attempt_id,
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            number,
+            expected_head_sha: expected_head_sha.to_string(),
+            method,
+            bypass_requirements,
+            message,
+        });
     }
 
     pub fn pull_request_readiness(&self, item_id: &str, base: Option<&str>) {
@@ -3135,7 +3171,7 @@ impl Backend {
         body: &str,
         event: PullReviewEvent,
     ) -> Option<u64> {
-        let attempt_id = self.pull_request_review_attempts.begin(item_id)?;
+        let attempt_id = self.next_attempt();
         if self
             .commands
             .send(Command::SubmitPullRequestReview {
@@ -3149,8 +3185,6 @@ impl Backend {
             })
             .is_err()
         {
-            self.pull_request_review_attempts
-                .finish(item_id, attempt_id);
             return None;
         }
         Some(attempt_id)
@@ -3252,8 +3286,7 @@ impl Backend {
     }
 
     pub fn open_item(&self, id: &str) -> u64 {
-        let navigation_id = self.navigation_requests.begin_item(id);
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::OpenItem {
             id: id.to_string(),
             navigation_id,
@@ -3262,8 +3295,7 @@ impl Backend {
     }
 
     pub fn view_agent_owner(&self, id: &str) -> u64 {
-        let navigation_id = self.navigation_requests.begin_item(id);
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::ViewAgentOwner {
             id: id.to_string(),
             navigation_id,
@@ -3272,8 +3304,7 @@ impl Backend {
     }
 
     pub fn view_review_attempt_owner(&self, item_id: &str, attempt_id: &str) -> u64 {
-        let request_id = self.navigation_requests.begin_attempt(item_id, attempt_id);
-        self.scope_requests.clear();
+        let request_id = self.navigations.begin_historical(self.window);
         let _ = self.commands.send(Command::ViewReviewAttemptOwner {
             item_id: item_id.to_string(),
             attempt_id: attempt_id.to_string(),
@@ -3283,7 +3314,7 @@ impl Backend {
     }
 
     pub fn open_file(&self, path: &str) {
-        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let navigation_id = self.navigations.current(self.window).unwrap_or(0);
         let _ = self.commands.send(Command::OpenFile {
             path: path.to_string(),
             navigation_id,
@@ -3291,7 +3322,7 @@ impl Backend {
     }
 
     pub fn open_outside_file(&self, path: &str) {
-        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let navigation_id = self.navigations.current(self.window).unwrap_or(0);
         let _ = self.commands.send(Command::OpenOutsideFile {
             path: path.to_string(),
             navigation_id,
@@ -3299,25 +3330,22 @@ impl Backend {
     }
 
     pub fn set_scope(&self, item_id: &str, scope: perch_git::Scope) {
-        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
-        let request_id = self.scope_requests.begin(item_id);
+        let navigation_id = self.navigations.current(self.window).unwrap_or(0);
         let _ = self.commands.send(Command::SetScope {
             item_id: item_id.to_string(),
             scope,
-            request_id,
             navigation_id,
         });
     }
 
+    /// Look at the checkout again. Skipped by the engine while a scope
+    /// change is still reading.
     pub fn refresh_scope(&self, item_id: &str) {
-        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
-        if let Some(scope_revision) = self.scope_requests.stable_revision() {
-            let _ = self.commands.send(Command::RefreshScope {
-                item_id: item_id.to_string(),
-                navigation_id,
-                scope_revision,
-            });
-        }
+        let navigation_id = self.navigations.current(self.window).unwrap_or(0);
+        let _ = self.commands.send(Command::RefreshScope {
+            item_id: item_id.to_string(),
+            navigation_id,
+        });
     }
 
     pub fn set_viewed(&self, item_id: &str, path: &str, blob: &str, viewed: bool) {
@@ -3428,33 +3456,28 @@ impl Backend {
     }
 
     pub fn close_review(&self) -> u64 {
-        let navigation_id = self.navigation_requests.begin_closed();
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::CloseReview { navigation_id });
         navigation_id
     }
 
     pub fn archive_item(&self, id: &str) -> u64 {
-        let suspended_navigation = self.navigation_requests.suspend_item(id);
-        self.scope_requests.clear_item(id);
-        let fence_id = suspended_navigation.fence_id;
+        let fence_id = self.navigations.archive_fence(self.window, id);
         if self
             .commands
             .send(Command::ArchiveItem {
                 id: id.to_string(),
-                suspended_navigation: suspended_navigation.clone(),
+                fence_id,
             })
             .is_err()
         {
-            self.navigation_requests
-                .restore_suspended(&suspended_navigation);
+            self.navigations.drop_archive_fence(self.window, id);
         }
         fence_id
     }
 
     pub fn restore_item(&self, id: &str) -> u64 {
-        let navigation_id = self.navigation_requests.begin_item(id);
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::RestoreItem {
             id: id.to_string(),
             navigation_id,
@@ -3469,7 +3492,6 @@ impl Backend {
     }
 
     pub fn delete_item(&self, id: &str, accept_loss: bool) {
-        self.scope_requests.clear_item(id);
         let _ = self.commands.send(Command::DeleteItem {
             id: id.to_string(),
             accept_loss,
@@ -3493,8 +3515,7 @@ impl Backend {
     /// Start work, with the reader's own words for the agent when they
     /// were written in an issue's composer set to Work.
     pub fn start_work_with(&self, item_id: &str, instructions: Option<String>) -> u64 {
-        let navigation_id = self.navigation_requests.begin_item(item_id);
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::StartWork {
             item_id: item_id.to_string(),
             navigation_id,
@@ -3506,8 +3527,7 @@ impl Backend {
     /// Start work from a notification's pull request or issue, which may
     /// have no item yet.
     pub fn start_work_on_subject(&self, repo_full_name: &str, kind: ItemKind, number: u64) -> u64 {
-        let navigation_id = self.navigation_requests.begin_current();
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::StartWorkOnSubject {
             repo_full_name: repo_full_name.to_string(),
             kind,
@@ -3571,8 +3591,7 @@ impl Backend {
     }
 
     pub fn create_worktree(&self, work: NewWork) -> u64 {
-        let navigation_id = self.navigation_requests.begin_current();
-        self.scope_requests.clear();
+        let navigation_id = self.navigations.begin(self.window);
         let _ = self.commands.send(Command::CreateWorktree {
             work,
             navigation_id,
@@ -3680,9 +3699,9 @@ impl Backend {
     }
 
     pub fn open_review_snapshot(&self, item_id: &str, group_id: &str) -> u64 {
-        let request_id = self.navigation_requests.begin_group(item_id, group_id);
-        self.scope_requests.clear();
+        let request_id = self.navigations.begin_historical(self.window);
         let _ = self.commands.send(Command::OpenReviewSnapshot {
+            item_id: item_id.to_string(),
             group_id: group_id.to_string(),
             request_id,
         });
@@ -3857,8 +3876,7 @@ impl Backend {
             path: path.to_string(),
             original,
             lines,
-            navigation_id: self.navigation_requests.current_id().unwrap_or(0),
-            scope_revision: self.scope_requests.stable_revision(),
+            navigation_id: self.navigations.current(self.window).unwrap_or(0),
         });
         token
     }
@@ -3952,7 +3970,7 @@ impl Backend {
 
     /// Start the open item's server of `kind` again.
     pub fn start_language_server_here(&self, kind: perch_lsp::ServerKind) {
-        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let navigation_id = self.navigations.current(self.window).unwrap_or(0);
         let _ = self.commands.send(Command::StartLanguageServer {
             navigation_id,
             kind,
@@ -3962,7 +3980,7 @@ impl Backend {
     /// Trust `item_id`'s code, and `everywhere` on all of its repository,
     /// and start what was held for it.
     pub fn trust_language_servers(&self, item_id: &str, everywhere: Vec<perch_lsp::ServerKind>) {
-        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let navigation_id = self.navigations.current(self.window).unwrap_or(0);
         let _ = self.commands.send(Command::TrustLanguageServers {
             navigation_id,
             item_id: item_id.to_string(),
@@ -4066,12 +4084,59 @@ impl Backend {
             commands: CommandSender::Plain(commands),
             window: 1,
             windows: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            navigation_requests: Arc::default(),
-            scope_requests: Arc::default(),
-            merge_attempts: Arc::default(),
-            pull_request_review_attempts: Arc::default(),
+            navigations: Arc::default(),
+            attempts: Arc::default(),
         };
         (backend, received)
+    }
+}
+
+impl Backend {
+    /// A handle on its client's `NO_WINDOW`, whose commands go to `send`.
+    /// Events on their way to the client's windows go past `navigations`.
+    fn client(
+        navigations: Arc<client::Navigations>,
+        send: impl Fn(WindowId, Command) -> Result<(), ()> + Send + Sync + 'static,
+    ) -> Backend {
+        Backend {
+            commands: CommandSender::routed(send),
+            window: NO_WINDOW,
+            windows: Arc::default(),
+            navigations,
+            attempts: Arc::default(),
+        }
+    }
+
+    /// A client of `engine` in this process: commands and events cross
+    /// over channels, as they are, with no wire between. The last handle
+    /// dropped closes the connection.
+    pub fn in_process(engine: &Engine) -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
+        let (events, received) = std::sync::mpsc::channel();
+        let navigations = Arc::<client::Navigations>::default();
+        let connection = engine.connect({
+            let navigations = navigations.clone();
+            move |window, event| {
+                navigations.observe(window, &event);
+                let _ = events.send((window, event));
+            }
+        });
+        let backend = Self::client(navigations, move |window, command| {
+            connection.send(window, command)
+        });
+        (backend, received)
+    }
+
+    /// A client over a wire: what the handles send goes to `to`, and
+    /// what comes back goes past the returned `Navigations` before the
+    /// windows hear it.
+    pub(crate) fn over_wire(
+        to: tokio::sync::mpsc::UnboundedSender<(WindowId, Command)>,
+    ) -> (Backend, Arc<client::Navigations>) {
+        let navigations = Arc::<client::Navigations>::default();
+        let backend = Self::client(navigations.clone(), move |window, command| {
+            to.send((window, command)).map_err(drop)
+        });
+        (backend, navigations)
     }
 }
 
@@ -4129,75 +4194,98 @@ async fn detect_review_capabilities(
     vec![claude, codex, gemini]
 }
 
-/// Start the worker thread. Returns a handle windows are opened from, and
-/// the events, each with the window whose view sent it. `check` looks at
-/// every read of config.toml for what the app knows and the engine does
-/// not (see [`CheckConfig`]).
+/// Start the engine in this process, with the app as its one client.
+/// Returns a handle windows are opened from, and the events, each with the
+/// window whose view sent it. `check` looks at every read of config.toml
+/// for what the app knows and the engine does not (see [`CheckConfig`]).
+/// The engine lives while the app's connection does: dropping the last
+/// handle shuts it down as quitting always has.
 pub fn spawn(check: CheckConfig) -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (evt_tx, evt_rx) = std::sync::mpsc::channel();
-    let evt_tx = EventSender::routed(evt_tx);
-    let navigation_requests = Arc::<NavigationRequests>::default();
-    let worker_navigation_requests = navigation_requests.clone();
-    let scope_requests = Arc::<ScopeRequests>::default();
-    let worker_scope_requests = scope_requests.clone();
-    let merge_attempts = Arc::<MergeAttempts>::default();
-    let worker_merge_attempts = merge_attempts.clone();
-    let pull_request_review_attempts = Arc::<PullRequestReviewAttempts>::default();
-    let worker_pull_request_review_attempts = pull_request_review_attempts.clone();
-
-    std::thread::Builder::new()
-        .name("perch-backend".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4)
-                .enable_all()
-                .build()
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = evt_tx.send(Event::Status(Status::Error {
-                        message: format!("could not start the network runtime: {e}"),
-                    }));
-                    return;
-                }
-            };
-            runtime.block_on(run(
-                cmd_rx,
-                evt_tx,
-                worker_navigation_requests,
-                worker_scope_requests,
-                worker_merge_attempts,
-                worker_pull_request_review_attempts,
-                check,
+    match Engine::build(Lifetime::WhileConnected) {
+        Ok(unstarted) => {
+            // Connected before the engine runs, so the client hears what
+            // it says at startup.
+            let client = Backend::in_process(unstarted.engine());
+            unstarted.start(check);
+            client
+        }
+        Err(e) => {
+            let (events, received) = std::sync::mpsc::channel();
+            let _ = events.send((
+                NO_WINDOW,
+                Event::Status(Status::Error {
+                    message: format!("could not start the network runtime: {e}"),
+                }),
             ));
-        })
-        .expect("spawn backend thread");
+            let (backend, _) = Backend::over_wire(tokio::sync::mpsc::unbounded_channel().0);
+            (backend, received)
+        }
+    }
+}
 
-    (
-        Backend {
-            commands: CommandSender::Routed {
-                tx: cmd_tx,
-                window: NO_WINDOW,
-            },
-            window: NO_WINDOW,
-            windows: Arc::default(),
-            navigation_requests,
-            scope_requests,
-            merge_attempts,
-            pull_request_review_attempts,
-        },
-        evt_rx,
-    )
+/// An engine with its runtime made and its connections open, not yet
+/// running: what connects now hears everything it says at startup.
+pub struct Unstarted {
+    engine: Engine,
+    runtime: tokio::runtime::Runtime,
+    commands: UnboundedReceiver<connections::Inbound>,
+}
+
+impl Engine {
+    /// The engine's runtime and its connection layer. `start` runs it.
+    pub fn build(lifetime: Lifetime) -> std::io::Result<Unstarted> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()?;
+        let (tx, commands) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Engine {
+            hub: Arc::new(connections::Hub::new(tx, lifetime)),
+            runtime: runtime.handle().clone(),
+        };
+        Ok(Unstarted {
+            engine,
+            runtime,
+            commands,
+        })
+    }
+
+    /// Build and start an engine at once. What it says at startup reaches
+    /// only those connected by then; a client that comes later asks with
+    /// `Command::Resync`.
+    pub fn start(check: CheckConfig, lifetime: Lifetime) -> std::io::Result<Engine> {
+        Ok(Self::build(lifetime)?.start(check))
+    }
+}
+
+impl Unstarted {
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// Run the engine on a thread of its own, until it shuts down.
+    pub fn start(self, check: CheckConfig) -> Engine {
+        let Unstarted {
+            engine,
+            runtime,
+            commands,
+        } = self;
+        let hub = engine.hub.clone();
+        let events = EventSender::to(move |window, event| {
+            hub.route(window, event);
+            Ok(())
+        });
+        std::thread::Builder::new()
+            .name("perch-backend".into())
+            .spawn(move || runtime.block_on(run(commands, events, check)))
+            .expect("spawn backend thread");
+        engine
+    }
 }
 
 async fn run(
-    mut commands: UnboundedReceiver<(WindowId, Command)>,
+    commands: UnboundedReceiver<connections::Inbound>,
     events: EventSender<Event>,
-    navigation_requests: Arc<NavigationRequests>,
-    scope_requests: Arc<ScopeRequests>,
-    merge_attempts: Arc<MergeAttempts>,
-    pull_request_review_attempts: Arc<PullRequestReviewAttempts>,
     check: CheckConfig,
 ) {
     tracing::info!("backend started");
@@ -4269,19 +4357,6 @@ async fn run(
     for warning in &config.warnings {
         let _ = events.send(Event::Notice(warning.clone()));
     }
-    let _ = events.send(Event::Repos(config.declared_repos()));
-    let _ = events.send(Event::WorkApprovals(WorkApprovals {
-        config: config.approvals_table(),
-        items: Default::default(),
-    }));
-    let _ = events.send(Event::WorkDefaults(config.work.clone()));
-    let _ = events.send(Event::GithubHosts(config.github_hosts()));
-    if let Some(file) = settings_file {
-        let _ = events.send(Event::Settings(file));
-    }
-    send_trusted_servers(&cache, &events);
-    let mut initial_notifications = Vec::new();
-    let mut initial_faces = RowFaces::default();
     if let Some(cache) = cache.as_ref() {
         if let Ok(guard) = cache.lock() {
             match guard.interrupt_active_runs(
@@ -4292,43 +4367,23 @@ async fn run(
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "could not reconcile runs"),
             }
-            initial_faces = send_items(&guard, &events, Event::Items).unwrap_or_default();
-            match guard.load_item_activity() {
-                Ok(activity) => {
-                    let _ = events.send(Event::ItemActivity(activity));
-                }
-                Err(e) => tracing::warn!(error = %e, "could not read item activity"),
-            }
-            match guard.load_threads() {
-                Ok(threads) => {
-                    initial_notifications = threads.clone();
-                    let _ = events.send(Event::Notifications(threads));
-                }
-                Err(e) => tracing::warn!(error = %e, "could not load cached notifications"),
-            }
-            match guard.load_done_threads() {
-                Ok(threads) => {
-                    let _ = events.send(Event::DoneNotifications(threads));
-                }
-                Err(e) => tracing::warn!(error = %e, "could not load Done notifications"),
-            }
-            match guard.load_snoozed_threads() {
-                Ok(threads) => {
-                    let _ = events.send(Event::SnoozedNotifications(threads));
-                }
-                Err(e) => tracing::warn!(error = %e, "could not load snoozed notifications"),
-            }
-            for key in UI_META_KEYS {
-                if let Ok(Some(value)) = guard.meta(key) {
-                    let _ = events.send(Event::Meta {
-                        key: key.to_string(),
-                        value,
-                    });
-                }
-            }
         }
     }
-    send_agent_runs_from_cache(&cache, &events, 50);
+    let Seeded {
+        faces: initial_faces,
+        notifications: initial_notifications,
+    } = send_standing_state(
+        Standing {
+            config: &config,
+            settings: settings_file,
+            approvals: WorkApprovals {
+                config: config.approvals_table(),
+                items: Default::default(),
+            },
+            cache: &cache,
+        },
+        &events,
+    );
 
     // Checkout retirement is local bookkeeping. Finish an archive that was
     // interrupted by a crash before entering the command loop.
@@ -4343,6 +4398,7 @@ async fn run(
     // useful without a token, so only polling and remote actions are gated
     // on a client below.
     let token = resolve_token(&config);
+    let mut startup_status = None;
     let session = match token.as_ref() {
         Some(token) => match GitHub::new(&token.value) {
             Ok(github) => {
@@ -4354,20 +4410,23 @@ async fn run(
                 })
             }
             Err(e) => {
-                let _ = events.send(Event::Status(Status::Error {
+                startup_status = Some(Status::Error {
                     message: format!("could not build the GitHub client: {e}"),
-                }));
+                });
                 None
             }
         },
         None => {
             tracing::warn!("no token resolved");
-            let _ = events.send(Event::Status(Status::NoToken {
+            startup_status = Some(Status::NoToken {
                 detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
-            }));
+            });
             None
         }
     };
+    if let Some(status) = &startup_status {
+        let _ = events.send(Event::Status(status.clone()));
+    }
 
     let avatars = Arc::new(Semaphore::new(AVATAR_CONCURRENCY));
     // The review side of the app. Long operations run as their own tasks so a
@@ -4425,12 +4484,12 @@ async fn run(
         runs: run_manager,
         review_capabilities,
         review_snapshots,
-        navigation_requests,
-        scope_requests,
+        navigation_requests: Arc::default(),
+        scope_requests: Arc::default(),
         status_requests: Arc::default(),
         discussion_requests: Arc::default(),
-        merge_attempts,
-        pull_request_review_attempts,
+        merge_attempts: Arc::default(),
+        pull_request_review_attempts: Arc::default(),
         review_navigation: Arc::new(tokio::sync::Mutex::new(())),
         review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
@@ -4456,6 +4515,7 @@ async fn run(
         window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         window: NO_WINDOW,
         views: Default::default(),
+        status: Arc::new(std::sync::Mutex::new(startup_status)),
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
@@ -4551,6 +4611,12 @@ async fn run(
         });
     }
 
+    command_loop(ctx, commands).await;
+}
+
+/// Run each command as it comes, and the poll and the snooze clock
+/// between, until told to stop.
+async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inbound>) {
     // A refresh happens immediately, then on whatever cadence the server
     // asks for. Other commands do not restart that clock. Without a token
     // the clock still runs, so a `gh auth login` since launch is found
@@ -4581,10 +4647,11 @@ async fn run(
                 }
                 continue;
             }
-            cmd = commands.recv() => match cmd {
-                Some(cmd) => cmd,
-                // The UI is gone.
-                None => {
+            inbound = commands.recv() => match inbound {
+                Some(connections::Inbound::Command(window, command)) => (window, command),
+                // Told to stop: the app quit, or the host's service did.
+                Some(connections::Inbound::Shutdown) | None => {
+                    tracing::info!("backend shutting down");
                     base.runs.shutdown().await;
                     // Deferred archive waiters are detached tasks. Complete
                     // their local work synchronously before this runtime can
@@ -4596,6 +4663,10 @@ async fn run(
         };
         // The command runs in the view of the window that sent it.
         let ctx = base.for_window(window);
+        // What the command fences, it fences now, before anything it
+        // starts and before the next command.
+        let suspended_navigation =
+            register_fences(&ctx.navigation_requests, &ctx.scope_requests, &command);
         let checkout = ctx.slot.clone();
         let language_servers = ctx.language_servers.clone();
 
@@ -4770,13 +4841,19 @@ async fn run(
             Command::WakeSnoozed => {
                 ctx.wake_snoozed_notifications(Timestamp::now());
             }
-            Command::WindowOpened {
-                navigation_requests,
-                scope_requests,
-            } => {
+            Command::WindowOpened => {
                 if let Ok(mut views) = base.views.lock() {
-                    views.push(View::new(window, navigation_requests, scope_requests));
+                    if !views.iter().any(|view| view.window == window) {
+                        views.push(View::new(window));
+                    }
                 }
+            }
+            Command::Resync => {
+                // To the asker alone: the handle sends it from its
+                // client's `NO_WINDOW`, which is that client's home here.
+                let mut asker = base.clone();
+                asker.events = base.events.for_window(window);
+                send_standing(&asker);
             }
             Command::WindowClosed => {
                 if let Ok(mut views) = base.views.lock() {
@@ -4848,6 +4925,12 @@ async fn run(
                 bypass_requirements,
                 message,
             } => {
+                // One merge of an item at a time, from whichever window or
+                // client. The window that asked twice already shows the
+                // first under way.
+                if !ctx.merge_attempts.begin(&item_id, attempt_id) {
+                    continue;
+                }
                 ctx.clear_notice();
                 let _ = ctx.events.send(Event::PullRequestMergeStarted {
                     item_id: item_id.clone(),
@@ -4947,6 +5030,18 @@ async fn run(
                 body,
                 event,
             } => {
+                if !ctx.pull_request_review_attempts.begin(&item_id, attempt_id) {
+                    send_pull_request_review_failure(
+                        &ctx,
+                        attempt_id,
+                        &item_id,
+                        &repo_full_name,
+                        number,
+                        &expected_head_sha,
+                        "A review is already being submitted. Wait for it to finish.",
+                    );
+                    continue;
+                }
                 ctx.clear_notice();
                 let _ = ctx.events.send(Event::PullRequestReviewStarted {
                     item_id: item_id.clone(),
@@ -5110,14 +5205,12 @@ async fn run(
                     view_review_attempt_owner(&ctx, &item_id, &attempt_id, request_id).await;
                 });
             }
-            Command::ArchiveItem {
-                id,
-                suspended_navigation,
-            } => {
+            Command::ArchiveItem { id, .. } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(message) = archive_item(&ctx, &id, Some(&suspended_navigation)).await
+                    if let Err(message) =
+                        archive_item(&ctx, &id, suspended_navigation.as_ref()).await
                     {
                         tracing::warn!(id, %message, "could not archive item");
                         let _ = ctx.events.send(Event::Notice(message));
@@ -5357,6 +5450,7 @@ async fn run(
             Command::OpenReviewSnapshot {
                 group_id,
                 request_id,
+                ..
             } => {
                 let ctx = ctx.clone();
                 tokio::spawn(
@@ -5478,8 +5572,10 @@ async fn run(
                 original,
                 lines,
                 navigation_id,
-                scope_revision,
             } => {
+                // The scope as the suggestion found it: one that changes
+                // before it lands takes the view elsewhere.
+                let scope_revision = ctx.scope_requests.stable_revision();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     let result = apply_suggestion(&ctx, &item_id, &path, &original, &lines).await;
@@ -5611,9 +5707,9 @@ async fn run(
                 path,
                 navigation_id,
             } => {
-                let preparer = preparer.clone();
+                let preparer = ctx.preparer.clone();
                 let checkout = checkout.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 let language_servers = language_servers.clone();
                 let navigation_requests = ctx.navigation_requests.clone();
                 let ctx = ctx.clone();
@@ -5621,7 +5717,7 @@ async fn run(
                     if let Some(shown) = open_file(
                         preparer,
                         checkout.clone(),
-                        events.clone(),
+                        ctx.events.clone(),
                         navigation_requests.clone(),
                         path.clone(),
                         navigation_id,
@@ -5649,14 +5745,14 @@ async fn run(
                 navigation_id,
             } => {
                 let checkout = checkout.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 let language_servers = language_servers.clone();
                 let navigation_requests = ctx.navigation_requests.clone();
                 tokio::spawn(async move {
                     if open_outside_file(
                         checkout.clone(),
                         language_servers.clone(),
-                        events.clone(),
+                        ctx.events.clone(),
                         navigation_requests.clone(),
                         path.clone(),
                         navigation_id,
@@ -5716,7 +5812,7 @@ async fn run(
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 tokio::spawn(async move {
                     let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
@@ -5740,9 +5836,9 @@ async fn run(
             Command::SetScope {
                 item_id,
                 scope,
-                request_id,
                 navigation_id,
             } => {
+                let request_id = ctx.scope_requests.begin(&item_id);
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     set_scope(&ctx, &item_id, scope, request_id, navigation_id).await
@@ -5768,12 +5864,15 @@ async fn run(
             Command::RefreshScope {
                 item_id,
                 navigation_id,
-                scope_revision,
             } => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    refresh_scope(&ctx, &item_id, navigation_id, scope_revision).await
-                });
+                // Not while a scope change is still reading: it reads the
+                // checkout itself.
+                if let Some(scope_revision) = ctx.scope_requests.stable_revision() {
+                    let ctx = ctx.clone();
+                    tokio::spawn(async move {
+                        refresh_scope(&ctx, &item_id, navigation_id, scope_revision).await
+                    });
+                }
             }
             Command::SetViewed {
                 item_id,
@@ -5825,7 +5924,7 @@ async fn run(
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 tokio::spawn(async move {
                     let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
@@ -5858,7 +5957,7 @@ async fn run(
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 tokio::spawn(async move {
                     let Some((client, full)) =
                         resolve(&checkout, &language_servers, &symbol.path).await
@@ -5873,7 +5972,7 @@ async fn run(
             Command::DocumentSymbols { path, text } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 tokio::spawn(async move {
                     let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
@@ -5899,7 +5998,7 @@ async fn run(
             Command::RemovedSymbols { path, text } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 tokio::spawn(async move {
                     let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
@@ -5931,7 +6030,7 @@ async fn run(
             } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
-                let events = events.clone();
+                let events = ctx.events.clone();
                 tokio::spawn(async move {
                     let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
@@ -5983,7 +6082,7 @@ async fn run(
                     *item,
                     checkout.clone(),
                     language_servers.clone(),
-                    events.clone(),
+                    ctx.events.clone(),
                 );
             }
             Command::OutgoingCalls { token, item } => {
@@ -5993,7 +6092,7 @@ async fn run(
                     *item,
                     checkout.clone(),
                     language_servers.clone(),
-                    events.clone(),
+                    ctx.events.clone(),
                 );
             }
             Command::Names { token, names } => {
@@ -6002,7 +6101,7 @@ async fn run(
                     names,
                     checkout.clone(),
                     language_servers.clone(),
-                    events.clone(),
+                    ctx.events.clone(),
                 );
             }
             // The three gotos: a position in, every location out, each
@@ -6023,7 +6122,7 @@ async fn run(
                     base_text,
                     checkout.clone(),
                     language_servers.clone(),
-                    events.clone(),
+                    ctx.events.clone(),
                 );
             }
             Command::TypeDefinition {
@@ -6042,7 +6141,7 @@ async fn run(
                     base_text,
                     checkout.clone(),
                     language_servers.clone(),
-                    events.clone(),
+                    ctx.events.clone(),
                 );
             }
             Command::Implementation {
@@ -6061,7 +6160,7 @@ async fn run(
                     base_text,
                     checkout.clone(),
                     language_servers.clone(),
-                    events.clone(),
+                    ctx.events.clone(),
                 );
             }
             Command::CloseReview { navigation_id } => {
@@ -6090,6 +6189,68 @@ async fn run(
             }
         }
     }
+}
+
+/// Register in the window's engine copy of its fences what `command`
+/// fences, as the handle did in its own when it sent it. The command loop
+/// calls this as each command arrives, so the order the window clicked in
+/// is the order the engine fences in. An archive's suspended navigation
+/// comes back for the archive to settle.
+fn register_fences(
+    navigation: &NavigationRequests,
+    scopes: &ScopeRequests,
+    command: &Command,
+) -> Option<SuspendedNavigation> {
+    match command {
+        Command::OpenSubject { navigation_id, .. }
+        | Command::OpenReference { navigation_id, .. }
+        | Command::StartWorkOnSubject { navigation_id, .. }
+        | Command::CreateWorktree { navigation_id, .. }
+        | Command::OpenNotification {
+            navigation_id: Some(navigation_id),
+            ..
+        } => {
+            navigation.begin_current_as(*navigation_id);
+        }
+        Command::OpenItem { id, navigation_id }
+        | Command::ViewAgentOwner { id, navigation_id }
+        | Command::RestoreItem { id, navigation_id }
+        | Command::StartWork {
+            item_id: id,
+            navigation_id,
+            ..
+        } => {
+            navigation.begin_item_as(*navigation_id, id);
+        }
+        Command::ViewReviewAttemptOwner {
+            item_id,
+            attempt_id,
+            request_id,
+        } => {
+            navigation.begin_attempt_as(*request_id, item_id, attempt_id);
+        }
+        Command::OpenReviewSnapshot {
+            item_id,
+            group_id,
+            request_id,
+        } => {
+            navigation.begin_group_as(*request_id, item_id, group_id);
+        }
+        Command::CloseReview { navigation_id } => {
+            navigation.begin_closed_as(*navigation_id);
+        }
+        Command::ArchiveItem { id, fence_id } => {
+            scopes.clear_item(id);
+            return Some(navigation.suspend_item_as(*fence_id, id));
+        }
+        Command::DeleteItem { id, .. } => {
+            scopes.clear_item(id);
+            return None;
+        }
+        _ => return None,
+    }
+    scopes.clear();
+    None
 }
 
 /// Which of the three gotos to ask.
@@ -6653,6 +6814,8 @@ struct Ctx {
     window: WindowId,
     /// Every window's view.
     views: Views,
+    /// What the status line says now, for a client that connects later.
+    status: Arc<std::sync::Mutex<Option<Status>>>,
 }
 
 /// The GitHub client and the token it was built on.
@@ -6677,6 +6840,19 @@ type TokenResolver = dyn Fn(&Config) -> Option<perch_github::Token> + Send + Syn
 type ClientBuilder = dyn Fn(&str) -> Result<GitHub, perch_github::Error> + Send + Sync;
 
 impl Ctx {
+    /// Say `status` on every client's status line, and keep it for the
+    /// next to connect.
+    fn send_status(&self, status: Status) {
+        if let Ok(mut now) = self.status.lock() {
+            *now = Some(status.clone());
+        }
+        let _ = self.events.send(Event::Status(status));
+    }
+
+    fn status(&self) -> Option<Status> {
+        self.status.lock().ok().and_then(|now| now.clone())
+    }
+
     /// The config as it is now.
     /// Who decides Work requests, config's levels and the reader's picks.
     fn work_approvals(&self) -> WorkApprovals {
@@ -7927,6 +8103,109 @@ impl Ctx {
 struct RowFaces {
     avatars: Vec<String>,
     subjects: Vec<(String, u64, Timestamp)>,
+}
+
+/// What every window starts from, and where to read it.
+struct Standing<'a> {
+    config: &'a Config,
+    settings: Option<SettingsFile>,
+    approvals: WorkApprovals,
+    cache: &'a SharedCache,
+}
+
+/// What `send_standing_state` showed, whose faces are wanted next.
+struct Seeded {
+    faces: RowFaces,
+    notifications: Vec<Thread>,
+}
+
+/// Send what every window starts from: the repositories and settings, the
+/// rows, the inbox, the kept UI settings and the agents' runs. Startup
+/// sends it to everyone; `Command::Resync` sends it to the client that
+/// asks. Each event replaces what the window had.
+fn send_standing_state(standing: Standing, events: &EventSender<Event>) -> Seeded {
+    let Standing {
+        config,
+        settings,
+        approvals,
+        cache,
+    } = standing;
+    let _ = events.send(Event::Repos(config.declared_repos()));
+    let _ = events.send(Event::WorkApprovals(approvals));
+    let _ = events.send(Event::WorkDefaults(config.work.clone()));
+    let _ = events.send(Event::GithubHosts(config.github_hosts()));
+    if let Some(file) = settings {
+        let _ = events.send(Event::Settings(file));
+    }
+    send_trusted_servers(cache, events);
+    let mut seeded = Seeded {
+        faces: RowFaces::default(),
+        notifications: Vec::new(),
+    };
+    if let Some(cache) = cache.as_ref() {
+        if let Ok(guard) = cache.lock() {
+            seeded.faces = send_items(&guard, events, Event::Items).unwrap_or_default();
+            match guard.load_item_activity() {
+                Ok(activity) => {
+                    let _ = events.send(Event::ItemActivity(activity));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not read item activity"),
+            }
+            match guard.load_threads() {
+                Ok(threads) => {
+                    seeded.notifications = threads.clone();
+                    let _ = events.send(Event::Notifications(threads));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not load cached notifications"),
+            }
+            match guard.load_done_threads() {
+                Ok(threads) => {
+                    let _ = events.send(Event::DoneNotifications(threads));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not load Done notifications"),
+            }
+            match guard.load_snoozed_threads() {
+                Ok(threads) => {
+                    let _ = events.send(Event::SnoozedNotifications(threads));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not load snoozed notifications"),
+            }
+            for key in UI_META_KEYS {
+                if let Ok(Some(value)) = guard.meta(key) {
+                    let _ = events.send(Event::Meta {
+                        key: key.to_string(),
+                        value,
+                    });
+                }
+            }
+        }
+    }
+    send_agent_runs_from_cache(cache, events, 50);
+    seeded
+}
+
+/// Everything a client that has just connected needs, to `ctx.events`:
+/// what startup sends, and what startup learns after it, the agents found,
+/// their usage, the last status and the faces.
+fn send_standing(ctx: &Ctx) {
+    let config = ctx.config();
+    let seeded = send_standing_state(
+        Standing {
+            config: &config,
+            settings: ctx.settings.last(),
+            approvals: ctx.work_approvals(),
+            cache: &ctx.cache,
+        },
+        &ctx.events,
+    );
+    let _ = ctx.events.send(Event::AgentConfig(config.agent.clone()));
+    let usage = perch_agent::usage::subscribe().borrow().clone();
+    let _ = ctx.events.send(Event::Usage(usage));
+    if let Some(status) = ctx.status() {
+        ctx.send_status(status);
+    }
+    ctx.want_avatars(seeded.faces.avatars);
+    ctx.want_avatars(notification_avatars(&seeded.notifications));
 }
 
 /// Publish the rows, and hand back what the caller should ask after for
@@ -12604,7 +12883,7 @@ async fn learn_issue_closable(ctx: &Ctx, item_id: &str, repo_full_name: &str, nu
 }
 
 /// A close or a reopen from the state pill's menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StateChange {
     CloseIssue(perch_github::IssueCloseReason),
     ClosePullRequest,
@@ -14261,7 +14540,6 @@ async fn adopt_new_token(ctx: &Ctx) -> Option<Session> {
 
 /// One poll of the notifications API.
 async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
-    let events = &ctx.events;
     let config = ctx.config();
     let wait = Duration::from_secs(config.poll_interval_secs.max(30));
     let no_poll = PollAfter {
@@ -14276,12 +14554,12 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
         session = adopt_new_token(ctx).await;
     }
     let Some(mut session) = session else {
-        let _ = events.send(Event::Status(Status::NoToken {
+        ctx.send_status(Status::NoToken {
             detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
-        }));
+        });
         return no_poll;
     };
-    let _ = events.send(Event::Status(Status::Refreshing));
+    ctx.send_status(Status::Refreshing);
 
     let last_modified = (mode == NotificationPollMode::Conditional)
         .then(|| ctx.notifications_last_modified())
@@ -14331,10 +14609,10 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
             }
             spawn_sweep(ctx);
 
-            let _ = events.send(Event::Status(Status::Idle {
+            ctx.send_status(Status::Idle {
                 at: Timestamp::now(),
                 source: session.source,
-            }));
+            });
             PollAfter {
                 wait,
                 floor: result.poll_interval,
@@ -14354,7 +14632,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
             } else {
                 (wait, Duration::from_secs(30))
             };
-            let _ = events.send(Event::Status(status));
+            ctx.send_status(status);
             PollAfter {
                 wait,
                 floor,
@@ -16055,7 +16333,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
 
 /// What an issue's Code reads: the repository's home checkout, on its
 /// default branch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HomeCode {
     pub path: PathBuf,
     pub branch: String,
@@ -21390,6 +21668,9 @@ fn backoff_until(reset_epoch: Option<i64>, retry_after_secs: Option<u64>) -> Dur
 }
 
 #[cfg(test)]
+mod wire_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -21596,7 +21877,7 @@ mod tests {
 
     use perch_github::{Reason, Repository, Subject, SubjectKind};
 
-    fn thread(id: &str, title: &str) -> Thread {
+    pub(super) fn thread(id: &str, title: &str) -> Thread {
         Thread {
             id: id.into(),
             unread: true,
@@ -21717,14 +21998,14 @@ mod tests {
 
     /// A base nothing listens on, so a request the code should not make
     /// is refused at once instead of reaching GitHub.
-    fn nowhere() -> String {
+    pub(super) fn nowhere() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         format!("http://{}", listener.local_addr().unwrap())
     }
 
     /// A context with no window behind it: a client at `base`, a cache,
     /// and the events kept so a test can say what the sidebar was told.
-    fn ctx(dir: &Path, base: &str, declared: &[&str]) -> (Ctx, Receiver<Event>) {
+    pub(super) fn ctx(dir: &Path, base: &str, declared: &[&str]) -> (Ctx, Receiver<Event>) {
         ctx_declaring(
             dir,
             base,
@@ -21818,6 +22099,7 @@ mod tests {
             window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             window: NO_WINDOW,
             views: Default::default(),
+            status: Default::default(),
         };
         (ctx, received)
     }
@@ -21881,17 +22163,21 @@ mod tests {
 
     #[test]
     fn opening_an_ordinary_agent_owner_cancels_a_historical_load() {
-        let backend = Backend::detached();
-        let request = backend.navigation_requests.begin_group("item", "group-a");
-        assert!(backend
-            .navigation_requests
-            .is_current_group("group-a", request));
+        let (backend, mut commands) = Backend::recording();
+        let engine = (NavigationRequests::default(), ScopeRequests::default());
+        let arrive = |commands: &mut UnboundedReceiver<Command>| {
+            while let Ok(command) = commands.try_recv() {
+                register_fences(&engine.0, &engine.1, &command);
+            }
+        };
+        let request = backend.open_review_snapshot("item", "group-a");
+        arrive(&mut commands);
+        assert!(engine.0.is_current_group("group-a", request));
 
         backend.view_agent_owner("item");
+        arrive(&mut commands);
 
-        assert!(!backend
-            .navigation_requests
-            .is_current_group("group-a", request));
+        assert!(!engine.0.is_current_group("group-a", request));
     }
 
     #[test]
@@ -21974,7 +22260,7 @@ mod tests {
         browser_only.subject.kind = SubjectKind::CheckSuite;
 
         assert_eq!(backend.open_notification(&browser_only), None);
-        assert!(backend.navigation_requests.is_current(current));
+        assert_eq!(backend.navigations.current(backend.window), Some(current));
     }
 
     #[tokio::test]
@@ -23113,7 +23399,7 @@ mod tests {
         assert_eq!(ctx.notifications_last_modified().as_deref(), Some("fourth"));
     }
 
-    fn pull_request(number: u64) -> PullRequest {
+    pub(super) fn pull_request(number: u64) -> PullRequest {
         PullRequest {
             number,
             title: format!("pull {number}"),
@@ -23301,34 +23587,30 @@ mod tests {
     fn merge_attempts_suppress_duplicates_and_only_matching_finishes() {
         let attempts = MergeAttempts::default();
 
-        let first = attempts.begin("item").expect("first attempt starts");
-        assert_eq!(attempts.begin("item"), None);
+        let first = 1;
+        assert!(attempts.begin("item", first), "first attempt starts");
+        assert!(!attempts.begin("item", 2));
 
         attempts.finish("item", first.saturating_add(1));
-        assert_eq!(attempts.begin("item"), None, "a stale finish is ignored");
+        assert!(!attempts.begin("item", 3), "a stale finish is ignored");
 
         attempts.finish("item", first);
-        let second = attempts
-            .begin("item")
-            .expect("matching finish releases item");
-        assert!(second > first);
+        assert!(attempts.begin("item", 4), "matching finish releases item");
     }
 
     #[test]
     fn review_attempts_suppress_duplicates_and_only_matching_finishes() {
         let attempts = PullRequestReviewAttempts::default();
 
-        let first = attempts.begin("item").expect("first attempt starts");
-        assert_eq!(attempts.begin("item"), None);
+        let first = 1;
+        assert!(attempts.begin("item", first), "first attempt starts");
+        assert!(!attempts.begin("item", 2));
 
         attempts.finish("item", first.saturating_add(1));
-        assert_eq!(attempts.begin("item"), None, "a stale finish is ignored");
+        assert!(!attempts.begin("item", 3), "a stale finish is ignored");
 
         attempts.finish("item", first);
-        let second = attempts
-            .begin("item")
-            .expect("matching finish releases item");
-        assert!(second > first);
+        assert!(attempts.begin("item", 4), "matching finish releases item");
     }
 
     #[test]
@@ -23444,19 +23726,20 @@ mod tests {
     #[tokio::test]
     async fn a_successful_review_releases_its_gate_before_refresh_is_polled() {
         let attempts = PullRequestReviewAttempts::default();
-        let first = attempts.begin("item").unwrap();
-        let next = std::cell::Cell::new(None);
+        let first = 1;
+        assert!(attempts.begin("item", first));
+        let next = std::cell::Cell::new(false);
 
         settle_pull_request_review_attempt(&attempts, "item", first, true, async {
-            next.set(attempts.begin("item"));
+            next.set(attempts.begin("item", 2));
         })
         .await;
 
-        let second = next
-            .get()
-            .expect("the refresh observes an already released mutation gate");
-        assert!(second > first);
-        attempts.finish("item", second);
+        assert!(
+            next.get(),
+            "the refresh observes an already released mutation gate"
+        );
+        attempts.finish("item", 2);
     }
 
     #[test]
@@ -25846,7 +26129,7 @@ while True:
     #[test]
     fn trust_and_start_sends_the_item_with_the_latest_navigation() {
         let (backend, mut commands) = Backend::recording();
-        let navigation_id = backend.navigation_requests.begin_current();
+        let navigation_id = backend.navigations.begin(backend.window);
         backend.trust_language_servers("pr", vec![perch_lsp::ServerKind::Jdtls]);
         match commands.try_recv() {
             Ok(Command::TrustLanguageServers {
@@ -25865,11 +26148,7 @@ while True:
     fn two_windows(ctx: &Ctx) {
         let mut views = ctx.views.lock().unwrap();
         for window in [1, 2] {
-            views.push(View::new(
-                window,
-                Arc::new(NavigationRequests::for_window(window)),
-                Arc::default(),
-            ));
+            views.push(View::new(window));
         }
     }
 

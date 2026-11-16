@@ -9,7 +9,7 @@ use crate::model::SubjectState;
 
 /// An issue or a pull request a `#` can name, as the suggestion list
 /// shows it: the state glyph, the title, and the number.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct IssueReference {
     pub number: u64,
     pub title: String,

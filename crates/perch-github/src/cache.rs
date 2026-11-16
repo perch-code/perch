@@ -136,7 +136,7 @@ pub struct Reconciled {
 /// kept from an approval card's "Always". `key` is what a request is
 /// matched on (`network:example.com`, `command:<text>`, `tool:<name>:<what>`,
 /// `commit`); `label` is what the card said.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkGrantRecord {
     pub id: String,
     pub repo: String,

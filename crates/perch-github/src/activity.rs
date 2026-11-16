@@ -58,7 +58,7 @@ impl ActivityEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ItemActivity {
     pub item_id: String,
     /// When the latest event happened.

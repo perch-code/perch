@@ -44,7 +44,7 @@ impl Row {
 }
 
 /// A file laid out for display, with the mapping back to real positions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DisplayBuffer {
     /// The text handed to the editor.
     pub text: String,

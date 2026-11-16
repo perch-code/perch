@@ -251,7 +251,7 @@ storage_enum! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewSnapshot {
     pub id: String,
     pub item_id: String,
@@ -290,7 +290,7 @@ fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewGroup {
     pub id: String,
     pub item_id: String,
@@ -309,7 +309,7 @@ pub struct ReviewGroup {
     pub instructions: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewerAttempt {
     pub id: String,
     pub group_id: String,
@@ -348,7 +348,7 @@ pub struct ReviewVerificationInput {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
     pub id: String,
     pub item_id: String,
@@ -458,7 +458,7 @@ pub struct FindingAuditEntry {
     pub created_at: Timestamp,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewPreference {
     pub backend: String,
     pub model: Option<String>,

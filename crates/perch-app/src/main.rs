@@ -107,7 +107,7 @@ fn main() {
     keymap::take_up(&config.keybindings);
 
     windows::load_frame();
-    let (backend, events) = backend::spawn(keymap::add_warnings);
+    let (backend, events) = start_engine();
     let mut started = Some((backend, events));
 
     // A development hook: open a pull request at launch rather than by
@@ -242,6 +242,24 @@ fn main() {
         Some(config),
     )
     .run();
+}
+
+/// The engine, in this process. `PERCH_WIRE_LOOPBACK=1` reaches it
+/// through the JSON wire over a pipe in memory, as a host's engine is
+/// reached, so a change that breaks the wire form shows here.
+fn start_engine() -> (
+    backend::Backend,
+    std::sync::mpsc::Receiver<(backend::WindowId, backend::Event)>,
+) {
+    if std::env::var("PERCH_WIRE_LOOPBACK").is_ok_and(|v| v == "1") {
+        match perch_engine::wire::loopback(keymap::add_warnings) {
+            Ok(started) => return started,
+            Err(error) => {
+                tracing::error!(%error, "could not start the loopback wire; in process instead")
+            }
+        }
+    }
+    backend::spawn(keymap::add_warnings)
 }
 
 /// The log goes to stderr, for a terminal launch, and to a file a day in

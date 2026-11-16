@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::discussion::{Discussion, ReviewComment};
 use crate::reactions::Reactions;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ThreadOrigin {
     /// Perch's own. The truth; nothing replaces it.
     Local,
@@ -69,7 +69,7 @@ impl Side {
 }
 
 /// Lines a thread is about.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Anchor {
     pub path: String,
     /// Inclusive, one-based, in the file on `side`.
@@ -97,7 +97,7 @@ impl Anchor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommentThread {
     /// Perch's own id for a local thread; `gh-{root comment id}` for one
     /// from GitHub, so ingesting the same thread twice finds the same row.
@@ -196,14 +196,14 @@ impl CommentThread {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Author {
     User,
     Agent { backend: String, model: String },
     GitHubUser(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommentMessage {
     pub id: String,
     pub thread_id: String,
@@ -751,7 +751,7 @@ pub struct RunUsage {
     pub cached_input_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunRecord {
     pub id: String,
     pub owner: RunOwner,
@@ -956,7 +956,7 @@ impl RunEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunEventRecord {
     pub run_id: String,
     pub sequence: u64,
@@ -981,7 +981,7 @@ pub struct RunHistoryFilter {
     pub status: Option<RunStatus>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunHistoryCursor {
     pub ended_at: Timestamp,
     pub id: String,
@@ -990,7 +990,7 @@ pub struct RunHistoryCursor {
 /// The scalar projection used by app-wide run lists. It deliberately omits
 /// steps, event text, the final result, and the retry prompt; those belong to
 /// the selected run's paginated detail query.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunSummary {
     pub id: String,
     pub owner: RunOwner,

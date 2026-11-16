@@ -57,7 +57,7 @@ pub fn capture_name(index: usize) -> &'static str {
 }
 
 /// A highlighted run of bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -65,7 +65,7 @@ pub struct Span {
     pub capture: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Language {
     Rust,
     Json,
@@ -434,7 +434,7 @@ fn fenced_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
 ///
 /// The editor styles one line at a time, so doing the split once here keeps
 /// the per-line path free of searching.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LineSpans {
     lines: Vec<Vec<Span>>,
 }
