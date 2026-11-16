@@ -372,9 +372,15 @@ where
         at: heard.clone(),
     });
     let mut line = Vec::new();
-    let hello = first_message::<_, serde_json::Value>(&mut read, &mut line)
-        .await
-        .and_then(check_hello);
+    // A client that never says hello, an ssh session stuck before the app
+    // writes, is given up on like one gone quiet later.
+    let hello = tokio::time::timeout(
+        limits.idle,
+        first_message::<_, serde_json::Value>(&mut read, &mut line),
+    )
+    .await
+    .unwrap_or(Err(WireError::Silent))
+    .and_then(check_hello);
     let hello = match hello {
         Ok(hello) => hello,
         Err(WireError::Refused(reason)) => {
@@ -465,7 +471,11 @@ where
         let (done, silent) = (done.clone(), silent.clone());
         async move {
             loop {
-                let due = *heard.lock().unwrap_or_else(|e| e.into_inner()) + limits.idle;
+                let heard = *heard.lock().unwrap_or_else(|e| e.into_inner());
+                // An unlimited wait, as the loopback's, never comes due.
+                let Some(due) = heard.checked_add(limits.idle) else {
+                    return;
+                };
                 if Instant::now() >= due {
                     tracing::info!(idle = ?limits.idle, "heard nothing from a client; closing it");
                     silent.store(true, Ordering::Relaxed);
@@ -731,8 +741,15 @@ pub fn loopback(
     let engine = unstarted.engine().clone();
     let runtime = engine.runtime().clone();
     let (near, far) = tokio::io::duplex(1 << 16);
+    // No network to lose, and the app's keepalives share a process with
+    // the watchdog: an App Nap that held both off would otherwise end the
+    // engine, which lives only while this connection does.
+    let limits = Limits {
+        idle: Duration::MAX,
+        ..Limits::default()
+    };
     runtime.spawn(async move {
-        if let Err(error) = serve(engine, far).await {
+        if let Err(error) = serve_with(engine, far, limits).await {
             tracing::error!(%error, "the loopback connection ended");
         }
     });

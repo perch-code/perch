@@ -352,6 +352,39 @@ pub async fn branch_exists(git: &Git, dir: &Path, branch: &str) -> Result<bool, 
     Ok(out.lines().any(|line| line.trim() == full))
 }
 
+/// The names `branch` was renamed from, newest first, as its reflog has
+/// them: `git branch -m old new` moves `old`'s reflog to `new` and adds
+/// `Branch: renamed refs/heads/old to refs/heads/new`. A branch made with
+/// `checkout -b` and an old one deleted has no such line, which is how a
+/// rename is told from a switch. Empty when the reflog is off.
+pub async fn renamed_from(git: &Git, dir: &Path, branch: &str) -> Result<Vec<String>, Error> {
+    let full = format!("refs/heads/{branch}");
+    let out = git
+        .run(
+            Some(dir),
+            ["reflog", "show", "--format=%gs", full.as_str(), "--"],
+            QUERY_TIMEOUT,
+        )
+        .await?;
+    Ok(parse_renames(&out))
+}
+
+fn parse_renames(reflog: &str) -> Vec<String> {
+    const RENAMED: &str = "branch: renamed refs/heads/";
+    reflog
+        .lines()
+        .filter_map(|line| {
+            let head = line.get(..RENAMED.len())?;
+            if !head.eq_ignore_ascii_case(RENAMED) {
+                return None;
+            }
+            // Branch names have no spaces, so the first " to " ends the old.
+            let (old, _) = line[RENAMED.len()..].split_once(" to refs/heads/")?;
+            Some(old.to_string())
+        })
+        .collect()
+}
+
 /// Lines added and removed on a worktree's branch since it left `base_ref`:
 /// `git diff base...HEAD`, summed over files. Binary files count for
 /// nothing. The `+12 −3` a branch row shows.
@@ -764,5 +797,17 @@ partial\thttps://github.com/acme/partial.git (push)
         let out = "1\t0\ta.txt\n10\t3\tsrc/lib.rs\n-\t-\timage.png\n";
         assert_eq!(sum_numstat(out), (11, 3));
         assert_eq!(sum_numstat(""), (0, 0));
+    }
+
+    #[test]
+    fn renames_are_read_from_a_branch_s_reflog_newest_first() {
+        let reflog = "Branch: renamed refs/heads/t3/nice to refs/heads/nicer\n\
+                      commit: c\n\
+                      Branch: renamed refs/heads/t3/abc to refs/heads/t3/nice\n\
+                      commit: renamed refs/heads/x to refs/heads/y\n\
+                      branch: Created from HEAD\n";
+        assert_eq!(parse_renames(reflog), ["t3/nice", "t3/abc"]);
+        assert!(parse_renames("branch: Created from HEAD\n").is_empty());
+        assert!(parse_renames("").is_empty());
     }
 }

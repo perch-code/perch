@@ -38,6 +38,24 @@ pub fn set_place(place: Place) {
     PLACE.set(place);
 }
 
+/// Keep macOS from napping the app for as long as it runs. A hidden,
+/// idle app can be put in App Nap, which holds off its timers; held off
+/// past `wire::IDLE`, the keepalives stop and the host's engine hangs up,
+/// closing this Mac's windows and their language servers. Idle system
+/// sleep is still allowed: a Mac asleep is what the hang-up is for.
+pub fn stay_awake_for_the_host() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+            &NSString::from_str("Keeping the connection to the Perch engine on a host"),
+        );
+        // Held until the process ends; ending it would let the nap back.
+        std::mem::forget(activity);
+    }
+}
+
 /// The host the engine is on, with one.
 pub fn host() -> Option<String> {
     match place() {

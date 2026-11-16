@@ -407,13 +407,15 @@ A worktree with no pull request is yours, so it is in **Authored**, whether Perc
 made it or found it under a root; the base branch never becomes a row. Once
 someone else's pull request attaches to it, the row goes by that author.
 Perch never removes a worktree it found under a root, so deleting its row
-lasts only until the next scan finds it again. A worktree whose branch is
-renamed keeps its row: the scan finds the row by the worktree's directory and
-renames its branch, with its threads, runs and name kept. That is what T3
-Code does to a thread's `t3/<hex>` branch once the thread has a title. A
-branch switched rather than renamed, the old one still there, puts the old
-row away as before, and so does a rename onto a branch another row already
-has. **Hide** in the row's menu
+lasts only until the next scan finds it again. A branch renamed with
+`git branch -m` keeps its row, with its threads, runs and name, and a hidden
+row stays hidden; the scan knows it by the rename in the branch's reflog.
+That is what T3 Code does to a thread's `t3/<hex>` branch once the thread
+has a title. A branch switched rather than renamed puts the old row away as
+before, even when the old branch is deleted before the next scan, and so
+does a rename onto a branch another row already has, or of a branch with a
+pull request, which GitHub still has on the old name.
+**Hide** in the row's menu
 keeps it out of Worktrees without touching it; it's listed under Recent,
 where **Unhide** brings it back.
 A repository with a root and no GitHub remote is `local/<name>`: it has no pull
@@ -1523,8 +1525,11 @@ session ends, its runs with it; run it from the unit there.
 The app says it is still there every 15 seconds it has nothing else to
 send, and the engine hangs up on a client it has heard nothing from in a
 minute: a Mac asleep, or off the network, would otherwise hold its windows'
-open items and language servers until TCP gave up on it, hours later. The
-Mac's windows reconnect when it wakes.
+open items and language servers until TCP gave up on it, hours later. A
+client that connects and never says hello is hung up on after the same
+minute. The Mac's windows reconnect when it wakes. While the app is
+connected to a host it opts out of App Nap, which could hold its keepalives
+back while it is hidden.
 
 ## An engine on another machine
 

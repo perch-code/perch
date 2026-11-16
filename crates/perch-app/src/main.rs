@@ -265,6 +265,7 @@ fn start_engine(
             home: Default::default(),
             data_root: Default::default(),
         });
+        remote::stay_awake_for_the_host();
         return perch_engine::wire::remote::over_ssh(host, remote.command());
     }
     if std::env::var("PERCH_WIRE_LOOPBACK").is_ok_and(|v| v == "1") {

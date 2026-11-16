@@ -214,8 +214,8 @@ T3 makes its worktrees with `git worktree add` from the project root,
 so a `[[repo]] root` that names the same clone lists them as worktree
 items already, and Perch never resets or removes a worktree it does not
 own. T3 renames a thread's branch after creating it. Today the scan
-archives the old row and makes a new one; it now matches by path and
-renames the row's branch instead.
+archives the old row and makes a new one; it now renames the row's branch
+instead (see As built for how a rename is told).
 
 ## Build order
 
@@ -280,9 +280,15 @@ Where the implementation went its own way, and why:
   The timeout's default comes from the engine's `Lifetime`, and the denial
   names the actual wait. `[work] approval_timeout_mins` has no control in
   Settings > Work, which lists no other numbers.
-- The scan renames a row by path only when the old branch no longer
-  exists; a branch switched in place (the old one still there) puts the old
-  row away as before, as does a rename onto a branch another row holds.
+- The scan does not match by path: a branch switched and the old one
+  deleted before the next scan looks the same as a rename from the
+  worktree list. It renames a row only when the new branch's reflog says
+  `git branch -m` renamed it from the row's branch, which is gone. A hidden
+  row is renamed and stays hidden; a Perch-made row has only its branch
+  renamed; a row with a pull request is not renamed. Otherwise the old row
+  is put away as before, as is one renamed onto a branch another row holds.
+- The hello has the same minute as the keepalives. The loopback wire has
+  no idle limit, and the app opts out of App Nap while on a host.
 
 ## Acceptance
 

@@ -908,7 +908,14 @@ struct PendingApproval {
     view: ApprovalView,
     /// When it was asked, so a resync lists the cards in that order.
     asked: std::time::Instant,
+    /// Which asking this is. A timeout settles only the request it was
+    /// started for: agents number requests per process, so a later one in
+    /// the same run can have an answered one's id.
+    asking: u64,
 }
+
+/// Numbers each request as it is asked; see `PendingApproval::asking`.
+static ASKINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How a request was settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7069,14 +7076,17 @@ impl Ctx {
         }
     }
 
-    /// The requests waiting on the reader, oldest first.
-    fn pending_approvals(&self) -> Vec<ApprovalView> {
+    /// Send the requests waiting on the reader, oldest first. Sent under
+    /// the lock that asking and settling send under, so a card settled
+    /// while the list is made is not put back after its `ApprovalSettled`.
+    fn send_pending_approvals(&self) {
         let Ok(pending) = self.approvals.lock() else {
-            return Vec::new();
+            return;
         };
         let mut waiting: Vec<_> = pending.values().collect();
         waiting.sort_by_key(|p| p.asked);
-        waiting.into_iter().map(|p| p.view.clone()).collect()
+        let views = waiting.into_iter().map(|p| p.view.clone()).collect();
+        let _ = self.events.send(Event::Approvals(views));
     }
 
     /// Tell every window who decides Work requests.
@@ -8444,7 +8454,7 @@ fn send_standing(ctx: &Ctx) {
     let _ = ctx.events.send(Event::Usage(usage));
     // Requests a run asked while this client was away, or before it
     // came, still waiting: its cards, which it can answer.
-    let _ = ctx.events.send(Event::Approvals(ctx.pending_approvals()));
+    ctx.send_pending_approvals();
     if let Some(status) = ctx.status() {
         ctx.send_status(status);
     }
@@ -15621,11 +15631,6 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     let mut failed_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
     let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-    // The rows as they were before this scan, for a worktree whose branch
-    // was renamed under its row to find it by its directory.
-    let rows = ctx
-        .with_cache(|c| c.load_items().unwrap_or_default())
-        .unwrap_or_default();
 
     for declared in &ctx.config().repo {
         // Every entry has its identity by the time the backend runs. One
@@ -15695,47 +15700,14 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                 let existing = ctx
                     .with_cache(|c| c.find_item_by_branch(identity, &branch).ok().flatten())
                     .flatten();
-                let renamed = renamed_row(git, &rows, identity, &path, &branch).await;
-                let existing = match (existing, renamed) {
-                    (None, Some(mut item)) => {
-                        // The same worktree on a new name: the row is
-                        // renamed, and what hangs off it stays.
-                        let Some(c) = item.checkout.as_mut() else {
-                            continue;
-                        };
-                        let old = std::mem::replace(&mut c.branch, branch.clone());
-                        c.head_sha = entry.head_sha.clone();
-                        c.on_disk = true;
-                        c.churn = churn;
-                        c.path = path.clone();
-                        match ctx.with_cache(|cache| cache.update_item(&item)) {
-                            Some(Ok(())) => {
-                                tracing::info!(item = %item.id, %old, new = %branch, "a worktree's branch was renamed; renamed its row");
-                                count_divergence(git, &mut item).await;
-                                ctx.with_cache(|cache| cache.update_item(&item));
-                                changed = true;
-                                continue;
-                            }
-                            Some(Err(e)) => {
-                                tracing::warn!(item = %item.id, %old, new = %branch, error = %e, "could not rename a row with its worktree's branch; a new row instead");
-                            }
-                            None => {}
-                        }
-                        None
-                    }
-                    (Some(holder), Some(renamed)) if holder.id != renamed.id => {
-                        let old = renamed.checkout.as_ref().map(|c| c.branch.as_str());
-                        tracing::info!(
-                            item = %renamed.id,
-                            old,
-                            new = %branch,
-                            holder = %holder.id,
-                            "a worktree's branch was renamed to one another row has; its row is not renamed"
-                        );
-                        Some(holder)
-                    }
-                    (existing, _) => existing,
-                };
+                // A branch with no row may be one renamed under its row; the
+                // row follows it, and what hangs off it stays.
+                if existing.is_none()
+                    && follow_rename(ctx, identity, &path, &branch, &entry.head_sha, churn).await
+                {
+                    changed = true;
+                    continue;
+                }
                 match existing {
                     Some(mut item) => {
                         let Some(c) = item.checkout.as_mut() else {
@@ -15846,38 +15818,85 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     changed
 }
 
-/// The unowned row for the worktree at `path` when the worktree is on
-/// `branch` and the row on a branch that is not there any more: the branch
-/// was renamed under the row, as T3 Code renames a thread's `t3/<hex>`
-/// branch once the thread has a title. A branch still there means the
-/// reader switched branches in the worktree, which puts the old row away
-/// instead. A row the reader archived stays theirs.
-async fn renamed_row(
-    git: &perch_git::cmd::Git,
-    rows: &[Item],
+/// Rename the row of the branch that `branch`, checked out at `path`, was
+/// renamed from, as T3 Code renames a thread's `t3/<hex>` branch once the
+/// thread has a title. Only git's own record of a rename counts: a branch
+/// switched in the worktree and the old one deleted looks the same from
+/// the worktree list, and its row is put away instead. The old name must
+/// be gone, and its row must have no pull request, whose head is still
+/// the old name on GitHub. Returns whether a row was renamed.
+async fn follow_rename(
+    ctx: &Ctx,
     identity: &str,
     path: &Path,
     branch: &str,
-) -> Option<Item> {
-    let row = rows.iter().find(|item| {
-        let Some(c) = item.checkout.as_ref() else {
-            return false;
-        };
-        item.repo_full_name.eq_ignore_ascii_case(identity)
-            && !c.owned
-            && !item.is_archived()
-            && c.branch != branch
-            && c.path.canonicalize().unwrap_or_else(|_| c.path.clone()) == path
-    })?;
-    let old = &row.checkout.as_ref()?.branch;
-    match perch_git::branch_exists(git, path, old).await {
-        Ok(false) => Some(row.clone()),
-        Ok(true) => None,
+    head_sha: &str,
+    churn: Option<(u32, u32)>,
+) -> bool {
+    let git = ctx.preparer.git();
+    let olds = match perch_git::renamed_from(git, path, branch).await {
+        Ok(olds) => olds,
         Err(error) => {
-            tracing::warn!(%error, branch = %old, "could not tell whether a branch is still there");
-            None
+            tracing::warn!(%error, %branch, "could not read a branch's reflog");
+            return false;
+        }
+    };
+    for old in olds {
+        if old == branch {
+            continue;
+        }
+        match perch_git::branch_exists(git, path, &old).await {
+            Ok(false) => {}
+            // Made again since: the name, and any row on it, are that
+            // branch's now.
+            Ok(true) => continue,
+            Err(error) => {
+                tracing::warn!(%error, branch = %old, "could not tell whether a branch is still there");
+                return false;
+            }
+        }
+        // Read and written under one lock, so a Hide or a rename the
+        // reader made while the scan was asking git is kept.
+        let renamed = ctx.with_cache(|cache| {
+            let mut item = cache.find_item_by_branch(identity, &old).ok().flatten()?;
+            if item.subject.is_some() {
+                return Some(None);
+            }
+            let c = item.checkout.as_mut()?;
+            c.branch = branch.to_string();
+            // A worktree Perch made is the cut's to keep up; only its name
+            // follows, so the scan makes no second row for it.
+            if !c.owned {
+                // Put away by the scan, its directory gone, it comes back;
+                // hidden by the reader, it stays hidden.
+                if !c.on_disk {
+                    item.archived_at = None;
+                }
+                let c = item.checkout.as_mut()?;
+                c.head_sha = head_sha.to_string();
+                c.on_disk = true;
+                c.churn = churn;
+                c.path = path.to_path_buf();
+            }
+            match cache.update_item(&item) {
+                Ok(()) => Some(Some(item.id)),
+                Err(error) => {
+                    tracing::warn!(item = %item.id, %old, new = %branch, %error, "could not rename a row with its branch");
+                    Some(None)
+                }
+            }
+        });
+        match renamed.flatten() {
+            // The newest old name with a row decides.
+            Some(Some(id)) => {
+                tracing::info!(item = %id, %old, new = %branch, "a branch was renamed; renamed its row");
+                return true;
+            }
+            Some(None) => return false,
+            None => {}
         }
     }
+    false
 }
 
 /// For each item with a branch and no subject, ask GitHub whether a pull
@@ -18640,6 +18659,14 @@ async fn on_approval(
         detail: request.detail.clone(),
         always: crate::approvals::always_button(request),
     };
+    record_approval_step(
+        ctx,
+        &run.id,
+        &format!("approval-{id}"),
+        &format!("Asked: {line}"),
+        None,
+    );
+    let asking = ASKINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut pending) = ctx.approvals.lock() {
         pending.insert(
             (run.id.clone(), id.to_string()),
@@ -18649,37 +18676,56 @@ async fn on_approval(
                 request: request.clone(),
                 view: view.clone(),
                 asked: std::time::Instant::now(),
+                asking,
             },
         );
+        // Every client's, whichever window started the run: any of them
+        // may answer, and the first answer settles it for all. Sent under
+        // the lock, so it cannot follow its own `ApprovalSettled`.
+        let _ = ctx
+            .events
+            .for_window(NO_WINDOW)
+            .send(Event::ApprovalRequested(view));
     }
-    record_approval_step(
-        ctx,
-        &run.id,
-        &format!("approval-{id}"),
-        &format!("Asked: {line}"),
-        None,
-    );
-    // Every client's, whichever window started the run: any of them may
-    // answer, and the first answer settles it for all.
-    let _ = ctx
-        .events
-        .for_window(NO_WINDOW)
-        .send(Event::ApprovalRequested(view));
     let wait = ctx.approval_wait();
     let ctx = ctx.clone();
     let (run_id, id) = (run.id.clone(), id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(wait).await;
-        settle_approval(&ctx, &run_id, &id, Settle::TimedOut(wait)).await;
+        settle(&ctx, &run_id, &id, Settle::TimedOut(wait), Some(asking)).await;
     });
 }
 
 /// Answer a request, once: by the reader, by a timeout, or because its
 /// run ended. A request already settled is left alone.
 async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
+    settle(ctx, run_id, id, how, None).await;
+}
+
+/// `settle_approval`, for only the asking numbered `only` when one is
+/// given.
+async fn settle(ctx: &Ctx, run_id: &str, id: &str, how: Settle, only: Option<u64>) {
     let key = (run_id.to_string(), id.to_string());
-    let Some(pending) = ctx.approvals.lock().ok().and_then(|mut p| p.remove(&key)) else {
-        return;
+    let pending = {
+        let Ok(mut pending) = ctx.approvals.lock() else {
+            return;
+        };
+        if only.is_some_and(|asking| pending.get(&key).is_some_and(|p| p.asking != asking)) {
+            return;
+        }
+        let Some(settled) = pending.remove(&key) else {
+            return;
+        };
+        // Under the lock, as a resync's list is sent, so the two reach
+        // each client in the order they happened.
+        let _ = ctx
+            .events
+            .for_window(NO_WINDOW)
+            .send(Event::ApprovalSettled {
+                run_id: run_id.to_string(),
+                approval_id: id.to_string(),
+            });
+        settled
     };
     let (decision, ok, summary) = match how {
         Settle::Answered(ApprovalAnswer::Once) => (
@@ -18741,13 +18787,6 @@ async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
         &format!("{summary}: {line}"),
         Some(ok),
     );
-    let _ = ctx
-        .events
-        .for_window(NO_WINDOW)
-        .send(Event::ApprovalSettled {
-            run_id: run_id.to_string(),
-            approval_id: id.to_string(),
-        });
 }
 
 /// A request, or what became of it, as a step of its run, so it is in
@@ -27852,6 +27891,26 @@ read eof || true
         })
         .await;
 
+        // A timeout left from an earlier request with the same id, already
+        // answered, does not settle this one.
+        let asking = ctx
+            .approvals
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .asking;
+        settle(
+            &ctx,
+            &asked.run_id,
+            &asked.id,
+            Settle::TimedOut(Duration::from_secs(1)),
+            Some(asking + 1),
+        )
+        .await;
+        assert_eq!(ctx.approvals.lock().unwrap().len(), 1, "still waiting");
+
         // A client that connects now is given the card.
         received.try_iter().for_each(drop);
         send_standing(&ctx);
@@ -32942,6 +33001,47 @@ read eof || true
         assert!(row.is_archived());
         let holder = rows.iter().find(|i| i.id == holder.id).unwrap();
         assert_eq!(branch_of(holder), "taken");
+    }
+
+    #[tokio::test]
+    async fn a_branch_switched_and_the_old_one_deleted_is_not_a_rename() {
+        // Between two scans the reader leaves `feature` for a new branch
+        // and deletes `feature`. The worktree list says the same as for a
+        // rename; the new branch's reflog does not, and the old row, with
+        // whatever hangs off it, is put away rather than moved.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        let items = || ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        let branch_of = |item: &Item| item.checkout.as_ref().unwrap().branch.clone();
+        assert!(scan_roots(&ctx).await);
+        let found = items().remove(0);
+
+        git(&worktree, &["checkout", "-q", "-b", "next"]);
+        git(&worktree, &["branch", "-q", "-D", "feature"]);
+        assert!(scan_roots(&ctx).await);
+        let rows = items();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let old = rows.iter().find(|i| i.id == found.id).unwrap();
+        assert_eq!(branch_of(old), "feature");
+        assert!(old.is_archived());
+        let mut next = rows.into_iter().find(|i| i.id != found.id).unwrap();
+        assert_eq!(branch_of(&next), "next");
+        assert!(!next.is_archived());
+
+        // A row the reader hid follows a real rename, and stays hidden.
+        next.archived_at = Some(Timestamp::now());
+        ctx.with_cache(|c| c.update_item(&next)).unwrap().unwrap();
+        git(&worktree, &["branch", "-m", "renamed"]);
+        scan_roots(&ctx).await;
+        let rows = items();
+        assert_eq!(rows.len(), 2, "no row for the new name: {rows:?}");
+        let hidden = rows.iter().find(|i| i.id == next.id).unwrap();
+        assert_eq!(branch_of(hidden), "renamed");
+        assert!(hidden.is_archived());
     }
 
     #[tokio::test]

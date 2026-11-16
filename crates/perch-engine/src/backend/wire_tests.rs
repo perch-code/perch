@@ -752,6 +752,24 @@ async fn a_client_is_kept_while_it_keeps_alive_and_hung_up_on_once_silent() {
 }
 
 #[tokio::test]
+async fn a_client_that_never_says_hello_is_hung_up_on() {
+    let (engine, _commands) = bare_engine();
+    let limits = wire::Limits {
+        idle: Duration::from_millis(300),
+        ..wire::Limits::default()
+    };
+    let (_near, far) = tokio::io::duplex(1 << 12);
+    let ended = tokio::time::timeout(
+        Duration::from_secs(10),
+        wire::serve_with(engine.clone(), far, limits),
+    )
+    .await
+    .expect("the engine waited on the hello for ever");
+    assert!(matches!(ended, Err(wire::WireError::Silent)), "{ended:?}");
+    assert_eq!(engine.connections(), 0);
+}
+
+#[tokio::test]
 async fn a_quiet_client_says_it_is_there_every_little_while() {
     let (near, far) = tokio::io::duplex(1 << 16);
     let (read, mut write) = tokio::io::split(far);
