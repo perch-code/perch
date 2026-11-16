@@ -9,7 +9,13 @@ use std::collections::VecDeque;
 use jiff::Timestamp;
 use regex::Regex;
 
-use crate::state::Tone;
+/// The colour of a message's dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Error,
+    Warning,
+    Success,
+}
 
 /// Where every report goes.
 pub const REPO: &str = "perch-code/perch";

@@ -115,7 +115,7 @@ async fn write_inner(
 
 /// The body with the line that links the issue to the pull request it
 /// came from, which GitHub shows in the pull request's timeline.
-pub(crate) fn with_found_in(body: &str, number: u64) -> String {
+pub fn with_found_in(body: &str, number: u64) -> String {
     let body = body.trim_end();
     if body.is_empty() {
         format!("Found in #{number}.")

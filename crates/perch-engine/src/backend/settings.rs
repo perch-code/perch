@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use perch_git::cmd::Git;
@@ -16,6 +16,24 @@ use super::{
     detect_review_capabilities, hold_untrusted_servers, scan_roots, start_held_servers_everywhere,
     Ctx, Event,
 };
+
+/// What the app checks in a config as it is read, beyond what the engine
+/// knows: the keys `[keybindings]` names are the window's. What it finds
+/// goes in the config's warnings and is said as the file's others are.
+static APP_CHECK: OnceLock<fn(&mut Config)> = OnceLock::new();
+
+/// Have every read of config.toml checked by `check` as well. Set once,
+/// before [`spawn`](super::spawn).
+pub fn check_config_with(check: fn(&mut Config)) {
+    let _ = APP_CHECK.set(check);
+}
+
+/// The app's check of `config`, when it set one.
+pub(super) fn check_config(config: &mut Config) {
+    if let Some(check) = APP_CHECK.get() {
+        check(config);
+    }
+}
 
 /// config.toml as the Settings page shows it, sent at startup, after every
 /// write and after an edit made outside Perch.
@@ -308,7 +326,7 @@ pub(super) async fn take_up_whole_config(ctx: &Ctx, path: &Path) -> Result<Confi
         }
     };
     crate::repos::resolve(&mut file, &Git::new(None)).await;
-    crate::keymap::add_warnings(&mut file);
+    check_config(&mut file);
 
     let before = ctx.config();
     let rediscover = held.swap_file_agent(&file.agent);

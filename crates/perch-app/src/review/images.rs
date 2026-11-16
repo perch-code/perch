@@ -2,7 +2,7 @@
 //! drawn in the thread as GitHub draws it rather than named by a link.
 //!
 //! A picture is asked for the first time a view shows it, downloaded by
-//! the backend, and decoded there, off the main thread, into the pixels
+//! the engine, and decoded here, off the main thread, into the pixels
 //! the renderer draws. What came back is kept for the session, by
 //! address, for every window: a thread drawn again, or the same comment
 //! in another window, draws at once.
@@ -27,6 +27,7 @@ use floem::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat, Im
 use floem::reactive::{Memo, RwSignal, Scope, SignalUpdate, SignalWith};
 use floem::{Renderer, View, ViewId};
 use image::imageops::FilterType;
+use perch_engine::review::images::Downloaded;
 
 /// The most pixels a side of a picture keeps: a comment's column at 2x.
 pub const MAX_SIDE: u32 = 1536;
@@ -116,9 +117,15 @@ pub fn fetchable(src: &str) -> bool {
 }
 
 struct Store {
+    /// What the store's signal, and each decode's way back to the main
+    /// thread, are made under.
+    scope: Scope,
     pictures: RwSignal<HashMap<String, Arc<Decoded>>>,
     /// Every address asked for, so each is asked for once.
     asked: RefCell<HashSet<String>>,
+    /// The addresses being decoded, so a picture every window hears of is
+    /// decoded once.
+    decoding: RefCell<HashSet<String>>,
     /// The pictures kept, oldest first, with what each weighs.
     kept: RefCell<VecDeque<(String, usize)>>,
 }
@@ -126,11 +133,16 @@ struct Store {
 thread_local! {
     /// The pictures of every window. Its signal outlives any view that
     /// first asked for it.
-    static STORE: Store = Scope::new().enter(|| Store {
-        pictures: RwSignal::new(HashMap::new()),
-        asked: RefCell::default(),
-        kept: RefCell::default(),
-    });
+    static STORE: Store = {
+        let scope = Scope::new();
+        scope.enter(|| Store {
+            scope,
+            pictures: RwSignal::new(HashMap::new()),
+            asked: RefCell::default(),
+            decoding: RefCell::default(),
+            kept: RefCell::default(),
+        })
+    };
 }
 
 /// Have the picture at `src` downloaded, unless it has been asked for or
@@ -162,10 +174,40 @@ pub(crate) fn asked() -> Vec<String> {
     ASKED.with(|asked| std::mem::take(&mut *asked.borrow_mut()))
 }
 
-/// What the backend made of the picture at `url`, `None` when it could
-/// not be downloaded or decoded. Each window hears it; the first puts it
-/// in place. One that failed is forgotten, to be asked for again the next
-/// time a view shows it.
+/// What the engine downloaded from `url`, `None` when it could not. Each
+/// window hears it; the first has it decoded on a thread of its own,
+/// since a big one is slow, and put in place by [`arrived`].
+pub fn received(url: String, downloaded: Option<Downloaded>) {
+    let Some(Downloaded(bytes)) = downloaded else {
+        arrived(url, None);
+        return;
+    };
+    let scope = STORE.with(|store| {
+        let have = store
+            .pictures
+            .with_untracked(|pictures| pictures.contains_key(&url));
+        (!have && store.decoding.borrow_mut().insert(url.clone())).then_some(store.scope)
+    });
+    let Some(scope) = scope else {
+        return;
+    };
+    let done =
+        floem::ext_event::create_ext_action(scope, |(url, decoded): (String, Option<Decoded>)| {
+            STORE.with(|store| store.decoding.borrow_mut().remove(&url));
+            arrived(url, decoded.map(Arc::new));
+        });
+    std::thread::spawn(move || {
+        let decoded = decode(&bytes, &url);
+        if decoded.is_none() {
+            tracing::debug!(url, "picture did not decode");
+        }
+        done((url, decoded));
+    });
+}
+
+/// The picture at `url` decoded, `None` when it could not be downloaded
+/// or decoded. One that failed is forgotten, to be asked for again the
+/// next time a view shows it.
 pub fn arrived(url: String, decoded: Option<Arc<Decoded>>) {
     STORE.with(|store| {
         let Some(decoded) = decoded else {

@@ -3702,12 +3702,34 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "perch-agent",
+ "perch-engine",
+ "perch-git",
+ "perch-github",
+ "perch-lsp",
+ "perch-syntax",
+ "pulldown-cmark",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width",
+]
+
+[[package]]
+name = "perch-engine"
+version = "0.8.0"
+dependencies = [
+ "image",
+ "jiff",
+ "perch-agent",
  "perch-git",
  "perch-github",
  "perch-knowledge",
  "perch-lsp",
  "perch-syntax",
- "pulldown-cmark",
  "regex",
  "semver",
  "serde",
@@ -3717,8 +3739,6 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-appender",
- "tracing-subscriber",
- "unicode-width",
 ]
 
 [[package]]

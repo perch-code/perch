@@ -16,6 +16,8 @@ use perch_github::{
     Reference, Review,
 };
 
+pub use perch_engine::review::timeline::{count_of, short_sha};
+
 /// One card on Conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Card {
@@ -173,16 +175,6 @@ impl Piece {
                 .into(),
         }
     }
-}
-
-/// The seven characters a commit is read by.
-pub fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
-
-/// `n` and the noun that counts it: "1 comment", "3 comments".
-pub fn count_of(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The event's one line, in the order its pieces are drawn. Who did it is

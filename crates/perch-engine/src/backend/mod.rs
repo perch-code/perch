@@ -25,9 +25,10 @@ use perch_github::{
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
 
-pub(crate) use issue_draft::with_found_in;
+pub use avatar::APP_AVATAR_CORNER;
+pub use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
-pub use settings::SettingsFile;
+pub use settings::{check_config_with, SettingsFile};
 use windows::{CommandSender, View, Views};
 pub use windows::{EventSender, WindowId, NO_WINDOW};
 
@@ -37,7 +38,7 @@ mod feedback;
 mod issue_draft;
 mod kept_servers;
 pub(crate) mod open_pull;
-pub(crate) mod reviews;
+pub mod reviews;
 pub(crate) mod runs;
 mod settings;
 mod star;
@@ -1011,8 +1012,8 @@ pub enum Event {
     /// What came of downloading a picture a comment shows.
     Picture {
         url: String,
-        /// `None` when it could not be downloaded or decoded.
-        decoded: Option<Arc<crate::review::images::Decoded>>,
+        /// `None` when it could not be downloaded.
+        downloaded: Option<crate::review::images::Downloaded>,
     },
     /// Who acted last on pull requests and issues, by repository and
     /// number: the faces on item and Browse rows.
@@ -1908,7 +1909,7 @@ pub struct SuspendedNavigation {
 /// owner jumps, and historical snapshots all share this one sequence so task
 /// scheduling cannot reverse the reader's click order.
 #[derive(Debug, Default)]
-pub(crate) struct NavigationRequests {
+pub struct NavigationRequests {
     next_id: std::sync::atomic::AtomicU64,
     latest: std::sync::Mutex<Option<NavigationRequest>>,
     archive_fences: std::sync::Mutex<std::collections::HashMap<String, ArchiveFence>>,
@@ -2429,7 +2430,7 @@ struct ScopeRequest {
 /// so a slower earlier Git query cannot overwrite a later scope or publish
 /// finding anchors projected for the wrong pair of sides.
 #[derive(Debug, Default)]
-pub(crate) struct ScopeRequests {
+pub struct ScopeRequests {
     state: std::sync::Mutex<ScopeRequestState>,
 }
 
@@ -4051,14 +4052,14 @@ impl Backend {
     /// A handle with nobody behind it: every command is dropped. For
     /// headless tests, which must not open the reader's database or talk
     /// to GitHub.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn detached() -> Self {
         Self::recording().0
     }
 
     /// A handle whose commands go nowhere but a channel the test holds, so
     /// a test can see what the window asked for.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn recording() -> (Self, tokio::sync::mpsc::UnboundedReceiver<Command>) {
         let (commands, received) = tokio::sync::mpsc::unbounded_channel();
         let backend = Backend {
@@ -4212,7 +4213,7 @@ async fn run(
     // declared list. No token is needed: the scan reads the root's own
     // config and fetches nothing.
     crate::repos::resolve(&mut config, &perch_git::cmd::Git::new(None)).await;
-    crate::keymap::add_warnings(&mut config);
+    settings::check_config(&mut config);
     tracing::info!(poll = config.poll_interval_secs, repos = ?config.declared(), "config loaded");
     let settings_file = match (&config_file, config_text, config_error) {
         (Some(path), Some(text), _) => Some(SettingsFile::read(path, &text, &config)),
@@ -6754,11 +6755,14 @@ impl Ctx {
         }
     }
 
-    /// Download a picture a comment shows and decode it to draw. It
-    /// waits its turn with the faces.
+    /// Download a picture a comment shows, for the window to decode and
+    /// draw. It waits its turn with the faces.
     fn want_picture(&self, url: String) {
         let Some(github) = self.github() else {
-            let _ = self.events.send(Event::Picture { url, decoded: None });
+            let _ = self.events.send(Event::Picture {
+                url,
+                downloaded: None,
+            });
             return;
         };
         let events = self.events.clone();
@@ -6769,29 +6773,14 @@ impl Ctx {
             };
             let bytes = github.fetch_picture(&url).await;
             drop(permit);
-            let decoded = match bytes {
-                Ok(bytes) => {
-                    let at = url.clone();
-                    let decoded = tokio::task::spawn_blocking(move || {
-                        crate::review::images::decode(&bytes, &at)
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                    if decoded.is_none() {
-                        tracing::debug!(url, "picture did not decode");
-                    }
-                    decoded
-                }
+            let downloaded = match bytes {
+                Ok(bytes) => Some(crate::review::images::Downloaded(bytes.into())),
                 Err(e) => {
                     tracing::debug!(error = %e, url, "picture fetch failed");
                     None
                 }
             };
-            let _ = events.send(Event::Picture {
-                url,
-                decoded: decoded.map(Arc::new),
-            });
+            let _ = events.send(Event::Picture { url, downloaded });
         });
     }
 
@@ -21179,7 +21168,7 @@ fn render_hover(hover: &perch_lsp::lsp_types::Hover) -> String {
 /// A file as the editor wants it: the two sides diffed and highlighted,
 /// with the head blob the reveals are keyed by, empty when the file has
 /// none.
-pub(crate) fn build_loaded_file(
+pub fn build_loaded_file(
     path: String,
     head: String,
     base: String,
@@ -21221,7 +21210,7 @@ pub(crate) fn build_loaded_file(
     let picture = {
         let head_side = (status != Some(perch_git::ChangeStatus::Deleted)).then_some(head.as_str());
         let base_side = (status.is_some() && !base.is_empty()).then_some(base.as_str());
-        crate::review::picture::Picture::parse(&path, head_side, base_side)
+        crate::review::picture::PictureSource::of(&path, head_side, base_side).map(Arc::new)
     };
 
     // A changed file is diffed for the stacked view, and the same diff
@@ -21367,7 +21356,7 @@ fn describe_error(e: &perch_github::Error) -> Status {
 }
 
 /// Wall-clock time in the user's zone.
-pub(crate) fn local_clock_time(epoch: i64) -> Option<String> {
+pub fn local_clock_time(epoch: i64) -> Option<String> {
     let ts = Timestamp::from_second(epoch).ok()?;
     let zoned = ts.to_zoned(jiff::tz::TimeZone::system());
     Some(format!("{:02}:{:02}", zoned.hour(), zoned.minute()))
@@ -35365,7 +35354,7 @@ model = \"opus\"\n",
 
         let closed = ctx.item(&closed.id).unwrap();
         assert_eq!(
-            crate::ui::items::state_of(&closed),
+            closed.subject.as_ref().map(|s| s.subject_state()),
             Some(perch_github::SubjectState::IssueNotPlanned)
         );
         assert_eq!(

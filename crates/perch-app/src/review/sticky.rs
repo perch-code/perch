@@ -28,7 +28,6 @@
 //! shows the block's first lines in place; the wheel over one scrolls the
 //! code.
 
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -39,6 +38,8 @@ use floem::style::Position;
 use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue, TextLayout};
 use floem::views::{dyn_stack, rich_text, ClipExt, Container, Decorators, Empty, Label, Stack};
 use perch_git::ChangeStatus;
+
+pub(crate) use perch_engine::review::sticky::lines_hash;
 
 use crate::backend::Backend;
 use crate::review::doc::{Doc, DocRow};
@@ -176,17 +177,6 @@ pub(crate) fn pinned(placed: &[Placed], scroll_top: f64, line_height: f64, max: 
         });
     }
     out
-}
-
-/// A hash of a text's lines, which says whether an outline was counted
-/// in the lines the editor shows. Lines rather than the text, so that the
-/// file's last newline, which the head's lines drop, is no difference.
-pub(crate) fn lines_hash<'a>(lines: impl Iterator<Item = &'a str>) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for line in lines {
-        line.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 /// Whether a file pins its base's blocks rather than its head's: a
@@ -654,14 +644,6 @@ mod tests {
         let pins = pinned(&placed, 5.5 * LH, LH, 5);
         assert_eq!(lines(&pins), vec![0]);
         assert!((pins[0].y + 0.5 * LH).abs() < 1e-9, "{pins:?}");
-    }
-
-    #[test]
-    fn the_lines_hash_ignores_the_last_newline_and_nothing_else() {
-        let hash = |text: &str| lines_hash(text.lines());
-        assert_eq!(hash("a\nb\n"), hash("a\nb"));
-        assert_ne!(hash("a\nb\n"), hash("a\nc\n"));
-        assert_ne!(hash("ab\n"), hash("a\nb\n"));
     }
 
     #[test]

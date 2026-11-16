@@ -223,13 +223,7 @@ pub enum ToastOpen {
     FeedbackPreview,
 }
 
-/// The colour of a message's dot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Error,
-    Warning,
-    Success,
-}
+pub use perch_engine::feedback::Tone;
 
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -3269,7 +3263,7 @@ impl AppState {
                     m.insert(url, Arc::new(bytes));
                 });
             }
-            Event::Picture { url, decoded } => crate::review::images::arrived(url, decoded),
+            Event::Picture { url, downloaded } => crate::review::images::received(url, downloaded),
             Event::Profile { login, answer } => crate::ui::profile_card::arrived(login, answer),
             Event::Participants(found) => {
                 self.participants.update(|m| m.extend(found));

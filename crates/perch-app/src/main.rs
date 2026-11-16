@@ -4,19 +4,11 @@
 mod agents_cli;
 mod app_icon;
 mod app_menu;
-mod approvals;
-mod ask;
-mod backend;
-mod context;
-mod feedback;
+mod ask_cli;
 mod icons;
-mod inbox;
-mod items;
 mod items_cli;
 mod keymap;
-mod log_file;
 mod reference;
-mod repos;
 mod review;
 mod scrollers;
 mod snooze;
@@ -25,8 +17,10 @@ mod swipes;
 mod theme;
 mod timefmt;
 mod ui;
-mod update;
 mod windows;
+
+// The engine's modules, at the paths the window has always named them by.
+pub(crate) use perch_engine::{ask, backend, feedback, inbox, items, log_file, repos, update};
 
 use floem::reactive::SignalWith;
 use floem::{Application, IntoView};
@@ -71,7 +65,7 @@ fn main() {
     // The same, for a question: the prompt as the app would build it, the
     // run's events one per line, then the answer.
     if args.get(1).map(String::as_str) == Some("--ask") {
-        ask::run_cli(&args[2..]);
+        ask_cli::run(&args[2..]);
         return;
     }
     // The sidebar as text, from the cache alone: Pinned, then each section
@@ -113,6 +107,7 @@ fn main() {
     keymap::take_up(&config.keybindings);
 
     windows::load_frame();
+    backend::check_config_with(keymap::add_warnings);
     let (backend, events) = backend::spawn();
     let mut started = Some((backend, events));
 

@@ -191,9 +191,7 @@ const fn rgba(hex: u32, alpha: u8) -> Color {
     Color::from_rgba8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
 }
 
-/// How round an app's face is, as a share of its side: GitHub's 4px on
-/// a 16px bot.
-pub const APP_AVATAR_CORNER: f64 = 0.25;
+pub use perch_engine::backend::APP_AVATAR_CORNER;
 
 /// Surfaces.
 pub fn canvas() -> Color {

@@ -689,9 +689,9 @@ fn session(kind: Option<&str>, wayland: bool, x11: bool, desktop: Option<&str>) 
 
 fn problem_line(problem: &Problem, seed: Option<&Problem>) -> String {
     let tone = match problem.tone {
-        crate::state::Tone::Error => "error",
-        crate::state::Tone::Warning => "warning",
-        crate::state::Tone::Success => "done",
+        crate::feedback::Tone::Error => "error",
+        crate::feedback::Tone::Warning => "warning",
+        crate::feedback::Tone::Success => "done",
     };
     let marked = if seed == Some(problem) {
         " (reported)"

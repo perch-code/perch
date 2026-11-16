@@ -7,6 +7,7 @@ members = [
     "crates/perch-git",
     "crates/perch-lsp",
     "crates/perch-syntax",
+    "crates/perch-engine",
     "crates/perch-app",
 ]
 

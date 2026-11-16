@@ -40,7 +40,7 @@ const VERIFICATION_DELIMITER: &str = "\n\n--- Perch prior-finding verification -
 /// before the findings it filed through a tool and before the verification
 /// of earlier findings. Both follow the prose as JSON for extraction to
 /// re-read, and the findings are shown as findings, not as the answer.
-pub(crate) fn reviewer_prose(raw: &str) -> &str {
+pub fn reviewer_prose(raw: &str) -> &str {
     [perch_agent::REPORT_DELIMITER, VERIFICATION_DELIMITER]
         .into_iter()
         .filter_map(|delimiter| raw.find(delimiter))

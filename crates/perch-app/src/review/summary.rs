@@ -29,6 +29,8 @@ use perch_github::{
     CheckState, Checks, Item, ItemKind, ItemSubject, MentionableUser, SubjectState,
 };
 
+pub(crate) use perch_engine::review::summary::closes;
+
 use crate::backend::{Backend, StateChange};
 use crate::icons::{self, SidebarIcon};
 use crate::review::cards::{avatar_url_for, tip, tip_with, verdict_glyph};
@@ -2429,35 +2431,6 @@ fn github_data(app: AppState, state: ReviewState) -> GitHubData {
     data
 }
 
-/// The issue numbers a description says it closes: `closes #12`, `Fixes
-/// #3`, `resolved #7`, in any case, anywhere in the text. Only this
-/// repository's; `owner/repo#N` names another and is left alone.
-pub(crate) fn closes(body: &str) -> Vec<u64> {
-    const WORDS: [&str; 9] = [
-        "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
-    ];
-    let mut out = Vec::new();
-    let mut words = body.split_whitespace().peekable();
-    while let Some(word) = words.next() {
-        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
-        if !WORDS.iter().any(|w| word.eq_ignore_ascii_case(w)) {
-            continue;
-        }
-        let Some(next) = words.peek() else { break };
-        let Some(number) = next.strip_prefix('#') else {
-            continue;
-        };
-        let digits: String = number.chars().take_while(char::is_ascii_digit).collect();
-        if let Ok(n) = digits.parse::<u64>() {
-            if !out.contains(&n) {
-                out.push(n);
-            }
-            words.next();
-        }
-    }
-    out
-}
-
 /// Avatar, login, and when it was opened, as the reviewers are drawn; on
 /// the description's byline, a size up, the login a step stronger.
 fn author_view(
@@ -3805,18 +3778,6 @@ pub(crate) mod tests {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(short_ref(sha), "0123456");
         assert_eq!(short_ref("main"), "main");
-    }
-
-    #[test]
-    fn the_issues_a_description_closes_are_read_in_any_case_and_once_each() {
-        let body = "Closes #12 and fixes #3.\n\nResolved #12 again; see #99 and other/repo#7. fix #x fixed #";
-        assert_eq!(closes(body), [12, 3]);
-        assert_eq!(closes("nothing here"), Vec::<u64>::new());
-        assert_eq!(
-            closes("close\n#5"),
-            [5],
-            "a line break between the word and the number is fine"
-        );
     }
 
     #[test]

@@ -2,17 +2,18 @@
 //! before beside after when the pull request changed it.
 //!
 //! An SVG is text, and loads as every other file does, diffed and
-//! highlighted; the loader also parses each side into the tree the
-//! renderer draws, so the pane can show what the file looks like rather
-//! than what it is written as. The two sides of a change are drawn at
+//! highlighted; the engine also hands over each side's markup, which is
+//! parsed here into the tree the renderer draws, so the pane can show
+//! what the file looks like rather than what it is written as. The two sides of a change are drawn at
 //! one scale, the one that fits the larger of them into a half, so a
 //! change of size shows as one. The markup is a click away: the strip's
 //! Source tile shows the file as the editor shows every other, with the
 //! diff, the gutter and the threads anchored in it.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use floem::context::{LayoutChanged, PaintCx};
 use floem::kurbo::{Size, Stroke};
@@ -22,6 +23,7 @@ use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::{RendererSvg, View, ViewId};
 use floem_renderer::usvg::{self, fontdb, Tree};
+use perch_engine::review::picture::{is_svg, PictureSource};
 use perch_git::ChangeStatus;
 
 use crate::icons::SidebarIcon;
@@ -47,6 +49,12 @@ pub struct Drawing {
     hash: [u8; 8],
 }
 
+thread_local! {
+    /// The pictures parsed from loaded files' markup, by the markup they
+    /// came from. An entry goes once its file is let go.
+    static PARSED: RefCell<Vec<(Weak<PictureSource>, Picture)>> = const { RefCell::new(Vec::new()) };
+}
+
 impl Picture {
     /// The picture of the file at `path`, or `None` when the file is not
     /// one that draws: only an `.svg` is, by its extension in any case.
@@ -62,18 +70,32 @@ impl Picture {
         })
     }
 
+    /// The picture `file` draws as, parsed from the markup it loaded
+    /// with. A file's sides are parsed once while it stays loaded, not on
+    /// every build of the pane or read of the strip's tile.
+    pub fn of(file: &LoadedFile) -> Option<Picture> {
+        let source = file.picture.as_ref()?;
+        PARSED.with(|parsed| {
+            let mut parsed = parsed.borrow_mut();
+            parsed.retain(|(kept, _)| kept.strong_count() > 0);
+            if let Some((_, picture)) = parsed
+                .iter()
+                .find(|(kept, _)| std::ptr::eq(kept.as_ptr(), Arc::as_ptr(source)))
+            {
+                return Some(picture.clone());
+            }
+            let picture =
+                Picture::parse(&file.path, source.head.as_deref(), source.base.as_deref())?;
+            parsed.push((Arc::downgrade(source), picture.clone()));
+            Some(picture)
+        })
+    }
+
     /// The side the file is now: the head, or the base of a deletion.
     #[cfg(test)]
     pub fn current(&self) -> Option<&Result<Drawing, String>> {
         self.head.as_ref().or(self.base.as_ref())
     }
-}
-
-/// Whether a path names an SVG file.
-pub fn is_svg(path: &str) -> bool {
-    std::path::Path::new(path)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
 }
 
 impl Drawing {

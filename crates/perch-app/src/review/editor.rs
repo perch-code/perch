@@ -193,7 +193,11 @@ pub fn editor_pane(
                             Some(file) => {
                                 // A file that draws is drawn, unless the reader
                                 // asked for its markup.
-                                let drawn = if source { None } else { file.picture.clone() };
+                                let drawn = if source {
+                                    None
+                                } else {
+                                    picture::Picture::of(&file)
+                                };
                                 let previewed = preview && preview::can_preview(&file);
                                 if previewed {
                                     state.selection.set(None);

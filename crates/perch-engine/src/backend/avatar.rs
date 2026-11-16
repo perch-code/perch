@@ -27,6 +27,10 @@ use image::{imageops, ImageFormat};
 /// milliseconds a face in a debug build.
 static CUT: LazyLock<Mutex<HashMap<u64, Vec<u8>>>> = LazyLock::new(Default::default);
 
+/// How round an app's face is, as a share of its side: GitHub's 4px on
+/// a 16px bot. The window rounds what it draws of one by it too.
+pub const APP_AVATAR_CORNER: f64 = 0.25;
+
 /// The most pixels a side a face keeps: what `GitHub::fetch_avatar` asks
 /// for, and more than the largest face drawn (24 pt) needs at 2x.
 const SIDE: u32 = 64;
@@ -43,14 +47,7 @@ pub(crate) fn drawn(bytes: Vec<u8>, url: &str) -> Vec<u8> {
     if let Some(cut) = CUT.lock().ok().and_then(|cut| cut.get(&key).cloned()) {
         return cut;
     }
-    match cut(
-        &bytes,
-        if app {
-            crate::theme::APP_AVATAR_CORNER as f32
-        } else {
-            0.5
-        },
-    ) {
+    match cut(&bytes, if app { APP_AVATAR_CORNER as f32 } else { 0.5 }) {
         Some(cut) => {
             if let Ok(mut memo) = CUT.lock() {
                 memo.insert(key, cut.clone());
