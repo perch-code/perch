@@ -601,6 +601,13 @@ where
             let _ = write.shutdown().await;
             return Err(WireError::Refused(reason, about));
         }
+        // Nothing said and gone: no fault of the engine's. A bridge waiting
+        // for an engine it asked to stop connects to see whether the socket
+        // still answers, and an ssh session can end before the app writes.
+        Err(WireError::Closed) => {
+            tracing::info!("a connection closed before its hello");
+            return Err(WireError::Closed);
+        }
         Err(error) => {
             tracing::error!(%error, "closing a connection before its hello");
             return Err(error);
