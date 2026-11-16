@@ -29,6 +29,12 @@
 //!   it is connected and something it asked for may have been lost
 //!   (`EngineLink::Up`'s `again`).
 //!
+//! - With no `[remote] command`, a try that ends with the host saying it
+//!   has no `perchd` of the build the app wants installs it and tries
+//!   again at once, outside the waits (see `provision`). Installing once
+//!   is all a try gets: a host that still says so after is a fault the
+//!   reader has to look at, and the tries stop.
+//!
 //! How the connection stands goes to the windows as `Event::Link`, with
 //! the engine's own events, in order.
 
@@ -41,6 +47,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::provision::{self, Arch, Failed, Source};
 use super::{handshake, WireError};
 use crate::backend::client::Navigations;
 use crate::backend::{Backend, Command, EngineLink, Event, WindowId, NO_WINDOW};
@@ -49,8 +56,16 @@ use crate::backend::{Backend, Command, EngineLink, Event, WindowId, NO_WINDOW};
 /// code asks for hovers many times a second.
 const REFUSALS_APART: Duration = Duration::from_secs(2);
 
-/// What `[remote] command` is when the file says nothing.
-pub const DEFAULT_COMMAND: &str = "perchd bridge";
+/// What ssh runs on the host to reach the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bridge {
+    /// `[remote] command`, run in the login shell as given. Nothing is
+    /// installed.
+    Command(String),
+    /// The `perchd` the app installs there, from `Source`, when it is not
+    /// there already.
+    Installed(Source),
+}
 
 /// A byte stream to an engine.
 pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
@@ -70,6 +85,11 @@ pub struct Dialed {
 /// How a stream to the engine is made: `ssh` in the app, a pipe in memory
 /// in a test. Err says why none could be.
 pub type Dial = Box<dyn FnMut() -> BoxFuture<Result<Dialed, String>> + Send>;
+
+/// How `perchd` is put on the host, for a try that ended with the host
+/// saying it has none, for the processor it named: the build it installs,
+/// said at once, and the install.
+pub type Install = Box<dyn FnMut(Arch) -> (String, BoxFuture<Result<(), Failed>>) + Send>;
 
 /// The waits between tries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +289,23 @@ impl Link {
     fn say(&self, link: EngineLink) -> bool {
         self.events.send((NO_WINDOW, Event::Link(link))).is_ok()
     }
+
+    /// Not connected for `why`, which trying again cannot help: no more
+    /// tries until the reader asks for one. False once nobody is
+    /// listening.
+    async fn halt(&self, why: String, ever: bool) -> bool {
+        self.down();
+        if !self.say(EngineLink::Down {
+            host: self.host.clone(),
+            why,
+            retry_in: None,
+            ever,
+        }) {
+            return false;
+        }
+        self.retry.notified().await;
+        true
+    }
 }
 
 /// What a window is told of a command refused while disconnected.
@@ -282,6 +319,7 @@ pub fn refused(host: &str) -> String {
 pub fn link(
     host: &str,
     dial: Dial,
+    install: Option<Install>,
     backoff: Backoff,
     runtime: &tokio::runtime::Handle,
 ) -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
@@ -293,20 +331,28 @@ pub fn link(
         state: Mutex::default(),
         retry: tokio::sync::Notify::new(),
     });
-    runtime.spawn(keep_connected(link.clone(), dial, backoff));
+    runtime.spawn(keep_connected(link.clone(), dial, install, backoff));
     (Backend::linked(link), received)
 }
 
 /// Make the connection, and make it again each time it is lost, until the
 /// app stops listening.
-async fn keep_connected(link: Arc<Link>, mut dial: Dial, backoff: Backoff) {
+async fn keep_connected(
+    link: Arc<Link>,
+    mut dial: Dial,
+    mut install: Option<Install>,
+    backoff: Backoff,
+) {
     let host = link.host.clone();
     if !link.say(EngineLink::Connecting { host: host.clone() }) {
         return;
     }
     let mut wait = backoff.first;
     let mut ever = false;
+    // The build the last try installed, while the try after it is made.
+    let mut installed: Option<String> = None;
     loop {
+        let just_installed = installed.take();
         let why = match dial().await {
             Err(why) => why,
             Ok(Dialed { stream, hang_up }) => {
@@ -358,22 +404,43 @@ async fn keep_connected(link: Arc<Link>, mut dial: Dial, backoff: Backoff) {
                     Some(Ok(Err(WireError::Refused(reason)))) => {
                         let _ = hang_up().await;
                         tracing::warn!(host, %reason, "the engine refused the app");
-                        link.down();
-                        if !link.say(EngineLink::Down {
-                            host: host.clone(),
-                            why: reason,
-                            retry_in: None,
-                            ever,
-                        }) {
+                        if !link.halt(reason, ever).await {
                             return;
                         }
-                        link.retry.notified().await;
                         wait = backoff.first;
                         continue;
                     }
                     Some(Ok(Err(error))) => hang_up().await.unwrap_or_else(|| error.to_string()),
                 }
             }
+        };
+        let installing = |build: &str| {
+            link.say(EngineLink::Installing {
+                host: host.clone(),
+                build: build.to_string(),
+            });
+        };
+        let why = match install_if_asked(install.as_mut(), &host, &why, just_installed, installing)
+            .await
+        {
+            None => why,
+            Some(Ok(build)) => {
+                // Tried again at once: nothing failed.
+                installed = Some(build);
+                if !link.say(EngineLink::Connecting { host: host.clone() }) {
+                    return;
+                }
+                continue;
+            }
+            Some(Err(Failed { why, lasting: true })) => {
+                tracing::warn!(host, %why, "perchd could not be installed");
+                if !link.halt(why, ever).await {
+                    return;
+                }
+                wait = backoff.first;
+                continue;
+            }
+            Some(Err(Failed { why, .. })) => why,
         };
         tracing::warn!(host, %why, ?wait, "not connected to the engine");
         link.down();
@@ -390,6 +457,83 @@ async fn keep_connected(link: Arc<Link>, mut dial: Dial, backoff: Backoff) {
             () = link.retry.notified() => {}
         }
         wait = backoff.after(wait);
+    }
+}
+
+/// When `why`, the last thing a try said, is the host saying it has no
+/// `perchd` of the build asked for: install it, saying so with
+/// `installing`, and give the build installed. None for any other end, or
+/// with nothing to install with. A try right after an install that says
+/// so again is not installed for again: the host does not find what was
+/// put there, and installing it again would find it no better.
+async fn install_if_asked(
+    install: Option<&mut Install>,
+    host: &str,
+    why: &str,
+    just_installed: Option<String>,
+    installing: impl FnOnce(&str),
+) -> Option<Result<String, Failed>> {
+    let install = install?;
+    let asked = provision::install_line(why)?;
+    Some(match (asked, just_installed) {
+        (Err(why), _) => Err(Failed::lasting(why)),
+        (Ok(_), Some(build)) => Err(Failed::lasting(format!(
+            "Perch installed perchd {build} on {host}, and the host still says it has none. Check that a login shell there sees the same $PERCH_HOME, or set [remote] command to run perchd yourself."
+        ))),
+        (Ok(arch), None) => {
+            let (build, installed) = install(arch);
+            tracing::info!(host, build, arch = arch.name(), "installing perchd");
+            installing(&build);
+            installed.await.map(|()| {
+                tracing::info!(host, build, "installed perchd");
+                build
+            })
+        }
+    })
+}
+
+/// Connect to the engine on `host` once, installing `perchd` first if it
+/// is missing, and give its welcome, or why there was none: what `perch
+/// --connect` does. `installing` hears the build being installed.
+pub async fn connect_once(
+    host: &str,
+    bridge: Bridge,
+    answer: Duration,
+    mut installing: impl FnMut(&str),
+) -> Result<super::Welcome, String> {
+    let (mut dial, mut install) = dial_for(host, bridge);
+    let mut installed: Option<String> = None;
+    loop {
+        let just_installed = installed.take();
+        let Dialed { stream, hang_up } = dial().await?;
+        let why = match tokio::time::timeout(answer, handshake(stream)).await {
+            Ok(Ok((welcome, session))) => {
+                drop(session);
+                let _ = hang_up().await;
+                return Ok(welcome);
+            }
+            Ok(Err(WireError::Refused(reason))) => {
+                let _ = hang_up().await;
+                return Err(reason);
+            }
+            Ok(Err(error)) => hang_up().await.unwrap_or_else(|| error.to_string()),
+            Err(_) => hang_up()
+                .await
+                .unwrap_or_else(|| format!("{host} did not answer within {} s.", answer.as_secs())),
+        };
+        match install_if_asked(
+            install.as_mut(),
+            host,
+            &why,
+            just_installed,
+            &mut installing,
+        )
+        .await
+        {
+            None => return Err(why),
+            Some(Ok(build)) => installed = Some(build),
+            Some(Err(failed)) => return Err(failed.why),
+        }
     }
 }
 
@@ -428,9 +572,10 @@ pub fn in_login_shell(command: &str) -> String {
     format!("exec \"$SHELL\" -lc {}", shell_quote(command))
 }
 
-/// ssh's arguments to run `command` on `host`: no terminal, so nothing
-/// but the wire is on its stdout, and a check every 15 s that the host is
-/// still there, given up after three go unanswered.
+/// ssh's arguments to run `remote`, a command line for the shell ssh
+/// starts there, on `host`: no terminal, so nothing but the wire is on its
+/// stdout, and a check every 15 s that the host is still there, given up
+/// after three go unanswered.
 ///
 /// Whatever the reader's ssh config says, the agent and X11 are not
 /// forwarded and no port forwardings are made: the engine outlives this
@@ -439,7 +584,7 @@ pub fn in_login_shell(command: &str) -> String {
 /// Nothing is asked of the reader either, as there is no terminal to ask
 /// in: a host whose key ssh has not seen, or a key with no agent to
 /// unlock it, fails the try with ssh's reason.
-pub fn ssh_args(host: &str, command: &str) -> Vec<String> {
+pub fn ssh_args(host: &str, remote: &str) -> Vec<String> {
     [
         "-T",
         "-o",
@@ -458,90 +603,179 @@ pub fn ssh_args(host: &str, command: &str) -> Vec<String> {
         "ClearAllForwardings=yes",
         "--",
         host,
+        remote,
     ]
     .into_iter()
     .map(str::to_string)
-    .chain([in_login_shell(command)])
     .collect()
 }
 
-/// Dial `host` with ssh, which runs `command` there. ssh's stderr goes to
-/// the log, and its last line is why a connection ended.
-pub fn ssh(host: &str, command: &str) -> Dial {
-    let (host, command) = (host.to_string(), command.to_string());
-    Box::new(move || {
-        let (host, command) = (host.clone(), command.clone());
-        Box::pin(async move {
-            if let Some(why) = bad_host(&host) {
-                return Err(why);
-            }
-            let mut child = tokio::process::Command::new("ssh")
-                .args(ssh_args(&host, &command))
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|error| format!("Could not run ssh: {error}"))?;
-            let (Some(stdin), Some(stdout), Some(stderr)) =
-                (child.stdin.take(), child.stdout.take(), child.stderr.take())
-            else {
-                return Err("ssh started with no pipes to it".to_string());
-            };
-            let last = Arc::new(Mutex::new(None::<String>));
-            let said = tokio::spawn({
-                let (last, host) = (last.clone(), host.clone());
-                async move {
-                    use tokio::io::AsyncBufReadExt;
-                    let mut lines = tokio::io::BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let line = line.trim();
-                        if line.is_empty() {
-                            continue;
-                        }
-                        tracing::info!(host, "ssh: {line}");
-                        if let Ok(mut last) = last.lock() {
-                            *last = Some(line.to_string());
-                        }
+/// The remote line ssh runs for `bridge`, by `build` when it is installed.
+fn remote_line(bridge: &Bridge, build: &str) -> String {
+    match bridge {
+        Bridge::Command(command) => in_login_shell(command),
+        Bridge::Installed(_) => provision::connect_command(build),
+    }
+}
+
+/// Dial `host` with ssh (`PERCH_SSH` when set), which runs `remote` there.
+/// ssh's stderr goes to the log, and its last line is why a connection
+/// ended. A host saying it has no `perchd` to run keeps that as the last
+/// line, whatever ssh says after it.
+async fn dial_ssh(host: &str, remote: &str) -> Result<Dialed, String> {
+    if let Some(why) = bad_host(host) {
+        return Err(why);
+    }
+    let mut child = tokio::process::Command::new(provision::ssh_program())
+        .args(ssh_args(host, remote))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("Could not run ssh: {error}"))?;
+    let (Some(stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        return Err("ssh started with no pipes to it".to_string());
+    };
+    let last = Arc::new(Mutex::new(None::<String>));
+    let said = tokio::spawn({
+        let (last, host) = (last.clone(), host.to_string());
+        async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                tracing::info!(host, "ssh: {line}");
+                if let Ok(mut last) = last.lock() {
+                    let kept = last
+                        .as_deref()
+                        .is_some_and(|was| was.starts_with(provision::INSTALL_SAID));
+                    if !kept {
+                        *last = Some(line.to_string());
                     }
                 }
-            });
-            Ok(Dialed {
-                stream: Box::new(tokio::io::join(stdout, stdin)),
-                hang_up: Box::new(move || {
-                    Box::pin(async move {
-                        // Most often ssh has gone already, or is going,
-                        // and its last words are on their way.
-                        if tokio::time::timeout(Duration::from_secs(2), child.wait())
-                            .await
-                            .is_err()
-                        {
-                            let _ = child.kill().await;
-                        }
-                        // A master connection ssh shares (ControlPersist)
-                        // keeps its stderr open past it: the reader is
-                        // stopped rather than left with the pipe.
-                        let mut said = said;
-                        if tokio::time::timeout(Duration::from_secs(1), &mut said)
-                            .await
-                            .is_err()
-                        {
-                            said.abort();
-                        }
-                        last.lock().ok().and_then(|last| last.clone())
-                    })
-                }),
+            }
+        }
+    });
+    Ok(Dialed {
+        stream: Box::new(tokio::io::join(stdout, stdin)),
+        hang_up: Box::new(move || {
+            Box::pin(async move {
+                // Most often ssh has gone already, or is going, and its
+                // last words are on their way.
+                if tokio::time::timeout(Duration::from_secs(2), child.wait())
+                    .await
+                    .is_err()
+                {
+                    let _ = child.kill().await;
+                }
+                // A master connection ssh shares (ControlPersist) keeps its
+                // stderr open past it: the reader is stopped rather than
+                // left with the pipe.
+                let mut said = said;
+                if tokio::time::timeout(Duration::from_secs(1), &mut said)
+                    .await
+                    .is_err()
+                {
+                    said.abort();
+                }
+                last.lock().ok().and_then(|last| last.clone())
             })
-        })
+        }),
     })
 }
 
-/// The app's connection to the engine on `host`, by ssh running `command`
-/// there, carried by a runtime of the client's own. With no runtime to be
-/// had, a handle with nothing behind it, and a status that says why.
+/// How to reach the engine on `host` through `bridge`, and, with no
+/// command given, how to install `perchd` there. The build is worked out
+/// for each try, so a `[remote] perchd` rebuilt while the app runs is
+/// installed on the next.
+pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
+    let dial: Dial = Box::new({
+        let (host, bridge) = (host.to_string(), bridge.clone());
+        move || {
+            let (host, bridge) = (host.clone(), bridge.clone());
+            Box::pin(async move {
+                let build = match &bridge {
+                    Bridge::Command(_) | Bridge::Installed(Source::Release) => {
+                        provision::release_build()
+                    }
+                    Bridge::Installed(Source::File(path)) => {
+                        let path = path.clone();
+                        tokio::task::spawn_blocking(move || provision::read_file(&path))
+                            .await
+                            .map_err(|e| e.to_string())??
+                            .build
+                    }
+                };
+                if !provision::plain_word(&build) {
+                    return Err(format!(
+                        "perchd's build, {build}, has a character Perch won't put on a command line."
+                    ));
+                }
+                dial_ssh(&host, &remote_line(&bridge, &build)).await
+            })
+        }
+    });
+    let Bridge::Installed(source) = bridge else {
+        return (dial, None);
+    };
+    let host = host.to_string();
+    let install: Install = Box::new(move |arch| {
+        let host = host.clone();
+        match &source {
+            Source::Release => {
+                let build = provision::release_build();
+                let to = build.clone();
+                (
+                    build,
+                    Box::pin(async move {
+                        let binary = provision::release_binary(arch).await?;
+                        provision::upload(&host, &to, binary).await
+                    }),
+                )
+            }
+            // Read again: the file may have changed since the try that
+            // asked, and the build installed has to be the file's now.
+            Source::File(path) => match provision::read_file(path) {
+                Ok(binary) => {
+                    let build = binary.build.clone();
+                    let path = path.clone();
+                    (
+                        build.clone(),
+                        Box::pin(async move {
+                            match provision::elf_arch(&binary.bytes) {
+                                Ok(built) if built != arch => Err(Failed::lasting(format!(
+                                    "[remote] perchd, {}, is built for {}, and {host} is {}.",
+                                    path.display(),
+                                    built.name(),
+                                    arch.name()
+                                ))),
+                                _ => provision::upload(&host, &build, binary.bytes).await,
+                            }
+                        }),
+                    )
+                }
+                Err(why) => (
+                    path.display().to_string(),
+                    Box::pin(async move { Err(Failed::lasting(why)) }),
+                ),
+            },
+        }
+    });
+    (dial, Some(install))
+}
+
+/// The app's connection to the engine on `host`, through `bridge`, carried
+/// by a runtime of the client's own. With no runtime to be had, a handle
+/// with nothing behind it, and a status that says why.
 pub fn over_ssh(
     host: &str,
-    command: &str,
+    bridge: Bridge,
 ) -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     let runtime = match RUNTIME.get() {
@@ -567,12 +801,8 @@ pub fn over_ssh(
             }
         },
     };
-    link(
-        host,
-        ssh(host, command),
-        Backoff::default(),
-        runtime.handle(),
-    )
+    let (dial, install) = dial_for(host, bridge);
+    link(host, dial, install, Backoff::default(), runtime.handle())
 }
 
 #[cfg(test)]
@@ -599,7 +829,7 @@ mod tests {
     #[test]
     fn ssh_is_given_the_host_and_a_command_for_the_login_shell() {
         assert_eq!(
-            ssh_args("halo", DEFAULT_COMMAND),
+            ssh_args("halo", &in_login_shell("perchd bridge")),
             [
                 "-T",
                 "-o",
@@ -702,17 +932,21 @@ mod tests {
         far: tokio::sync::mpsc::UnboundedReceiver<Far>,
         dials: Arc<std::sync::atomic::AtomicUsize>,
         failing: Arc<Mutex<Option<String>>>,
+        /// What a dial says last as it is hung up, ssh's last line.
+        last: Arc<Mutex<Option<String>>>,
     }
 
     fn pipes() -> (Dial, Pipes) {
         let (to_test, far) = tokio::sync::mpsc::unbounded_channel();
         let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failing = Arc::new(Mutex::new(None::<String>));
+        let last = Arc::new(Mutex::new(None::<String>));
         let dial: Dial = Box::new({
-            let (dials, failing) = (dials.clone(), failing.clone());
+            let (dials, failing, last) = (dials.clone(), failing.clone(), last.clone());
             move || {
                 dials.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let failing = failing.lock().unwrap().clone();
+                let said = last.lock().unwrap().clone();
                 let to_test = to_test.clone();
                 Box::pin(async move {
                     if let Some(why) = failing {
@@ -727,7 +961,7 @@ mod tests {
                     });
                     Ok(Dialed {
                         stream: Box::new(near),
-                        hang_up: Box::new(|| Box::pin(async { None })),
+                        hang_up: Box::new(move || Box::pin(async move { said })),
                     })
                 })
             }
@@ -738,6 +972,7 @@ mod tests {
                 far,
                 dials,
                 failing,
+                last,
             },
         )
     }
@@ -787,7 +1022,13 @@ mod tests {
     async fn a_command_while_disconnected_is_refused_with_a_notice_and_never_sent() {
         let (dial, mut pipes) = pipes();
         *pipes.failing.lock().unwrap() = Some("ssh: Could not resolve hostname halo".into());
-        let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
         assert_eq!(
             next_link(&events).await,
             EngineLink::Connecting {
@@ -867,7 +1108,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_lost_connection_is_made_again_and_the_windows_resync() {
         let (dial, mut pipes) = pipes();
-        let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
         let (first, second) = (backend.open_window(), backend.open_window());
         // Asked for as the app starts, before the first try is through:
         // it goes once the windows are open and everything asked for.
@@ -930,7 +1177,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn which_window_is_key_is_kept_through_a_lost_connection() {
         let (dial, mut pipes) = pipes();
-        let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
         let (first, second) = (backend.open_window(), backend.open_window());
         let mut far = pipes.next().await;
         far.welcome(1).await;
@@ -969,7 +1222,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn what_the_windows_asked_for_as_a_failed_first_try_ran_is_said_dropped() {
         let (dial, mut pipes) = pipes();
-        let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
         let (first, second) = (backend.open_window(), backend.open_window());
         first.refresh_open_item("item");
         // The first try is under way, and fails.
@@ -1013,7 +1272,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connection_that_ends_at_once_keeps_doubling_the_wait() {
         let (dial, mut pipes) = pipes();
-        let (_backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
         let mut waits = Vec::new();
         for connection in 1..=3 {
             let mut far = pipes.next().await;
@@ -1038,7 +1303,13 @@ mod tests {
             answer: Duration::from_secs(1),
             ..QUICK
         };
-        let (_backend, events) = link("halo", dial, backoff, &tokio::runtime::Handle::current());
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            None,
+            backoff,
+            &tokio::runtime::Handle::current(),
+        );
         // A host that hears the hello and never answers.
         let mut far = pipes.next().await;
         far.hello().await;
@@ -1064,7 +1335,13 @@ mod tests {
             answer: Duration::from_secs(60),
             ..QUICK
         };
-        let (backend, events) = link("halo", dial, backoff, &tokio::runtime::Handle::current());
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            backoff,
+            &tokio::runtime::Handle::current(),
+        );
         let mut stuck = pipes.next().await;
         stuck.hello().await;
         backend.reconnect();
@@ -1087,7 +1364,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_protocol_stops_the_tries_until_the_reader_asks() {
         let (dial, mut pipes) = pipes();
-        let (backend, events) = link("halo", dial, QUICK, &tokio::runtime::Handle::current());
+        let (backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
         let mut far = pipes.next().await;
         far.hello().await;
         let reason = "Perch 1 speaks protocol 1, and this engine, Perch 2, speaks protocol 2. Update the app.";
@@ -1113,6 +1396,240 @@ mod tests {
             if let EngineLink::Up { .. } = next_link(&events).await {
                 break;
             }
+        }
+    }
+
+    /// An install that records what it was asked for, and fails with
+    /// `failing` while that holds something.
+    fn installer(asked: Arc<Mutex<Vec<Arch>>>, failing: Option<Failed>) -> Install {
+        Box::new(move |arch| {
+            asked.lock().unwrap().push(arch);
+            let failing = failing.clone();
+            (
+                "0.9.0".to_string(),
+                Box::pin(async move { failing.map_or(Ok(()), Err) }),
+            )
+        })
+    }
+
+    const MISSING: &str = "perch-install: Linux aarch64";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_with_no_perchd_has_it_installed_and_is_dialled_again_at_once() {
+        let (dial, mut pipes) = pipes();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let backoff = Backoff {
+            // Long enough that a wait would show.
+            first: Duration::from_secs(30),
+            ..QUICK
+        };
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            Some(installer(asked.clone(), None)),
+            backoff,
+            &tokio::runtime::Handle::current(),
+        );
+        *pipes.last.lock().unwrap() = Some(MISSING.into());
+        drop(pipes.next().await);
+        assert_eq!(
+            next_link(&events).await,
+            EngineLink::Connecting {
+                host: "halo".into()
+            }
+        );
+        assert_eq!(
+            next_link(&events).await,
+            EngineLink::Installing {
+                host: "halo".into(),
+                build: "0.9.0".into()
+            }
+        );
+        *pipes.last.lock().unwrap() = None;
+        assert_eq!(
+            next_link(&events).await,
+            EngineLink::Connecting {
+                host: "halo".into()
+            }
+        );
+        pipes.next().await.welcome(1).await;
+        assert!(matches!(next_link(&events).await, EngineLink::Up { .. }));
+        assert_eq!(*asked.lock().unwrap(), [Arch::Arm64]);
+        assert_eq!(pipes.dials(), 2);
+    }
+
+    /// An install that went through, with the host still saying it has
+    /// none, is not made again and again: the tries stop and say why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_still_missing_perchd_after_an_install_stops_the_tries() {
+        let (dial, mut pipes) = pipes();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (backend, events) = link(
+            "halo",
+            dial,
+            Some(installer(asked.clone(), None)),
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        *pipes.last.lock().unwrap() = Some(MISSING.into());
+        drop(pipes.next().await);
+        drop(pipes.next().await);
+        loop {
+            if let EngineLink::Down { why, retry_in, .. } = next_link(&events).await {
+                assert!(why.contains("still says it has none"), "{why}");
+                assert_eq!(retry_in, None);
+                break;
+            }
+        }
+        tokio::time::sleep(QUICK.last * 4).await;
+        assert_eq!(pipes.dials(), 2);
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        // Asked to, it tries again, and installs again.
+        backend.reconnect();
+        drop(pipes.next().await);
+        loop {
+            if let EngineLink::Installing { .. } = next_link(&events).await {
+                break;
+            }
+        }
+        assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_that_fails_waits_as_any_try_does_unless_it_cannot_help() {
+        let (dial, mut pipes) = pipes();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            Some(installer(
+                asked.clone(),
+                Some(Failed::now("couldn't download it".into())),
+            )),
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        *pipes.last.lock().unwrap() = Some(MISSING.into());
+        drop(pipes.next().await);
+        loop {
+            if let EngineLink::Down { why, retry_in, .. } = next_link(&events).await {
+                assert_eq!(why, "couldn't download it");
+                assert_eq!(retry_in, Some(QUICK.first));
+                break;
+            }
+        }
+        // The next try asks again, and installs again.
+        drop(pipes.next().await);
+        loop {
+            if let EngineLink::Down { retry_in, .. } = next_link(&events).await {
+                assert_eq!(retry_in, Some(QUICK.first * 2));
+                break;
+            }
+        }
+        assert_eq!(asked.lock().unwrap().len(), 2);
+
+        // A host Perch has no perchd for stops the tries.
+        let (dial, mut other) = super::tests::pipes();
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            Some(installer(asked.clone(), None)),
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        *other.last.lock().unwrap() = Some("perch-install: Linux riscv64".into());
+        drop(other.next().await);
+        loop {
+            if let EngineLink::Down { why, retry_in, .. } = next_link(&events).await {
+                assert!(why.contains("[remote] command"), "{why}");
+                assert_eq!(retry_in, None);
+                break;
+            }
+        }
+        assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    /// With a command of the reader's own, nothing is installed: the line
+    /// is only why the try failed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_a_command_given_nothing_is_installed() {
+        let (dial, mut pipes) = pipes();
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        *pipes.last.lock().unwrap() = Some(MISSING.into());
+        drop(pipes.next().await);
+        loop {
+            if let EngineLink::Down { why, retry_in, .. } = next_link(&events).await {
+                assert_eq!(why, MISSING);
+                assert!(retry_in.is_some());
+                break;
+            }
+        }
+    }
+
+    /// The connection script, run as ssh would have the login shell run
+    /// it, by each shell there is here: bash and zsh on macOS, fish when
+    /// installed. It runs the bridge of the build named, under the Perch
+    /// home a login shell sees, and says what the host is when there is
+    /// none.
+    #[test]
+    fn the_connection_script_runs_in_every_login_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let shells = provision::tests::shells();
+        assert!(!shells.is_empty());
+        for shell in shells {
+            let home = tempfile::tempdir().unwrap();
+            let bin = home.path().join(".perch/bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let fake = bin.join("perchd-0.9.0-0123456789ab");
+            std::fs::write(&fake, "#!/bin/sh\necho \"ran $0 $*\"\n").unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let run = |build: &str| {
+                std::process::Command::new(&shell)
+                    .arg("-c")
+                    .arg(provision::connect_command(build))
+                    .env_clear()
+                    .env("HOME", home.path())
+                    .env("SHELL", &shell)
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()
+                    .unwrap()
+            };
+            let ran = run("0.9.0-0123456789ab");
+            assert_eq!(
+                String::from_utf8_lossy(&ran.stdout).trim(),
+                format!("ran {} bridge", fake.display()),
+                "{shell}: {}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
+            assert!(ran.status.success(), "{shell}");
+
+            let missing = run("0.9.0");
+            assert_eq!(
+                missing.status.code(),
+                Some(provision::INSTALL_EXIT),
+                "{shell}"
+            );
+            let said = String::from_utf8_lossy(&missing.stderr);
+            let last = said.lines().last().unwrap_or_default();
+            let uname = |flag: &str| {
+                let out = std::process::Command::new("uname")
+                    .arg(flag)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            };
+            assert_eq!(
+                last,
+                format!("perch-install: {} {}", uname("-s"), uname("-m")),
+                "{shell}"
+            );
+            assert!(provision::install_line(last).is_some());
         }
     }
 }

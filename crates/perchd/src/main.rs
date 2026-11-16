@@ -7,8 +7,11 @@
 //!   an engine first when none answers. The app runs `ssh <host> perchd
 //!   bridge`, so ssh does the authentication and nothing listens on a port.
 //! - `perchd status` says whether an engine is running, and what it has.
+//! - `perchd --version` prints `perchd <version> (protocol <n>)`, which the
+//!   app reads when it installs one on a host: keep the form.
 
 mod bridge;
+mod cleanup;
 mod serve;
 mod socket;
 mod status;

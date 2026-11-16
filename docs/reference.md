@@ -1481,7 +1481,9 @@ toolkit, so it needs no GTK. Releases carry it for Linux as
 `perchd-linux-<arch>.tar.gz`, for x86_64 and arm64, with the SHA-256 of
 every asset in the release's `SHA256SUMS`. It is built against musl and
 linked statically, so it runs on any Linux of its architecture, Alpine
-included, whatever its libc. Put `perchd` in `~/.local/bin`.
+included, whatever its libc. The app installs it on a host itself (see
+[Installing perchd](#installing-perchd)); to run one by hand, put it in
+`~/.local/bin`.
 
 - `perchd serve` runs the engine and listens on
   `$PERCH_HOME/run/perchd.sock` (the directory owner-only, the socket mode
@@ -1501,17 +1503,21 @@ included, whatever its libc. Put `perchd` in `~/.local/bin`.
   desktop login on the host say, keeps `SSH_AUTH_SOCK`, which is then the
   host's own agent.
 - `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
-  until either side closes. It is what `ssh <host> perchd bridge` runs. With
+  until either side closes. It is what the app has ssh run. With
   no engine answering it starts `perchd serve` in a session of its own, so
   the engine outlives the ssh connection, and waits up to 10 seconds for
   it. When something holds the home's lock without listening, the Perch
   app running on the host say, it names that process. It writes nothing
-  but the engine's messages to stdout.
+  but the engine's messages to stdout. A bridge the app installed, one
+  run from `$PERCH_HOME/bin/perchd-<build>`, removes the other
+  `perchd-*` there but the newest, and the temporary files of uploads
+  that stopped over an hour ago.
 - `perchd status` connects without starting anything and prints whether
   an engine is running, its version and protocol, its Perch home, how many
   other clients are connected and how many agent runs are queued or under
   way. It exits 0 when one answers and 3 when none does.
-- `perchd --version` prints the version and the wire protocol.
+- `perchd --version` prints the version and the wire protocol, as
+  `perchd 0.9.0 (protocol 4)`.
 
 A socket file left by an engine that was killed is removed when the next
 one starts, once nothing answers on it.
@@ -1537,23 +1543,70 @@ back while it is hidden.
 
 ### Setting up a host
 
-The host is Linux, always on, and reachable from the Mac with `ssh <host>`.
-On it:
+The host is Linux on x86_64 or arm64, always on, and reachable from the
+Mac with `ssh <host>`. The app installs `perchd` there itself (see
+[Installing perchd](#installing-perchd)), so nothing of Perch's has to be
+put on it first. On it:
 
-1. Unpack `perchd-linux-<arch>.tar.gz` from a release and put `perchd` in
-   `~/.local/bin`, on the `PATH` your login shell sets. It is a static
-   binary, so the distribution's libc does not matter.
-2. Install bubblewrap and socat (`apt install bubblewrap socat`, or your
+1. Install bubblewrap and socat (`apt install bubblewrap socat`, or your
    distribution's), which Claude Code's sandbox needs on Linux.
-3. Sign in to what the engine uses, as the user it runs as: `gh auth login`
+2. Sign in to what the engine uses, as the user it runs as: `gh auth login`
    (or `token` in its config.toml), and each agent CLI you run, `claude`,
    `codex` or `agy`. Nothing is copied from the Mac.
-4. Write `~/.perch/config.toml` on the host with a `[[repo]]` for each
+3. Write `~/.perch/config.toml` on the host with a `[[repo]]` for each
    repository and a `root` that is a clone on the host. Add repository… in
    the app can't do this for a host; edit the file there.
 
 Then on the Mac, set `[remote] host` in `~/.perch/config.toml` to the name
 you `ssh` to, or type it into Settings > General > Engine, and restart Perch.
+
+### Installing perchd
+
+With no `[remote] command`, the app runs a `perchd` of its own build on the
+host, `${PERCH_HOME:-~/.perch}/bin/perchd-<build>`, and installs it when it
+is not there: on the first connection, and after each update of the app.
+`<build>` is the app's version, `0.9.0`, for the release's `perchd`.
+
+- The host's login shell runs a short `sh` script that starts the bridge
+  of that build, or, with none, writes `perch-install: <uname -s> <uname
+  -m>` to stderr and exits 97.
+- On that line the app installs and connects again at once, outside the
+  waits between tries. The strip at the foot of the window says
+  "Installing perchd 0.9.0 on <host>…" meanwhile. Linux on `x86_64`, or on
+  `aarch64` or `arm64`, has a release's `perchd`; any other host says what
+  it is and to install `perchd` by hand and set `[remote] command`.
+- The app downloads `perchd-linux-<arch>.tar.gz` and `SHA256SUMS` from
+  the release of its own version on GitHub, with no token, checks the
+  tarball against the sums, keeps both in `~/.perch/perchd/<version>/` on
+  the Mac, and takes `perchd` out of the tarball. A release with no such
+  file says to set `[remote] perchd`.
+- A second ssh, with the same options, sends the binary to a script on the
+  host that writes it to a temporary file in `bin` (the directory and the
+  file owner-only), runs it with `--version`, and moves it into place only
+  when it names the app's version and protocol. The temporary file is
+  removed when anything fails.
+- An install that goes through, after which the host still says it has
+  no `perchd`, stops the tries and says so rather than installing again:
+  most often a login shell there that sets another `PERCH_HOME`. A
+  download or upload that fails is tried again with the next try.
+
+`[remote] perchd` names a Linux `perchd`, or a release tarball of one, on
+the Mac, to install instead of the release's: a dev build, or a host
+whose release has none. Its `<build>` is the app's version and the first
+12 hex digits of the binary's SHA-256, `0.9.0-1a2b3c4d5e6f`, so a rebuilt
+binary is installed again on the next connection. A tarball and the
+binary in it are the same build. It has to be built for the host's
+processor and name the app's version and protocol.
+
+Each bridge the app installed removes the older builds beside it but the
+newest one (see [perchd](#perchd)).
+
+`perch --connect [host]` does what the app does to connect, with no
+window: it installs `perchd` if the host needs it, prints the engine's
+version, protocol, host name, home and data folder, how many other clients
+it has and how many runs, and exits 0. It reads `[remote]` from the Mac's
+config.toml, and `[remote] host` when no host is given. On failure it says
+why and exits 1.
 
 ### What runs where
 
@@ -1580,17 +1633,22 @@ no lock on its Perch home. It runs
 ```sh
 ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
     -o ServerAliveCountMax=3 -o ForwardAgent=no -o ForwardX11=no \
-    -o ClearAllForwardings=yes -- <host> 'exec "$SHELL" -lc '\''perchd bridge'\'''
+    -o ClearAllForwardings=yes -- <host> <command>
 ```
 
-and talks to the engine on the host over ssh's stdin and stdout. ssh's own
+and talks to the engine on the host over ssh's stdin and stdout. The
+command runs `~/.perch/bin/perchd-<build> bridge` (see [Installing
+perchd](#installing-perchd)), or `[remote] command` when the Mac's
+config.toml sets one, in your login shell either way. ssh's own
 config, keys and agent apply to logging in, but nothing is forwarded,
 whatever the config says: not the agent, not X11, no ports. Nothing is
 asked either, as there is no terminal: connect once with `ssh <host>` in a
 terminal to accept the host's key, and keep a key with a passphrase in the
 agent or the macOS keychain. The command is run in your login shell on the
-host, so a `perchd` your profile puts on `PATH` is found; `[remote]
-command` changes it. What ssh says on stderr goes to the log. A change to
+host, bash, zsh or fish, so the engine has the `PATH` your profile sets and
+finds `git`, `gh` and the agents where you do. What ssh says on stderr goes
+to the log. `PERCH_SSH` in the app's environment names another ssh program
+to run, everywhere the app runs one. A change to
 the host takes effect when Perch restarts.
 
 The host's engine keeps its items, runs and checkouts going with the app

@@ -129,16 +129,22 @@ pub fn bad_path(path: &Path, for_terminal: bool) -> Option<String> {
     None
 }
 
-/// The line Terminal runs to open a shell in `path` on `host`: ssh with a
-/// terminal, a `cd` there, and the reader's login shell. The path is quoted
-/// for the host's shell, and the whole of what ssh runs there for this
-/// one's. Neither the host nor the path can be read as an option.
-pub fn terminal_line(host: &str, path: &Path) -> String {
+/// The line Terminal runs to open a shell in `path` on `host`: `ssh`, the
+/// program, with a terminal, a `cd` there, and the reader's login shell.
+/// The path is quoted for the host's shell, and the whole of what ssh runs
+/// there for this one's. Neither the host nor the path can be read as an
+/// option.
+pub fn terminal_line(ssh: &str, host: &str, path: &Path) -> String {
     let there = format!(
         "cd -- {} && exec $SHELL -l",
         shell_quote(&path.to_string_lossy())
     );
-    format!("ssh -t -- {} {}", shell_quote(host), shell_quote(&there))
+    format!(
+        "{} -t -- {} {}",
+        shell_quote(ssh),
+        shell_quote(host),
+        shell_quote(&there)
+    )
 }
 
 /// How `terminal` is told to run a program and its arguments: most take
@@ -235,7 +241,8 @@ pub fn open_terminal_on(host: &str, path: &Path) {
         crate::windows::notice(why);
         return;
     }
-    let line = terminal_line(host, path);
+    let ssh = perch_engine::wire::provision::ssh_program();
+    let line = terminal_line(&ssh.to_string_lossy(), host, path);
     if cfg!(target_os = "macos") {
         if let Err(e) = std::process::Command::new("osascript")
             .args(terminal_script(&line))
@@ -304,12 +311,12 @@ mod tests {
     #[test]
     fn a_shell_on_the_host_is_opened_with_the_path_quoted_twice() {
         assert_eq!(
-            terminal_line("halo", Path::new("/srv/code/perch")),
+            terminal_line("ssh", "halo", Path::new("/srv/code/perch")),
             "ssh -t -- halo 'cd -- /srv/code/perch && exec $SHELL -l'"
         );
         // A path with a space is one word in the host's shell, and the
         // whole is one word in this one's.
-        let line = terminal_line("chris@halo", Path::new("/srv/it is here"));
+        let line = terminal_line("ssh", "chris@halo", Path::new("/srv/it is here"));
         assert_eq!(
             line,
             r#"ssh -t -- chris@halo 'cd -- '\''/srv/it is here'\'' && exec $SHELL -l'"#

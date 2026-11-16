@@ -64,7 +64,7 @@ fn engine(page: &Page) -> Row {
         "engine",
         "Engine",
         || {
-            "Where Perch's engine runs: this Mac, or an SSH host with perchd on it. Changing it takes effect when Perch restarts."
+            "Where Perch's engine runs: this Mac, or a Linux host you can ssh to, where Perch installs perchd itself. Changing it takes effect when Perch restarts."
                 .to_string()
         },
         control,

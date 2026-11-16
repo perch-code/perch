@@ -9,6 +9,10 @@ same home refuses to start and says which process has it (see
 [One engine to a Perch home](reference.md#one-engine-to-a-perch-home)).
 `perchd` reads the config.toml of the machine it runs on.
 
+`PERCH_SSH`, in the app's environment, names the ssh program the app runs
+to reach a host, install `perchd` there and open a terminal on it, in
+place of `ssh`: a wrapper that adds `-F <config>`, for tests.
+
 With `[remote] host` set, the app uses the engine on that host (see
 [An engine on another machine](reference.md#an-engine-on-another-machine))
 and the settings split by whose they are. `[ui]`, `[display]`,
@@ -48,7 +52,8 @@ repository's `github` and `root`.
 | `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |
 | `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |
 | `[remote] host` | none | An SSH host whose `perchd` the app uses instead of an engine of its own; applies after a restart |
-| `[remote] command` | `"perchd bridge"` | What ssh runs on the host, in your login shell, to reach the engine |
+| `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app installs its own `perchd` there and runs that |
+| `[remote] perchd` | none | A Linux `perchd`, or a release tarball of one, on the Mac, for the app to install on the host instead of downloading the release's |
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |

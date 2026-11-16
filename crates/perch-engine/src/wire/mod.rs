@@ -18,6 +18,7 @@
 
 pub mod bytes;
 pub mod pairs;
+pub mod provision;
 pub mod remote;
 
 use std::path::PathBuf;

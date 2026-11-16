@@ -36,6 +36,8 @@ base64 = "0.22"
 libc = "0.2"
 # What the nested `.git` look keeps of each file is its digest.
 sha2 = "0.10"
+# A host's perchd comes in a gzipped tarball, unpacked on the Mac.
+flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"

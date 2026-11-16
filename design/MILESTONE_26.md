@@ -306,8 +306,8 @@ connect. VS Code's Remote SSH, Zed and T3 Code work the same way.
    and bundled SQLite, no OpenSSL), checks it is static, and publishes a
    `SHA256SUMS` beside the assets. `perchd-linux-<arch>.tar.gz` keeps its
    name. (Done.)
-2. Probe and upload (below).
-3. Versioned installs and their cleanup (below).
+2. Probe and upload (below). (Done.)
+3. Versioned installs and their cleanup (below). (Done.)
 4. Replacing an older engine (below).
 5. Host checks (below).
 
@@ -409,6 +409,38 @@ button to Settings when anything required is missing.
   and a static PIE, differently from one version to the next. CI's Linux job also builds `perchd` for
   `x86_64-unknown-linux-musl` and runs the same check, so a dependency
   that needs OpenSSL or glibc fails on the pull request, not at release.
+- What ssh runs is `exec "$SHELL" -lc 'exec /bin/sh -c "<script>"
+  perch-connect <build>'`. The script has no single quote, backslash,
+  backquote or `!`, and each `$` and `"` in it is behind a backslash,
+  which bash, zsh and fish all read as the character itself inside double
+  quotes. A test runs the exact line through each shell it finds, against
+  a temporary `HOME` with a stand-in `perchd-<build>`, and the upload
+  script the same way.
+- An install that goes through, after which the redial still says
+  `perch-install`, stops the tries (no retry until Reconnect) and says the
+  host still finds none, most likely a login shell with another
+  `PERCH_HOME`. A host Perch has no build for, and a release with no
+  asset, stop them too. A download or upload that fails waits for the next
+  try as any failure does, and that try installs again.
+- The `perch-install` line is kept as ssh's last line even when ssh says
+  something after it, a shared connection closing say.
+- The upload checks for the app's version and protocol whatever the
+  source, so a `[remote] perchd` from another version is refused there.
+  Its processor is checked on the Mac first, from the ELF header.
+- The tarball is read in Rust (flate2 and a small tar reader) rather than
+  by `tar`, so a test needs no tar, and macOS's `._perchd` beside it in a
+  tarball made on a Mac is passed over. `SHA256SUMS` is kept beside the
+  cached tarball, and the cache is used only while the two still agree.
+- Its `<build>` hashes the binary after it is taken out of a tarball, so a
+  tarball and its binary are one build. The file is read again on each
+  try, so a rebuilt one is installed on the next connect.
+- `PERCH_SSH` is honoured by Open in Terminal too, not only the link and
+  the upload.
+- The link's new state is `EngineLink::Installing { host, build }`; after
+  an install the strip says Connecting again until the engine answers.
+- Cleanup runs in a thread as the bridge starts, keeps the newest other
+  `perchd-*` by modification time, and touches only plain files.
+- `perch --connect` prints the welcome only; the host checks are step 5.
 
 ## Acceptance
 

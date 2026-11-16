@@ -1580,7 +1580,8 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let config = Config::parse_text(&text).unwrap();
         assert_eq!(config.remote.host(), Some("halo"));
-        assert_eq!(config.remote.command(), "perchd bridge");
+        // No command: the app installs and runs its own perchd there.
+        assert_eq!(config.remote.command(), None);
         assert!(present_keys(&text, &[]).contains("remote.host"));
         write_settings(&path, &[Setting::RemoteHost(Some("  ".into()))], &[]).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();

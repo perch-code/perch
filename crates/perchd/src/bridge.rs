@@ -6,6 +6,9 @@
 //! With no engine answering, the bridge starts `perchd serve` in a session
 //! of its own, so the engine outlives the ssh session that started it, and
 //! waits for its socket.
+//!
+//! A bridge the app installed clears the older builds beside it as it
+//! starts (see `cleanup`).
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -25,6 +28,7 @@ const STARTING: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(25);
 
 pub fn run() -> ExitCode {
+    crate::cleanup::start();
     let socket = socket::path();
     let stream = match UnixStream::connect(&socket) {
         Ok(stream) => stream,

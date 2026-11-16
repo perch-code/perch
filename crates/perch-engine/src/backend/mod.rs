@@ -1896,8 +1896,12 @@ impl Event {
 /// `wire::remote`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum EngineLink {
-    /// The first try is under way.
+    /// The first try is under way, or the one right after `perchd` was
+    /// installed.
     Connecting { host: String },
+    /// The host had no `perchd` of the build the app wants, and it is being
+    /// installed: downloaded, or read from `[remote] perchd`, and uploaded.
+    Installing { host: String, build: String },
     /// Let in. `again` when something a window asked for may have been
     /// lost: the client had been connected before and lost it, or its
     /// first try failed. The engine has been asked for everything again,
@@ -1922,6 +1926,7 @@ impl EngineLink {
     pub fn host(&self) -> &str {
         match self {
             EngineLink::Connecting { host }
+            | EngineLink::Installing { host, .. }
             | EngineLink::Up { host, .. }
             | EngineLink::Down { host, .. } => host,
         }

@@ -6,6 +6,7 @@ mod app_icon;
 mod app_menu;
 mod ask_cli;
 mod client_settings;
+mod connect_cli;
 mod icons;
 mod items_cli;
 mod keymap;
@@ -96,6 +97,11 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--timeline") {
         timeline_cli::run(&args[2..]);
         return;
+    }
+    // Connect to the engine on a host, installing perchd there first if
+    // need be, and print its welcome: the link without a window.
+    if args.get(1).map(String::as_str) == Some("--connect") {
+        std::process::exit(connect_cli::run(&args[2..]));
     }
     init_logging();
     tracing::info!("perch starting");
@@ -259,14 +265,15 @@ fn start_engine(
     // No engine here, and no lock on this machine's home: the host's
     // engine has its own.
     if let Some(host) = remote.host() {
-        tracing::info!(host, command = remote.command(), "engine on a host");
+        let bridge = bridge(remote);
+        tracing::info!(host, ?bridge, "engine on a host");
         remote::set_place(remote::Place::Host {
             host: host.to_string(),
             home: Default::default(),
             data_root: Default::default(),
         });
         remote::stay_awake_for_the_host();
-        return perch_engine::wire::remote::over_ssh(host, remote.command());
+        return perch_engine::wire::remote::over_ssh(host, bridge);
     }
     if std::env::var("PERCH_WIRE_LOOPBACK").is_ok_and(|v| v == "1") {
         match perch_engine::wire::loopback(keymap::add_warnings) {
@@ -277,6 +284,19 @@ fn start_engine(
         }
     }
     backend::spawn(keymap::add_warnings)
+}
+
+/// What ssh runs on the host: `[remote] command` as given, or else the
+/// `perchd` the app installs there, from `[remote] perchd` or the release.
+pub(crate) fn bridge(remote: &perch_github::RemoteConfig) -> perch_engine::wire::remote::Bridge {
+    use perch_engine::wire::{provision::Source, remote::Bridge};
+    match remote.command() {
+        Some(command) => Bridge::Command(command.to_string()),
+        None => Bridge::Installed(match remote.perchd() {
+            Some(path) => Source::File(path),
+            None => Source::Release,
+        }),
+    }
 }
 
 /// The log goes to stderr, for a terminal launch, and to a file a day in

@@ -21,6 +21,9 @@ pub fn said(link: &EngineLink) -> Option<(String, Option<String>)> {
     match link {
         EngineLink::Up { .. } => None,
         EngineLink::Connecting { host } => Some((format!("Connecting to {host}…"), None)),
+        EngineLink::Installing { host, build } => {
+            Some((format!("Installing perchd {build} on {host}…"), None))
+        }
         EngineLink::Down {
             host,
             why,
@@ -190,6 +193,13 @@ mod tests {
                 host: "halo".into()
             }),
             Some(("Connecting to halo…".to_string(), None))
+        );
+        assert_eq!(
+            said(&EngineLink::Installing {
+                host: "halo".into(),
+                build: "0.9.0".into()
+            }),
+            Some(("Installing perchd 0.9.0 on halo…".to_string(), None))
         );
         assert!(can_retry(&down(true, None)));
         assert!(!can_retry(&EngineLink::Connecting {

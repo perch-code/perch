@@ -3722,6 +3722,7 @@ name = "perch-engine"
 version = "0.8.0"
 dependencies = [
  "base64",
+ "flate2",
  "image",
  "jiff",
  "libc",

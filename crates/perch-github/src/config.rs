@@ -302,28 +302,21 @@ pub fn is_local(identity: &str) -> bool {
 
 /// `[remote]`: where the engine is. With no host, in the app, on this
 /// machine.
-#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
 pub struct RemoteConfig {
     /// An SSH host, as `ssh` is given it: a name from `~/.ssh/config`,
     /// `user@host`, or an address. ssh's own config, keys and agent apply.
     #[serde(default)]
     pub host: Option<String>,
-    /// What ssh runs there, in the login shell: the bridge to the engine.
-    #[serde(default = "default_remote_command")]
-    pub command: String,
-}
-
-fn default_remote_command() -> String {
-    "perchd bridge".to_string()
-}
-
-impl Default for RemoteConfig {
-    fn default() -> Self {
-        RemoteConfig {
-            host: None,
-            command: default_remote_command(),
-        }
-    }
+    /// What ssh runs there, in the login shell, to reach the engine. Unset
+    /// or empty, the app runs the `perchd` it installed there itself, and
+    /// installs it first when it is missing.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// A Linux `perchd`, or a release tarball of one, on this machine: what
+    /// the app installs on the host in place of the release's download.
+    #[serde(default)]
+    pub perchd: Option<PathBuf>,
 }
 
 impl RemoteConfig {
@@ -335,11 +328,23 @@ impl RemoteConfig {
             .filter(|host| !host.is_empty())
     }
 
-    /// The command, or the default for one left empty.
-    pub fn command(&self) -> &str {
-        match self.command.trim() {
-            "" => "perchd bridge",
-            command => command,
+    /// The command ssh runs on the host as given, when one is: an empty
+    /// one is none, and the app installs and runs its own `perchd`.
+    pub fn command(&self) -> Option<&str> {
+        self.command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+    }
+
+    /// The `perchd` to install from this machine, with `~` read as its
+    /// home, when one is named.
+    pub fn perchd(&self) -> Option<PathBuf> {
+        let path = self.perchd.as_deref()?;
+        match path.to_str().map(str::trim) {
+            Some("") => None,
+            Some(text) => Some(expand_home(text)),
+            None => Some(path.to_path_buf()),
         }
     }
 }
@@ -1307,6 +1312,24 @@ pub fn avatar_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file from before installs keeps working: a command spelled out is
+    /// run as given. With none, or an empty one, the app installs its own.
+    #[test]
+    fn remote_reads_old_and_new_files() {
+        let remote = |text: &str| Config::parse_text(text).unwrap().remote;
+        let old = remote("[remote]\nhost = \"halo\"\ncommand = \"perchd bridge\"\n");
+        assert_eq!(old.host(), Some("halo"));
+        assert_eq!(old.command(), Some("perchd bridge"));
+        assert_eq!(old.perchd(), None);
+        assert_eq!(remote("[remote]\nhost = \"halo\"\n").command(), None);
+        assert_eq!(remote("[remote]\ncommand = \"  \"\n").command(), None);
+        let dev = remote("[remote]\nhost = \"halo\"\nperchd = \"~/Downloads/perchd\"\n");
+        assert_eq!(dev.command(), None);
+        assert_eq!(dev.perchd(), Some(home_dir().join("Downloads/perchd")));
+        assert_eq!(remote("[remote]\nperchd = \"\"\n").perchd(), None);
+        assert_eq!(remote(""), RemoteConfig::default());
+    }
 
     #[test]
     fn a_repository_is_appended_and_the_file_before_it_kept() {
