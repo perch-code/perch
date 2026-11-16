@@ -43,6 +43,10 @@ struct App {
     /// tables were put in: with the engine on a host, they are put in
     /// again after each write of the client's own.
     engine_settings: RefCell<Option<crate::backend::SettingsFile>>,
+    /// Whether this machine's config.toml did not parse when last read,
+    /// with the engine on a host: the client's rows go by it, not by
+    /// whether the host's file parses.
+    client_file_broken: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -177,6 +181,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             check_update_on_open: Cell::new(false),
             settings_on_open: Cell::new(false),
             engine_settings: RefCell::new(None),
+            client_file_broken: Cell::new(false),
         })));
         // The page shows this machine's settings until the host's engine
         // sends its own, which it may never do: a host named wrong.
@@ -219,11 +224,19 @@ fn deliver(window: WindowId, mut event: Event) {
     // tables put in, which the client reads and writes here.
     if let Event::Settings(file) = &mut event {
         if crate::remote::host().is_some() {
+            // A host file that doesn't parse leaves the engine on what it
+            // read last, so the page keeps showing that.
+            if file.config.is_none() {
+                file.config = app
+                    .engine_settings
+                    .borrow()
+                    .as_ref()
+                    .and_then(|last| last.config.clone());
+            }
             app.engine_settings.replace(Some(file.clone()));
-            *file = crate::client_settings::merge(
-                file.clone(),
-                &crate::client_settings::Local::read_kept(),
-            );
+            let local = crate::client_settings::Local::read_kept();
+            app.client_file_broken.set(local.error.is_some());
+            *file = crate::client_settings::merge(file.clone(), &local);
         }
     }
     deliver_as_is(&app, window, event);
@@ -282,6 +295,7 @@ pub fn client_settings_written() {
                 return;
             };
             let local = crate::client_settings::Local::read_kept();
+            app.client_file_broken.set(local.error.is_some());
             let file = crate::client_settings::alone(path, &local);
             deliver_as_is(&app, crate::backend::NO_WINDOW, Event::Settings(file));
         }
@@ -294,6 +308,12 @@ pub fn client_settings_written() {
 pub fn engine_settings_heard() -> bool {
     crate::remote::host().is_none()
         || app().is_none_or(|app| app.engine_settings.borrow().is_some())
+}
+
+/// Whether this machine's config.toml did not parse when last read, with
+/// the engine on a host.
+pub fn client_file_broken() -> bool {
+    app().is_some_and(|app| app.client_file_broken.get())
 }
 
 /// How often this machine's config.toml is looked at for edits made

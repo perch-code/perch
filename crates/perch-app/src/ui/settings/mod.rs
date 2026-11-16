@@ -205,6 +205,26 @@ pub(crate) struct Page {
     client: bool,
 }
 
+/// Whether a page's rows can be changed: see [`Page::writable`]. With the
+/// engine on a host, `file` is the host's with this machine's tables put
+/// in, and its error the host's; `client_broken` says whether this
+/// machine's own file parses.
+fn writable(
+    file: Option<&crate::backend::SettingsFile>,
+    client: bool,
+    remote: bool,
+    client_broken: bool,
+    engine_heard: bool,
+) -> bool {
+    let Some(file) = file.filter(|file| file.config.is_some()) else {
+        return false;
+    };
+    if client && remote {
+        return !client_broken;
+    }
+    file.error.is_none() && (client || engine_heard)
+}
+
 thread_local! {
     /// What a file with nothing in it reads as, for the page to show before
     /// the backend has said what the file holds.
@@ -245,13 +265,18 @@ impl Page {
     /// Whether the controls can change anything: the file has been read,
     /// and it parses. With the engine on a host, only the client's own
     /// until the engine has sent its settings: the rest show defaults
-    /// until then, not what the host's file holds.
+    /// until then, not what the host's file holds. The client's own go by
+    /// whether this machine's file parses, not the host's.
     pub(crate) fn writable(&self) -> bool {
-        let read = self.state.settings_file.with(|file| {
-            file.as_ref()
-                .is_some_and(|file| file.error.is_none() && file.config.is_some())
-        });
-        read && (self.client || crate::windows::engine_settings_heard())
+        self.state.settings_file.with(|file| {
+            writable(
+                file.as_ref(),
+                self.client,
+                crate::remote::host().is_some(),
+                crate::windows::client_file_broken(),
+                crate::windows::engine_settings_heard(),
+            )
+        })
     }
 
     /// Whether the file sets `key`, in the dotted form `present_keys`
@@ -1013,7 +1038,15 @@ fn error_banner(page: Page) -> impl IntoView {
             .settings_file
             .with(|file| file.as_ref().and_then(|file| file.error.clone()))
     };
+    // With the engine on a host, once it has sent its settings the error
+    // is its file's, and this Mac's rows can still be changed.
+    let host_s = || crate::remote::host().is_some() && crate::windows::engine_settings_heard();
     let text = move || match error() {
+        Some(error) if host_s() => format!(
+            "Perch can't use the host's config.toml: {error}. Fix it in your editor. Until \
+             then the engine keeps the settings it read last, and only this Mac's can be \
+             changed here."
+        ),
         Some(error) => format!(
             "Perch can't use config.toml: {error}. Fix it in your editor. Until then Perch \
              keeps the settings it read last, and they can't be changed here."
@@ -1176,6 +1209,36 @@ mod tests {
     use super::*;
     use crate::backend::{Command, SettingsFile};
     use crate::review::model::ReviewState;
+
+    /// With the engine on a host, the client's rows go by this machine's
+    /// file and the engine's by the host's: a broken host file leaves the
+    /// Engine, appearance and keys rows on, a broken file here turns them
+    /// off. In process one file decides all.
+    #[test]
+    fn the_client_s_rows_go_by_this_machine_s_file() {
+        let file = |error: Option<&str>| SettingsFile {
+            path: "/x".into(),
+            config: Some(Arc::new(perch_github::Config::parse_text("").unwrap())),
+            error: error.map(str::to_string),
+            present: Default::default(),
+            warnings: Vec::new(),
+        };
+        let broken_host = file(Some("line 1"));
+        let whole = file(None);
+        // Remote, the host's file broken.
+        assert!(writable(Some(&broken_host), true, true, false, true));
+        assert!(!writable(Some(&broken_host), false, true, false, true));
+        // Remote, this machine's file broken and the host's whole.
+        assert!(!writable(Some(&whole), true, true, true, true));
+        assert!(writable(Some(&whole), false, true, true, true));
+        // Remote, before the engine has sent its own.
+        assert!(writable(Some(&whole), true, true, false, false));
+        assert!(!writable(Some(&whole), false, true, false, false));
+        assert!(!writable(None, true, true, false, false));
+        // In process.
+        assert!(writable(Some(&whole), true, false, false, true));
+        assert!(!writable(Some(&broken_host), true, false, false, true));
+    }
 
     pub(super) fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
         if id.debug_name().contains(name) {

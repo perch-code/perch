@@ -124,18 +124,22 @@ pub fn alone(path: std::path::PathBuf, local: &Local) -> SettingsFile {
 
 /// The engine's Settings with the client's tables, the keys of them the
 /// file sets and what is wrong with them, taken from this machine's file.
+/// When the host's file does not parse, the client's tables go over the
+/// defaults, so the page still shows this machine's host and appearance;
+/// the host's error stays, and with it the engine's rows stay off.
 pub fn merge(engine: SettingsFile, local: &Local) -> SettingsFile {
-    let config = engine.config.map(|config| {
-        let mut config = Config::clone(&config);
-        config.ui = local.config.ui.clone();
-        config.display = local.config.display.clone();
-        config.keybindings = local.config.keybindings.clone();
-        config.remote = local.config.remote.clone();
-        config
-            .warnings
-            .extend(local.config.warnings.iter().cloned());
-        Arc::new(config)
-    });
+    let mut config = match engine.config {
+        Some(config) => Config::clone(&config),
+        None => Config::parse_text("").unwrap_or_default(),
+    };
+    config.ui = local.config.ui.clone();
+    config.display = local.config.display.clone();
+    config.keybindings = local.config.keybindings.clone();
+    config.remote = local.config.remote.clone();
+    config
+        .warnings
+        .extend(local.config.warnings.iter().cloned());
+    let config = Some(Arc::new(config));
     let mut present: std::collections::BTreeSet<String> = engine
         .present
         .into_iter()
@@ -196,6 +200,28 @@ mod tests {
         assert!(file.error.is_none());
         assert!(file.present.contains("remote.host"));
         assert!(alone("/x".into(), &broken).error.is_some());
+    }
+
+    /// A host whose file does not parse: the page still has this
+    /// machine's tables, so it shows the host Perch is on, with the
+    /// host's error kept for the engine's rows.
+    #[test]
+    fn a_broken_file_on_the_host_keeps_this_machine_s_tables() {
+        let local =
+            Local::of("[remote]\nhost = \"halo\"\n[ui]\nappearance = \"dark\"\n".to_string());
+        let engine = SettingsFile {
+            path: "/home/chris/.perch/config.toml".into(),
+            config: None,
+            error: Some("line 1: expected `]`".into()),
+            present: Default::default(),
+            warnings: Vec::new(),
+        };
+        let merged = merge(engine, &local);
+        assert_eq!(merged.error.as_deref(), Some("line 1: expected `]`"));
+        let config = merged.config.unwrap();
+        assert_eq!(config.remote.host(), Some("halo"));
+        assert_eq!(config.ui.appearance, perch_github::config::Appearance::Dark);
+        assert!(merged.present.contains("remote.host"));
     }
 
     #[test]
