@@ -1,0 +1,256 @@
+# Perch: Milestone 26, An engine on another machine
+
+## Goal
+
+Perch is one process. The window, the GitHub client, the cache, the
+checkouts, the language servers and the agents all live on the Mac in
+front of the reader, and closing the lid stops all of it. The reader
+has an always-on Linux box (an AMD Strix Halo) where builds are fast,
+dependencies stay installed and agents can keep working overnight.
+
+After this milestone:
+
+- Everything below the UI is `perch-engine`, a crate with no floem, GTK
+  or platform UI in it. The Mac app runs it in process, as today, with
+  no change in behaviour.
+- `perchd` runs the same engine headless, as a long-lived service on
+  the box. It owns the GitHub client, `perch.db`, the store, the
+  checkouts, the language servers and the runs, and keeps all of it
+  going with no window connected.
+- The Mac app can connect to a `perchd` instead of starting its own
+  engine. The connection is `ssh <host> perchd bridge`: SSH does the
+  authentication, and nothing listens on a network port.
+- A window that loses its engine says so, reconnects, and catches up.
+  Runs on the box carry on in the meantime.
+
+This reverses three earlier non-goals, on purpose:
+
+- Milestone 7: "there is one environment and it is this machine". There
+  are now two kinds of engine, in process and on a host. Still one at a
+  time per app.
+- Milestone 12: "background daemon, remote execution". `perchd` is a
+  background service, and its runs execute on another machine.
+- Milestone 12: "Reattachment across app restarts is out of scope". A
+  client that reconnects to `perchd` sees the runs that kept going. A run
+  still never outlives its engine: `perchd` stopping interrupts its runs,
+  as quitting the app does today.
+
+## Non-goals
+
+- A second implementation of the backend. The engine is today's
+  backend, moved. The protocol is today's `Command` and `Event`. The
+  unmerged `perch-server` branch built a separate engine with its own
+  RPC set; that is the thing this milestone avoids.
+- One sidebar across several engines. The app talks to one engine at a
+  time: This Mac, or a host.
+- A network listener, TLS, or a phone client. The transport is a byte
+  stream; a WebSocket can carry it later.
+- Sandboxes, containers and VMs (the M25 branch's providers), and
+  per-repository setup recipes. Both slot in under the engine later.
+- Moving code between engines. An item lives where its engine is.
+- Windows hosts.
+
+## Architecture
+
+```
+Mac                                     host (Linux, always on)
+perch-app (floem)                       perchd serve
+  windows, editor, rendering    ssh     ├─ unix socket $PERCH_HOME/run/perchd.sock
+  image and SVG decoding   ───────────▶ │   (perchd bridge copies stdio to it)
+  client settings (ui, display,  NDJSON └─ perch-engine
+  keybindings, remote)     ◀─────────── GitHub, perch.db, store, worktrees,
+                                         runs, LSP, snapshots, approvals
+```
+
+### Crates
+
+- `perch-engine`: `perch-app/src/backend/`, and the logic it uses that
+  lives elsewhere today (`ask`, `approvals`, `context`, `items`, the
+  feedback and update logic, `repos`, `inbox`'s helpers, `log_file`),
+  and the data types it shares with the UI, cut out of
+  `review/model.rs`, `review/suggestion.rs`, `review/code_refs.rs` and
+  `state.rs`. It depends on the other workspace crates and on no UI
+  toolkit. `cargo tree -p perch-engine` has no floem, winit, gtk or muda.
+- `perch-engine::wire`: the handshake, the framing, and the transport
+  that carries `Command` and `Event` over a byte stream. Kept in the
+  engine crate so the types and their wire form cannot drift apart.
+- `perchd`: a binary crate with `serve`, `bridge` and `status`.
+- `perch-app`: the UI. Where it said `crate::backend::…` it still does,
+  through a re-export.
+
+### The boundary
+
+The UI talks to the engine through `Backend`, the handle it has today,
+and hears it on the `(WindowId, Event)` channel it has today. A
+`Backend` is built either by `perch_engine::spawn()` (in process) or by
+`perch_engine::wire::connect(stream)` (remote). Nothing else in the UI
+knows which.
+
+Nothing the UI and the engine exchange may be anything but data:
+
+- `Command` and `Event` and every type they carry derive `Serialize` and
+  `Deserialize`.
+- No shared memory crosses the boundary. The fences the handle shares
+  with the worker today (`NavigationRequests`, `ScopeRequests`,
+  `MergeAttempts`, `PullRequestReviewAttempts`) become ids carried in
+  commands. The engine keeps its own copy of each and updates it when the
+  command arrives; the UI drops a result whose id is not the latest it
+  issued. Over a wire a stale result can now reach the UI, so every
+  handler that takes a navigation, scope or attempt id checks it.
+- Pictures travel as bytes. The engine never decodes an image into a
+  brush or parses an SVG into a render tree; the UI does, when it
+  draws.
+- The UI never reads the engine's files. `windows::load_frame` keeps
+  reading the window frame, which is the client's own.
+
+### The wire
+
+Newline-delimited JSON, one message per line, on any duplex byte stream.
+
+- The client sends `Hello { protocol, app_version }`. The engine answers
+  `Welcome { protocol, engine_version, host, home, data_root }` or
+  `Refused { reason }`. A different `protocol` number is refused before
+  any command runs, with both versions named.
+- Then the client sends `{ window, command }` and the engine sends
+  `{ window, event }`.
+- Window ids are per connection. The engine maps a connection's window
+  to an engine window of its own, and maps events back. An event for
+  `NO_WINDOW` goes to every connection; an event for a window goes only
+  to the connection that owns it.
+- `Command::Resync` asks the engine to send, to that connection, what it
+  sends every window at startup: repositories, items, notifications,
+  settings, runs, usage, pending approvals. A client sends it after
+  `Welcome`, and again after every reconnect, then reopens each window
+  and the item it had open. There is no replay buffer: a reconnect is a
+  resync.
+- Logs never go on the stream. `perchd` logs to stderr and to its log
+  file.
+
+`PERCH_WIRE_LOOPBACK=1` makes the in-process app send every command and
+event through JSON and back, so a regression in the wire form shows on
+the Mac without a host.
+
+### perchd
+
+- `perchd serve` runs the engine and listens on
+  `$PERCH_HOME/run/perchd.sock` (directory 0700, socket 0600). It holds
+  an exclusive lock on `$PERCH_HOME/engine.lock` for its lifetime. The
+  in-process app takes the same lock, so two engines never share one
+  `perch.db` (the second would mark the first one's runs Interrupted).
+- The engine keeps its own command sender, so the last client leaving
+  closes nothing. Polling, runs, sweeps and checks carry on with zero
+  clients.
+- SIGTERM and SIGINT shut down as quitting the app does: runs are
+  stopped and recorded Interrupted, children are reaped.
+- `perchd bridge` connects its stdin and stdout to the socket. If no
+  engine is listening it starts `perchd serve` detached (its own session,
+  output to the log) and waits for the socket. So a host needs no
+  service manager, but `scripts/perchd.service` is a systemd user unit
+  for one that should start at boot (`loginctl enable-linger`).
+- `perchd status` says whether an engine is running, its version and
+  how many clients and runs it has.
+- `perchd` does not link GTK. Its release artefact is a Linux tarball
+  beside the app's.
+
+### The client
+
+- `[remote] host` in the Mac's config.toml, or Settings > General >
+  Engine, names an SSH host. Empty means This Mac. `[remote] command`
+  defaults to `perchd bridge` and is run through the remote login shell.
+- The app runs `ssh -T -o ServerAliveInterval=15 -o
+  ServerAliveCountMax=3 <host> <command>`. SSH's own config, keys and
+  agent apply.
+- A lost connection shows in every window as a lasting banner, not a
+  toast: "Disconnected from halo. Reconnecting…", with a Reconnect
+  button. The app retries with backoff (1s doubling to 30s), resyncs and
+  reopens what each window had open. Commands sent while disconnected
+  are refused at the handle with a message, never queued.
+- A protocol mismatch says which side to update, and does not retry.
+- What opens something on the Mac follows the engine:
+  - Open in Terminal runs `ssh -t <host> 'cd <path> && exec $SHELL -l'`
+    in Terminal.
+  - Reveal in Finder becomes Open in Editor: `zed ssh://<host>/<path>`
+    when Zed is installed, else VS Code's `code --remote
+    ssh-remote+<host> <path>`.
+  - Copy Path copies the host's path.
+  - Paths shown are the host's, and `~` means the host's home
+    (`Welcome.home`).
+
+### Settings
+
+Settings split by whose they are:
+
+- The client's, in the Mac's config.toml, read and written locally
+  whatever the engine: `[ui]`, `[display]`, `[keybindings]`, `[remote]`.
+- The engine's, in the engine's config.toml, read and written by the
+  engine: the token, `[[repo]]`, `[agent]`, `[work]`, `[lsp]`,
+  `poll_interval_secs`, `github_host`.
+
+In process both are the one file, as today.
+
+### Approvals
+
+A pending approval is engine state, not a one-shot event. It is in the
+resync, so a client that connects later shows the card. The wait before
+a request is denied is `[work] approval_timeout_mins`: 15 by default in
+the app, 480 under `perchd`, because nobody may be connected.
+
+### Linux
+
+What the host needs that the Mac didn't:
+
+- ty is downloaded for the host's triple, not `apple-darwin`.
+- Language-server memory comes from `ps -eo pid=,ppid=,rss=` on Linux.
+- Claude Code's sandbox needs `bwrap` and `socat` on Linux. A Work or
+  Ask run on a host without them is refused with that sentence, not
+  with Claude Code's exit.
+- Claude Code on Linux skips glob `denyWrite` patterns, so a Work run
+  loses `*/**/.git`. After a Work run on Linux, a `.git` that appeared
+  below the worktree's top fails the run's record with the path named.
+
+### Beside T3 Code
+
+T3 makes its worktrees with `git worktree add` from the project root,
+so a `[[repo]] root` that names the same clone lists them as worktree
+items already, and Perch never resets or removes a worktree it does not
+own. T3 renames a thread's branch after creating it. Today the scan
+archives the old row and makes a new one; it now matches by path and
+renames the row's branch instead.
+
+## Build order
+
+1. **Engine crate.** Move the backend and its support into
+   `perch-engine`; the app re-exports it. Pictures become bytes. No
+   behaviour change; every existing test passes where it moved to.
+2. **Wire-ready boundary.** serde on both enums and their payloads,
+   fences as ids, per-connection window mapping, `Resync`, the framing
+   and handshake, the loopback mode and its test.
+3. **perchd and the client.** `serve`, `bridge`, `status`, the lock, the
+   socket, the unit file; the app's remote mode, banner and reconnect,
+   the remote openers, the settings split; the Linux fixes.
+4. **Durable approvals and T3.** Approvals in the resync and their
+   timeout; the scan's rename by path; docs.
+
+## Acceptance
+
+- `cargo tree -p perch-engine -e normal` names no floem, winit, gtk,
+  muda or objc2 crate.
+- With no `[remote] host`, the app behaves as before, and with
+  `PERCH_WIRE_LOOPBACK=1` it behaves the same.
+- A test starts `perchd serve` on a temporary `PERCH_HOME`, connects
+  two clients through `perchd bridge`, opens an item from one, drops
+  it, and the other still gets events; a third client's resync lists the
+  items.
+- A second `perchd serve`, or the app in process, on the same
+  `PERCH_HOME` refuses to start and says why.
+- On the host: open a pull request from the Mac, start a Work run, quit
+  the Mac app, reopen it, and the run's progress and result are there.
+
+## Things the implementer should not do
+
+- Write a second engine, or a second set of messages beside `Command`
+  and `Event`.
+- Queue commands across a disconnect.
+- Put the GitHub token on the wire. The host's engine resolves its own,
+  as the app does today.
+- Forward the SSH agent, or listen on a TCP port.
