@@ -57,6 +57,7 @@ repository's `github` and `root`.
 | `[remote] host` | none | An SSH host whose `perchd` the app uses instead of an engine of its own; applies after a restart |
 | `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app installs its own `perchd` there, runs that, and replaces an older engine it finds running |
 | `[remote] perchd` | none | A Linux `perchd`, or a release tarball of one, on the Mac, for the app to install on the host instead of downloading the release's |
+| `[remote] perchd_on_host` | none | A Linux `perchd` on the host, such as `"~/code/perch/target/debug/perchd"`, for the host to put in place itself: one built there from the source the app was built from |
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |

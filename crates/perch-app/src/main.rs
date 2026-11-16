@@ -287,16 +287,19 @@ fn start_engine(
 }
 
 /// What ssh runs on the host: `[remote] command` as given, or else the
-/// `perchd` the app installs there, from `[remote] perchd` or the release.
+/// `perchd` the app installs there: the one `[remote] perchd_on_host`
+/// names there, else `[remote] perchd` from this machine, else the
+/// release's.
 pub(crate) fn bridge(remote: &perch_github::RemoteConfig) -> perch_engine::wire::remote::Bridge {
     use perch_engine::wire::{provision::Source, remote::Bridge};
-    match remote.command() {
-        Some(command) => Bridge::Command(command.to_string()),
-        None => Bridge::Installed(match remote.perchd() {
-            Some(path) => Source::File(path),
-            None => Source::Release,
-        }),
+    if let Some(command) = remote.command() {
+        return Bridge::Command(command.to_string());
     }
+    Bridge::Installed(match (remote.perchd_on_host(), remote.perchd()) {
+        (Some(path), _) => Source::HostFile(path.to_string()),
+        (None, Some(path)) => Source::File(path),
+        (None, None) => Source::Release,
+    })
 }
 
 /// The log goes to stderr, for a terminal launch, and to a file a day in

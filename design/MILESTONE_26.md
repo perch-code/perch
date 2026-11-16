@@ -573,6 +573,22 @@ button to Settings when anything required is missing.
   events are per window and partial; keeping them current is left for
   later.
 
+- `[remote] perchd_on_host = "<path on the host>"` is a third source,
+  for developing Perch with the source on the host and the app on the
+  Mac: the engine is built there, natively, from the commit the Mac's
+  app was built from, and nothing crosses the wire twice. The app can't
+  name the build before it dials, since the bytes are on the host, so an
+  ssh of its own runs first: a script that hashes the file, names the
+  build as `file_build` would, copies it into `bin` when that build is
+  not there (checked for version and protocol as an upload is, and for
+  having changed under the copy), and prints the build. The dial then
+  runs the usual connection script with it, so replacing an idle engine
+  and offering Restart for a busy one work as for any build. It has no
+  install step of the app's. `scripts/dev-remote.sh` wraps the loop:
+  fetch the host checkout's commit, build `perchd` there, run the app.
+  Both sides keep the default home: the dev build is the one in daily
+  use, so a second home for it was left out.
+
 ## Acceptance
 
 - `cargo tree -p perch-engine -e normal` names no floem, winit, gtk,

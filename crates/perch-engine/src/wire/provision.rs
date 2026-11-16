@@ -96,6 +96,10 @@ pub enum Source {
     /// `[remote] perchd`: a Linux binary, or a release tarball of one, on
     /// this machine.
     File(PathBuf),
+    /// `[remote] perchd_on_host`: a Linux binary on the host, as one built
+    /// there from the source the app was built from. Nothing is uploaded:
+    /// the host copies it into place itself.
+    HostFile(String),
 }
 
 /// A host's processor, as Perch's releases name it.
@@ -170,6 +174,104 @@ pub fn plain_word(build: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
 }
 
+/// Whether `path` can go on a command line unquoted in every shell: a
+/// build's characters and `/`.
+fn plain_path(path: &str) -> bool {
+    !path.is_empty()
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._+-/".contains(&b))
+}
+
+/// `[remote] perchd_on_host` as the staging script takes it: from the
+/// host's home when it starts with `~/` or names no root, else as it is.
+/// Err when it holds a character Perch won't put on a command line.
+pub fn host_path(path: &str) -> Result<String, String> {
+    let path = path.trim();
+    let from_home = path.strip_prefix("~/").unwrap_or(path);
+    if plain_path(from_home) && !from_home.starts_with('-') {
+        Ok(from_home.to_string())
+    } else {
+        Err(format!(
+            "[remote] perchd_on_host, {path}, can hold only letters, digits and . _ + - /, after a ~/ if it is under the home directory."
+        ))
+    }
+}
+
+/// The start of what the staging script says on stdout when the `perchd`
+/// on the host is in place, before its build.
+const STAGED_SAID: &str = "perch-staged:";
+
+/// The staging script, run by `sh` with the path of a `perchd` on the
+/// host, the version and the protocol as `$1`, `$2` and `$3`. It names the
+/// file's build as the app would, `<version>-<first 12 hex of its
+/// SHA-256>`, and when no `perchd` of that build is installed copies the
+/// file into place the way an upload is: a temporary file, owner-only,
+/// asked its version, moved only when that is the version and protocol
+/// expected. A file that changed while it was copied, as under a build
+/// still running, is not installed.
+const STAGE: &str = r#"d="${PERCH_HOME:-$HOME/.perch}/bin"
+case "$1" in
+  /*) f="$1" ;;
+  *) f="$HOME/$1" ;;
+esac
+if [ -f "$f" ] && [ -x "$f" ]; then
+  :
+else
+  echo "perch-stage: there is no perchd at $f" >&2
+  exit 1
+fi
+sum() {
+  { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -c1-12
+}
+h=$(sum "$f")
+case "$h" in
+  ????????????) ;;
+  *)
+    echo "perch-stage: could not take the SHA-256 of $f" >&2
+    exit 1
+    ;;
+esac
+b="$2-$h"
+if [ -x "$d/perchd-$b" ]; then
+  echo "perch-staged: $b"
+  exit 0
+fi
+umask 077
+mkdir -p "$d" && chmod 700 "$d" || {
+  echo "perch-stage: could not make $d" >&2
+  exit 1
+}
+t="$d/.perchd-$b.$$"
+gone() {
+  rm -f "$t"
+}
+trap gone EXIT
+trap "exit 1" HUP INT PIPE TERM
+cp "$f" "$t" && chmod 700 "$t" || {
+  echo "perch-stage: could not copy $f to $t" >&2
+  exit 1
+}
+if [ "$(sum "$t")" = "$h" ]; then
+  :
+else
+  echo "perch-stage: $f changed while it was copied" >&2
+  exit 1
+fi
+v=$("$t" --version 2>&1)
+case "$v" in
+  "perchd $2 (protocol $3)") ;;
+  *)
+    echo "perch-version: $v" >&2
+    exit 1
+    ;;
+esac
+mv -f "$t" "$d/perchd-$b" || {
+  echo "perch-stage: could not move it to $d/perchd-$b" >&2
+  exit 1
+}
+echo "perch-staged: $b""#;
+
 /// The connection script, run by `sh` with the build as `$1` and the
 /// bridge's flags after it: the bridge of that build if it is there, else
 /// a line saying what the host is, for the app to install from.
@@ -235,7 +337,7 @@ fn in_login_sh(name: &str, script: &str, args: &[&str]) -> String {
         !script.contains(['\'', '\\', '`', '!']),
         "a script for every login shell"
     );
-    debug_assert!(args.iter().all(|arg| plain_word(arg)));
+    debug_assert!(args.iter().all(|arg| plain_path(arg)));
     let script = script.replace('"', "\\\"").replace('$', "\\$");
     let mut inner = format!("exec /bin/sh -c \"{script}\" {name}");
     for arg in args {
@@ -262,6 +364,36 @@ pub fn upload_command(build: &str) -> String {
         UPLOAD,
         &[build, VERSION, &PROTOCOL.to_string()],
     )
+}
+
+/// What ssh runs on the host to put the `perchd` at `path` there in place,
+/// `path` as [`host_path`] gives it.
+pub fn stage_command(path: &str) -> String {
+    in_login_sh(
+        "perch-stage",
+        STAGE,
+        &[path, VERSION, &PROTOCOL.to_string()],
+    )
+}
+
+/// What a failed staging's last line says, put for the reader.
+pub fn stage_failure(line: &str, host: &str) -> String {
+    if let Some(said) = line.trim().strip_prefix("perch-version:") {
+        let said = said.trim();
+        return match parse_version(said) {
+            Some((version, protocol)) => format!(
+                "[remote] perchd_on_host on {host} is perchd {version} (protocol {protocol}), and this app is {VERSION} (protocol {PROTOCOL}). Build both from the same source."
+            ),
+            None if said.is_empty() => format!(
+                "[remote] perchd_on_host on {host} printed nothing when asked its version."
+            ),
+            None => format!("[remote] perchd_on_host on {host} would not run: {said}"),
+        };
+    }
+    match line.trim().strip_prefix("perch-stage:") {
+        Some(said) => format!("[remote] perchd_on_host on {host}: {}.", said.trim()),
+        None => format!("Couldn't ready perchd on {host}: {}", line.trim()),
+    }
 }
 
 /// The version and protocol in what `perchd --version` prints:
@@ -616,6 +748,48 @@ pub async fn upload(host: &str, build: &str, binary: Vec<u8>) -> Result<(), Fail
     }))
 }
 
+/// Put the `perchd` at `path` on `host` in place there, if its build is
+/// not already, and give its build: an ssh of its own before the one that
+/// connects, since the build is in the name the connection runs.
+pub async fn stage(host: &str, path: &str) -> Result<String, String> {
+    let path = host_path(path)?;
+    let run = tokio::process::Command::new(ssh_program())
+        .args(super::remote::ssh_args(host, &stage_command(&path)))
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(120), run)
+        .await
+        .map_err(|_| format!("Readying perchd on {host} took over two minutes."))?
+        .map_err(|e| format!("Could not run ssh: {e}"))?;
+    let err = String::from_utf8_lossy(&output.stderr);
+    for line in err.lines().filter(|line| !line.trim().is_empty()) {
+        tracing::info!(host, "ssh (stage): {}", line.trim());
+    }
+    let out = String::from_utf8_lossy(&output.stdout);
+    let staged = out
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(STAGED_SAID))
+        .map(|build| build.trim().to_string());
+    match staged {
+        Some(build) if output.status.success() && plain_word(&build) => Ok(build),
+        _ => {
+            let last = err
+                .lines()
+                .rev()
+                .find(|line| line.starts_with("perch-"))
+                .or_else(|| err.lines().rev().find(|line| !line.trim().is_empty()));
+            Err(match last {
+                Some(line) => stage_failure(line, host),
+                None => format!(
+                    "Couldn't ready perchd on {host}: ssh exited with {}.",
+                    output.status
+                ),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -685,7 +859,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_scripts_need_no_quote_any_login_shell_reads_its_own_way() {
-        for script in [CONNECT, UPLOAD] {
+        for script in [CONNECT, UPLOAD, STAGE] {
             assert!(!script.contains(['\'', '\\', '`', '!']), "{script}");
         }
         let command = connect_command("0.9.0", Replace::No);
@@ -914,6 +1088,129 @@ pub(crate) mod tests {
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
             assert_eq!(left, ["perchd-0.9.0-0123456789ab"], "{shell}");
+        }
+    }
+
+    /// The staging script, run as ssh would have each login shell run it
+    /// over a stand-in for perchd on the host: it is copied into place
+    /// under the build its bytes name, owner-only, once, a rebuilt one
+    /// under another, and one of another version or one that is not there
+    /// is not, and leaves nothing behind.
+    #[test]
+    fn the_staging_script_installs_the_host_s_own_perchd_by_its_build() {
+        use std::os::unix::fs::PermissionsExt;
+        for shell in shells() {
+            let home = tempfile::tempdir().unwrap();
+            let built = home.path().join("code/perch/target/debug");
+            std::fs::create_dir_all(&built).unwrap();
+            let write = |text: &str| {
+                let path = built.join("perchd");
+                std::fs::write(&path, text).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            let stage = |path: &str| {
+                std::process::Command::new(&shell)
+                    .arg("-c")
+                    .arg(stage_command(&host_path(path).unwrap()))
+                    .env_clear()
+                    .env("HOME", home.path())
+                    .env("SHELL", &shell)
+                    .env("PATH", "/usr/bin:/bin:/sbin")
+                    .output()
+                    .unwrap()
+            };
+            let staged = |output: &std::process::Output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .find_map(|line| line.strip_prefix(STAGED_SAID))
+                    .map(|build| build.trim().to_string())
+            };
+            let bin = home.path().join(".perch/bin");
+            let names = || {
+                let mut names: Vec<_> = std::fs::read_dir(&bin)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            };
+
+            let good = format!("#!/bin/sh\necho \"perchd {VERSION} (protocol {PROTOCOL})\"\n");
+            write(&good);
+            let done = stage("~/code/perch/target/debug/perchd");
+            assert!(
+                done.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&done.stderr)
+            );
+            let build = file_build(good.as_bytes());
+            assert_eq!(staged(&done), Some(build.clone()), "{shell}");
+            let installed = bin.join(format!("perchd-{build}"));
+            assert_eq!(std::fs::read_to_string(&installed).unwrap(), good);
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&installed), 0o700, "{shell}");
+            assert_eq!(mode(&bin), 0o700, "{shell}");
+
+            // Again, by its full path: nothing is copied a second time.
+            let before = std::fs::metadata(&installed).unwrap().modified().unwrap();
+            let again = stage(&built.join("perchd").display().to_string());
+            assert_eq!(staged(&again), Some(build.clone()), "{shell}");
+            assert_eq!(
+                std::fs::metadata(&installed).unwrap().modified().unwrap(),
+                before
+            );
+
+            // Rebuilt: another build, beside the first.
+            let rebuilt = format!("{good}# rebuilt\n");
+            write(&rebuilt);
+            let next = file_build(rebuilt.as_bytes());
+            assert_eq!(
+                staged(&stage("code/perch/target/debug/perchd")),
+                Some(next.clone())
+            );
+            let mut both = [format!("perchd-{build}"), format!("perchd-{next}")];
+            both.sort();
+            assert_eq!(names(), both, "{shell}");
+
+            // Another version's is refused, and so is a file not there.
+            write("#!/bin/sh\necho \"perchd 0.1.0 (protocol 1)\"\n");
+            let refused = stage("~/code/perch/target/debug/perchd");
+            assert!(!refused.status.success(), "{shell}");
+            let said = String::from_utf8_lossy(&refused.stderr);
+            let last = said.lines().last().unwrap_or_default();
+            assert_eq!(last, "perch-version: perchd 0.1.0 (protocol 1)", "{shell}");
+            assert!(stage_failure(last, "halo").contains("is perchd 0.1.0 (protocol 1)"));
+            let missing = stage("~/nowhere/perchd");
+            assert!(!missing.status.success(), "{shell}");
+            let said = String::from_utf8_lossy(&missing.stderr);
+            assert!(
+                said.lines()
+                    .last()
+                    .unwrap_or_default()
+                    .starts_with("perch-stage: there is no perchd at "),
+                "{shell}: {said}"
+            );
+            assert_eq!(names().len(), 2, "{shell}: {:?}", names());
+        }
+    }
+
+    #[test]
+    fn a_host_path_is_from_home_or_whole_and_plain() {
+        assert_eq!(
+            host_path("~/code/perch/target/debug/perchd").unwrap(),
+            "code/perch/target/debug/perchd"
+        );
+        assert_eq!(host_path(" /srv/perchd ").unwrap(), "/srv/perchd");
+        assert_eq!(host_path("bin/perchd").unwrap(), "bin/perchd");
+        for bad in [
+            "",
+            "~/my code/perchd",
+            "~/a;b",
+            "$HOME/perchd",
+            "-x",
+            "~/a'b",
+        ] {
+            assert!(host_path(bad).is_err(), "{bad}");
         }
     }
 

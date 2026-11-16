@@ -1186,6 +1186,11 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                             .map_err(|e| e.to_string())??
                             .build
                     }
+                    // The host has the file: it puts it in place itself
+                    // and says its build, before the ssh that connects.
+                    Bridge::Installed(Source::HostFile(path)) => {
+                        provision::stage(&host, path).await?
+                    }
                 };
                 if !provision::plain_word(&build) {
                     return Err(format!(
@@ -1198,8 +1203,11 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
             })
         }
     });
-    let Bridge::Installed(source) = bridge else {
-        return (dial, None);
+    let source = match bridge {
+        // Each dial stages the host's own file, so there is nothing for
+        // the app to install.
+        Bridge::Command(_) | Bridge::Installed(Source::HostFile(_)) => return (dial, None),
+        Bridge::Installed(source) => source,
     };
     let host = host.to_string();
     let install: Install = Box::new(move |arch| {
@@ -1242,6 +1250,7 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                     Box::pin(async move { Err(Failed::lasting(why)) }),
                 ),
             },
+            Source::HostFile(_) => unreachable!("staged by the dial"),
         }
     });
     (dial, Some(install))

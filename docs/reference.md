@@ -1680,6 +1680,25 @@ binary is installed again on the next connection. A tarball and the
 binary in it are the same build. It has to be built for the host's
 processor and name the app's version and protocol.
 
+`[remote] perchd_on_host` names a `perchd` that is already on the host,
+and wins over `[remote] perchd`: one built there, from the source the app
+on the Mac was built from. Nothing is uploaded. Before each connection an
+ssh of its own has the host take the file's SHA-256, name its build the
+same way, and, when that build is not installed, copy the file into `bin`
+as an upload would be: owner-only, asked its version, moved into place
+only when it names the app's version and protocol. A file that changed
+while it was copied, as under a build still running, is not installed, and
+the next try looks again. The path is from the host's home when it starts
+with `~/` or names no root, and can hold only letters, digits and
+`. _ + - /`.
+
+`scripts/dev-remote.sh <host> <checkout-on-host>` is that loop for working
+on Perch with the source on the host: it fetches the host checkout's
+commit into the Mac's clone, builds `perchd` in the host's checkout, and
+runs the app on the Mac. A rebuilt `perchd` is another build, so it
+replaces the host's engine as an update does (see below): at once when
+nothing is running in it, and by Restart when something is.
+
 Each bridge the app installed removes the older builds beside it but the
 newest one (see [perchd](#perchd)).
 

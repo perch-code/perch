@@ -317,6 +317,12 @@ pub struct RemoteConfig {
     /// the app installs on the host in place of the release's download.
     #[serde(default)]
     pub perchd: Option<PathBuf>,
+    /// A Linux `perchd` on the host, as one built there: what the app has
+    /// the host put in place, in place of `perchd` or the release's
+    /// download. From the host's home when it starts with `~/` or names
+    /// no root.
+    #[serde(default)]
+    pub perchd_on_host: Option<String>,
 }
 
 impl RemoteConfig {
@@ -346,6 +352,14 @@ impl RemoteConfig {
             Some(text) => Some(expand_home(text)),
             None => Some(path.to_path_buf()),
         }
+    }
+
+    /// The `perchd` on the host to run, as written, when one is named.
+    pub fn perchd_on_host(&self) -> Option<&str> {
+        self.perchd_on_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
     }
 }
 
@@ -1328,6 +1342,16 @@ mod tests {
         assert_eq!(dev.command(), None);
         assert_eq!(dev.perchd(), Some(home_dir().join("Downloads/perchd")));
         assert_eq!(remote("[remote]\nperchd = \"\"\n").perchd(), None);
+        assert_eq!(dev.perchd_on_host(), None);
+        let on_host = remote("[remote]\nperchd_on_host = \" ~/code/perch/target/debug/perchd \"\n");
+        assert_eq!(
+            on_host.perchd_on_host(),
+            Some("~/code/perch/target/debug/perchd")
+        );
+        assert_eq!(
+            remote("[remote]\nperchd_on_host = \"\"\n").perchd_on_host(),
+            None
+        );
         assert_eq!(remote(""), RemoteConfig::default());
     }
 
