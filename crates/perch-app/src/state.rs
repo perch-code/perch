@@ -1932,9 +1932,13 @@ impl AppState {
                     review.comment_threads.set(Arc::new(Vec::new()));
                 }
                 // The tabs open last time come back now, and load once
-                // there is a checkout to load them from.
+                // there is a checkout to load them from. Those of the item
+                // already showing were read from a checkout that is being
+                // made anew, so they are asked for again then too.
                 if fresh {
                     review.files_reload.set(review.restore_pane());
+                } else {
+                    review.files_reload.set(review.reload_all());
                 }
                 review.ready.set(true);
                 review.set_phase(Phase::Ready);
@@ -5004,6 +5008,53 @@ mod tests {
         assert_eq!(review.files_pending.get(), None);
         assert_eq!(review.phase.get(), Phase::Ready);
         assert!(review.is_item("pr"));
+    }
+
+    /// The item showing opened again, say on reconnecting, whose checkout
+    /// has to be made anew: the files its tabs held were read from the old
+    /// one, so they are asked for again once the new one is there.
+    #[test]
+    fn a_showing_pull_request_reopened_before_its_checkout_reloads_its_tabs() {
+        use crate::review::model::ItemTab;
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "pr", 40);
+        app.apply_with_review(review_ready("pr", 40), review);
+        review.open_tab("src/x.rs");
+        review.show_tab(ItemTab::Code);
+        review.finish_load(
+            "src/x.rs",
+            Arc::new(crate::backend::build_loaded_file(
+                "src/x.rs".into(),
+                "new\n".into(),
+                "old\n".into(),
+                Some(perch_git::ChangeStatus::Modified),
+                false,
+                perch_git::Scope::Branch,
+                String::new(),
+            )),
+        );
+        assert!(!review.is_loading("src/x.rs"));
+        app.reload.set(Vec::new());
+
+        let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = "pr".into();
+        app.expect_item_navigation("pr", 41);
+        app.apply_with_review(
+            Event::PullRequestReady {
+                navigation_id: 41,
+                item: Arc::new(item),
+                pull_request: Arc::new(pull_request(7, "h", "open")),
+            },
+            review,
+        );
+        let mut ready = review_ready("pr", 41);
+        if let Event::ReviewReady { shown_early, .. } = &mut ready {
+            *shown_early = true;
+        }
+        app.apply_with_review(ready, review);
+        assert_eq!(app.reload.get(), ["src/x.rs"]);
+        assert!(review.is_loading("src/x.rs"));
     }
 
     /// A thread card drawn while a pull request waits for its checkout
