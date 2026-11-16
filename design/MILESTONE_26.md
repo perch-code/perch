@@ -497,6 +497,12 @@ button to Settings when anything required is missing.
 - The strip shows "needs setup" only while connected to the build the app
   wants; an engine of another build has its own strip, which matters
   more.
+- The upload script removes its temporary file from a trap, on exit and
+  on HUP, INT, PIPE and TERM. Run against a container over real ssh, an
+  upload cut short left the file behind: the session gone, the script's
+  next write to stderr was a SIGPIPE, and dash, Debian's `sh`, runs no
+  EXIT trap for a signal that kills it. Only a script killed outright now
+  leaves one for the bridge's cleanup.
 
 ## Acceptance
 

@@ -186,8 +186,10 @@ exit 97"#;
 /// protocol as `$1`, `$2` and `$3`, and the binary on stdin. It writes a
 /// temporary file beside the others, owner-only, asks it its version, and
 /// moves it into place only when that is the version and protocol
-/// expected. The temporary file goes whatever fails; one left by an
-/// upload cut short is the bridge's to clear.
+/// expected. The temporary file goes whatever fails, the ssh session
+/// ending under it included: a write to its closed stderr is a SIGPIPE,
+/// which the trap turns into an exit, so the file goes with it. One left
+/// by a script killed outright is the bridge's to clear.
 const UPLOAD: &str = r#"d="${PERCH_HOME:-$HOME/.perch}/bin"
 umask 077
 mkdir -p "$d" && chmod 700 "$d" || {
@@ -195,8 +197,12 @@ mkdir -p "$d" && chmod 700 "$d" || {
   exit 1
 }
 t="$d/.perchd-$1.$$"
-cat > "$t" && chmod 700 "$t" || {
+gone() {
   rm -f "$t"
+}
+trap gone EXIT
+trap "exit 1" HUP INT PIPE TERM
+cat > "$t" && chmod 700 "$t" || {
   echo "perch-upload: could not write $t" >&2
   exit 1
 }
@@ -204,13 +210,11 @@ v=$("$t" --version 2>&1)
 case "$v" in
   "perchd $2 (protocol $3)") ;;
   *)
-    rm -f "$t"
     echo "perch-version: $v" >&2
     exit 1
     ;;
 esac
 mv -f "$t" "$d/perchd-$1" || {
-  rm -f "$t"
   echo "perch-upload: could not move it to $d/perchd-$1" >&2
   exit 1
 }
@@ -910,6 +914,68 @@ pub(crate) mod tests {
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                 .collect();
             assert_eq!(left, ["perchd-0.9.0-0123456789ab"], "{shell}");
+        }
+    }
+
+    /// An upload whose script is told to stop while it asks the binary
+    /// its version, as when the ssh session ends under it, leaves no
+    /// temporary file behind, in any login shell.
+    #[test]
+    fn an_upload_cut_short_leaves_nothing_behind() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        for shell in shells() {
+            let home = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(&shell)
+                .arg("-c")
+                .arg(upload_command("0.9.0"))
+                .env_clear()
+                .env("HOME", home.path())
+                .env("SHELL", &shell)
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            // Slow to answer, so the script is still waiting on it when told.
+            let slow =
+                format!("#!/bin/sh\nsleep 2\necho \"perchd {VERSION} (protocol {PROTOCOL})\"\n");
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(slow.as_bytes()).unwrap();
+            drop(stdin);
+            let bin = home.path().join(".perch/bin");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let written = loop {
+                let ready = std::fs::read_dir(&bin)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|entry| {
+                        entry.file_name().to_string_lossy().starts_with(".perchd-")
+                            && entry.metadata().unwrap().permissions().mode() & 0o100 != 0
+                    });
+                if ready || Instant::now() > deadline {
+                    break ready;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert!(
+                written,
+                "{shell}: the script never wrote its temporary file"
+            );
+            let told = std::process::Command::new("kill")
+                .args(["-HUP", &child.id().to_string()])
+                .status()
+                .unwrap();
+            assert!(told.success(), "{shell}");
+            assert!(!child.wait().unwrap().success(), "{shell}");
+            let left: Vec<_> = std::fs::read_dir(&bin)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(left.is_empty(), "{shell}: left {left:?}");
         }
     }
 }

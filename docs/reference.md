@@ -1643,7 +1643,7 @@ is not there: on the first connection, and after each update of the app.
   host that writes it to a temporary file in `bin` (the directory and the
   file owner-only), runs it with `--version`, and moves it into place only
   when it names the app's version and protocol. The temporary file is
-  removed when anything fails.
+  removed when anything fails, the ssh session ending under it included.
 - An install that goes through, after which the host still says it has
   no `perchd`, stops the tries and says so rather than installing again:
   most often a login shell there that sets another `PERCH_HOME`. A
