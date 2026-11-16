@@ -5,7 +5,9 @@
 # which `releases/latest` skips.
 #
 # install.sh downloads the latest release's tarball for its platform, so
-# keep the Perch-<os>-<arch>.tar.gz names in step with it.
+# keep the Perch-<os>-<arch>.tar.gz names in step with it. The app downloads
+# perchd-linux-<arch>.tar.gz for a host and checks it against SHA256SUMS, so
+# keep those names too.
 
 name: Release
 
@@ -88,12 +90,35 @@ jobs:
       - name: Package
         run: tar -czf Perch-linux-${{ matrix.arch }}.tar.gz -C target perch
 
-      # The engine alone, for a host: no GTK, no window.
+      # The engine alone, for a host: no GTK, no window. Built against musl
+      # and linked statically, so it runs on any Linux of its architecture,
+      # whatever its libc. ring and the bundled SQLite are C, compiled with
+      # musl-gcc.
       - name: Build perchd
-        run: cargo build --release --locked -p perchd
+        run: |
+          sudo apt-get install -y --no-install-recommends musl-tools
+          target="$(uname -m)-unknown-linux-musl"
+          rustup target add "$target"
+          export CC_x86_64_unknown_linux_musl=musl-gcc CC_aarch64_unknown_linux_musl=musl-gcc
+          cargo build --release --locked -p perchd --target "$target"
+          echo "PERCHD_DIR=target/$target/release" >> "$GITHUB_ENV"
+
+      # No interpreter and no shared libraries, or the build is wrong. `file`
+      # and ldd word a static binary differently from one version to the
+      # next, and a static PIE differently again, so ask readelf.
+      - name: Check perchd is static
+        run: |
+          bin="$PERCHD_DIR/perchd"
+          file "$bin"
+          if readelf -lW "$bin" | grep -q INTERP || readelf -dW "$bin" | grep -q NEEDED; then
+            readelf -dW "$bin" | grep NEEDED || true
+            echo "::error::perchd is dynamically linked"
+            exit 1
+          fi
+          "$bin" --version
 
       - name: Package perchd
-        run: tar -czf perchd-linux-${{ matrix.arch }}.tar.gz -C target/release perchd
+        run: tar -czf perchd-linux-${{ matrix.arch }}.tar.gz -C "$PERCHD_DIR" perchd
 
       - uses: actions/upload-artifact@v4
         with:
@@ -120,6 +145,8 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             prerelease=(--prerelease)
           fi
+          sha256sum Perch-macos-*.tar.gz Perch-linux-*.tar.gz perchd-linux-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
           gh release create "$GITHUB_REF_NAME" Perch-macos-*.tar.gz Perch-linux-*.tar.gz \
-            perchd-linux-*.tar.gz \
+            perchd-linux-*.tar.gz SHA256SUMS \
             --verify-tag --generate-notes "${prerelease[@]}"

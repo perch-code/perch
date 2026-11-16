@@ -1478,7 +1478,10 @@ lock and run beside an engine.
 `perchd` runs the engine with no window, for an always-on machine the Mac
 reaches over ssh. It is built from the same crates as the app, without a UI
 toolkit, so it needs no GTK. Releases carry it for Linux as
-`perchd-linux-<arch>.tar.gz`; put `perchd` in `~/.local/bin`.
+`perchd-linux-<arch>.tar.gz`, for x86_64 and arm64, with the SHA-256 of
+every asset in the release's `SHA256SUMS`. It is built against musl and
+linked statically, so it runs on any Linux of its architecture, Alpine
+included, whatever its libc. Put `perchd` in `~/.local/bin`.
 
 - `perchd serve` runs the engine and listens on
   `$PERCH_HOME/run/perchd.sock` (the directory owner-only, the socket mode
@@ -1538,7 +1541,8 @@ The host is Linux, always on, and reachable from the Mac with `ssh <host>`.
 On it:
 
 1. Unpack `perchd-linux-<arch>.tar.gz` from a release and put `perchd` in
-   `~/.local/bin`, on the `PATH` your login shell sets.
+   `~/.local/bin`, on the `PATH` your login shell sets. It is a static
+   binary, so the distribution's libc does not matter.
 2. Install bubblewrap and socat (`apt install bubblewrap socat`, or your
    distribution's), which Claude Code's sandbox needs on Linux.
 3. Sign in to what the engine uses, as the user it runs as: `gh auth login`

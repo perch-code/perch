@@ -5,7 +5,7 @@
 Perch is one process. The window, the GitHub client, the cache, the
 checkouts, the language servers and the agents all live on the Mac in
 front of the reader, and closing the lid stops all of it. The reader
-has an always-on Linux box (an AMD Strix Halo) where builds are fast,
+may have an always-on Linux machine where builds are fast,
 dependencies stay installed and agents can keep working overnight.
 
 After this milestone:
@@ -161,7 +161,7 @@ the Mac without a host.
   ServerAliveCountMax=3 <host> <command>`. SSH's own config, keys and
   agent apply.
 - A lost connection shows in every window as a lasting banner, not a
-  toast: "Disconnected from halo. Reconnecting…", with a Reconnect
+  toast: "Disconnected from <host>. Reconnecting…", with a Reconnect
   button. The app retries with backoff (1s doubling to 30s), resyncs and
   reopens what each window had open. Commands sent while disconnected
   are refused at the handle with a message, never queued.
@@ -305,7 +305,7 @@ connect. VS Code's Remote SSH, Zed and T3 Code work the same way.
    `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (rustls
    and bundled SQLite, no OpenSSL), checks it is static, and publishes a
    `SHA256SUMS` beside the assets. `perchd-linux-<arch>.tar.gz` keeps its
-   name.
+   name. (Done.)
 2. Probe and upload (below).
 3. Versioned installs and their cleanup (below).
 4. Replacing an older engine (below).
@@ -353,7 +353,7 @@ so a rebuilt dev binary is uploaded again. The app always knows the
   `--version`, and renames it into place only when that names the
   expected version and protocol. The temporary file is removed on any
   failure.
-- The link strip says "Installing perchd 0.9.0 on halo…" meanwhile.
+- The link strip says "Installing perchd 0.9.0 on <host>…" meanwhile.
 - `perch --connect <host>` does all this headless, prints the welcome
   and the host checks, and exits: for testing and for the reader.
 
@@ -399,8 +399,16 @@ and when its config changes, and sends it in the resync: a GitHub token,
 `git`, a `[[repo]]` whose root is on the host, each agent CLI, on Linux
 bubblewrap and socat when Claude Code is there, and logind's
 `KillUserProcesses=yes`. Each says what to run to fix it. Settings >
-General > Engine lists them; the strip says "halo needs setup" with a
+General > Engine lists them; the strip says "<host> needs setup" with a
 button to Settings when anything required is missing.
+
+### As built
+
+- The static check asks `readelf` for an interpreter or a `NEEDED`
+  library rather than reading `file` or `ldd`, which word a static binary,
+  and a static PIE, differently from one version to the next. CI's Linux job also builds `perchd` for
+  `x86_64-unknown-linux-musl` and runs the same check, so a dependency
+  that needs OpenSSL or glibc fails on the pull request, not at release.
 
 ## Acceptance
 
