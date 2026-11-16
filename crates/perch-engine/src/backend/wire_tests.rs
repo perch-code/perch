@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use super::connections::{Hub, Inbound};
+use super::connections::{Hub, Inbound, RESYNC};
 use super::tests::{ctx, nowhere, pull_request};
 use super::*;
 use crate::wire::{self, Answer, Hello, PROTOCOL, VERSION};
@@ -105,6 +105,31 @@ fn events_cross_the_wire_whole() {
     };
     round_trip(&Event::AgentRunUpdated { run });
 
+    // Reveals are keyed by (path, blob), which JSON cannot have as a key.
+    let reveals: perch_github::StoredReveals =
+        [(("src/lib.rs".to_string(), "blob".to_string()), vec![(3, 9)])].into();
+    let Event::ViewedReady {
+        reveals: Some(back),
+        viewed,
+        ..
+    } = round_trip(&Event::ViewedReady {
+        item_id: "i".into(),
+        viewed: Arc::new([("src/lib.rs".to_string(), "blob".to_string())].into()),
+        reveals: Some(Arc::new(reveals.clone())),
+    })
+    else {
+        panic!("not viewed, or no reveals");
+    };
+    assert_eq!(*back, reveals);
+    assert_eq!(viewed.len(), 1);
+    let Event::ViewedReady { reveals: None, .. } = round_trip(&Event::ViewedReady {
+        item_id: "i".into(),
+        viewed: Arc::default(),
+        reveals: None,
+    }) else {
+        panic!("reveals from nowhere");
+    };
+
     // Bytes go as base64, not as a list of numbers.
     let avatar = Event::Avatar {
         url: "u".into(),
@@ -148,6 +173,28 @@ fn what_discovery_found_reaches_a_window_across_the_wire() {
     assert_eq!(repos[0].identity, "me/notes");
 }
 
+#[test]
+fn the_token_stays_with_the_engine() {
+    let config = Config::parse_text("token = \"ghp_secret\"\npoll_interval_secs = 90\n").unwrap();
+    assert_eq!(config.token.as_deref(), Some("ghp_secret"));
+    let settings = Event::Settings(SettingsFile {
+        path: "/home/me/.config/perch/config.toml".into(),
+        config: Some(Arc::new(config)),
+        error: None,
+        present: ["token".to_string()].into(),
+        warnings: Vec::new(),
+    });
+    let json = serde_json::to_string(&settings).unwrap();
+    assert!(!json.contains("ghp_secret"), "{json}");
+    let Event::Settings(SettingsFile {
+        config: Some(back), ..
+    }) = serde_json::from_str(&json).unwrap()
+    else {
+        panic!("not settings");
+    };
+    assert_eq!((back.token.as_deref(), back.poll_interval_secs), (None, 90));
+}
+
 type Heard = UnboundedReceiver<(WindowId, Event)>;
 
 fn listener() -> (impl Fn(WindowId, Event) + Send + Sync + 'static, Heard) {
@@ -177,7 +224,7 @@ fn heard(rx: &mut Heard) -> Vec<(WindowId, String)> {
 fn ran(rx: &mut UnboundedReceiver<Inbound>) -> Vec<(WindowId, String)> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .map(|inbound| match inbound {
-            Inbound::Command(window, command) => (window, format!("{command:?}")),
+            Inbound::Command(window, command, _) => (window, format!("{command:?}")),
             Inbound::Shutdown => (NO_WINDOW, "Shutdown".into()),
         })
         .collect()
@@ -186,7 +233,7 @@ fn ran(rx: &mut UnboundedReceiver<Inbound>) -> Vec<(WindowId, String)> {
 #[test]
 fn two_connections_keep_their_own_windows() {
     let (tx, mut commands) = unbounded_channel();
-    let hub = Arc::new(Hub::new(tx, Lifetime::Service));
+    let hub = Arc::new(Hub::new(tx, Lifetime::Service, Fencing::default()));
     let engine = Engine {
         hub: hub.clone(),
         runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
@@ -198,17 +245,35 @@ fn two_connections_keep_their_own_windows() {
     // Homes 1 and 2; both clients call their first window 1.
     a.send(1, Command::WindowOpened).unwrap();
     b.send(1, Command::WindowOpened).unwrap();
+    // Only a window opens or closes a window.
+    a.send(NO_WINDOW, Command::WindowOpened).unwrap();
+    b.send(NO_WINDOW, Command::WindowClosed).unwrap();
+    // A resync, from any window, is the connection's.
     a.send(1, Command::Resync).unwrap();
     b.send(NO_WINDOW, Command::Resync).unwrap();
+    a.send(
+        NO_WINDOW,
+        Command::RefreshOpenItem {
+            item_id: "i".into(),
+        },
+    )
+    .unwrap();
     // A window that never opened sends nothing.
-    a.send(7, Command::Resync).unwrap();
+    a.send(
+        7,
+        Command::RefreshOpenItem {
+            item_id: "i".into(),
+        },
+    )
+    .unwrap();
     assert_eq!(
         ran(&mut commands),
         vec![
             (3, "WindowOpened".into()),
             (4, "WindowOpened".into()),
-            (3, "Resync".into()),
-            (2, "Resync".into()),
+            (RESYNC | 1, "Resync".into()),
+            (RESYNC | 2, "Resync".into()),
+            (1, "RefreshOpenItem { item_id: \"i\" }".into()),
         ]
     );
 
@@ -217,14 +282,19 @@ fn two_connections_keep_their_own_windows() {
     hub.route(4, notice("b's"));
     // A home's goes to its connection alone.
     hub.route(2, notice("b's home"));
-    // What every window shows goes to all, the sender's as its window.
+    // What every window shows goes to all, the sender's as its window,
+    // from a home as from a window.
     hub.route(3, Event::Items(Vec::new()));
+    hub.route(2, Event::Repos(Vec::new()));
     hub.route(NO_WINDOW, notice("everyone"));
+    // A resync's goes to its asker alone, whatever it is.
+    hub.route(RESYNC | 2, Event::Notifications(Vec::new()));
     assert_eq!(
         heard(&mut a_heard),
         vec![
             (1, "a's".into()),
             (1, "Items([])".into()),
+            (NO_WINDOW, "Repos([])".into()),
             (NO_WINDOW, "everyone".into()),
         ]
     );
@@ -234,7 +304,9 @@ fn two_connections_keep_their_own_windows() {
             (1, "b's".into()),
             (NO_WINDOW, "b's home".into()),
             (NO_WINDOW, "Items([])".into()),
+            (NO_WINDOW, "Repos([])".into()),
             (NO_WINDOW, "everyone".into()),
+            (NO_WINDOW, "Notifications([])".into()),
         ]
     );
 
@@ -243,20 +315,108 @@ fn two_connections_keep_their_own_windows() {
     assert_eq!(ran(&mut commands), vec![(3, "WindowClosed".into())]);
     assert_eq!(engine.connections(), 1);
     hub.route(3, notice("late"));
+    // The tail of a's resync has nobody to go to, not everybody.
+    hub.route(RESYNC | 1, Event::Items(Vec::new()));
     hub.route(NO_WINDOW, notice("still here"));
     assert_eq!(heard(&mut b_heard), vec![(NO_WINDOW, "still here".into())]);
     b.send(1, Command::WindowClosed).unwrap();
-    b.send(1, Command::Resync).unwrap();
+    b.send(
+        1,
+        Command::RefreshOpenItem {
+            item_id: "i".into(),
+        },
+    )
+    .unwrap();
     drop(b);
     // A service engine outlives its clients.
     assert_eq!(ran(&mut commands), vec![(4, "WindowClosed".into())]);
+}
+
+/// The view `window` has in the engine.
+fn view(fencing: &Fencing, window: WindowId) -> View {
+    fencing
+        .views
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|view| view.window == window)
+        .cloned()
+        .expect("no view")
+}
+
+#[test]
+fn a_command_is_fenced_as_it_is_sent_not_when_the_loop_gets_to_it() {
+    // Nothing reads the commands, as when the loop is busy with a poll.
+    let (tx, mut commands) = unbounded_channel();
+    let fencing = Fencing::default();
+    let engine = Engine {
+        hub: Arc::new(Hub::new(tx, Lifetime::Service, fencing.clone())),
+        runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
+    };
+    let (backend, _events) = Backend::in_process(&engine);
+    let window = backend.open_window();
+    let first = window.open_item("a");
+    let second = window.open_item("b");
+    let fences = view(&fencing, 2).navigation_requests;
+    assert!(!fences.is_current(first));
+    assert!(fences.is_current(second));
+
+    // A scope change is begun, and an archive suspends what it showed, as
+    // they are sent; the loop is handed what that gave.
+    window.set_scope("b", perch_git::Scope::Branch);
+    let fence = window.archive_item("b");
+    let fenced: Vec<Fenced> = std::iter::from_fn(|| commands.try_recv().ok())
+        .filter_map(|inbound| match inbound {
+            Inbound::Command(_, Command::SetScope { .. } | Command::ArchiveItem { .. }, fenced) => {
+                Some(fenced)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(fenced[0].scope_request.is_some());
+    assert_eq!(
+        fenced[1]
+            .suspended_navigation
+            .as_ref()
+            .map(|suspended| suspended.fence_id),
+        Some(fence)
+    );
+}
+
+#[test]
+fn attempts_are_the_engine_s_own_and_follow_every_one_heard_of() {
+    let (tx, _commands) = unbounded_channel();
+    let engine = Engine {
+        hub: Arc::new(Hub::new(tx, Lifetime::Service, Fencing::default())),
+        runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
+    };
+    let (a, _a_events) = Backend::in_process(&engine);
+    let (b, _b_events) = Backend::in_process(&engine);
+    let a_attempts: Vec<u64> = (0..10).map(|_| a.next_attempt()).collect();
+    let b_first = b.next_attempt();
+    // Never the same as another client's.
+    assert!(!a_attempts.contains(&b_first));
+    // A window of b's that heard a's latest takes b's next after it.
+    let latest = *a_attempts.last().unwrap();
+    engine.hub.route(
+        NO_WINDOW,
+        Event::PullRequestMergeStarted {
+            item_id: "i".into(),
+            repo_full_name: "a/b".into(),
+            number: 7,
+            expected_head_sha: "sha".into(),
+            attempt_id: latest,
+        },
+    );
+    let b_next = b.next_attempt();
+    assert!(b_next > latest && !a_attempts.contains(&b_next));
 }
 
 #[test]
 fn the_app_s_engine_stops_with_its_last_connection() {
     let (tx, mut commands) = unbounded_channel();
     let engine = Engine {
-        hub: Arc::new(Hub::new(tx, Lifetime::WhileConnected)),
+        hub: Arc::new(Hub::new(tx, Lifetime::WhileConnected, Fencing::default())),
         runtime: tokio::runtime::Runtime::new().unwrap().handle().clone(),
     };
     let connection = engine.connect(|_, _| {});
@@ -281,7 +441,12 @@ fn engine(dir: &Path) -> (Engine, String) {
         .unwrap()
         .unwrap();
     let (tx, commands) = unbounded_channel();
-    let hub = Arc::new(Hub::new(tx, Lifetime::Service));
+    let fencing = Fencing {
+        views: ctx.views.clone(),
+        navigation: ctx.navigation_requests.clone(),
+        scopes: ctx.scope_requests.clone(),
+    };
+    let hub = Arc::new(Hub::new(tx, Lifetime::Service, fencing));
     let router = hub.clone();
     ctx.events = EventSender::to(move |window, event| {
         router.route(window, event);
@@ -436,14 +601,17 @@ async fn a_client_on_another_protocol_is_told_both_versions() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_malformed_line_closes_only_its_connection() {
-    let dir = tempfile::tempdir().unwrap();
-    let (engine, _) = engine(dir.path());
-    let (other, other_events) = Backend::in_process(&engine);
-
-    let (near, far) = tokio::io::duplex(1 << 16);
-    let served = tokio::spawn(wire::serve(engine.clone(), far));
+/// A client's end of `serve` on a pipe, let in.
+async fn raw_client(
+    engine: &Engine,
+    limits: wire::Limits,
+) -> (
+    BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    tokio::task::JoinHandle<Result<(), wire::WireError>>,
+) {
+    let (near, far) = tokio::io::duplex(1 << 12);
+    let served = tokio::spawn(wire::serve_with(engine.clone(), far, limits));
     let (read, mut write) = tokio::io::split(near);
     let mut read = BufReader::new(read);
     let hello = serde_json::to_string(&Hello {
@@ -457,16 +625,65 @@ async fn a_malformed_line_closes_only_its_connection() {
         .unwrap();
     let answer: Answer = serde_json::from_str(&line(&mut read).await.unwrap()).unwrap();
     assert!(matches!(answer, Answer::Welcome(_)), "{answer:?}");
+    (read, write, served)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_line_is_dropped_and_the_next_still_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, _) = engine(dir.path());
+    let (mut read, mut write, served) = raw_client(&engine, wire::Limits::default()).await;
     write
-        .write_all(b"{\"window\":1,\"command\":\"NoSuchThing\"}\n")
+        .write_all(b"{\"window\":0,\"command\":\"NoSuchThing\"}\nnot json at all\n")
         .await
         .unwrap();
-    assert!(matches!(
-        served.await.unwrap(),
-        Err(wire::WireError::Malformed(_))
-    ));
-    // The rest of what it was sent, then the end.
+    let resync = serde_json::to_string(&wire::CommandLine {
+        window: NO_WINDOW,
+        command: Command::Resync,
+    })
+    .unwrap();
+    write
+        .write_all(format!("{resync}\n").as_bytes())
+        .await
+        .unwrap();
+    // The resync is answered: the connection outlived the lines before it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let next = tokio::time::timeout_at(deadline, line(&mut read))
+            .await
+            .expect("the resync never came")
+            .expect("the engine hung up");
+        if next.contains("\"WorkDefaults\"") {
+            break;
+        }
+    }
+    assert_eq!(engine.connections(), 1);
+    write.shutdown().await.unwrap();
     while line(&mut read).await.is_some() {}
+    assert!(served.await.unwrap().is_ok());
+    assert_eq!(engine.connections(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_stops_reading_is_hung_up_on_once_it_is_too_far_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, _) = engine(dir.path());
+    let (other, other_events) = Backend::in_process(&engine);
+    let limits = wire::Limits {
+        backlog: 64 << 10,
+        last_writes: Duration::from_millis(100),
+    };
+    // Never read again: the pipe fills, and then the backlog.
+    let (_read, _write, served) = raw_client(&engine, limits).await;
+    let big = "x".repeat(4 << 10);
+    for _ in 0..64 {
+        engine.hub.route(NO_WINDOW, Event::Notice(big.clone()));
+    }
+    let ended = tokio::time::timeout(Duration::from_secs(10), served)
+        .await
+        .expect("the engine kept waiting on the client")
+        .unwrap();
+    assert!(matches!(ended, Err(wire::WireError::Behind)), "{ended:?}");
     assert_eq!(engine.connections(), 1);
 
     // The engine and its other client go on.

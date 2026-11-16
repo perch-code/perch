@@ -204,17 +204,25 @@ impl Held {
         fresh
     }
 
+    /// Held while the Settings go, so a client's resync never sends an
+    /// older file after this one.
     fn send(&self, ctx: &Ctx, file: SettingsFile) {
-        *self
+        let mut last = self
             .last
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file.clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *last = Some(file.clone());
         let _ = ctx.events.send(Event::Settings(file));
     }
 
-    /// The Settings last sent, for a client that asks for it again.
-    pub(super) fn last(&self) -> Option<SettingsFile> {
-        self.last.lock().ok().and_then(|last| last.clone())
+    /// Run `send` with the Settings last sent, for a client that asks for
+    /// them again, and no write's Settings sent meanwhile.
+    pub(super) fn with_last<T>(&self, send: impl FnOnce(Option<SettingsFile>) -> T) -> T {
+        let last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        send(last.clone())
     }
 
     fn send_again(&self, ctx: &Ctx) {

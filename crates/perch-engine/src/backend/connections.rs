@@ -7,14 +7,21 @@
 //! - A command from a connection's window runs as the engine window
 //!   that `WindowOpened` gave it.
 //! - A command from a connection's `NO_WINDOW` runs as that connection's
-//!   home: an engine window with no view, so the engine can answer that
-//!   connection alone, as a `Resync` is answered.
+//!   home: an engine window with no view, so the engine can give its
+//!   answers to that connection alone. Only a window opens or closes a
+//!   window.
+//! - A `Resync`, from whichever of its windows, runs as the connection's
+//!   resync window, whose every event goes to that connection alone, as
+//!   its `NO_WINDOW`'s, and nowhere once it has gone.
 //! - An event for `NO_WINDOW` goes to every connection.
-//! - An event for a window goes to the connection that owns it. One a
-//!   client shows in every window (not `Event::for_one_window`) also goes
-//!   to every other connection, as their `NO_WINDOW`'s: a rename asked
-//!   for in one client is news to the rest.
-//! - An event for a connection's home goes to that connection alone.
+//! - An event for a window or a home goes to the connection that owns it.
+//!   One a client shows in every window (not `Event::for_one_window`)
+//!   also goes to every other connection, as their `NO_WINDOW`'s: a
+//!   rename asked for in one client is news to the rest.
+//!
+//! A command's fences are registered as it is sent (`Fencing`), so the
+//! engine fences in the order the windows clicked in, whatever its
+//! command loop is busy with.
 //!
 //! When a connection goes, the engine is told each of its windows closed.
 //! The engine holds its own command sender, so the last connection going
@@ -26,7 +33,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{Command, Event, WindowId, NO_WINDOW};
+use super::windows::Fencing;
+use super::{Command, Event, Fenced, WindowId, NO_WINDOW};
+
+/// The bit that marks a connection's resync window, beside its id. Engine
+/// windows are counted up from 1 and never get near it.
+pub(super) const RESYNC: WindowId = 1 << 62;
 
 /// How long an engine runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +53,8 @@ pub enum Lifetime {
 
 /// What reaches the engine's command loop.
 pub(crate) enum Inbound {
-    Command(WindowId, Command),
+    /// A command from an engine window, with what its fences gave back.
+    Command(WindowId, Command, Fenced),
     /// Stop as quitting does.
     Shutdown,
 }
@@ -89,6 +102,11 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// The engine's number for this client, never another's.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Run `command` from the client's `window`. Err when the engine has
     /// gone.
     pub fn send(&self, window: WindowId, command: Command) -> Result<(), ()> {
@@ -108,6 +126,14 @@ type Sink = Box<dyn Fn(WindowId, Event) + Send + Sync>;
 pub(super) struct Hub {
     commands: UnboundedSender<Inbound>,
     lifetime: Lifetime,
+    fencing: Fencing,
+    /// Held while a command is mapped, fenced and queued, so the engine
+    /// hears commands in the order they were fenced, a window open before
+    /// anything from it, and nothing after it closed. Apart from `state`,
+    /// which routing takes: the engine routes events while holding a
+    /// fence's lock (`NavigationRequests::with_current`), so fencing must
+    /// never wait on routing.
+    sending: Mutex<()>,
     state: Mutex<HubState>,
 }
 
@@ -131,12 +157,24 @@ struct Peer {
 }
 
 impl Hub {
-    pub(super) fn new(commands: UnboundedSender<Inbound>, lifetime: Lifetime) -> Self {
+    pub(super) fn new(
+        commands: UnboundedSender<Inbound>,
+        lifetime: Lifetime,
+        fencing: Fencing,
+    ) -> Self {
         Self {
             commands,
             lifetime,
+            fencing,
+            sending: Mutex::default(),
             state: Mutex::default(),
         }
+    }
+
+    fn sending(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.sending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, HubState> {
@@ -164,50 +202,63 @@ impl Hub {
     }
 
     fn send(&self, id: u64, window: WindowId, command: Command) -> Result<(), ()> {
-        // Held through the send, so the engine hears a window open before
-        // anything from it, and nothing after it closed.
-        let mut state = self.state();
-        let state = &mut *state;
-        let Some(peer) = state.connections.get_mut(&id) else {
-            return Err(());
-        };
-        let engine_window = if window == NO_WINDOW {
-            peer.home
-        } else if matches!(command, Command::WindowOpened) {
-            if let Some(&known) = peer.windows.get(&window) {
-                known
-            } else {
-                state.last_window += 1;
-                let engine_window = state.last_window;
-                peer.windows.insert(window, engine_window);
-                state.owners.insert(engine_window, (id, window));
-                engine_window
-            }
-        } else if matches!(command, Command::WindowClosed) {
-            let Some(engine_window) = peer.windows.remove(&window) else {
-                return Ok(());
+        let _sending = self.sending();
+        let engine_window = {
+            let mut state = self.state();
+            let state = &mut *state;
+            let Some(peer) = state.connections.get_mut(&id) else {
+                return Err(());
             };
-            state.owners.remove(&engine_window);
-            engine_window
-        } else {
-            match peer.windows.get(&window) {
-                Some(&engine_window) => engine_window,
-                None => {
-                    tracing::debug!(
-                        connection = id,
-                        window,
-                        "command from a window that is not open; dropped"
-                    );
+            match (&command, window) {
+                // Asked for from any window, answered to the client alone.
+                (Command::Resync, _) => RESYNC | id,
+                (Command::WindowOpened | Command::WindowClosed, NO_WINDOW) => {
+                    tracing::debug!(connection = id, "a window command from no window; dropped");
                     return Ok(());
                 }
+                (_, NO_WINDOW) => peer.home,
+                (Command::WindowOpened, _) => match peer.windows.get(&window) {
+                    Some(&known) => known,
+                    None => {
+                        state.last_window += 1;
+                        let engine_window = state.last_window;
+                        peer.windows.insert(window, engine_window);
+                        state.owners.insert(engine_window, (id, window));
+                        engine_window
+                    }
+                },
+                (Command::WindowClosed, _) => {
+                    let Some(engine_window) = peer.windows.remove(&window) else {
+                        return Ok(());
+                    };
+                    state.owners.remove(&engine_window);
+                    engine_window
+                }
+                _ => match peer.windows.get(&window) {
+                    Some(&engine_window) => engine_window,
+                    None => {
+                        tracing::debug!(
+                            connection = id,
+                            window,
+                            "command from a window that is not open; dropped"
+                        );
+                        return Ok(());
+                    }
+                },
             }
         };
+        // The view is there before anything from the window is fenced.
+        if matches!(command, Command::WindowOpened) {
+            self.fencing.open(engine_window);
+        }
+        let fenced = self.fencing.register(engine_window, &command);
         self.commands
-            .send(Inbound::Command(engine_window, command))
+            .send(Inbound::Command(engine_window, command, fenced))
             .map_err(drop)
     }
 
     fn remove(&self, id: u64) {
+        let _sending = self.sending();
         let mut state = self.state();
         let Some(peer) = state.connections.remove(&id) else {
             return;
@@ -215,9 +266,11 @@ impl Hub {
         state.owners.remove(&peer.home);
         for engine_window in peer.windows.into_values() {
             state.owners.remove(&engine_window);
-            let _ = self
-                .commands
-                .send(Inbound::Command(engine_window, Command::WindowClosed));
+            let _ = self.commands.send(Inbound::Command(
+                engine_window,
+                Command::WindowClosed,
+                Fenced::default(),
+            ));
         }
         tracing::info!(
             connection = id,
@@ -232,24 +285,32 @@ impl Hub {
     /// Hand an engine event to whoever should hear it.
     pub(super) fn route(&self, window: WindowId, event: Event) {
         let state = self.state();
+        // A resync's, for its asker alone; one that has gone hears nothing.
+        if window & RESYNC != 0 {
+            if let Some(peer) = state.connections.get(&(window & !RESYNC)) {
+                (peer.sink)(NO_WINDOW, event);
+            }
+            return;
+        }
         let owner = (window != NO_WINDOW)
             .then(|| state.owners.get(&window).copied())
             .flatten();
         match owner {
-            // A home, or a window's own answer: its connection alone.
-            Some((id, theirs)) if theirs == NO_WINDOW || event.for_one_window() => {
+            // A window's or a home's own answer: its connection alone.
+            Some((id, theirs)) if event.for_one_window() => {
                 if let Some(peer) = state.connections.get(&id) {
                     (peer.sink)(theirs, event);
                 }
             }
-            // News from a window that every client shows.
+            // News from a window or a home that every client shows.
             Some((id, theirs)) => {
                 for (&peer_id, peer) in &state.connections {
                     let to = if peer_id == id { theirs } else { NO_WINDOW };
                     (peer.sink)(to, event.clone());
                 }
             }
-            // A window that has closed: its answers have nowhere to go.
+            // A window or a home that has closed: its answers have nowhere
+            // to go, and its news is still news.
             None if window != NO_WINDOW && event.for_one_window() => {}
             None => {
                 for peer in state.connections.values() {

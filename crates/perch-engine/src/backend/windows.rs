@@ -172,6 +172,46 @@ impl View {
 /// The windows' views, by window.
 pub(super) type Views = Arc<std::sync::Mutex<Vec<View>>>;
 
+/// The views and the engine's own fences, which the connections reach as
+/// well as the command loop. A command's fences are registered as it is
+/// sent, as the handle once registered them as the window clicked, so a
+/// task that finishes while the loop is busy with a poll already sees the
+/// newer click.
+#[derive(Clone, Default)]
+pub(super) struct Fencing {
+    pub(super) views: Views,
+    /// The fences of what runs on no window's view: the engine's own work
+    /// and every connection's home.
+    pub(super) navigation: Arc<NavigationRequests>,
+    pub(super) scopes: Arc<ScopeRequests>,
+}
+
+impl Fencing {
+    /// Make `window`'s view, unless it has one.
+    pub(super) fn open(&self, window: WindowId) {
+        if let Ok(mut views) = self.views.lock() {
+            if !views.iter().any(|view| view.window == window) {
+                views.push(View::new(window));
+            }
+        }
+    }
+
+    /// Register what `command` fences in the fences of the view it runs in.
+    pub(super) fn register(&self, window: WindowId, command: &Command) -> super::Fenced {
+        let view = self.views.lock().ok().and_then(|views| {
+            views.iter().find(|view| view.window == window).map(|view| {
+                (
+                    view.navigation_requests.clone(),
+                    view.scope_requests.clone(),
+                )
+            })
+        });
+        let (navigation, scopes) =
+            view.unwrap_or_else(|| (self.navigation.clone(), self.scopes.clone()));
+        super::register_fences(&navigation, &scopes, command)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

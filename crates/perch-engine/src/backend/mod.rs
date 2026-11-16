@@ -30,7 +30,7 @@ pub use connections::{Connection, Engine, Lifetime};
 pub use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 pub use settings::{CheckConfig, SettingsFile};
-use windows::{CommandSender, View, Views};
+use windows::{CommandSender, Fencing, View, Views};
 pub use windows::{EventSender, WindowId, NO_WINDOW};
 
 mod avatar;
@@ -1693,6 +1693,7 @@ pub enum Event {
     ViewedReady {
         item_id: String,
         viewed: Arc<std::collections::HashSet<(String, String)>>,
+        #[serde(default, with = "crate::wire::pairs::shared")]
         reveals: Option<Arc<perch_github::StoredReveals>>,
     },
 
@@ -1877,12 +1878,10 @@ pub struct Backend {
     window: WindowId,
     /// The last window handed out, shared by every handle.
     windows: Arc<std::sync::atomic::AtomicU64>,
-    /// Every window's latest navigation, shared by the handles and the
-    /// connection's events on their way to the window.
+    /// Every window's latest navigation, and the client's merge and
+    /// review attempts, shared by the handles and the connection's events
+    /// on their way to the window.
     navigations: Arc<client::Navigations>,
-    /// The last merge or review attempt handed out, shared by every
-    /// handle.
-    attempts: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1914,9 +1913,10 @@ struct SuspendedNavigation {
 }
 
 /// A window's latest view navigation, as the engine has it. The handle
-/// numbers each navigation and the command carries the id; the command
-/// loop registers it here as the command arrives, before any task it
-/// starts, so task scheduling cannot reverse the reader's click order.
+/// numbers each navigation and the command carries the id; the engine
+/// registers it here as the command is sent to it (`Fencing`), before the
+/// command loop gets to it or any task it starts, so neither the loop's
+/// own work nor task scheduling can reverse the reader's click order.
 /// Current opens, close, Agents owner jumps, and historical snapshots all
 /// share this one sequence. A result that beats a newer command to the
 /// loop still reaches the window, which drops it by id.
@@ -2762,7 +2762,7 @@ struct MergeAttempts {
 
 impl MergeAttempts {
     /// False when one is in flight for the item already. A refused
-    /// attempt never finishes: another client's may share its id.
+    /// attempt never finishes: the one in flight is another's.
     fn begin(&self, item_id: &str, attempt_id: u64) -> bool {
         let Ok(mut in_flight) = self.in_flight.lock() else {
             return false;
@@ -2828,7 +2828,6 @@ impl Backend {
             window,
             windows: self.windows.clone(),
             navigations: self.navigations.clone(),
-            attempts: self.attempts.clone(),
         }
     }
 
@@ -2846,9 +2845,7 @@ impl Backend {
     }
 
     fn next_attempt(&self) -> u64 {
-        self.attempts
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1)
+        self.navigations.next_attempt()
     }
 
     pub fn window(&self) -> WindowId {
@@ -4085,7 +4082,6 @@ impl Backend {
             window: 1,
             windows: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             navigations: Arc::default(),
-            attempts: Arc::default(),
         };
         (backend, received)
     }
@@ -4103,7 +4099,6 @@ impl Backend {
             window: NO_WINDOW,
             windows: Arc::default(),
             navigations,
-            attempts: Arc::default(),
         }
     }
 
@@ -4120,19 +4115,22 @@ impl Backend {
                 let _ = events.send((window, event));
             }
         });
+        navigations.connected_as(connection.id());
         let backend = Self::client(navigations, move |window, command| {
             connection.send(window, command)
         });
         (backend, received)
     }
 
-    /// A client over a wire: what the handles send goes to `to`, and
-    /// what comes back goes past the returned `Navigations` before the
-    /// windows hear it.
+    /// A client over a wire, the engine's `connection`: what the handles
+    /// send goes to `to`, and what comes back goes past the returned
+    /// `Navigations` before the windows hear it.
     pub(crate) fn over_wire(
         to: tokio::sync::mpsc::UnboundedSender<(WindowId, Command)>,
+        connection: u64,
     ) -> (Backend, Arc<client::Navigations>) {
         let navigations = Arc::<client::Navigations>::default();
+        navigations.connected_as(connection);
         let backend = Self::client(navigations.clone(), move |window, command| {
             to.send((window, command)).map_err(drop)
         });
@@ -4217,7 +4215,7 @@ pub fn spawn(check: CheckConfig) -> (Backend, std::sync::mpsc::Receiver<(WindowI
                     message: format!("could not start the network runtime: {e}"),
                 }),
             ));
-            let (backend, _) = Backend::over_wire(tokio::sync::mpsc::unbounded_channel().0);
+            let (backend, _) = Backend::over_wire(tokio::sync::mpsc::unbounded_channel().0, 0);
             (backend, received)
         }
     }
@@ -4229,6 +4227,8 @@ pub struct Unstarted {
     engine: Engine,
     runtime: tokio::runtime::Runtime,
     commands: UnboundedReceiver<connections::Inbound>,
+    /// Shared with the connections, which fence as commands are sent.
+    fencing: Fencing,
 }
 
 impl Engine {
@@ -4239,14 +4239,16 @@ impl Engine {
             .enable_all()
             .build()?;
         let (tx, commands) = tokio::sync::mpsc::unbounded_channel();
+        let fencing = Fencing::default();
         let engine = Engine {
-            hub: Arc::new(connections::Hub::new(tx, lifetime)),
+            hub: Arc::new(connections::Hub::new(tx, lifetime, fencing.clone())),
             runtime: runtime.handle().clone(),
         };
         Ok(Unstarted {
             engine,
             runtime,
             commands,
+            fencing,
         })
     }
 
@@ -4269,6 +4271,7 @@ impl Unstarted {
             engine,
             runtime,
             commands,
+            fencing,
         } = self;
         let hub = engine.hub.clone();
         let events = EventSender::to(move |window, event| {
@@ -4277,7 +4280,7 @@ impl Unstarted {
         });
         std::thread::Builder::new()
             .name("perch-backend".into())
-            .spawn(move || runtime.block_on(run(commands, events, check)))
+            .spawn(move || runtime.block_on(run(commands, events, check, fencing)))
             .expect("spawn backend thread");
         engine
     }
@@ -4287,6 +4290,7 @@ async fn run(
     commands: UnboundedReceiver<connections::Inbound>,
     events: EventSender<Event>,
     check: CheckConfig,
+    fencing: Fencing,
 ) {
     tracing::info!("backend started");
     // The file is read once, for the running config and the Settings page
@@ -4484,8 +4488,8 @@ async fn run(
         runs: run_manager,
         review_capabilities,
         review_snapshots,
-        navigation_requests: Arc::default(),
-        scope_requests: Arc::default(),
+        navigation_requests: fencing.navigation.clone(),
+        scope_requests: fencing.scopes.clone(),
         status_requests: Arc::default(),
         discussion_requests: Arc::default(),
         merge_attempts: Arc::default(),
@@ -4514,7 +4518,7 @@ async fn run(
         approval_picks: Default::default(),
         window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         window: NO_WINDOW,
-        views: Default::default(),
+        views: fencing.views.clone(),
         status: Arc::new(std::sync::Mutex::new(startup_status)),
     };
     send_agent_runs(&ctx, 50);
@@ -4638,9 +4642,9 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
 
     let base = ctx;
     loop {
-        let (window, command) = tokio::select! {
-            _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh),
-            _ = snooze_clock.tick() => (NO_WINDOW, Command::WakeSnoozed),
+        let (window, command, fenced) = tokio::select! {
+            _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh, Fenced::default()),
+            _ = snooze_clock.tick() => (NO_WINDOW, Command::WakeSnoozed, Fenced::default()),
             () = base.settings.poll_interval_changed() => {
                 if let Some(last) = last_poll {
                     next_auto_poll = next_poll(last, poll_floor, base.config().poll_interval_secs);
@@ -4648,7 +4652,9 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 continue;
             }
             inbound = commands.recv() => match inbound {
-                Some(connections::Inbound::Command(window, command)) => (window, command),
+                Some(connections::Inbound::Command(window, command, fenced)) => {
+                    (window, command, fenced)
+                }
                 // Told to stop: the app quit, or the host's service did.
                 Some(connections::Inbound::Shutdown) | None => {
                     tracing::info!("backend shutting down");
@@ -4661,12 +4667,13 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 },
             },
         };
-        // The command runs in the view of the window that sent it.
+        // The command runs in the view of the window that sent it. What it
+        // fences was fenced as it was sent (`Fencing`).
         let ctx = base.for_window(window);
-        // What the command fences, it fences now, before anything it
-        // starts and before the next command.
-        let suspended_navigation =
-            register_fences(&ctx.navigation_requests, &ctx.scope_requests, &command);
+        let Fenced {
+            suspended_navigation,
+            scope_request,
+        } = fenced;
         let checkout = ctx.slot.clone();
         let language_servers = ctx.language_servers.clone();
 
@@ -5838,7 +5845,10 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 scope,
                 navigation_id,
             } => {
-                let request_id = ctx.scope_requests.begin(&item_id);
+                // Begun as it was sent; here only for a command that came
+                // some other way.
+                let request_id =
+                    scope_request.unwrap_or_else(|| ctx.scope_requests.begin(&item_id));
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     set_scope(&ctx, &item_id, scope, request_id, navigation_id).await
@@ -6191,16 +6201,25 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
     }
 }
 
+/// What registering a command's fences gave back, for the command to use
+/// when it runs.
+#[derive(Debug, Default)]
+pub(crate) struct Fenced {
+    /// An archive's suspended navigation, for the archive to settle.
+    suspended_navigation: Option<SuspendedNavigation>,
+    /// A scope change's request.
+    scope_request: Option<u64>,
+}
+
 /// Register in the window's engine copy of its fences what `command`
-/// fences, as the handle did in its own when it sent it. The command loop
-/// calls this as each command arrives, so the order the window clicked in
-/// is the order the engine fences in. An archive's suspended navigation
-/// comes back for the archive to settle.
+/// fences, as the handle did in its own when it sent it. Called as each
+/// command is sent (`Fencing::register`), so the order the window clicked
+/// in is the order the engine fences in.
 fn register_fences(
     navigation: &NavigationRequests,
     scopes: &ScopeRequests,
     command: &Command,
-) -> Option<SuspendedNavigation> {
+) -> Fenced {
     match command {
         Command::OpenSubject { navigation_id, .. }
         | Command::OpenReference { navigation_id, .. }
@@ -6241,16 +6260,25 @@ fn register_fences(
         }
         Command::ArchiveItem { id, fence_id } => {
             scopes.clear_item(id);
-            return Some(navigation.suspend_item_as(*fence_id, id));
+            return Fenced {
+                suspended_navigation: Some(navigation.suspend_item_as(*fence_id, id)),
+                scope_request: None,
+            };
         }
         Command::DeleteItem { id, .. } => {
             scopes.clear_item(id);
-            return None;
+            return Fenced::default();
         }
-        _ => return None,
+        Command::SetScope { item_id, .. } => {
+            return Fenced {
+                suspended_navigation: None,
+                scope_request: Some(scopes.begin(item_id)),
+            };
+        }
+        _ => return Fenced::default(),
     }
     scopes.clear();
-    None
+    Fenced::default()
 }
 
 /// Which of the three gotos to ask.
@@ -8189,15 +8217,17 @@ fn send_standing_state(standing: Standing, events: &EventSender<Event>) -> Seede
 /// their usage, the last status and the faces.
 fn send_standing(ctx: &Ctx) {
     let config = ctx.config();
-    let seeded = send_standing_state(
-        Standing {
-            config: &config,
-            settings: ctx.settings.last(),
-            approvals: ctx.work_approvals(),
-            cache: &ctx.cache,
-        },
-        &ctx.events,
-    );
+    let seeded = ctx.settings.with_last(|settings| {
+        send_standing_state(
+            Standing {
+                config: &config,
+                settings,
+                approvals: ctx.work_approvals(),
+                cache: &ctx.cache,
+            },
+            &ctx.events,
+        )
+    });
     let _ = ctx.events.send(Event::AgentConfig(config.agent.clone()));
     let usage = perch_agent::usage::subscribe().borrow().clone();
     let _ = ctx.events.send(Event::Usage(usage));

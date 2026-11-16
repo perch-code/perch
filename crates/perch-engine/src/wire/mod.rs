@@ -5,19 +5,25 @@
 //! when the protocols differ, before any command runs. Then the client
 //! sends `{ window, command }` lines and the engine `{ window, event }`
 //! lines, the window ids the client's own (see `backend::connections`).
-//! A line that does not parse closes its connection, with the reason in
-//! the log; logs never go on the stream.
+//! A line that does not parse is dropped, with the reason in the log, and
+//! the lines after it still go: framing is by the line. Only a handshake
+//! that fails, or the stream itself, ends a connection. Logs never go on
+//! the stream.
 //!
 //! The types and their wire form live in this crate together so they
 //! cannot drift apart: what goes over is `Command` and `Event` as serde
 //! writes them.
 
 pub mod bytes;
+pub mod pairs;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, WindowId};
 
@@ -27,6 +33,36 @@ pub const PROTOCOL: u32 = 1;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The longest line read. A longer one is read to its end and dropped, so
+/// a peer that never sends a newline cannot fill memory.
+pub const MAX_LINE: usize = 256 << 20;
+
+/// How much a client may fall behind in what it is sent before the engine
+/// hangs up on it. A laptop asleep on a half-open connection would
+/// otherwise have a night of events kept for it; a client that comes back
+/// reconnects and resyncs.
+pub const MAX_BACKLOG: usize = 256 << 20;
+
+/// How long the engine waits, once a client has gone, for the last of
+/// what it was sent to be written.
+const LAST_WRITES: Duration = Duration::from_secs(5);
+
+/// How far a client may fall behind, and how long its last writes get.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    pub(crate) backlog: usize,
+    pub(crate) last_writes: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            backlog: MAX_BACKLOG,
+            last_writes: LAST_WRITES,
+        }
+    }
+}
 
 /// The client's first line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +76,9 @@ pub struct Hello {
 pub struct Welcome {
     pub protocol: u32,
     pub engine_version: String,
+    /// The engine's number for this connection, never another's: the
+    /// client's attempt ids carry it.
+    pub connection: u64,
     /// The engine's machine, by its host name.
     pub host: String,
     /// The engine's home directory: what `~` means in its paths.
@@ -79,6 +118,8 @@ pub enum WireError {
     Closed,
     /// The engine would not let the client in, and why.
     Refused(String),
+    /// The client fell more than `MAX_BACKLOG` behind.
+    Behind,
 }
 
 impl std::fmt::Display for WireError {
@@ -88,6 +129,7 @@ impl std::fmt::Display for WireError {
             WireError::Malformed(why) => write!(f, "a malformed line: {why}"),
             WireError::Closed => f.write_str("the connection closed during the handshake"),
             WireError::Refused(reason) => f.write_str(reason),
+            WireError::Behind => f.write_str("the client fell too far behind"),
         }
     }
 }
@@ -100,45 +142,103 @@ impl From<std::io::Error> for WireError {
     }
 }
 
+/// One message as a line, with its newline.
+fn encode(message: &impl Serialize) -> Result<Vec<u8>, WireError> {
+    let mut line =
+        serde_json::to_vec(message).map_err(|error| WireError::Malformed(error.to_string()))?;
+    line.push(b'\n');
+    Ok(line)
+}
+
 /// Write one message and its newline.
 async fn write_line<W: AsyncWrite + Unpin>(
     write: &mut W,
     message: &impl Serialize,
 ) -> Result<(), WireError> {
-    let mut line =
-        serde_json::to_vec(message).map_err(|error| WireError::Malformed(error.to_string()))?;
-    line.push(b'\n');
+    let line = encode(message)?;
     write.write_all(&line).await?;
     write.flush().await?;
     Ok(())
 }
 
-/// Read one message; `None` at the end of the stream.
-async fn read_line<R: AsyncBufReadExt + Unpin, T: for<'de> Deserialize<'de>>(
+/// What `next_line` read.
+#[derive(Debug, PartialEq, Eq)]
+enum Line {
+    /// A line, in the buffer, its newline and all.
+    Read,
+    /// A line longer than the limit, read to its end and dropped.
+    TooLong,
+}
+
+/// Read a line of at most `limit` bytes into `line`; `None` at the end of
+/// the stream. A last line with no newline still counts.
+async fn next_line<R: AsyncBufRead + Unpin>(
     read: &mut R,
-    line: &mut String,
-) -> Result<Option<T>, WireError> {
+    line: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<Option<Line>> {
     line.clear();
-    let read_bytes = read.read_line(line).await.map_err(|error| {
-        if error.kind() == std::io::ErrorKind::InvalidData {
-            WireError::Malformed(error.to_string())
-        } else {
-            WireError::Io(error)
+    let mut too_long = false;
+    let mut any = false;
+    loop {
+        let available = read.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(any.then_some(if too_long { Line::TooLong } else { Line::Read }));
         }
-    })?;
-    if read_bytes == 0 {
-        return Ok(None);
+        any = true;
+        let (taken, ended) = match available.iter().position(|&b| b == b'\n') {
+            Some(at) => (at + 1, true),
+            None => (available.len(), false),
+        };
+        if !too_long {
+            if line.len() + taken > limit {
+                too_long = true;
+                *line = Vec::new();
+            } else {
+                line.extend_from_slice(&available[..taken]);
+            }
+        }
+        read.consume(taken);
+        if ended {
+            return Ok(Some(if too_long { Line::TooLong } else { Line::Read }));
+        }
     }
-    serde_json::from_str(line.trim_end())
-        .map(Some)
-        .map_err(|error| WireError::Malformed(error.to_string()))
+}
+
+/// Read one message: `None` at the end of the stream, and the reason for
+/// a line that is not one, which the caller drops and reads past.
+async fn next_message<R: AsyncBufRead + Unpin, T: for<'de> Deserialize<'de>>(
+    read: &mut R,
+    line: &mut Vec<u8>,
+) -> std::io::Result<Option<Result<T, String>>> {
+    Ok(match next_line(read, line, MAX_LINE).await? {
+        None => None,
+        Some(Line::TooLong) => Some(Err(format!("a line longer than {MAX_LINE} bytes"))),
+        Some(Line::Read) => {
+            Some(serde_json::from_slice(line.trim_ascii_end()).map_err(|error| error.to_string()))
+        }
+    })
+}
+
+/// The first message, which has to be one: the handshake has nothing to
+/// go on without it.
+async fn first_message<R: AsyncBufRead + Unpin, T: for<'de> Deserialize<'de>>(
+    read: &mut R,
+    line: &mut Vec<u8>,
+) -> Result<T, WireError> {
+    match next_message(read, line).await? {
+        Some(Ok(message)) => Ok(message),
+        Some(Err(why)) => Err(WireError::Malformed(why)),
+        None => Err(WireError::Closed),
+    }
 }
 
 /// What this engine tells a client it lets in.
-fn welcome() -> Welcome {
+fn welcome(connection: u64) -> Welcome {
     Welcome {
         protocol: PROTOCOL,
         engine_version: VERSION.to_string(),
+        connection,
         host: host_name(),
         home: perch_github::config::home_dir(),
         data_root: perch_github::config::data_dir().unwrap_or_default(),
@@ -155,13 +255,12 @@ fn host_name() -> String {
         .unwrap_or_default()
 }
 
-/// The refusal a client speaking `hello.protocol` gets, naming both sides.
-fn refusal(hello: &Hello) -> String {
+/// The refusal a client of `app_version` speaking `protocol` gets, naming
+/// both sides.
+fn refusal(protocol: u64, app_version: &str) -> String {
     format!(
-        "Perch {} speaks protocol {}, and this engine, Perch {VERSION}, speaks protocol {PROTOCOL}. Update the {}.",
-        hello.app_version,
-        hello.protocol,
-        if hello.protocol < PROTOCOL {
+        "Perch {app_version} speaks protocol {protocol}, and this engine, Perch {VERSION}, speaks protocol {PROTOCOL}. Update the {}.",
+        if protocol < u64::from(PROTOCOL) {
             "app"
         } else {
             "engine"
@@ -169,81 +268,162 @@ fn refusal(hello: &Hello) -> String {
     )
 }
 
-/// Serve one client on `stream` until it hangs up or sends a line that
-/// does not parse. Its windows close in the engine when it goes; the
-/// engine itself goes on, unless it lives only while connected.
+/// The client's hello, or why it is refused. Only the protocol is read
+/// before it is checked: a hello from another protocol may be another
+/// shape, and its client is still owed the refusal that names both.
+fn check_hello(hello: serde_json::Value) -> Result<Hello, WireError> {
+    let Some(protocol) = hello.get("protocol").and_then(serde_json::Value::as_u64) else {
+        return Err(WireError::Malformed("a hello with no protocol".into()));
+    };
+    if protocol != u64::from(PROTOCOL) {
+        let app_version = hello
+            .get("app_version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(of no version said)");
+        return Err(WireError::Refused(refusal(protocol, app_version)));
+    }
+    serde_json::from_value(hello).map_err(|error| WireError::Malformed(error.to_string()))
+}
+
+/// Serve one client on `stream` until it hangs up, its stream fails, or
+/// it falls more than `MAX_BACKLOG` behind. Its windows close in the engine
+/// when it goes; the engine itself goes on, unless it lives only while
+/// connected.
 pub async fn serve<S>(engine: Engine, stream: S) -> Result<(), WireError>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    serve_with(engine, stream, Limits::default()).await
+}
+
+pub(crate) async fn serve_with<S>(
+    engine: Engine,
+    stream: S,
+    limits: Limits,
+) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
-    let mut line = String::new();
-    let hello: Hello = match read_line(&mut read, &mut line).await {
-        Ok(Some(hello)) => hello,
-        Ok(None) => return Err(WireError::Closed),
+    let mut line = Vec::new();
+    let hello = first_message::<_, serde_json::Value>(&mut read, &mut line)
+        .await
+        .and_then(check_hello);
+    let hello = match hello {
+        Ok(hello) => hello,
+        Err(WireError::Refused(reason)) => {
+            tracing::warn!(%reason, "refused a client");
+            write_line(
+                &mut write,
+                &Answer::Refused {
+                    reason: reason.clone(),
+                },
+            )
+            .await?;
+            let _ = write.shutdown().await;
+            return Err(WireError::Refused(reason));
+        }
         Err(error) => {
             tracing::error!(%error, "closing a connection before its hello");
             return Err(error);
         }
     };
-    if hello.protocol != PROTOCOL {
-        let reason = refusal(&hello);
-        tracing::warn!(%reason, "refused a client");
-        write_line(
-            &mut write,
-            &Answer::Refused {
-                reason: reason.clone(),
-            },
-        )
-        .await?;
-        let _ = write.shutdown().await;
-        return Err(WireError::Refused(reason));
-    }
     tracing::info!(app = hello.app_version, "client said hello");
 
     // Connected before the welcome, so a client that has it is already
-    // hearing events.
-    let (events, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<(WindowId, Event)>();
+    // hearing events. The sink never waits: the events are written out by
+    // the line, and what is waiting to be written is counted.
+    let (events, mut queued) = tokio::sync::mpsc::unbounded_channel::<(WindowId, Event)>();
     let connection = engine.connect(move |window, event| {
         let _ = events.send((window, event));
     });
-    write_line(&mut write, &Answer::Welcome(welcome())).await?;
-    let writer = tokio::spawn(async move {
-        while let Some((window, event)) = outgoing.recv().await {
-            match write_line(&mut write, &EventLine { window, event }).await {
-                Ok(()) => {}
-                // An event that will not serialize is a bug here, not the
-                // client's; the rest still go.
-                Err(WireError::Malformed(error)) => {
-                    tracing::error!(%error, "an event would not serialize; dropped")
+    write_line(&mut write, &Answer::Welcome(welcome(connection.id()))).await?;
+    // Told when the client cannot be written to any more, or has fallen
+    // too far behind: either way it is done.
+    let done = Arc::new(tokio::sync::Notify::new());
+    let backlog = Arc::new(AtomicUsize::new(0));
+    let (lines, mut to_write) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let encoder = tokio::spawn({
+        let done = done.clone();
+        let backlog = backlog.clone();
+        async move {
+            while let Some((window, event)) = queued.recv().await {
+                let line = match encode(&EventLine { window, event }) {
+                    Ok(line) => line,
+                    // An event that will not serialize is a bug here, not
+                    // the client's; the rest still go.
+                    Err(error) => {
+                        tracing::error!(%error, "an event would not serialize; dropped");
+                        continue;
+                    }
+                };
+                let behind = backlog.fetch_add(line.len(), Ordering::Relaxed) + line.len();
+                if behind > limits.backlog {
+                    tracing::warn!(behind, "a client fell too far behind; closing it");
+                    done.notify_one();
+                    return true;
                 }
-                Err(error) => {
-                    tracing::info!(%error, "client stopped reading");
-                    return;
+                if lines.send(line).is_err() {
+                    return false;
                 }
             }
+            false
         }
-        let _ = write.shutdown().await;
+    });
+    let mut writer = tokio::spawn({
+        let done = done.clone();
+        async move {
+            while let Some(line) = to_write.recv().await {
+                let written = async {
+                    write.write_all(&line).await?;
+                    write.flush().await
+                };
+                if let Err(error) = written.await {
+                    tracing::info!(%error, "client stopped reading");
+                    done.notify_one();
+                    return;
+                }
+                backlog.fetch_sub(line.len(), Ordering::Relaxed);
+            }
+            let _ = write.shutdown().await;
+        }
     });
 
     let ended = loop {
-        match read_line::<_, CommandLine>(&mut read, &mut line).await {
-            Ok(Some(CommandLine { window, command })) => {
+        let next = tokio::select! {
+            next = next_message::<_, CommandLine>(&mut read, &mut line) => next,
+            () = done.notified() => break Ok(()),
+        };
+        match next {
+            Ok(Some(Ok(CommandLine { window, command }))) => {
                 if connection.send(window, command).is_err() {
                     break Ok(());
                 }
             }
+            Ok(Some(Err(why))) => {
+                tracing::error!(%why, "a command line that does not parse; dropped")
+            }
             Ok(None) => break Ok(()),
             Err(error) => {
-                tracing::error!(%error, "closing a connection");
-                break Err(error);
+                tracing::info!(%error, "closing a connection");
+                break Err(WireError::Io(error));
             }
         }
     };
-    // The windows close, the sink goes, and the writer sends what is left.
+    // The windows close and the sink goes; the encoder ends with what is
+    // left, and the writer writes it if the client is still reading.
     drop(connection);
-    let _ = writer.await;
+    let behind = encoder.await.unwrap_or(false);
+    if tokio::time::timeout(limits.last_writes, &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
+    if behind {
+        return Err(WireError::Behind);
+    }
     ended
 }
 
@@ -265,7 +445,7 @@ where
 {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
-    let mut line = String::new();
+    let mut line = Vec::new();
     write_line(
         &mut write,
         &Hello {
@@ -274,33 +454,41 @@ where
         },
     )
     .await?;
-    let welcome = match read_line::<_, Answer>(&mut read, &mut line).await? {
-        Some(Answer::Welcome(welcome)) => welcome,
-        Some(Answer::Refused { reason }) => return Err(WireError::Refused(reason)),
-        None => return Err(WireError::Closed),
+    let welcome = match first_message::<_, Answer>(&mut read, &mut line).await? {
+        Answer::Welcome(welcome) => welcome,
+        Answer::Refused { reason } => return Err(WireError::Refused(reason)),
     };
 
     let (commands, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<(WindowId, Command)>();
-    let (backend, navigations) = Backend::over_wire(commands);
+    let (backend, navigations) = Backend::over_wire(commands, welcome.connection);
     let (events, received) = std::sync::mpsc::channel();
     // Ends when every handle has gone, which hangs up.
     tokio::spawn(async move {
         while let Some((window, command)) = outgoing.recv().await {
-            if let Err(error) = write_line(&mut write, &CommandLine { window, command }).await {
-                tracing::info!(%error, "engine stopped reading");
-                return;
+            match write_line(&mut write, &CommandLine { window, command }).await {
+                Ok(()) => {}
+                Err(WireError::Malformed(error)) => {
+                    tracing::error!(%error, "a command would not serialize; dropped")
+                }
+                Err(error) => {
+                    tracing::info!(%error, "engine stopped reading");
+                    return;
+                }
             }
         }
         let _ = write.shutdown().await;
     });
     tokio::spawn(async move {
         loop {
-            match read_line::<_, EventLine>(&mut read, &mut line).await {
-                Ok(Some(EventLine { window, event })) => {
+            match next_message::<_, EventLine>(&mut read, &mut line).await {
+                Ok(Some(Ok(EventLine { window, event }))) => {
                     navigations.observe(window, &event);
                     if events.send((window, event)).is_err() {
                         return;
                     }
+                }
+                Ok(Some(Err(why))) => {
+                    tracing::error!(%why, "an event line that does not parse; dropped")
                 }
                 Ok(None) => {
                     tracing::info!("engine hung up");
@@ -338,8 +526,63 @@ pub fn loopback(
         .map_err(std::io::Error::other)?;
     tracing::info!(host = welcome.host, "engine over the loopback wire");
     // Connected before it runs, so the app hears its startup as it would
-    // in process; then asks again, as a client of a running engine does.
+    // in process, and has no need to ask for it again.
     unstarted.start(check);
-    backend.resync();
     Ok((backend, events))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn lines(input: &[u8], limit: usize) -> Vec<(Line, String)> {
+        let mut read = BufReader::with_capacity(4, input);
+        let mut line = Vec::new();
+        let mut read_lines = Vec::new();
+        while let Some(what) = next_line(&mut read, &mut line, limit).await.unwrap() {
+            read_lines.push((what, String::from_utf8_lossy(&line).into_owned()));
+        }
+        read_lines
+    }
+
+    #[tokio::test]
+    async fn a_line_past_the_limit_is_read_to_its_end_and_dropped() {
+        assert_eq!(
+            lines(b"short\nfar too long a line\nok\nlast", 8).await,
+            vec![
+                (Line::Read, "short\n".into()),
+                (Line::TooLong, String::new()),
+                (Line::Read, "ok\n".into()),
+                (Line::Read, "last".into()),
+            ]
+        );
+        assert!(lines(b"", 8).await.is_empty());
+    }
+
+    #[test]
+    fn a_hello_is_checked_by_its_protocol_before_its_shape() {
+        let refused = |hello: serde_json::Value| match check_hello(hello) {
+            Err(WireError::Refused(reason)) => reason,
+            other => panic!("{other:?}"),
+        };
+        let reason = refused(serde_json::json!({
+            "protocol": PROTOCOL + 1,
+            "app_version": { "major": 99 },
+        }));
+        assert!(
+            reason.contains(&format!("protocol {}", PROTOCOL + 1)),
+            "{reason}"
+        );
+        assert!(reason.contains("Update the engine"), "{reason}");
+        assert!(matches!(
+            check_hello(serde_json::json!({ "app_version": "1" })),
+            Err(WireError::Malformed(_))
+        ));
+        let hello = check_hello(serde_json::json!({
+            "protocol": PROTOCOL,
+            "app_version": "1.2.3",
+        }))
+        .unwrap();
+        assert_eq!(hello.app_version, "1.2.3");
+    }
 }

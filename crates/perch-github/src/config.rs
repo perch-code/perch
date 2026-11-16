@@ -8,7 +8,9 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, serde::Serialize, Deserialize)]
 pub struct Config {
     /// Last-resort token, used only when env vars and `gh` come up empty.
-    #[serde(default)]
+    /// Read, never written: settings go to a client as written, and the
+    /// token stays with the engine that resolves it.
+    #[serde(default, skip_serializing)]
     pub token: Option<String>,
     /// Floor for the poll interval. `X-Poll-Interval` may raise it, never lower it.
     #[serde(default = "default_poll_secs")]
