@@ -359,9 +359,10 @@ mod tests {
         );
         assert_eq!(
             written(&mut commands),
+            // As config.toml writes them here: `super` is Ctrl off macOS.
             vec![Setting::Keybinding {
                 action: "open".to_string(),
-                keys: Some(vec!["super+o".to_string()]),
+                keys: Some(vec![Shortcut::parse("super+o").unwrap().to_config()]),
             }]
         );
         stroke(
