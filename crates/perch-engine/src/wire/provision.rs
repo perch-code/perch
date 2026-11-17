@@ -22,6 +22,13 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::{PROTOCOL, VERSION};
+use crate::backend::InstallProgress;
+
+pub type Progress = tokio::sync::watch::Sender<Option<InstallProgress>>;
+
+pub fn phase(progress: &Progress, name: &str) {
+    progress.send_replace(Some(InstallProgress::phase(name)));
+}
 
 /// The start of what the host says on stderr when it has no `perchd` of
 /// the build asked for, before `<uname -s> <uname -m>`.
@@ -912,7 +919,8 @@ fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// The release's `perchd` for `arch`, from the cache when what is there
 /// checks out, else downloaded and kept.
-pub async fn release_binary(platform: Platform) -> Result<Vec<u8>, Failed> {
+pub async fn release_binary(platform: Platform, progress: &Progress) -> Result<Vec<u8>, Failed> {
+    phase(progress, "Checking cached download");
     let (dir, asset) = (cache_dir(), platform.asset());
     let (sums_path, tarball_path) = (dir.join("SHA256SUMS"), dir.join(&asset));
     let cached = {
@@ -944,16 +952,35 @@ pub async fn release_binary(platform: Platform) -> Result<Vec<u8>, Failed> {
                 } else {
                     MAX_BINARY
                 };
-                perch_github::releases::download(&url, limit)
-                    .await
-                    .map_err(|error| match error {
-                        perch_github::releases::DownloadError::Missing => missing(&name),
-                        perch_github::releases::DownloadError::Failed(why) => Failed::now(why),
-                    })
+                let label = if name == "SHA256SUMS" {
+                    "Downloading checksums"
+                } else {
+                    "Downloading perchd"
+                };
+                phase(progress, label);
+                let mut last_percent = None;
+                perch_github::releases::download_with_progress(&url, limit, |completed, total| {
+                    let update = InstallProgress {
+                        phase: label.into(),
+                        completed,
+                        total,
+                    };
+                    let percent = update.percent();
+                    if completed == 0 || percent != last_percent {
+                        progress.send_replace(Some(update));
+                        last_percent = percent;
+                    }
+                })
+                .await
+                .map_err(|error| match error {
+                    perch_github::releases::DownloadError::Missing => missing(&name),
+                    perch_github::releases::DownloadError::Failed(why) => Failed::now(why),
+                })
             };
             let sums = fetch("SHA256SUMS".to_string()).await?;
             let sums = String::from_utf8_lossy(&sums).into_owned();
             let tarball = fetch(asset.clone()).await?;
+            phase(progress, "Verifying download");
             check_sum(&sums, &asset, &tarball).map_err(Failed::now)?;
             let kept = std::fs::create_dir_all(&dir)
                 .and_then(|()| write_whole(&sums_path, sums.as_bytes()))
@@ -964,6 +991,7 @@ pub async fn release_binary(platform: Platform) -> Result<Vec<u8>, Failed> {
             tarball
         }
     };
+    phase(progress, "Extracting perchd");
     tokio::task::spawn_blocking(move || extract_perchd(&tarball))
         .await
         .map_err(|e| Failed::now(e.to_string()))?
@@ -980,7 +1008,12 @@ pub fn ssh_program() -> std::ffi::OsString {
 
 /// Install `binary` as the `perchd` of `build` on `host`, with a second ssh
 /// that writes it from its stdin.
-pub async fn upload(host: &str, build: &str, binary: Vec<u8>) -> Result<(), Failed> {
+pub async fn upload(
+    host: &str,
+    build: &str,
+    binary: Vec<u8>,
+    progress: &Progress,
+) -> Result<(), Failed> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     if !plain_word(build) {
         return Err(Failed::lasting(format!(
@@ -1000,9 +1033,35 @@ pub async fn upload(host: &str, build: &str, binary: Vec<u8>) -> Result<(), Fail
     else {
         return Err(Failed::now("ssh started with no pipes to it".to_string()));
     };
+    phase(progress, "Connecting for upload");
     let send = async move {
-        // A failed write is the script giving up early; its stderr says why.
-        let _ = stdin.write_all(&binary).await;
+        let total = binary.len() as u64;
+        let mut completed = 0;
+        let mut last_percent = None;
+        progress.send_replace(Some(InstallProgress {
+            phase: "Uploading perchd".into(),
+            completed,
+            total: Some(total),
+        }));
+        for chunk in binary.chunks(64 * 1024) {
+            // A failed write is the script giving up early; its stderr says why.
+            if stdin.write_all(chunk).await.is_err() {
+                break;
+            }
+            completed += chunk.len() as u64;
+            let update = InstallProgress {
+                phase: "Uploading perchd".into(),
+                completed,
+                total: Some(total),
+            };
+            if update.percent() != last_percent {
+                last_percent = update.percent();
+                progress.send_replace(Some(update));
+            }
+        }
+        if completed == total {
+            phase(progress, "Finishing installation");
+        }
         let _ = stdin.shutdown().await;
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());

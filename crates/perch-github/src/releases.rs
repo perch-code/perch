@@ -116,6 +116,15 @@ pub async fn latest(url: &str) -> Result<Option<Release>, DownloadError> {
 /// The file at `url`, fetched with no token, following redirects, and
 /// refused past `limit` bytes.
 pub async fn download(url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
+    download_with_progress(url, limit, |_, _| {}).await
+}
+
+/// Download with byte counts. A missing Content-Length leaves the total unknown.
+pub async fn download_with_progress(
+    url: &str,
+    limit: u64,
+    mut progress: impl FnMut(u64, Option<u64>) + Send,
+) -> Result<Vec<u8>, DownloadError> {
     let mut response = anonymous()?
         .get(url)
         .send()
@@ -137,6 +146,8 @@ pub async fn download(url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
     {
         return Err(too_big());
     }
+    let total = response.content_length();
+    progress(0, total);
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -147,6 +158,7 @@ pub async fn download(url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
             return Err(too_big());
         }
         body.extend_from_slice(&chunk);
+        progress(body.len() as u64, total);
     }
     Ok(body)
 }
@@ -154,6 +166,39 @@ pub async fn download(url: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn download_reports_bytes_with_or_without_a_known_length() {
+        use std::io::{Read, Write};
+        for known in [true, false] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/asset", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                stream.read(&mut request).unwrap();
+                let length = if known { "Content-Length: 6\r\n" } else { "" };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{length}Connection: close\r\n\r\nabcdef"
+                )
+                .unwrap();
+            });
+            let mut updates = Vec::new();
+            let bytes = download_with_progress(&url, 10, |done, total| updates.push((done, total)))
+                .await
+                .unwrap();
+            server.join().unwrap();
+            assert_eq!(bytes, b"abcdef");
+            let total = known.then_some(6);
+            assert_eq!(updates.first(), Some(&(0, total)));
+            assert_eq!(updates.last(), Some(&(6, total)));
+            assert!(updates.windows(2).all(|w| w[0].0 <= w[1].0));
+        }
+    }
 
     #[test]
     fn a_perch_download_is_under_its_version_s_tag() {

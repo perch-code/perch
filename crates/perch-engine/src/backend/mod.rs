@@ -1902,6 +1902,30 @@ impl Event {
     }
 }
 
+/// Progress within one installation phase, not an estimate of total install time.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InstallProgress {
+    pub phase: String,
+    pub completed: u64,
+    pub total: Option<u64>,
+}
+
+impl InstallProgress {
+    pub fn phase(phase: &str) -> Self {
+        Self {
+            phase: phase.into(),
+            completed: 0,
+            total: None,
+        }
+    }
+
+    pub fn percent(&self) -> Option<u8> {
+        self.total
+            .filter(|total| *total > 0)
+            .map(|total| ((u128::from(self.completed) * 100 / u128::from(total)).min(100)) as u8)
+    }
+}
+
 /// The app's connection to an engine on another machine: see
 /// `wire::remote`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1911,7 +1935,12 @@ pub enum EngineLink {
     Connecting { host: String },
     /// The host had no `perchd` of the build the app wants, and it is being
     /// installed: downloaded, or read from `[remote] perchd`, and uploaded.
-    Installing { host: String, build: String },
+    Installing {
+        host: String,
+        build: String,
+        #[serde(default)]
+        progress: Option<InstallProgress>,
+    },
     /// The host's engine is an older build, and is being stopped so that
     /// `build` can start: by itself when it had nothing running, or by the
     /// reader's Restart.

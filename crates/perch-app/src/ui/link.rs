@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::SignalWith;
-use floem::views::{Decorators, Stack};
+use floem::views::{dyn_container, Container, Decorators, Empty, Stack};
 
 use crate::backend::{Backend, EngineLink};
 use crate::icons::SidebarIcon;
@@ -48,8 +48,16 @@ pub fn said(link: &EngineLink, checks: &[HostCheck]) -> Option<(String, Option<S
             ..
         } => Some((other_said(host, other), None)),
         EngineLink::Connecting { host } => Some((format!("Connecting to {host}…"), None)),
-        EngineLink::Installing { host, build } => {
-            Some((format!("Installing perchd {build} on {host}…"), None))
+        EngineLink::Installing {
+            host,
+            build,
+            progress,
+        } => {
+            let detail = progress.as_ref().map(|p| match p.percent() {
+                Some(percent) => format!("{} · {percent}%", p.phase),
+                None => format!("{}…", p.phase),
+            });
+            Some((format!("Installing perchd {build} on {host}…"), detail))
         }
         EngineLink::Restarting { host, build } => Some((
             format!("Restarting the engine on {host} to update it to perchd {build}…"),
@@ -149,6 +157,7 @@ pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                         .text_wrap()
                         .apply_if(!has_why(), |s| s.hide())
                 }),
+            install_progress(state),
         ))
         .style(|s| s.gap(2.0).min_width(0.0).flex_grow(1.0_f32).flex_basis(0.0)),
         action_button(
@@ -192,6 +201,67 @@ pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .background(theme::notice_bg())
             .apply_if(said_now().is_none(), |s| s.hide())
     })
+}
+
+/// Rebuild only when changing between hidden, indeterminate, and measured.
+/// Byte updates change the fill's width without restarting its view.
+fn install_progress(state: AppState) -> impl IntoView {
+    let percent = move || {
+        state.link.with(|link| match link {
+            Some(EngineLink::Installing { progress, .. }) => {
+                progress.as_ref().and_then(|p| p.percent())
+            }
+            _ => None,
+        })
+    };
+    let mode = floem::reactive::Memo::new(move |_| {
+        state.link.with(|link| {
+            matches!(link, Some(EngineLink::Installing { .. })).then(|| percent().is_some())
+        })
+    });
+    dyn_container(
+        move || mode.get(),
+        move |measured| {
+            let Some(measured) = measured else {
+                return Empty::new().into_any();
+            };
+            let fill = Empty::new()
+                .debug_name("link-install-fill")
+                .style(move |s| {
+                    s.height_full()
+                        .width_pct(if measured {
+                            f64::from(percent().unwrap_or(0))
+                        } else {
+                            100.0
+                        })
+                        .background(theme::notice_fg())
+                        .border_radius(2.0)
+                });
+            let fill = if measured {
+                fill.into_any()
+            } else {
+                fill.animation(|_| {
+                    floem::animate::Animation::new()
+                        .keyframe(0, |f| f.style(|s| s.opacity(0.2_f32)))
+                        .keyframe(100, |f| f.style(|s| s.opacity(0.7_f32)))
+                        .duration(std::time::Duration::from_millis(800))
+                        .auto_reverse(true)
+                        .repeat(true)
+                })
+                .into_any()
+            };
+            Container::new(fill)
+                .debug_name("link-install-progress")
+                .style(|s| {
+                    s.width_full()
+                        .height(4.0)
+                        .margin_top(4.0)
+                        .background(theme::notice_fg().with_alpha(0.15))
+                        .border_radius(2.0)
+                })
+                .into_any()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -341,6 +411,66 @@ mod tests {
         assert!(!shown(&mut harness, "link-reconnect"));
     }
 
+    #[test]
+    fn installation_bar_tracks_the_phase_and_disappears_on_failure() {
+        let root = TestRoot::new();
+        let state = AppState::new();
+        let (backend, _) = Backend::recording();
+        let mut harness =
+            HeadlessHarness::new_with_size(root, banner(state, Rc::new(backend)), 800.0, 200.0);
+        let installing = |completed, total| EngineLink::Installing {
+            host: "halo".into(),
+            build: "0.9.0".into(),
+            progress: Some(perch_engine::backend::InstallProgress {
+                phase: "Uploading perchd".into(),
+                completed,
+                total,
+            }),
+        };
+        state.link.set(Some(installing(25, Some(100))));
+        assert!(shown(&mut harness, "link-install-progress"));
+        let width = |name| {
+            named(harness.root_id(), name)
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .width()
+        };
+        assert!((width("link-install-fill") / width("link-install-progress") - 0.25).abs() < 0.01);
+        assert_eq!(
+            said_(&installing(25, Some(100))).unwrap().1.as_deref(),
+            Some("Uploading perchd · 25%")
+        );
+        state.link.set(Some(installing(75, Some(100))));
+        assert!(shown(&mut harness, "link-install-progress"));
+        let width = |name| {
+            named(harness.root_id(), name)
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .width()
+        };
+        assert!((width("link-install-fill") / width("link-install-progress") - 0.75).abs() < 0.01);
+        // Unknown and zero totals have no misleading percentage.
+        for total in [None, Some(0)] {
+            state.link.set(Some(installing(0, total)));
+            assert!(shown(&mut harness, "link-install-progress"));
+            assert_eq!(
+                said_(&installing(0, total)).unwrap().1.as_deref(),
+                Some("Uploading perchd…")
+            );
+        }
+        state.link.set(Some(EngineLink::Down {
+            host: "halo".into(),
+            why: "Upload failed".into(),
+            retry_in: None,
+            ever: false,
+            other: None,
+        }));
+        assert!(shown(&mut harness, "link-reconnect"));
+        assert!(!shown(&mut harness, "link-install-progress"));
+        state.link.set(Some(up(None)));
+        assert!(!shown(&mut harness, "link-banner"));
+    }
+
     fn older(runs: usize) -> perch_engine::backend::OtherEngine {
         perch_engine::backend::OtherEngine {
             engine: "0.8.0".into(),
@@ -386,7 +516,8 @@ mod tests {
         assert_eq!(
             said_(&EngineLink::Installing {
                 host: "halo".into(),
-                build: "0.9.0".into()
+                build: "0.9.0".into(),
+                progress: None,
             }),
             Some(("Installing perchd 0.9.0 on halo…".to_string(), None))
         );

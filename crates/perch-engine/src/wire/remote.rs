@@ -120,8 +120,10 @@ pub type Dial = Box<dyn FnMut(Replace) -> BoxFuture<Result<Dialed, String>> + Se
 
 /// How `perchd` is put on the host, for a try that ended with the host
 /// saying it has none, for the processor it named: the build it installs,
-/// said at once, and the install.
-pub type Install = Box<dyn FnMut(Platform) -> (String, BoxFuture<Result<(), Failed>>) + Send>;
+/// said at once, and the install. The watch sender carries the latest phase
+/// and transfer counts without queuing every network chunk.
+pub type Install =
+    Box<dyn FnMut(Platform, provision::Progress) -> (String, BoxFuture<Result<(), Failed>>) + Send>;
 
 /// The waits between tries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,10 +709,11 @@ async fn keep_connected(
             wait = backoff.first;
             continue;
         }
-        let installing = |build: &str| {
+        let installing = |build: &str, progress| {
             link.say(EngineLink::Installing {
                 host: host.clone(),
                 build: build.to_string(),
+                progress,
             });
         };
         let why = match install_if_asked(install.as_mut(), &host, &why, just_installed, installing)
@@ -880,7 +883,7 @@ async fn install_if_asked(
     host: &str,
     why: &str,
     just_installed: Option<String>,
-    installing: impl FnOnce(&str),
+    mut installing: impl FnMut(&str, Option<crate::backend::InstallProgress>),
 ) -> Option<Result<String, Failed>> {
     let install = install?;
     let asked = provision::install_line(why)?;
@@ -890,13 +893,22 @@ async fn install_if_asked(
             "Perch installed perchd {build} on {host}, and the host still says it has none. Check that a login shell there sees the same $PERCH_HOME, or set [remote] command to run perchd yourself."
         ))),
         (Ok(arch), None) => {
-            let (build, installed) = install(arch);
+            let (progress, mut updates) = tokio::sync::watch::channel(None);
+            let (build, mut installed) = install(arch, progress);
             tracing::info!(host, build, platform = arch.name(), "installing perchd");
-            installing(&build);
-            installed.await.map(|()| {
-                tracing::info!(host, build, "installed perchd");
-                build
-            })
+            installing(&build, None);
+            loop {
+                tokio::select! {
+                    result = &mut installed => break result.map(|()| {
+                        tracing::info!(host, build, "installed perchd");
+                        build
+                    }),
+                    Ok(()) = updates.changed() => {
+                        let progress = updates.borrow_and_update().clone();
+                        installing(&build, progress);
+                    }
+                }
+            }
         }
     })
 }
@@ -999,7 +1011,11 @@ pub async fn connect_once(
                 other_said(host, &other)
             ));
         }
-        let mut installing = |build: &str| said(&format!("Installing perchd {build} on {host}…"));
+        let mut installing = |build: &str, progress: Option<crate::backend::InstallProgress>| {
+            if progress.is_none() {
+                said(&format!("Installing perchd {build} on {host}…"));
+            }
+        };
         match install_if_asked(
             install.as_mut(),
             host,
@@ -1316,7 +1332,7 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
         Bridge::Installed(source) => source,
     };
     let host = host.to_string();
-    let install: Install = Box::new(move |arch| {
+    let install: Install = Box::new(move |arch, progress| {
         let host = host.clone();
         match &source {
             Source::Release => {
@@ -1325,8 +1341,8 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                 (
                     build,
                     Box::pin(async move {
-                        let binary = provision::release_binary(arch).await?;
-                        provision::upload(&host, &to, binary).await
+                        let binary = provision::release_binary(arch, &progress).await?;
+                        provision::upload(&host, &to, binary, &progress).await
                     }),
                 )
             }
@@ -1352,7 +1368,9 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                                         arch.name()
                                     )))
                                 }
-                                _ => provision::upload(&host, &build, binary.bytes).await,
+                                _ => {
+                                    provision::upload(&host, &build, binary.bytes, &progress).await
+                                }
                             }
                         }),
                     )
@@ -1374,6 +1392,7 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                 (
                     format!("{VERSION} from source"),
                     Box::pin(async move {
+                        provision::phase(&progress, "Building perchd from source");
                         let path = provision::dev_build(&workspace, arch).await?;
                         let read = path.clone();
                         let binary = tokio::task::spawn_blocking(move || {
@@ -1383,7 +1402,8 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                         .map_err(|e| Failed::now(e.to_string()))?
                         .map_err(Failed::lasting)?;
                         if !provision::has_build(&host, &binary.build).await {
-                            provision::upload(&host, &binary.build, binary.bytes).await?;
+                            provision::upload(&host, &binary.build, binary.bytes, &progress)
+                                .await?;
                         }
                         if let Ok(mut built) = built.lock() {
                             *built = Some(path);
@@ -2188,7 +2208,7 @@ mod tests {
     /// An install that records what it was asked for, and fails with
     /// `failing` while that holds something.
     fn installer(asked: Arc<Mutex<Vec<Platform>>>, failing: Option<Failed>) -> Install {
-        Box::new(move |arch| {
+        Box::new(move |arch, _progress| {
             asked.lock().unwrap().push(arch);
             let failing = failing.clone();
             (
@@ -2196,6 +2216,56 @@ mod tests {
                 Box::pin(async move { failing.map_or(Ok(()), Err) }),
             )
         })
+    }
+
+    #[tokio::test]
+    async fn installation_progress_reaches_the_link_before_completion() {
+        let (dial, mut pipes) = pipes();
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let done = finish.clone();
+        let expected = crate::backend::InstallProgress {
+            phase: "Uploading perchd".into(),
+            completed: 25,
+            total: Some(100),
+        };
+        let update = expected.clone();
+        let install: Install = Box::new(move |_, progress| {
+            let (done, update) = (done.clone(), update.clone());
+            (
+                "0.9.0".into(),
+                Box::pin(async move {
+                    progress.send_replace(Some(update));
+                    done.notified().await;
+                    Ok(())
+                }),
+            )
+        });
+        let (_backend, events) = link(
+            "halo",
+            dial,
+            Some(install),
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        *pipes.last.lock().unwrap() = Some(MISSING.into());
+        drop(pipes.next().await);
+        assert!(matches!(
+            next_link(&events).await,
+            EngineLink::Connecting { .. }
+        ));
+        assert!(matches!(
+            next_link(&events).await,
+            EngineLink::Installing { progress: None, .. }
+        ));
+        assert!(
+            matches!(next_link(&events).await, EngineLink::Installing { progress: Some(p), .. } if p == expected)
+        );
+        *pipes.last.lock().unwrap() = None;
+        finish.notify_one();
+        assert!(matches!(
+            next_link(&events).await,
+            EngineLink::Connecting { .. }
+        ));
     }
 
     const MISSING: &str = "perch-install: Linux aarch64";
@@ -2228,7 +2298,8 @@ mod tests {
             next_link(&events).await,
             EngineLink::Installing {
                 host: "halo".into(),
-                build: "0.9.0".into()
+                build: "0.9.0".into(),
+                progress: None,
             }
         );
         *pipes.last.lock().unwrap() = None;
