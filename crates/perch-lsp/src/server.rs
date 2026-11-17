@@ -1541,17 +1541,9 @@ mod tests {
     #[test]
     fn ty_is_the_users_else_perchs_else_downloaded() {
         let fake = Fake::new();
-        let (arch, sha256) = if std::env::consts::ARCH == "aarch64" {
-            (
-                "aarch64",
-                "ba782554d855aa69ce6ec8fa5898f5256a8603eb81f35d1927434576a434ae4e",
-            )
-        } else {
-            (
-                "x86_64",
-                "6b7908dec8629f9c18fe8c76fdcc22497ff823b14c351636aebe4d552d0e1fe9",
-            )
-        };
+        // The release for where the test runs: the Linux job downloads
+        // another than a Mac does.
+        let (target, sha256) = ty_release_for(std::env::consts::OS, std::env::consts::ARCH);
         let ty = |fake: &Fake| find(ServerKind::Ty, &fake.path("checkout"), &fake.env());
         let missing = ty(&fake).unwrap_err();
         assert_eq!(missing.describe(), "ty isn't installed.");
@@ -1559,7 +1551,7 @@ mod tests {
             missing.install.as_deref(),
             Some(&Install::Download {
                 url: format!(
-                    "https://github.com/astral-sh/ty/releases/download/0.0.86/ty-{arch}-apple-darwin.tar.gz"
+                    "https://github.com/astral-sh/ty/releases/download/0.0.86/ty-{target}.tar.gz"
                 ),
                 sha256: sha256.into(),
                 into: fake.path("servers/ty/0.0.86"),
@@ -1567,7 +1559,7 @@ mod tests {
         );
 
         // Perch's own, where the tarball unpacks it.
-        let binary = fake.path(&format!("servers/ty/0.0.86/ty-{arch}-apple-darwin/ty"));
+        let binary = fake.path(&format!("servers/ty/0.0.86/ty-{target}/ty"));
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, "").unwrap();
         let spec = ty(&fake).unwrap();
