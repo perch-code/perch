@@ -13,10 +13,13 @@
 //! head; on Code the notice is in the tab bar and the way back in the
 //! rail, since the summary is Conversation's alone.
 //!
-//! Everything else is `details`, rows of a name and a value in the
-//! popover the bar's details button opens, as Codex has them: Branch,
-//! Worktree, Reviewers, then what GitHub says about the item. A row is
-//! absent when it has nothing.
+//! Everything else is `details`, in the popover the bar's details button
+//! opens: a line naming the item, with Open on GitHub and Copy Link at
+//! its end, then rows of a name and a value, as Codex has them: Inbox,
+//! Branch, Worktree, Reviewers, then what GitHub says about the item. A
+//! row is absent when it has nothing. What can be done with the item is
+//! on the row it is about: Done on Inbox, the branch's name copied from
+//! Branch, Start Work on Worktree.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,15 +36,19 @@ pub(crate) use perch_engine::review::summary::closes;
 
 use crate::backend::{Backend, StateChange};
 use crate::icons::{self, SidebarIcon};
+use crate::keymap::{self, Action};
 use crate::review::cards::{avatar_url_for, tip, tip_with, verdict_glyph};
 use crate::review::model::ReviewState;
+use crate::review::start_work::can_start_work;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
+use crate::ui::agents::dropdown;
 use crate::ui::menu::{Menu, MenuExt};
+use crate::ui::notifications::{self, InboxStanding};
 use crate::ui::widgets::{
-    avatar, badge_box, badge_text, clickable, name_label, open_in_browser, sidebar_glyph,
-    worktree_menu, Name,
+    action_button, avatar, badge_box, badge_text, clickable, copy_to_clipboard, icon_button,
+    name_label, open_in_browser, sidebar_glyph, worktree_menu, Name,
 };
 
 /// Whether the description's head says what the item is, rather than the
@@ -239,40 +246,63 @@ fn ask(app: AppState, state: ReviewState, backend: &Rc<Backend>) -> Asked {
     Asked { grants, assignable }
 }
 
-/// The rest of what there is to say about the item, in rows, at the top
-/// of the bar's details: its branches and worktree, then what GitHub says
-/// about it. A row is absent when it has nothing, and the block with
-/// them.
+/// The rest of what there is to say about the item, and what can be done
+/// with it, at the top of the bar's details: a line naming it, then rows
+/// for where it stands in the inbox, its branches and its worktree, then
+/// what GitHub says about it. A row is absent when it has nothing, and
+/// the block with them.
 pub(crate) fn details(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let data = Memo::new(move |_| github_data(app, state));
     let Asked { grants, assignable } = ask(app, state, &backend);
-    let shown = Memo::new(move |_| {
+    let standing = Memo::new(move |_| {
+        state.item.with(|item| {
+            item.as_deref()
+                .and_then(|item| notifications::standing(app, item))
+        })
+    });
+    let rows_shown = Memo::new(move |_| {
         !branches_text(state).is_empty()
+            || standing.with(Option::is_some)
+            || starts_work(state)
             || data.with(|d| d.has_details())
             || grants.with(|g| !g.is_empty())
             || assignable.with(Option::is_some)
     });
+    let shown = Memo::new(move |_| rows_shown.get() || url_of(state).is_some());
+    let inbox_backend = backend.clone();
     let grants_backend = backend.clone();
     let assign_backend = backend.clone();
     let closes_backend = backend.clone();
     let open_backend = backend.clone();
-    Stack::vertical((
+    let rows = Stack::vertical((
+        dyn_row(
+            SidebarIcon::Inbox,
+            "Inbox",
+            move || standing.get(),
+            Option::is_some,
+            move |standing| match standing {
+                Some(standing) => inbox(app, state, inbox_backend.clone(), standing).into_any(),
+                None => Empty::new().into_any(),
+            },
+        ),
         row(
             SidebarIcon::Branch,
             "Branch",
             move || !branches_text(state).is_empty(),
-            branches(state),
+            Stack::horizontal((branches(state), copy_branch_button(state)))
+                .style(|s| s.items_center().min_width(0.0).col_gap(2.0)),
         ),
         row(
             SidebarIcon::Folder,
             "Worktree",
-            move || checkout_on_disk(state).is_some(),
+            move || checkout_on_disk(state).is_some() || starts_work(state),
             Stack::horizontal((
                 directory(app, state, backend.clone()),
                 divergence(state),
                 push_button(app, state, backend.clone()),
                 update_button(state, backend.clone()),
                 rebase_button(state, backend.clone()),
+                start_work_button(app, state),
             ))
             .style(|s| {
                 s.items_center()
@@ -391,16 +421,286 @@ pub(crate) fn details(app: AppState, state: ReviewState, backend: Rc<Backend>) -
             },
         ),
     ))
-    .debug_name("item details")
+    .debug_name("details rows")
     .style(move |s| {
         s.flex_col()
             .width_full()
             .padding_horiz(14.0)
             .padding_vert(6.0)
-            .border_bottom(1.0)
+            .apply_if(!rows_shown.get(), |s| s.hide())
+    });
+    Stack::vertical((head(state, move || rows_shown.get()), rows))
+        .debug_name("item details")
+        .style(move |s| {
+            s.flex_col()
+                .width_full()
+                .border_bottom(1.0)
+                .border_color(theme::border_muted())
+                .apply_if(!shown.get(), |s| s.hide())
+        })
+}
+
+// ---------------------------------------------------------------------
+// What can be done with the item
+// ---------------------------------------------------------------------
+
+/// A round glyph in the details that does one thing, with a tip saying
+/// what, and the key for it. Tab reaches it, and Enter or Space presses
+/// it then.
+fn glyph_button(
+    glyph: SidebarIcon,
+    name: &'static str,
+    says: impl Fn() -> String + Clone + 'static,
+    act: impl Fn() + 'static,
+) -> impl IntoView {
+    tip_with(
+        icon_button(move || glyph, theme::fg_muted, act)
+            .into_view()
+            .style(|s| {
+                s.keyboard_navigable()
+                    .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            }),
+        says,
+    )
+    .debug_name(name)
+    .style(|s| s.flex_shrink(0.0_f32))
+}
+
+/// The details' first line, on an item with a page on github.com: its
+/// repository and number, then Open on GitHub and Copy Link. Each puts
+/// the details away, as choosing from a menu does. A worktree of the
+/// reader's own is nowhere on GitHub, and has no such line. A rule parts
+/// it from the rows while there are `rows` under it.
+fn head(state: ReviewState, rows: impl Fn() -> bool + 'static) -> impl IntoView {
+    let page = move || crate::review::header::page(state);
+    Stack::horizontal((
+        Label::derived(move || repo_of(state))
+            .debug_name("details name")
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_muted())
+                    .text_ellipsis()
+                    .flex_grow(1.0_f32)
+                    .flex_basis(0.0)
+                    .min_width(0.0)
+                    .selectable(false)
+            }),
+        glyph_button(
+            SidebarIcon::External,
+            "open on github",
+            || keymap::tip("Open on GitHub", Action::OpenOnGithub),
+            move || {
+                dropdown::close(state, true);
+                if let Some(url) = page() {
+                    open_in_browser(&url);
+                }
+            },
+        ),
+        glyph_button(
+            SidebarIcon::Link,
+            "copy link",
+            || keymap::tip("Copy Link", Action::CopyLink),
+            move || {
+                dropdown::close(state, true);
+                if let Some(url) = page() {
+                    copy_to_clipboard(url);
+                }
+            },
+        ),
+    ))
+    .debug_name("details head")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .height(HEAD_HEIGHT)
+            .padding_left(14.0)
+            .padding_right(8.0)
+            .col_gap(2.0)
             .border_color(theme::border_muted())
-            .apply_if(!shown.get(), |s| s.hide())
+            .apply_if(rows(), |s| s.border_bottom(1.0))
+            .apply_if(url_of(state).is_none(), |s| s.hide())
     })
+}
+
+/// The details' first line: a glyph button's height and room around it.
+const HEAD_HEIGHT: f64 = 38.0;
+
+/// Copy Branch Name, beside the branches: the pull request's head, or the
+/// checkout's branch.
+fn copy_branch_button(state: ReviewState) -> impl IntoView {
+    glyph_button(
+        SidebarIcon::Copy,
+        "copy branch name",
+        || keymap::tip("Copy Branch Name", Action::CopyBranchName),
+        move || {
+            dropdown::close(state, true);
+            if let Some(branch) = crate::review::header::open_branch_name(state) {
+                copy_to_clipboard(branch);
+            }
+        },
+    )
+}
+
+/// Whether Start Work is offered on the open item: see `can_start_work`.
+fn starts_work(state: ReviewState) -> bool {
+    state
+        .item
+        .with(|item| item.as_deref().is_some_and(can_start_work))
+}
+
+/// Start Work, on the Worktree row of an item with no worktree on disk.
+/// One with a worktree has it in the worktree's menu.
+fn start_work_button(app: AppState, state: ReviewState) -> impl IntoView {
+    let shown = Memo::new(move |_| starts_work(state) && checkout_on_disk(state).is_none());
+    tip_with(
+        row_button(
+            || "Start Work".to_string(),
+            "start-work",
+            || true,
+            move || {
+                dropdown::close(state, false);
+                crate::review::header::start_work(app, state);
+            },
+        ),
+        || keymap::tip("Start work in a new worktree", Action::StartWork),
+    )
+    .style(move |s| s.apply_if(!shown.get(), |s| s.hide()))
+}
+
+/// A button on a row of the details: a form's button at a chip's height.
+fn row_button(
+    label: impl Fn() -> String + 'static,
+    id: &'static str,
+    enabled: impl Fn() -> bool + 'static,
+    act: impl Fn() + 'static,
+) -> impl IntoView {
+    action_button(label, id, false, enabled, act).style(|s| s.height(22.0).padding_horiz(8.0))
+}
+
+/// A chip on a row of the details that drops `menu` down: its word and a
+/// chevron.
+fn menu_chip(
+    label: &'static str,
+    name: &'static str,
+    menu: impl Fn() -> Menu + 'static,
+) -> impl IntoView {
+    Stack::horizontal((
+        Label::derived(move || label.to_string()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg_muted())
+                .pointer_events_none()
+        }),
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle).style(|s| {
+            s.size(10.0, 10.0)
+                .margin_left(5.0)
+                .flex_shrink(0.0_f32)
+                .pointer_events_none()
+        }),
+    ))
+    .dropdown(menu)
+    .debug_name(name)
+    .style(|s| {
+        s.items_center()
+            .height(22.0)
+            .padding_horiz(8.0)
+            .background(theme::canvas())
+            .border(1.0)
+            .border_color(theme::border_muted())
+            .border_radius(theme::RADIUS)
+            .flex_shrink(0.0_f32)
+            .selectable(false)
+            .hover(|s| {
+                s.background(theme::canvas_hover())
+                    .cursor(CursorStyle::Pointer)
+            })
+    })
+}
+
+/// The Inbox row: what the inbox's own row about the item offers. While
+/// the inbox has it, Done, Snooze on a notification of GitHub's, and the
+/// rest in a menu. Once it was put away, where it went and Move to
+/// Inbox.
+fn inbox(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    standing: InboxStanding,
+) -> impl IntoView {
+    let open = move || state.item.get_untracked();
+    let (notification, away) = match standing {
+        InboxStanding::Here { notification, .. } => (notification, None),
+        InboxStanding::Done => (false, Some("Done".to_string())),
+        InboxStanding::Snoozed(until) => (
+            false,
+            Some(match until {
+                Some(until) => format!(
+                    "Snoozed until {}",
+                    timefmt::ahead(until, app.now.get_untracked())
+                ),
+                None => "Snoozed".to_string(),
+            }),
+        ),
+    };
+    let Some(away) = away else {
+        let done_backend = backend.clone();
+        let snooze_backend = backend.clone();
+        return Stack::horizontal((
+            tip_with(
+                row_button(
+                    || "Done".to_string(),
+                    "inbox-done",
+                    || true,
+                    move || {
+                        // Done closes the item it is about, and the
+                        // details with it.
+                        dropdown::close(state, false);
+                        if let Some(item) = open() {
+                            notifications::done_item(app, &done_backend, &item);
+                        }
+                    },
+                ),
+                || keymap::tip("Mark Done", Action::MarkDone),
+            ),
+            menu_chip("Snooze", "inbox-snooze", move || match open() {
+                Some(item) => notifications::snooze_menu_of(app, snooze_backend.clone(), &item),
+                None => Menu::new(),
+            })
+            .style(move |s| s.apply_if(!notification, |s| s.hide())),
+            crate::ui::nav_row::menu_button(
+                SidebarIcon::Ellipsis,
+                "inbox-more",
+                move || match open() {
+                    Some(item) => notifications::more_menu_of(app, backend.clone(), &item),
+                    None => Menu::new(),
+                },
+            ),
+        ))
+        .style(|s| s.items_center().min_width(0.0).col_gap(6.0))
+        .into_any();
+    };
+    Stack::horizontal((
+        Label::derived(move || away.clone())
+            .debug_name("inbox-away")
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_muted())
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .selectable(false)
+            }),
+        row_button(
+            || "Move to Inbox".to_string(),
+            "inbox-restore",
+            || true,
+            move || {
+                if let Some(item) = open() {
+                    notifications::move_to_inbox(app, &backend, &item);
+                }
+            },
+        ),
+    ))
+    .style(|s| s.items_center().min_width(0.0).col_gap(10.0))
+    .into_any()
 }
 
 // ---------------------------------------------------------------------
@@ -1753,7 +2053,52 @@ fn trust_rows(
     rows
 }
 
-/// The worktree's directory name, and a menu of ways to get there.
+/// What the worktree's menu ends with, after the ways to get there: Start
+/// Work, where there is something to cut from, then putting the worktree
+/// away. A worktree Perch made is removed. The backend closes the review
+/// itself when the removal goes through, and the Items event that follows
+/// closes the view; a refusal leaves everything as it was, with the
+/// reason in the popup. One under a root is the reader's, which Perch
+/// never touches: it is hidden from Worktrees instead, as its row's menu
+/// does.
+fn worktree_actions(
+    app: AppState,
+    state: ReviewState,
+    backend: &Rc<Backend>,
+    item: &Item,
+    mut menu: Menu,
+) -> Menu {
+    if can_start_work(item) {
+        use crate::review::start_work::{ask, Pending};
+        let id = item.id.clone();
+        menu = menu.separator().item("Start Work", move |entry| {
+            entry
+                .icon(SidebarIcon::Branch)
+                .accelerator_for(Action::StartWork)
+                .action(move || {
+                    dropdown::close(state, false);
+                    ask(app, Pending::Item(id.clone()));
+                })
+        });
+    }
+    let put_away = match item.checkout.as_ref() {
+        Some(checkout) if checkout.owned => Some("Remove Worktree"),
+        Some(_) if !item.is_archived() => Some("Hide"),
+        _ => None,
+    };
+    if let Some(label) = put_away {
+        let (backend, id) = (backend.clone(), item.id.clone());
+        menu = menu.separator().item(label, move |entry| {
+            entry.icon(SidebarIcon::Archive).action(move || {
+                backend.archive_item(&id);
+            })
+        });
+    }
+    menu
+}
+
+/// The worktree's directory name, and a menu of ways to get there, and
+/// of what can be done with it: see `worktree_actions`.
 ///
 /// This is what makes the checkout a place rather than a cache: the name
 /// on screen is the name in the Finder and in a shell.
@@ -1779,22 +2124,9 @@ fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let path = checkout.path.clone();
-            let id = state
-                .item
-                .with(|i| i.as_ref().map(|i| i.id.clone()).unwrap_or_default());
-            // Only a worktree Perch made can be removed from here; one
-            // under a root is the reader's. The backend closes the review
-            // itself when the removal goes through, and the Items event
-            // that follows closes the view. A refusal leaves everything as
-            // it was, with the reason in the popup.
-            let archive = checkout.owned.then(|| {
-                let backend = backend.clone();
-                Rc::new(move || {
-                    backend.archive_item(&id);
-                }) as Rc<dyn Fn()>
-            });
             // Read as the menu opens, for the item open then.
             let menu_backend = backend.clone();
+            let actions_backend = backend.clone();
             let trust = move || match state.item.get_untracked() {
                 Some(item) => trust_rows(
                     app,
@@ -1841,7 +2173,13 @@ fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
                         .pointer_events_none()
                 }),
             ))
-            .dropdown(move || worktree_menu(app, path.clone(), archive.clone(), trust()))
+            .dropdown(move || {
+                let menu = worktree_menu(app, path.clone(), trust());
+                match state.item.get_untracked() {
+                    Some(item) => worktree_actions(app, state, &actions_backend, &item, menu),
+                    None => menu,
+                }
+            })
             .debug_name("worktree menu")
             .style(|s| {
                 s.items_center()
@@ -1861,7 +2199,12 @@ fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
             .into_any()
         },
     )
-    .style(|s| s.min_width(0.0))
+    // Hidden with no worktree, so Start Work starts the row and not a
+    // gap after nothing.
+    .style(move |s| {
+        s.min_width(0.0)
+            .apply_if(checkout_on_disk(state).is_none(), |s| s.hide())
+    })
 }
 
 /// Lines added and removed on the branch, from the pull request or the
@@ -2664,20 +3007,7 @@ fn assign_button(
     backend: Rc<Backend>,
     assignable: Memo<Option<Arc<Vec<MentionableUser>>>>,
 ) -> impl IntoView {
-    Stack::horizontal((
-        Label::derived(|| "Assign".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::fg_muted())
-                .pointer_events_none()
-        }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle).style(|s| {
-            s.size(10.0, 10.0)
-                .margin_left(5.0)
-                .flex_shrink(0.0_f32)
-                .pointer_events_none()
-        }),
-    ))
-    .dropdown(move || {
+    menu_chip("Assign", "assign menu", move || {
         let users = assignable.get_untracked().unwrap_or_default();
         let viewer = app
             .viewer
@@ -2695,22 +3025,6 @@ fn assign_button(
                 backend.set_assigned(&item_id, &login, assign);
             }),
         )
-    })
-    .debug_name("assign menu")
-    .style(|s| {
-        s.items_center()
-            .height(22.0)
-            .padding_horiz(8.0)
-            .background(theme::canvas())
-            .border(1.0)
-            .border_color(theme::border_muted())
-            .border_radius(theme::RADIUS)
-            .flex_shrink(0.0_f32)
-            .selectable(false)
-            .hover(|s| {
-                s.background(theme::canvas_hover())
-                    .cursor(CursorStyle::Pointer)
-            })
     })
 }
 
@@ -2891,7 +3205,7 @@ pub(crate) mod tests {
 
     use crate::review::header::tests::{
         issue_harness, named, open_details, pull_request, pull_request_harness,
-        pull_request_harness_with, rect, within,
+        pull_request_harness_with, pull_request_window, rect, within,
     };
     use crate::review::model::ItemTab;
 
@@ -3101,11 +3415,20 @@ pub(crate) mod tests {
         assert_eq!(rect(&harness, "status group").width(), 0.0);
         assert!(named(harness.root_id(), "checks status").is_none());
         assert!(named(harness.root_id(), "churn").is_none());
-        // Nothing for the details to say: no branch, and no worktree.
+        // The details have no branch and no worktree: its page on
+        // GitHub, and Start Work where the worktree would be.
         open_details(&mut harness, state);
-        assert!(rows_shown(&harness).is_empty());
-        assert_eq!(rect(&harness, "item details").height(), 0.0);
+        assert_eq!(rows_shown(&harness), ["Worktree"]);
+        assert!(rect(&harness, "details head").height() > 0.0);
         assert!(named(harness.root_id(), "worktree menu").is_none());
+        let row = rect(&harness, "summary row Worktree");
+        let start = rect(&harness, "start-work");
+        assert!(within(start, row), "{start:?} is not on {row:?}");
+        assert_eq!(
+            start.x0,
+            row.x0 + theme::SUMMARY_NAME_WIDTH,
+            "Start Work at {start:?} is not after the name column"
+        );
     }
 
     #[test]
@@ -3579,6 +3902,239 @@ pub(crate) mod tests {
         assert_eq!(repo_line(&pull), "slatedb/slatedb #812");
     }
 
+    /// Click the middle of the view named `name`.
+    fn press(harness: &mut floem::headless::HeadlessHarness, name: &str) {
+        let at = rect(harness, name).center();
+        harness.click(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// The details start with a line naming the item, with its page on
+    /// GitHub and its link at the end; the branch's name is copied from
+    /// the Branch row. Each puts the details away, as a menu's row does.
+    #[test]
+    fn the_details_open_and_copy_the_page_and_copy_the_branch() {
+        let (mut harness, _, state) = pull_request_harness();
+        let page = "https://github.com/slatedb/slatedb/pull/812";
+        open_details(&mut harness, state);
+        let details = rect(&harness, "item details");
+        let head = rect(&harness, "details head");
+        assert_eq!(head.y0, details.y0, "the line is not on top");
+        assert!(rect(&harness, "details name").width() > 0.0);
+        let branch = rect(&harness, "summary row Branch");
+        assert!(head.y1 <= branch.y0, "{head:?} is not over {branch:?}");
+        for name in ["open on github", "copy link"] {
+            let r = rect(&harness, name);
+            assert!(within(r, head), "{name} at {r:?} is not on {head:?}");
+        }
+        let copy = rect(&harness, "copy branch name");
+        assert!(within(copy, branch), "{copy:?} is not on {branch:?}");
+        assert!(rect(&harness, "branches").x1 <= copy.x0);
+
+        crate::ui::widgets::opened();
+        crate::ui::widgets::copied();
+        press(&mut harness, "open on github");
+        assert_eq!(crate::ui::widgets::opened(), [page]);
+        assert!(!state.agents_dropdown_open.get(), "the details stayed");
+
+        open_details(&mut harness, state);
+        press(&mut harness, "copy link");
+        assert_eq!(crate::ui::widgets::copied(), [page]);
+        assert!(!state.agents_dropdown_open.get(), "the details stayed");
+
+        open_details(&mut harness, state);
+        press(&mut harness, "copy branch name");
+        assert_eq!(crate::ui::widgets::copied(), ["feature"]);
+        assert!(!state.agents_dropdown_open.get(), "the details stayed");
+
+        // A worktree of the reader's own is nowhere on GitHub: no line,
+        // and its branch is still copied.
+        let mut branch = branch_item("slatedb/slatedb");
+        branch.id = "branch".into();
+        state.pull_request.set(None);
+        state.item.set(Some(Arc::new(branch)));
+        open_details(&mut harness, state);
+        assert_eq!(rect(&harness, "details head").height(), 0.0);
+        press(&mut harness, "copy branch name");
+        assert_eq!(crate::ui::widgets::copied(), ["fence"]);
+    }
+
+    /// Start Work is on the Worktree row: a button where there is no
+    /// worktree, and in the worktree's menu where there is one.
+    #[test]
+    fn start_work_is_on_the_worktree_row() {
+        let (mut harness, app, state) = issue_harness();
+        open_details(&mut harness, state);
+        press(&mut harness, "start-work");
+        assert!(app.start_work_confirm.with(Option::is_some));
+        assert!(!state.agents_dropdown_open.get(), "the details stayed");
+
+        // With a worktree, the row is the worktree's, and its menu has
+        // Start Work.
+        let (mut harness, _, state) = pull_request_harness();
+        open_details(&mut harness, state);
+        assert!(rect(&harness, "worktree menu").width() > 0.0);
+        assert_eq!(rect(&harness, "start-work").width(), 0.0);
+    }
+
+    /// The worktree's menu ends with Start Work and with putting the
+    /// worktree away: Perch's own is removed, the reader's is hidden.
+    #[test]
+    fn the_worktree_menu_starts_work_and_puts_the_worktree_away() {
+        use crate::backend::Command;
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let (backend, mut commands) = Backend::recording();
+        let backend = Rc::new(backend);
+        let menu = |item: &Item| {
+            let menu = worktree_menu(app, "/w".into(), Vec::new());
+            worktree_actions(app, state, &backend, item, menu)
+        };
+        let ends = |item: &Item| menu(item).outline()[4..].to_vec();
+
+        let mut item = branch_item("slatedb/slatedb");
+        item.id = "branch".into();
+        assert_eq!(
+            ends(&item),
+            ["—", "Start Work", "—", "Remove Worktree"],
+            "a worktree Perch made"
+        );
+        menu(&item).choose("Start Work");
+        assert!(app.start_work_confirm.with(Option::is_some));
+        menu(&item).choose("Remove Worktree");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ArchiveItem { id, .. }) if id == "branch"
+        ));
+
+        // The reader's own checkout is hidden, not removed, and one
+        // hidden already has nothing left to do.
+        item.checkout.as_mut().unwrap().owned = false;
+        assert_eq!(ends(&item), ["—", "Start Work", "—", "Hide"]);
+        menu(&item).choose("Hide");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ArchiveItem { id, .. }) if id == "branch"
+        ));
+        item.archived_at = Some("2026-09-20T12:00:00Z".parse().unwrap());
+        assert!(ends(&item).is_empty(), "{:?}", ends(&item));
+
+        // A merged pull request has nothing to cut from.
+        let mut merged = pull_request(812);
+        merged.merged = true;
+        let mut item = branch_item("slatedb/slatedb");
+        item.subject = Some(ItemSubject::PullRequest(merged));
+        assert_eq!(ends(&item), ["—", "Remove Worktree"]);
+    }
+
+    /// A notification about pull request `number` of slatedb/slatedb.
+    fn thread(id: &str, number: u64) -> perch_github::Thread {
+        use perch_github::{Reason, Repository, Subject, SubjectKind, Thread};
+        Thread {
+            id: id.into(),
+            unread: false,
+            local_unread: false,
+            local_read: false,
+            restored_at: None,
+            reason: Reason::Mention,
+            updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            last_read_at: None,
+            subject: Subject {
+                title: "Fence".into(),
+                kind: SubjectKind::PullRequest,
+                url: Some(format!(
+                    "https://api.github.com/repos/slatedb/slatedb/pulls/{number}"
+                )),
+                latest_comment_url: None,
+            },
+            repository: Repository {
+                full_name: "slatedb/slatedb".into(),
+                owner_avatar_url: String::new(),
+            },
+            subject_snapshot: None,
+            run_snapshot: None,
+            snoozed_until: None,
+        }
+    }
+
+    /// The Inbox row is what the inbox's own row about the item offers:
+    /// Done, Snooze and the rest while the inbox has it, Move to Inbox
+    /// once it was put away, and no row for an item the inbox never had.
+    #[test]
+    fn the_inbox_row_marks_the_item_done_and_moves_it_back() {
+        use crate::backend::Command;
+        let app = AppState::new();
+        app.notifications.set(vec![thread("10", 812)]);
+        let (backend, mut commands) = Backend::recording();
+        let (mut harness, state) = pull_request_window(app, pull_request(812), backend);
+        let mut sent = move || {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::DoneNotification { thread_id, .. } => Some(("done", thread_id)),
+                    Command::RestoreNotification { thread_id } => Some(("restore", thread_id)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        open_details(&mut harness, state);
+        assert_eq!(rows_shown(&harness), ["Inbox", "Branch", "Worktree"]);
+        let row = rect(&harness, "summary row Inbox");
+        let mut last = row.x0 + theme::SUMMARY_NAME_WIDTH;
+        for name in ["inbox-done", "inbox-snooze", "inbox-more"] {
+            let r = rect(&harness, name);
+            assert!(within(r, row), "{name} at {r:?} is not on {row:?}");
+            assert!(r.x0 >= last, "{name} at {r:?} is not after what is before");
+            last = r.x1;
+        }
+        let item = state.item.get_untracked().unwrap();
+        assert_eq!(
+            notifications::more_menu_of(app, Rc::new(Backend::detached()), &item).outline(),
+            ["Mark Unread", "Unsubscribe"]
+        );
+        sent();
+        press(&mut harness, "inbox-done");
+        assert_eq!(sent(), [("done", "10".to_string())]);
+        assert!(!state.agents_dropdown_open.get(), "the details stayed");
+
+        // Done, as the backend answers: the row says where it went, and
+        // brings it back.
+        state.item.set(Some(item.clone()));
+        app.notifications.set(Vec::new());
+        app.done_notifications.set(vec![thread("10", 812)]);
+        open_details(&mut harness, state);
+        assert_eq!(rows_shown(&harness), ["Inbox", "Branch", "Worktree"]);
+        assert!(named(harness.root_id(), "inbox-done").is_none());
+        assert!(named(harness.root_id(), "Label: \"Done\"").is_some());
+        press(&mut harness, "inbox-restore");
+        assert_eq!(sent(), [("restore", "10".to_string())]);
+        assert!(state.agents_dropdown_open.get(), "the details went");
+
+        // Snoozed says until when.
+        let mut snoozed = thread("10", 812);
+        snoozed.snoozed_until = Some("2026-09-21T15:00:00Z".parse().unwrap());
+        app.done_notifications.set(Vec::new());
+        app.snoozed_notifications.set(vec![snoozed]);
+        harness.rebuild();
+        harness.paint();
+        let away = named(harness.root_id(), "inbox-away").unwrap();
+        assert!(
+            away.debug_name().contains("Snoozed until "),
+            "{}",
+            away.debug_name()
+        );
+        press(&mut harness, "inbox-restore");
+        assert_eq!(sent(), [("restore", "10".to_string())]);
+
+        // Nothing about it anywhere: no row.
+        app.snoozed_notifications.set(Vec::new());
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(rows_shown(&harness), ["Branch", "Worktree"]);
+    }
+
     #[test]
     fn the_repository_s_grants_are_listed_on_a_work_item_and_can_be_revoked() {
         let app = AppState::new();
@@ -3644,7 +4200,6 @@ pub(crate) mod tests {
             crate::ui::widgets::worktree_menu(
                 app,
                 "/w".into(),
-                None,
                 trust_rows(app, &backend, &item, held),
             )
         };

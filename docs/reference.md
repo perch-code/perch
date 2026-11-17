@@ -617,8 +617,9 @@ action would never run.
 
 On macOS, New Window, Open… and Settings… in the Perch menu show their
 action's first key, unless it is bare; the other keys work in the window.
-Menus that show keys, such as the bar's menu and the right-click menu in the
-code, show the first key of the action they do.
+Menus that show keys, such as a worktree's menu in an item's details and the
+right-click menu in the code, show the first key of the action they do. A
+button with a key says it in its tip.
 
 These stay as they are: `Escape`, `Enter`, the arrows and `Tab` inside
 menus, Go to File, pickers, dialogs and the find bar; the text keys of boxes
@@ -787,10 +788,11 @@ local repository cuts in that repository.
 
 ### Start work from an item
 
-The branch glyph in an item's bar, beside the agents, is **Start work**, and
-so is **Start Work** in an item row's menu and in the menu of a notification
-about a pull request or an issue. It cuts a new branch from the item into a
-worktree of your own and opens it:
+**Start Work** is on the Worktree row of an item's details, behind the list
+button in the bar: a button on an item with no worktree, and a row of the
+worktree's menu on one that has a worktree. It is also in an item row's menu
+and in the menu of a notification about a pull request or an issue. It cuts
+a new branch from the item into a worktree of your own and opens it:
 
 - From an **issue**, `perch/issue-<n>` from the default branch.
 - From a **pull request**, anyone's and from any fork, `perch/pr-<n>-work`
@@ -950,8 +952,8 @@ stopped, queued ones cancelled, and failed, stopped, or interrupted attempts
 retried without replacing their history. Whether the row is unfolded, and
 which runs are open, are kept with the item.
 
-Every item's runs are behind the **Agents** button in the bar, before Review
-or Start work, and in the bar of the pane with nothing open. It counts
+Every item's runs are behind the list button in the bar, before Review, under
+the item's details, and in the bar of the pane with nothing open. It counts
 the running and queued work, and has a dot while a run waits on you. Its
 dropdown lists the working runs under their items' titles, then the fifteen
 that finished last. A run there goes to its item on Conversation, with the
@@ -1061,7 +1063,7 @@ On an issue the picker is there for a new question, with **Read only** and
 **New branch**, but Work does not run there: the default branch the issue
 reads is shared by every issue of the repository, and has no branch to commit
 to. New branch's send reads **Start work**,
-and cuts `perch/issue-<n>` as the bar's Start work does, with what you wrote
+and cuts `perch/issue-<n>` as the item's Start Work does, with what you wrote
 in the new worktree's composer in place of the usual last line of the prompt
 (after the issue's number, title, link and body, and the lines you asked
 about, if any), to send or edit. The issue's next question starts on Ask

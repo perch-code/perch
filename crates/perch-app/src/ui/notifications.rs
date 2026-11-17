@@ -447,12 +447,130 @@ pub(crate) fn key_target(state: AppState) -> Option<KeyTarget> {
 /// issue, or the row for its last run. The whole inbox, filters aside.
 fn inbox_row_of(state: AppState, item: &Item) -> Option<InboxRow> {
     let rows = floem::reactive::Effect::untrack(|| state.inbox_rows(InboxView::Inbox));
+    row_about(rows, item)
+}
+
+fn row_about(rows: Vec<InboxRow>, item: &Item) -> Option<InboxRow> {
     rows.into_iter().find(|row| match row {
         InboxRow::Thread(thread) => item.subject.as_ref().is_some_and(|subject| {
             thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
         }),
         InboxRow::Local { item: local, .. } => local.id == item.id,
     })
+}
+
+/// Where an item stands in the inbox, as the Inbox row of its details
+/// says it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum InboxStanding {
+    /// The inbox has a row about it. `notification` is whether the row is
+    /// GitHub's, which can be snoozed and unsubscribed from, rather than
+    /// the row for a worktree's last run; `read` is whether Mark Unread
+    /// has anything to do.
+    Here { notification: bool, read: bool },
+    /// Its notification was marked Done.
+    Done,
+    /// Its notification is snoozed, until then.
+    Snoozed(Option<Timestamp>),
+}
+
+/// Where `item` stands in the inbox, tracked. None when the inbox never
+/// had anything about it, or has nothing left to bring back.
+pub(crate) fn standing(state: AppState, item: &Item) -> Option<InboxStanding> {
+    if let Some(row) = row_about(state.inbox_rows(InboxView::Inbox), item) {
+        return Some(match row {
+            InboxRow::Thread(thread) => InboxStanding::Here {
+                notification: true,
+                read: !thread.unread,
+            },
+            InboxRow::Local { activity, .. } => InboxStanding::Here {
+                notification: false,
+                read: !activity.is_unread(),
+            },
+        });
+    }
+    let subject = item.subject.as_ref()?;
+    let about = |thread: &Thread| {
+        thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
+    };
+    if state
+        .done_notifications
+        .with(|threads| threads.iter().any(about))
+    {
+        return Some(InboxStanding::Done);
+    }
+    state.snoozed_notifications.with(|threads| {
+        threads
+            .iter()
+            .find(|thread| about(thread))
+            .map(|thread| InboxStanding::Snoozed(thread.snoozed_until))
+    })
+}
+
+/// Done on `item`'s row in the inbox, as the row's check does. False when
+/// the inbox has no row about it.
+pub(crate) fn done_item(state: AppState, backend: &Backend, item: &Item) -> bool {
+    match inbox_row_of(state, item) {
+        Some(InboxRow::Thread(thread)) => done(state, backend, &thread),
+        Some(InboxRow::Local { item, .. }) => local_done(backend, &item),
+        None => return false,
+    }
+    true
+}
+
+/// The Snooze choices for `item`'s notification, as its row's Snooze has
+/// them. Empty when the inbox has no notification about it.
+pub(crate) fn snooze_menu_of(state: AppState, backend: Rc<Backend>, item: &Item) -> Menu {
+    match inbox_row_of(state, item) {
+        Some(InboxRow::Thread(thread)) => snooze_menu(state, backend, &thread),
+        _ => Menu::new(),
+    }
+}
+
+/// The rest of what `item`'s row in the inbox offers: Mark Unread, and on
+/// a notification of GitHub's, Unsubscribe.
+pub(crate) fn more_menu_of(state: AppState, backend: Rc<Backend>, item: &Item) -> Menu {
+    let row = inbox_row_of(state, item);
+    let read = match &row {
+        Some(InboxRow::Thread(thread)) => !thread.unread,
+        Some(InboxRow::Local { activity, .. }) => !activity.is_unread(),
+        None => false,
+    };
+    let unread_backend = backend.clone();
+    let unread_item = item.clone();
+    let mut menu = Menu::new().item("Mark Unread", move |entry| {
+        entry
+            .icon(SidebarIcon::Unread)
+            .enabled(read)
+            .accelerator_for(Action::MarkUnread)
+            .action(move || {
+                crate::ui::items::mark_unread(state, &unread_backend, &unread_item);
+            })
+    });
+    if let Some(InboxRow::Thread(thread)) = row {
+        let id = thread.id;
+        menu = menu.item("Unsubscribe", move |entry| {
+            entry
+                .icon(SidebarIcon::BellOff)
+                .action(move || backend.unsubscribe_notification(&id))
+        });
+    }
+    menu
+}
+
+/// Move `item`'s notification back to the inbox from Done or Snoozed, as
+/// its row's Move to Inbox does. False when none was put away.
+pub(crate) fn move_to_inbox(state: AppState, backend: &Backend, item: &Item) -> bool {
+    let Some(subject) = item.subject.as_ref() else {
+        return false;
+    };
+    match state.put_away_thread(subject.repo_full_name(), subject.kind(), subject.number()) {
+        Some(id) => {
+            backend.restore_notification(&id);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Done on what the key is for, as its row's check does. False when it
@@ -463,10 +581,7 @@ pub(crate) fn done_by_key(state: AppState, backend: &Backend) -> bool {
         Some(KeyTarget::Thread(_, true)) | None => return false,
         Some(KeyTarget::Thread(thread, false)) => InboxRow::Thread(thread),
         Some(KeyTarget::Local(item, activity)) => InboxRow::Local { activity, item },
-        Some(KeyTarget::Item(item)) => match inbox_row_of(state, &item) {
-            Some(row) => row,
-            None => return false,
-        },
+        Some(KeyTarget::Item(item)) => return done_item(state, backend, &item),
     };
     match row {
         InboxRow::Thread(thread) => done(state, backend, &thread),
@@ -494,7 +609,7 @@ pub(crate) fn mark_unread_by_key(state: AppState, backend: &Backend) -> bool {
 }
 
 /// The page on github.com of what the key is for, as its row's or the
-/// bar's Open on GitHub goes to.
+/// details' Open on GitHub goes to.
 pub(crate) fn github_url_by_key(state: AppState) -> Option<String> {
     match key_target(state)? {
         KeyTarget::Thread(thread, _) => github_url(&thread),

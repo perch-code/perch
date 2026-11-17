@@ -354,15 +354,13 @@ pub type TrustRow = (String, SidebarIcon, std::rc::Rc<dyn Fn()>);
 
 /// The menu every worktree offers: where it is, and how to get there.
 ///
-/// Remove Worktree is appended when the caller passes a way to do it: the
-/// review header offers it for a worktree Perch made. The `trust` rows go
-/// first, such as Trust and Start while a server waits for the reader to
-/// trust the code: they are still there once the toast that asked has
-/// gone.
+/// The `trust` rows go first, such as Trust and Start while a server
+/// waits for the reader to trust the code: they are still there once the
+/// toast that asked has gone. The item's details add what can be done
+/// with the worktree after these: see `review::summary`.
 pub fn worktree_menu(
     state: AppState,
     path: std::path::PathBuf,
-    on_archive: Option<std::rc::Rc<dyn Fn()>>,
     trust: Vec<TrustRow>,
 ) -> crate::ui::menu::Menu {
     use crate::ui::menu::Menu;
@@ -372,8 +370,7 @@ pub fn worktree_menu(
     for (label, icon, action) in trust {
         menu = menu.item(label, move |item| item.icon(icon).action(move || action()));
     }
-    menu = menu
-        .separator()
+    menu.separator()
         .item(reveal_label(state), move |item| {
             item.icon(SidebarIcon::Folder)
                 .action(move || reveal_in_file_manager(state, &reveal))
@@ -385,13 +382,7 @@ pub fn worktree_menu(
         .item("Copy Path", move |item| {
             item.icon(SidebarIcon::Copy)
                 .action(move || copy_to_clipboard(copy.to_string_lossy().into_owned()))
-        });
-    if let Some(archive) = on_archive {
-        menu = menu.separator().item("Remove Worktree", move |item| {
-            item.icon(SidebarIcon::Archive).action(move || archive())
-        });
-    }
-    menu
+        })
 }
 
 /// A text editor in its box: the room around the lines, the surface and,

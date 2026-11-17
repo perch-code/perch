@@ -1,6 +1,6 @@
 //! The details button in the bar, and the dropdown it opens: what there
-//! is to say about the open item (`review::summary::details`), then the
-//! one list of runs, under Agents. With nothing open the button is
+//! is to say about the open item and what can be done with it
+//! (`review::summary::details`), then the one list of runs, under Agents. With nothing open the button is
 //! Agents, and the dropdown the runs alone. What is working comes first,
 //! the open item's before the other items', each turning a spinner where
 //! a finished run has a dot. Then what finished, newest first: the open
