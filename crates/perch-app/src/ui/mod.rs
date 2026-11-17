@@ -27,6 +27,7 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
+use floem::ui_events::keyboard::Location;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::{Backend, Status};
@@ -510,7 +511,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             move |_, key: &KeyboardEvent| {
-                track_shortcut_modifier(state, key.code, false);
+                track_shortcut_modifier(state, key);
                 if state.settings.held.get_untracked() == Some(key.code) {
                     state.settings.let_go();
                 }
@@ -562,7 +563,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             alone(move |cx, key: &KeyboardEvent| {
-                track_shortcut_modifier(state, key.code, true);
+                track_shortcut_modifier(state, key);
                 let key_backend = &capture_backend;
                 // Cmd-P's palette is modal: while it is up, its keys are
                 // its own, whatever has the keyboard, and the rest are its
@@ -1357,15 +1358,25 @@ fn focus_target(cx: &floem::context::EventCx<'_>) -> Option<floem::ViewId> {
         .map(|step| step.owning_id)
 }
 
-fn track_shortcut_modifier(state: AppState, code: Code, down: bool) {
-    let sides = if cfg!(target_os = "macos") {
-        [Code::MetaLeft, Code::MetaRight]
+fn track_shortcut_modifier(state: AppState, event: &KeyboardEvent) {
+    // Floem reports an unidentified physical code for Command on macOS,
+    // but preserves the logical modifier and its left/right location.
+    let modifier = if cfg!(target_os = "macos") {
+        NamedKey::Meta
     } else {
-        [Code::ControlLeft, Code::ControlRight]
+        NamedKey::Control
     };
-    if let Some(side) = sides.iter().position(|&key| key == code) {
-        state.shortcut_modifiers.update(|held| held[side] = down);
+    if event.key != Key::Named(modifier) {
+        return;
     }
+    let side = match event.location {
+        Location::Left => 0,
+        Location::Right => 1,
+        _ => return,
+    };
+    state
+        .shortcut_modifiers
+        .update(|held| held[side] = event.state == KeyState::Down);
 }
 
 /// A window key handler that, once it stops a key, stops it for the
@@ -1978,23 +1989,24 @@ mod tests {
         )
         .unwrap();
         let tab_rect = tab.get_visual_rect();
-        let [left, right] = if cfg!(target_os = "macos") {
-            [Code::MetaLeft, Code::MetaRight]
+        let modifier = if cfg!(target_os = "macos") {
+            NamedKey::Meta
         } else {
-            [Code::ControlLeft, Code::ControlRight]
+            NamedKey::Control
         };
-        let change = |harness: &mut HeadlessHarness, code, state| {
+        let change = |harness: &mut HeadlessHarness, location, state| {
             let floem::event::Event::Key(mut event) =
-                key(code, Key::Named(NamedKey::Unidentified), OS_MOD)
+                key(Code::Unidentified, Key::Named(modifier), OS_MOD)
             else {
                 unreachable!()
             };
+            event.location = location;
             event.state = state;
             harness.dispatch_event(floem::event::Event::Key(event));
             harness.rebuild();
         };
         assert!(hint.is_hidden());
-        change(&mut harness, left, KeyState::Down);
+        change(&mut harness, Location::Left, KeyState::Down);
         assert!(!hint.is_hidden());
         assert!(hint
             .debug_name()
@@ -2007,25 +2019,25 @@ mod tests {
         assert!(code_hint
             .debug_name()
             .contains(&keymap::label(Action::ShowCode).unwrap()));
-        change(&mut harness, right, KeyState::Down);
-        change(&mut harness, left, KeyState::Up);
+        change(&mut harness, Location::Right, KeyState::Down);
+        change(&mut harness, Location::Left, KeyState::Up);
         assert!(!hint.is_hidden());
-        change(&mut harness, right, KeyState::Up);
+        change(&mut harness, Location::Right, KeyState::Up);
         assert!(hint.is_hidden());
 
-        change(&mut harness, left, KeyState::Down);
+        change(&mut harness, Location::Left, KeyState::Down);
         let filter = named(harness.root_id(), "sidebar filter").unwrap();
         let center = filter.get_visual_rect().center();
         harness.click(center.x, center.y);
         harness.rebuild();
         assert!(menu::is_open());
         assert!(hint.is_hidden(), "the menu took keyboard focus");
-        change(&mut harness, left, KeyState::Up);
+        change(&mut harness, Location::Left, KeyState::Up);
         menu::close();
         harness.rebuild();
         assert!(hint.is_hidden(), "release inside the menu left the hint up");
 
-        change(&mut harness, left, KeyState::Down);
+        change(&mut harness, Location::Left, KeyState::Down);
         harness.dispatch_event(floem::event::Event::Window(
             floem::event::WindowEvent::FocusLost,
         ));
