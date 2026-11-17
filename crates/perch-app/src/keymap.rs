@@ -135,9 +135,9 @@ actions! {
 
     ToggleSidebar { id: "toggle_sidebar", title: "Toggle Sidebar", group: Sidebar, context: Window, keys: ["super+\\"] },
     FocusSearch { id: "focus_search", title: "Search the Sidebar", group: Sidebar, context: Window, keys: ["super+1", "/"] },
-    Inbox { id: "inbox", title: "Show Inbox", group: Sidebar, context: Window, keys: [] },
-    Worktrees { id: "worktrees", title: "Show Worktrees", group: Sidebar, context: Window, keys: [] },
-    Browse { id: "browse", title: "Show Browse", group: Sidebar, context: Window, keys: [] },
+    Inbox { id: "inbox", title: "Show Inbox", group: Sidebar, context: Window, keys: ["super+2"] },
+    Worktrees { id: "worktrees", title: "Show Worktrees", group: Sidebar, context: Window, keys: ["super+3"] },
+    Browse { id: "browse", title: "Show Browse", group: Sidebar, context: Window, keys: ["super+4"] },
     NextItem { id: "next_item", title: "Next Item", group: Sidebar, context: Window, keys: ["j"] },
     PreviousItem { id: "previous_item", title: "Previous Item", group: Sidebar, context: Window, keys: ["k"] },
     MarkDone { id: "mark_done", title: "Mark Done", group: Sidebar, context: Window, keys: ["e"] },

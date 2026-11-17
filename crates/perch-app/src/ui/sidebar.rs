@@ -19,13 +19,14 @@ use crate::items::{
     BrowseView, Direction, InboxView, ItemFilters, ItemSort, Order, SidebarTab, StateFilter,
     WorktreeView,
 };
+use crate::keymap::Action;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::titlebar::title_bar;
-use crate::ui::widgets::sidebar_glyph;
+use crate::ui::widgets::{sidebar_glyph, with_shortcut_hint};
 use crate::update::UpdateStatus;
 use perch_github::Item;
 
@@ -115,30 +116,36 @@ pub fn pane_lights_lane(state: AppState) -> impl IntoView {
 
 /// `+`: the new-work view, as `Cmd-N` opens it.
 fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    Container::new(sidebar_glyph(SidebarIcon::Plus, theme::nav_muted).style(|s| s.size(16.0, 16.0)))
-        .on_event_stop(el::Click, move |_, _| {
-            crate::ui::new_work::open(state, &backend)
-        })
-        .debug_name("new work")
-        .style(move |s| {
-            let open = state.new_work.open.get();
-            crate::ui::widgets::clickable(s)
-                .size(26.0, 26.0)
-                .items_center()
-                .justify_center()
-                .border_radius(8.0)
-                .pointer_events_auto()
-                .apply_if(open, |s| s.background(theme::nav_selected()))
-                .hover(|s| s.background(theme::nav_hover()))
-        })
+    Container::new(with_shortcut_hint(
+        state,
+        Action::NewWork,
+        sidebar_glyph(SidebarIcon::Plus, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
+    ))
+    .on_event_stop(el::Click, move |_, _| {
+        crate::ui::new_work::open(state, &backend)
+    })
+    .debug_name("new work")
+    .style(move |s| {
+        let open = state.new_work.open.get();
+        crate::ui::widgets::clickable(s)
+            .size(26.0, 26.0)
+            .items_center()
+            .justify_center()
+            .border_radius(8.0)
+            .pointer_events_auto()
+            .apply_if(open, |s| s.background(theme::nav_selected()))
+            .hover(|s| s.background(theme::nav_hover()))
+    })
 }
 
 /// Show or hide the drawer. The same glyph either way, as the system's
 /// sidebar toggle is: it names the drawer, not the direction.
 fn toggle_button(state: AppState) -> impl IntoView {
-    Container::new(
+    Container::new(with_shortcut_hint(
+        state,
+        Action::ToggleSidebar,
         sidebar_glyph(SidebarIcon::Drawer, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
-    )
+    ))
     .on_event_stop(el::Click, move |_, _| state.toggle_sidebar())
     .debug_name("drawer toggle")
     .style(|s| {
@@ -345,6 +352,14 @@ fn items_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
     .style(|s| s.size_full().flex_col())
 }
 
+pub(crate) fn tab_action(tab: SidebarTab) -> Action {
+    match tab {
+        SidebarTab::Inbox => Action::Inbox,
+        SidebarTab::Worktrees => Action::Worktrees,
+        SidebarTab::Browse => Action::Browse,
+    }
+}
+
 /// Inbox, Worktrees and Browse. Selection uses the same persistence path
 /// as the filter menu, so changing tabs leaves the other filters intact.
 fn scope_tabs(state: AppState) -> impl IntoView {
@@ -352,34 +367,36 @@ fn scope_tabs(state: AppState) -> impl IntoView {
         || SidebarTab::ALL,
         |tab| tab.label(),
         move |tab| {
-            Button::new(Label::new(tab.label()).style(|s| s.pointer_events_none()))
-                .action(move || set_filters(state, move |f| f.tab = tab))
-                .debug_name(format!("tab:{}", tab.label()))
-                .style(move |s| {
-                    let selected = state.item_filters.with(|f| f.tab == tab);
-                    crate::ui::widgets::clickable(s)
-                        .height(31.0)
-                        .padding_horiz(9.0)
-                        .padding_vert(0.0)
-                        .border(0.0)
-                        .border_radius(10.0)
-                        .font_size(theme::TEXT_META)
-                        .color(if selected {
-                            theme::nav_fg()
-                        } else {
-                            theme::nav_muted()
-                        })
-                        .background(if selected {
-                            theme::nav_selected()
-                        } else {
-                            theme::nav_canvas()
-                        })
-                        .flex_shrink(0.0_f32)
-                        .hover(|s| s.background(theme::nav_hover()))
-                        .focus_visible(|s| {
-                            s.outline(2.0).outline_color(theme::nav_control_border())
-                        })
-                })
+            Button::new(with_shortcut_hint(
+                state,
+                tab_action(tab),
+                Label::new(tab.label()),
+            ))
+            .action(move || set_filters(state, move |f| f.tab = tab))
+            .debug_name(format!("tab:{}", tab.label()))
+            .style(move |s| {
+                let selected = state.item_filters.with(|f| f.tab == tab);
+                crate::ui::widgets::clickable(s)
+                    .height(31.0)
+                    .padding_horiz(9.0)
+                    .padding_vert(0.0)
+                    .border(0.0)
+                    .border_radius(10.0)
+                    .font_size(theme::TEXT_META)
+                    .color(if selected {
+                        theme::nav_fg()
+                    } else {
+                        theme::nav_muted()
+                    })
+                    .background(if selected {
+                        theme::nav_selected()
+                    } else {
+                        theme::nav_canvas()
+                    })
+                    .flex_shrink(0.0_f32)
+                    .hover(|s| s.background(theme::nav_hover()))
+                    .focus_visible(|s| s.outline(2.0).outline_color(theme::nav_control_border()))
+            })
         },
     )
     .style(|s| s.flex_row().items_center().gap(2.0).flex_shrink(0.0_f32))

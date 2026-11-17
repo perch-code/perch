@@ -13,6 +13,39 @@ use floem::style::ObjectFit;
 
 use crate::theme::{self, Ink};
 
+/// Float the active binding just below a toolbar control's content. Absolute
+/// positioning keeps the control and its click target still when hints appear.
+pub(crate) fn with_shortcut_hint(
+    app: AppState,
+    action: crate::keymap::Action,
+    content: impl IntoView + 'static,
+) -> impl IntoView {
+    let binding = move || {
+        if app.shortcut_modifiers.get().contains(&true) {
+            crate::keymap::label(action)
+        } else {
+            None
+        }
+    };
+    let hint = Label::derived(move || binding().unwrap_or_default())
+        .debug_name("shortcut hint")
+        .style(move |s| {
+            s.position(floem::style::Position::Absolute)
+                .inset_top_pct(100.0)
+                .margin_top(2.0)
+                .padding_horiz(4.0)
+                .border(1.0)
+                .border_color(theme::border())
+                .border_radius(4.0)
+                .background(theme::canvas())
+                .color(theme::fg())
+                .font_size(10.0)
+                .selectable(false)
+                .apply_if(binding().is_none(), |s| s.hide())
+        });
+    Stack::vertical((content, hint)).style(|s| s.items_center().pointer_events_none())
+}
+
 /// Open an HTTP(S) link supplied by GitHub in the user's default browser.
 ///
 /// Spawned and forgotten: waiting on `open` would block the UI thread for as

@@ -639,6 +639,9 @@ there does what it always does. The × beside the keys
 takes them all away, and the reset arrow puts the defaults back. Several
 keys for one action are written in the file.
 
+Hold Command on macOS or Ctrl on Linux to see the current shortcuts under
+the sidebar tabs, sidebar toggle, New Work, and the Conversation and Code tabs.
+
 Each action's id, its default keys and what it does, grouped as Settings
 groups them:
 
@@ -663,9 +666,9 @@ groups them:
 |---|---|---|
 | `toggle_sidebar` | `super+\` | Shows or hides the sidebar |
 | `focus_search` | `super+1`, `/` | Puts the keyboard in the sidebar's search, opening the sidebar if it is shut |
-| `inbox` | none | Shows the Inbox, opening the sidebar if it is shut |
-| `worktrees` | none | Shows Worktrees, opening the sidebar if it is shut |
-| `browse` | none | Shows Browse, opening the sidebar if it is shut |
+| `inbox` | `super+2` | Shows the Inbox, opening the sidebar if it is shut |
+| `worktrees` | `super+3` | Shows Worktrees, opening the sidebar if it is shut |
+| `browse` | `super+4` | Shows Browse, opening the sidebar if it is shut |
 | `next_item` | `j` | Opens the row after the open one in the sidebar's list, or the first; a notification that opens in the browser is passed over |
 | `previous_item` | `k` | Opens the row before the open one |
 | `mark_done` | `e` | Marks the Inbox row under the pointer done, else the open item's row |

@@ -41,7 +41,7 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
     title_bar(
         Stack::horizontal((
             leading(app, state, backend.clone()),
-            crate::review::switch::switch(state),
+            crate::review::switch::switch(app, state),
             trailing(app, state, backend),
         ))
         .debug_name("item bar"),

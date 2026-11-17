@@ -11,13 +11,16 @@ use floem::reactive::SignalGet;
 use floem::style::CursorStyle;
 use floem::views::{Container, Decorators, Label, Stack};
 
+use crate::keymap::Action;
 use crate::review::model::{ItemTab, ReviewState};
+use crate::state::AppState;
 use crate::theme;
+use crate::ui::widgets::with_shortcut_hint;
 
-pub fn switch(state: ReviewState) -> impl IntoView {
+pub fn switch(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
-        segment(state, ItemTab::Conversation, "Conversation"),
-        segment(state, ItemTab::Code, "Code"),
+        segment(app, state, ItemTab::Conversation, "Conversation"),
+        segment(app, state, ItemTab::Code, "Code"),
     ))
     .debug_name("item switch")
     // The bar it sits in is the window's title bar, and lets the pointer
@@ -31,11 +34,11 @@ pub fn switch(state: ReviewState) -> impl IntoView {
     })
 }
 
-/// One segment, its name alone. Selection is a soft neutral fill, not an
+/// One segment of the switch. Selection is a soft neutral fill, not an
 /// accent line, so the control stays out of the document's way.
-fn segment(state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoView {
+fn segment(app: AppState, state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoView {
     let active = move || state.tab.get() == which;
-    Container::new(Label::derived(move || name.to_string()).style(move |s| {
+    let label = Label::derived(move || name.to_string()).style(move |s| {
         s.font_size(theme::TEXT_META)
             .font_weight(if active() {
                 theme::weight_emphasis()
@@ -48,21 +51,26 @@ fn segment(state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoV
                 theme::fg_muted()
             })
             .selectable(false)
-    }))
-    .debug_name(format!("{name} pill"))
-    .on_event_stop(el::Click, move |_, _| state.show_tab(which))
-    .style(move |s| {
-        let base = s
-            .items_center()
-            .height(30.0)
-            .padding_horiz(12.0)
-            .flex_shrink(0.0_f32)
-            .border_radius(9.0)
-            .hover(|s| s.cursor(CursorStyle::Pointer));
-        if active() {
-            base.background(theme::canvas_subtle())
-        } else {
-            base.hover(|s| s.background(theme::canvas_hover()))
-        }
-    })
+    });
+    let action = match which {
+        ItemTab::Conversation => Action::ShowConversation,
+        ItemTab::Code => Action::ShowCode,
+    };
+    Container::new(with_shortcut_hint(app, action, label))
+        .debug_name(format!("{name} pill"))
+        .on_event_stop(el::Click, move |_, _| state.show_tab(which))
+        .style(move |s| {
+            let base = s
+                .items_center()
+                .height(30.0)
+                .padding_horiz(12.0)
+                .flex_shrink(0.0_f32)
+                .border_radius(9.0)
+                .hover(|s| s.cursor(CursorStyle::Pointer));
+            if active() {
+                base.background(theme::canvas_subtle())
+            } else {
+                base.hover(|s| s.background(theme::canvas_hover()))
+            }
+        })
 }

@@ -427,6 +427,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // not heard of on the way down.
                 match focused_descendant(cx, root_id.root()) {
                     Some(holder) => {
+                        // A menu overlay takes key-up outside this root.
+                        if !cx.window_state.is_focus_within(root_id)
+                            && state.shortcut_modifiers.get_untracked().contains(&true)
+                        {
+                            state.shortcut_modifiers.set([false; 2]);
+                        }
                         gone.set(Some(holder));
                         unheld.set(false);
                     }
@@ -491,6 +497,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         })
         .on_event_cont(el::WindowLostFocus, move |_, _| {
             // A key given to a shortcut, still down, comes up elsewhere.
+            state.shortcut_modifiers.set([false; 2]);
             state.settings.let_go();
             blur_backend.set_window_key(false)
         })
@@ -502,6 +509,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             move |_, key: &KeyboardEvent| {
+                track_shortcut_modifier(state, key.code, false);
                 if state.settings.held.get_untracked() == Some(key.code) {
                     state.settings.let_go();
                 }
@@ -553,6 +561,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             alone(move |cx, key: &KeyboardEvent| {
+                track_shortcut_modifier(state, key.code, true);
                 let key_backend = &capture_backend;
                 // Cmd-P's palette is modal: while it is up, its keys are
                 // its own, whatever has the keyboard, and the rest are its
@@ -807,12 +816,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     return EventPropagation::Stop;
                 }
                 use crate::items::SidebarTab;
-                for (action, tab) in [
-                    (Action::Inbox, SidebarTab::Inbox),
-                    (Action::Worktrees, SidebarTab::Worktrees),
-                    (Action::Browse, SidebarTab::Browse),
-                ] {
-                    if pressed(action) {
+                for tab in SidebarTab::ALL {
+                    if pressed(sidebar::tab_action(tab)) {
                         sidebar::show_tab(state, tab);
                         return EventPropagation::Stop;
                     }
@@ -1349,6 +1354,17 @@ fn focus_target(cx: &floem::context::EventCx<'_>) -> Option<floem::ViewId> {
         .iter()
         .find(|step| step.phase == floem::event::Phase::Target)
         .map(|step| step.owning_id)
+}
+
+fn track_shortcut_modifier(state: AppState, code: Code, down: bool) {
+    let sides = if cfg!(target_os = "macos") {
+        [Code::MetaLeft, Code::MetaRight]
+    } else {
+        [Code::ControlLeft, Code::ControlRight]
+    };
+    if let Some(side) = sides.iter().position(|&key| key == code) {
+        state.shortcut_modifiers.update(|held| held[side] = down);
+    }
 }
 
 /// A window key handler that, once it stops a key, stops it for the
@@ -1942,6 +1958,66 @@ mod tests {
             repeat: false,
             is_composing: false,
         })
+    }
+
+    #[test]
+    fn holding_the_shortcut_modifier_reveals_the_current_bindings() {
+        let _keymap = keymap::install(keymap::with_bindings("worktrees = 'alt+x'\nbrowse = []"));
+        let (mut harness, _, _) = window_and_state_with_a_file_open();
+        let tab = named(harness.root_id(), "tab:Worktrees").unwrap();
+        let hint = named(tab, "shortcut hint").unwrap();
+        let unbound = named(
+            named(harness.root_id(), "tab:Browse").unwrap(),
+            "shortcut hint",
+        )
+        .unwrap();
+        let code_hint = named(
+            named(harness.root_id(), "Code pill").unwrap(),
+            "shortcut hint",
+        )
+        .unwrap();
+        let tab_rect = tab.get_visual_rect();
+        let [left, right] = if cfg!(target_os = "macos") {
+            [Code::MetaLeft, Code::MetaRight]
+        } else {
+            [Code::ControlLeft, Code::ControlRight]
+        };
+        let change = |harness: &mut HeadlessHarness, code, state| {
+            let floem::event::Event::Key(mut event) =
+                key(code, Key::Named(NamedKey::Unidentified), OS_MOD)
+            else {
+                unreachable!()
+            };
+            event.state = state;
+            harness.dispatch_event(floem::event::Event::Key(event));
+            harness.rebuild();
+        };
+        assert!(hint.is_hidden());
+        change(&mut harness, left, KeyState::Down);
+        assert!(!hint.is_hidden());
+        assert!(hint
+            .debug_name()
+            .contains(&keymap::label(Action::Worktrees).unwrap()));
+        assert!(unbound.is_hidden());
+        assert_eq!(tab.get_visual_rect(), tab_rect);
+        let rect = code_hint.get_visual_rect();
+        assert!(rect.width() > 0.0);
+        assert_eq!(rect, code_hint.get_visual_rect_no_clip());
+        assert!(code_hint
+            .debug_name()
+            .contains(&keymap::label(Action::ShowCode).unwrap()));
+        change(&mut harness, right, KeyState::Down);
+        change(&mut harness, left, KeyState::Up);
+        assert!(!hint.is_hidden());
+        change(&mut harness, right, KeyState::Up);
+        assert!(hint.is_hidden());
+
+        change(&mut harness, left, KeyState::Down);
+        harness.dispatch_event(floem::event::Event::Window(
+            floem::event::WindowEvent::FocusLost,
+        ));
+        harness.rebuild();
+        assert!(hint.is_hidden());
     }
 
     /// Open…'s box comes up over the window with the keyboard in it, says
@@ -3061,10 +3137,9 @@ mod tests {
         assert!(!review.review_open.get(), "and shuts it");
     }
 
-    /// The actions with no key do what their buttons and menu rows do
-    /// once config.toml gives them one.
+    /// Custom bindings run the same actions as the buttons and menu rows.
     #[test]
-    fn the_actions_without_a_default_key_work_once_bound() {
+    fn custom_bindings_run_their_actions() {
         use crate::items::SidebarTab;
         let _keymap = crate::keymap::install(crate::keymap::with_bindings(
             r#"
