@@ -61,7 +61,7 @@ fi
 
 # In the host's login shell, for the PATH its profile sets (cargo's).
 on_host_run() {
-  ssh ${port[@]+"${port[@]}"} -o BatchMode=yes "$dest" "exec \"\$SHELL\" -lc 'cd \"$on_host\" && $1'"
+  ssh ${port[@]+"${port[@]}"} -o BatchMode=yes -- "$dest" "exec \"\$SHELL\" -lc 'cd \"$on_host\" && $1'"
 }
 
 echo "dev-remote: fetching $host:$from_home"

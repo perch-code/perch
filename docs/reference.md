@@ -1608,9 +1608,11 @@ still lacks.
 The host is named as ssh is given it: a name from `~/.ssh/config`, or
 `user@host`. A port goes after it, `chris@devbox:2222`, or the whole can be
 a URL, `ssh://chris@devbox:2222`; ssh itself takes a port only as an
-option, so Perch passes it as one, to the connection, the install, Open in
-Terminal and the editor's link alike. An IPv6 address with a port is in
-brackets, `[fe80::1]:2222`. ssh must connect with no question asked, a
+option, so Perch passes it as one, to the connection, the install and Open
+in Terminal alike, and Zed's link carries it. VS Code's does not: with a
+port, or an IPv6 address, Open in Editor needs Zed, or a name for the host
+in `~/.ssh/config`. An IPv6 address with a port is in brackets,
+`[fe80::1]:2222`. ssh must connect with no question asked, a
 password or a host key to accept: Perch runs it in batch mode.
 
 A Mac that is a host is kept from idle sleep for as long as its engine

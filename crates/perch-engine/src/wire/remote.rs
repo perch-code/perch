@@ -51,6 +51,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -1043,7 +1044,18 @@ pub fn bad_host(host: &str) -> Option<String> {
             "\"{host}\" has a space in it, which no host name does."
         ))
     } else {
-        None
+        // What ssh would be handed, past a scheme and a port: a user
+        // with no host after it, or brackets with nothing in them, names
+        // none, and a name that starts with a dash is an option to ssh.
+        let (name, _) = host_and_port(host);
+        let machine = name.rsplit_once('@').map_or(name.as_str(), |(_, m)| m);
+        if machine.is_empty() || name.contains("://") {
+            Some(format!("{host} names no host."))
+        } else if name.starts_with('-') {
+            Some(format!("{host} is not a host ssh can be given."))
+        } else {
+            None
+        }
     }
 }
 
@@ -1219,31 +1231,34 @@ async fn dial_ssh(host: &str, remote: &str, build: Option<String>) -> Result<Dia
 /// command given, how to install `perchd` there. The build is worked out
 /// for each try, so a `[remote] perchd` rebuilt while the app runs is
 /// installed on the next.
+/// What a reader knows the `perchd` an app run from source built as.
+const DEV_BINARY: &str = "The perchd built from source";
+
 pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
-    // What the host is, once it has said, for a `perchd` built from
-    // source: the dial can name its build only when it knows which one
-    // was built.
-    let host_is: Arc<Mutex<Option<Platform>>> = Arc::default();
+    // The `perchd` built from source for this host, once one has been:
+    // the dial can name its build only then. Set when a build succeeds
+    // and not before, so a try after a failed one builds again rather
+    // than naming whatever an earlier session left on disk.
+    let built: Arc<Mutex<Option<PathBuf>>> = Arc::default();
     let dial: Dial = Box::new({
-        let (host, bridge, host_is) = (host.to_string(), bridge.clone(), host_is.clone());
+        let (host, bridge, built) = (host.to_string(), bridge.clone(), built.clone());
         move |replace| {
             let (host, bridge) = (host.clone(), bridge.clone());
-            let host_is = host_is.lock().ok().and_then(|is| *is);
+            let built = built.lock().ok().and_then(|built| built.clone());
             Box::pin(async move {
                 let build = match &bridge {
                     // Before the host has said what it is, a build it
                     // can't have, so it says: the install then builds for
                     // it. After, the build of what was built.
-                    Bridge::Installed(Source::Dev(workspace)) => {
-                        let built = host_is
-                            .map(|platform| provision::dev_binary(workspace, platform))
-                            .filter(|binary| binary.is_file());
-                        match built {
+                    Bridge::Installed(Source::Dev(_)) => {
+                        match built.filter(|binary| binary.is_file()) {
                             Some(binary) => {
-                                tokio::task::spawn_blocking(move || provision::read_file(&binary))
-                                    .await
-                                    .map_err(|e| e.to_string())??
-                                    .build
+                                tokio::task::spawn_blocking(move || {
+                                    provision::read_binary(&binary, DEV_BINARY)
+                                })
+                                .await
+                                .map_err(|e| e.to_string())??
+                                .build
                             }
                             None => format!("{VERSION}-unbuilt"),
                         }
@@ -1350,23 +1365,30 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
             // Built now, for what the host said it is, from the source
             // as it stands; uploaded unless the host has that very build.
             Source::Dev(workspace) => {
-                if let Ok(mut is) = host_is.lock() {
-                    *is = Some(arch);
+                // Forgotten until this build is done: one that fails
+                // leaves the next try to build again.
+                if let Ok(mut built) = built.lock() {
+                    *built = None;
                 }
-                let workspace = workspace.clone();
+                let (workspace, built) = (workspace.clone(), built.clone());
                 (
                     format!("{VERSION} from source"),
                     Box::pin(async move {
-                        let binary = provision::dev_build(&workspace, arch).await?;
-                        let binary =
-                            tokio::task::spawn_blocking(move || provision::read_file(&binary))
-                                .await
-                                .map_err(|e| Failed::now(e.to_string()))?
-                                .map_err(Failed::lasting)?;
-                        if provision::has_build(&host, &binary.build).await {
-                            return Ok(());
+                        let path = provision::dev_build(&workspace, arch).await?;
+                        let read = path.clone();
+                        let binary = tokio::task::spawn_blocking(move || {
+                            provision::read_binary(&read, DEV_BINARY)
+                        })
+                        .await
+                        .map_err(|e| Failed::now(e.to_string()))?
+                        .map_err(Failed::lasting)?;
+                        if !provision::has_build(&host, &binary.build).await {
+                            provision::upload(&host, &binary.build, binary.bytes).await?;
                         }
-                        provision::upload(&host, &binary.build, binary.bytes).await
+                        if let Ok(mut built) = built.lock() {
+                            *built = Some(path);
+                        }
+                        Ok(())
                     }),
                 )
             }
@@ -1507,6 +1529,11 @@ mod tests {
         assert!(bad_host("halo box").is_some());
         assert!(bad_host(" ").is_some());
         assert_eq!(bad_host("chris@halo.local"), None);
+        assert_eq!(bad_host("chris@halo:2222"), None);
+        assert_eq!(bad_host("[fe80::1]:2222"), None);
+        for none in ["[]:2222", "chris@", "ssh://halo", "chris@:22"] {
+            assert!(bad_host(none).is_some(), "{none}");
+        }
     }
 
     /// The engine's end of a stream, played by the test.

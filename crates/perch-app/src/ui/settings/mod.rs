@@ -74,6 +74,14 @@ pub struct SettingsState {
     /// control so that a window shut while one waits gives them back.
     pub(crate) menu_keys: RwSignal<Option<crate::app_menu::KeysLetThrough>>,
     search_box: RwSignal<Option<floem::ViewId>>,
+    /// What the Add repository box holds, with the engine on a host. Kept
+    /// here and not in the box, which is built again whenever the list of
+    /// repositories changes, as it does when one typed earlier is added.
+    pub(crate) adding: RwSignal<String>,
+    /// What that box last sent and has not heard back about. It is not
+    /// sent again meanwhile, and the box empties when it is added only if
+    /// it still holds it.
+    pub(crate) adding_sent: RwSignal<Option<String>>,
     /// The page while it is up, for Tab to go round its controls only.
     page: RwSignal<Option<floem::ViewId>>,
 }
@@ -96,6 +104,8 @@ impl SettingsState {
             held: RwSignal::new(None),
             menu_keys: RwSignal::new(None),
             search_box: RwSignal::new(None),
+            adding: RwSignal::new(String::new()),
+            adding_sent: RwSignal::new(None),
             page: RwSignal::new(None),
         }
     }

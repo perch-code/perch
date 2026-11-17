@@ -329,6 +329,15 @@ pub struct RemoteConfig {
     pub perchd_on_host: Option<String>,
 }
 
+/// A host as it is typed or written, in the one form everything that
+/// names it takes: trimmed, with no `ssh://` before it and no `/` after.
+pub fn normalize_host(host: &str) -> &str {
+    let host = host.trim();
+    host.strip_prefix("ssh://")
+        .unwrap_or(host)
+        .trim_end_matches('/')
+}
+
 impl RemoteConfig {
     /// The host to connect to, when one is named: an empty one is none.
     /// Written as a URL, `ssh://chris@halo:2222`, it is what follows the
@@ -337,9 +346,7 @@ impl RemoteConfig {
     pub fn host(&self) -> Option<&str> {
         self.host
             .as_deref()
-            .map(str::trim)
-            .map(|host| host.strip_prefix("ssh://").unwrap_or(host))
-            .map(|host| host.trim_end_matches('/'))
+            .map(normalize_host)
             .filter(|host| !host.is_empty())
     }
 

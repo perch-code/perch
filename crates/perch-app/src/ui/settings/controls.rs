@@ -504,34 +504,37 @@ pub(crate) fn setting_text(
 /// A one-line box with a button after it, for something to add rather
 /// than a setting to change: Enter or the button hands what was typed to
 /// `submit`, and letting go of the box sends nothing, so a name half
-/// typed is never acted on. The box empties when what `done` reads
-/// changes, which the caller ties to the thing having been added; until
-/// then what was typed stays, to be put right if it was refused.
+/// typed is never acted on. Nothing is sent while the page can't be
+/// written, or again while `sent` still holds the same words, which the
+/// caller clears when it hears back. `draft` is the caller's to keep and
+/// to empty: the box may be built again while something is being added.
+/// `submit` says whether it sent.
 pub(crate) fn entry(
     page: &Page,
+    draft: RwSignal<String>,
+    sent: RwSignal<Option<String>>,
     placeholder: &str,
     label: &'static str,
-    done: impl Fn() + 'static,
-    submit: impl Fn(String) + 'static,
+    submit: impl Fn(String) -> bool + 'static,
     debug: &'static str,
 ) -> impl View {
     let editing = page.state.settings.editing;
-    let draft = RwSignal::new(String::new());
-    Effect::new(move |ran: Option<()>| {
-        done();
-        if ran.is_some() && !draft.get_untracked().is_empty() {
-            draft.set(String::new());
-        }
-    });
-    let send: Rc<dyn Fn()> = Rc::new(move || {
-        let Some(typed) = draft.try_get_untracked() else {
-            return;
-        };
-        let typed = typed.trim();
-        if !typed.is_empty() {
-            submit(typed.to_string());
-        }
-    });
+    let send: Rc<dyn Fn()> = {
+        let page = page.clone();
+        Rc::new(move || {
+            let Some(typed) = draft.try_get_untracked() else {
+                return;
+            };
+            let typed = typed.trim();
+            let waiting = sent.with_untracked(|sent| sent.as_deref() == Some(typed));
+            if typed.is_empty() || waiting || !page.writable() {
+                return;
+            }
+            if submit(typed.to_string()) {
+                sent.set(Some(typed.to_string()));
+            }
+        })
+    };
     let input = TextInput::new(draft)
         .placeholder(placeholder.to_string())
         .debug_name(debug);

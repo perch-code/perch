@@ -54,7 +54,7 @@ fn engine(page: &Page) -> Row {
                 move || value_page.with_config(|c| c.remote.host().unwrap_or_default().to_string()),
                 perch_engine::host::HERE_FIRST,
                 move |typed| {
-                    let host = typed.trim();
+                    let host = perch_github::config::normalize_host(&typed);
                     if host.is_empty() {
                         write.write(Setting::RemoteHost(None));
                         return;

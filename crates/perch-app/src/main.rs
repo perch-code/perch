@@ -305,21 +305,24 @@ pub(crate) fn bridge(remote: &perch_github::RemoteConfig) -> perch_engine::wire:
     })
 }
 
-/// The workspace this app was built from, when it is run from there
-/// rather than installed, as under `cargo run`: its `perchd` is then built
-/// from the same source, since no release is. An installed app has a
-/// bundle; a binary copied off elsewhere has no workspace where it was
-/// built.
+/// The workspace this app was built from, when it is not an installed
+/// one: its `perchd` is then built from the same source, since no release
+/// is. An installed app has a bundle. A binary built somewhere else, a
+/// release's on its runner say, has no workspace here at the path it was
+/// built from. Where the binary itself sits says nothing: cargo's target
+/// directory can be anywhere.
 fn source_workspace() -> Option<std::path::PathBuf> {
     if perch_engine::update::running_bundle().is_some() {
         return None;
     }
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .nth(2)?;
-    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-    let workspace = workspace.canonicalize().ok()?;
-    (exe.starts_with(&workspace) && workspace.join("crates/perchd/Cargo.toml").is_file())
+        .nth(2)?
+        .canonicalize()
+        .ok()?;
+    workspace
+        .join("crates/perchd/Cargo.toml")
+        .is_file()
         .then_some(workspace)
 }
 

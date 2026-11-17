@@ -32,7 +32,7 @@ pub fn run(args: &[String]) -> i32 {
                 return 2;
             }
         },
-        [host] => host.clone(),
+        [host] => perch_github::config::normalize_host(host).to_string(),
         _ => {
             eprintln!("usage: perch --connect <host>");
             return 2;

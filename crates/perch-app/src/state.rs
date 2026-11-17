@@ -3514,7 +3514,12 @@ impl AppState {
             Event::Meta { key, value } => self.take_meta(&key, value),
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
-            Event::Notice(message) => self.complain(message),
+            Event::Notice(message) => {
+                // A refusal answers what the Add repository box sent, if
+                // it sent anything: it can be put right and sent again.
+                self.settings.adding_sent.set(None);
+                self.complain(message)
+            }
             Event::Done(message) => self.notify(message, Tone::Success),
             Event::Bases { repo, bases } => self.new_work.take_bases(repo, bases),
             Event::WorkDefaults(work) => self.new_work.prefix.set(work.branch_prefix),
@@ -3524,6 +3529,15 @@ impl AppState {
                 if let Some(host) = crate::remote::host() {
                     self.notify(format!("Added {identity} on {host}."), Tone::Success);
                 }
+                // The Add box empties if it still holds what was added;
+                // anything typed since is left.
+                let (adding, sent) = (self.settings.adding, self.settings.adding_sent);
+                if let Some(sent) = sent.get_untracked() {
+                    if adding.get_untracked().trim() == sent {
+                        adding.set(String::new());
+                    }
+                }
+                sent.set(None);
                 self.added_repo.set(Some(identity));
             }
             Event::ApprovalRequested(view) => {

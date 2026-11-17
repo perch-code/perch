@@ -204,45 +204,66 @@ pub struct DevBuild {
     pub triple: Option<&'static str>,
 }
 
-/// How to build `perchd` here for `platform`. Linux's is against musl, as
-/// the release's is, so it runs whatever the host's libc.
+/// How to build `perchd` here for `platform`.
+///
+/// A Linux host's is always against musl and through zig, as the
+/// release's is static: this machine's own build would need this
+/// machine's libc there, or newer, and another processor's has no C
+/// compiler and linker here without zig. A Mac's is the toolchain's own
+/// from a Mac, for either processor, and zig's from anywhere else.
 pub fn dev_build_for(platform: Platform, here: Option<Platform>) -> DevBuild {
-    if here == Some(platform) {
-        return DevBuild {
+    let from_a_mac = here.is_some_and(|here| here.os == Os::MacOs);
+    match (platform.os, platform.arch) {
+        (Os::MacOs, _) if here == Some(platform) => DevBuild {
             subcommand: "build",
             triple: None,
-        };
+        },
+        (Os::MacOs, arch) => DevBuild {
+            subcommand: if from_a_mac { "build" } else { "zigbuild" },
+            triple: Some(match arch {
+                Arch::X86_64 => "x86_64-apple-darwin",
+                Arch::Arm64 => "aarch64-apple-darwin",
+            }),
+        },
+        (Os::Linux, arch) => DevBuild {
+            subcommand: "zigbuild",
+            triple: Some(match arch {
+                Arch::X86_64 => "x86_64-unknown-linux-musl",
+                Arch::Arm64 => "aarch64-unknown-linux-musl",
+            }),
+        },
     }
-    let triple = match (platform.os, platform.arch) {
-        (Os::Linux, Arch::X86_64) => "x86_64-unknown-linux-musl",
-        (Os::Linux, Arch::Arm64) => "aarch64-unknown-linux-musl",
-        (Os::MacOs, Arch::X86_64) => "x86_64-apple-darwin",
-        (Os::MacOs, Arch::Arm64) => "aarch64-apple-darwin",
+}
+
+/// The `perchd` cargo says it built, in what `--message-format=json`
+/// printed: the last artifact named `perchd` with an executable. Cargo
+/// says where, whatever `CARGO_TARGET_DIR`, `build.target-dir` or
+/// `build.target` moved it to.
+pub fn built_perchd(messages: &str) -> Option<PathBuf> {
+    messages
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| {
+            message["reason"] == "compiler-artifact" && message["target"]["name"] == "perchd"
+        })
+        .filter_map(|message| message["executable"].as_str().map(PathBuf::from))
+        .last()
+}
+
+/// `PATH` for cargo, with cargo's own bin directory after what is there:
+/// an app started from the Finder or a debugger has a bare one, and
+/// cargo-zigbuild is found by it too.
+fn path_with_cargo() -> std::ffi::OsString {
+    let cargo_bin = match std::env::var_os("CARGO_HOME").filter(|home| !home.is_empty()) {
+        Some(home) => PathBuf::from(home).join("bin"),
+        None => perch_github::config::home_dir().join(".cargo/bin"),
     };
-    // Another processor of this machine's own system is the toolchain's
-    // to build; another system needs zig.
-    let same_system = here.is_some_and(|here| here.os == platform.os);
-    DevBuild {
-        subcommand: if same_system { "build" } else { "zigbuild" },
-        triple: Some(triple),
-    }
-}
-
-/// Where cargo puts what it builds in `workspace`.
-fn target_dir(workspace: &Path) -> PathBuf {
-    match std::env::var_os("CARGO_TARGET_DIR").filter(|dir| !dir.is_empty()) {
-        Some(dir) => workspace.join(dir),
-        None => workspace.join("target"),
-    }
-}
-
-/// The `perchd` a dev build of `workspace` makes for `platform`.
-pub fn dev_binary(workspace: &Path, platform: Platform) -> PathBuf {
-    let mut path = target_dir(workspace);
-    if let Some(triple) = dev_build_for(platform, Platform::here()).triple {
-        path.push(triple);
-    }
-    path.join("debug").join("perchd")
+    let dirs = std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .chain([cargo_bin])
+        .collect::<Vec<_>>();
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 /// What a failed build means for the reader: the tool to install when
@@ -289,15 +310,19 @@ pub fn dev_build_failure(build: DevBuild, platform: Platform, said: &str) -> Str
 pub async fn dev_build(workspace: &Path, platform: Platform) -> Result<PathBuf, Failed> {
     let build = dev_build_for(platform, Platform::here());
     let mut command = tokio::process::Command::new("cargo");
-    command
-        .current_dir(workspace)
-        .args([build.subcommand, "-p", "perchd"]);
+    command.current_dir(workspace).args([
+        build.subcommand,
+        "-p",
+        "perchd",
+        "--message-format=json",
+    ]);
     if let Some(triple) = build.triple {
         command.args(["--target", triple]);
     }
     command
+        .env("PATH", path_with_cargo())
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     tracing::info!(
@@ -322,7 +347,14 @@ pub async fn dev_build(workspace: &Path, platform: Platform) -> Result<PathBuf, 
         }
         return Err(Failed::lasting(dev_build_failure(build, platform, &said)));
     }
-    Ok(dev_binary(workspace, platform))
+    built_perchd(&String::from_utf8_lossy(&output.stdout))
+        .filter(|binary| binary.is_file())
+        .ok_or_else(|| {
+            Failed::lasting(format!(
+                "Cargo built perchd for {} and did not say where.",
+                platform.name()
+            ))
+        })
 }
 
 /// The host `uname -s` and `uname -m` name, or why Perch has no `perchd`
@@ -821,20 +853,21 @@ pub struct Binary {
 /// The `perchd` `[remote] perchd` names, read now: a file rebuilt while the
 /// app runs is installed on the next connect.
 pub fn read_file(path: &Path) -> Result<Binary, String> {
+    read_binary(path, "[remote] perchd")
+}
+
+/// The `perchd` at `path`, which the reader knows as `what`.
+pub fn read_binary(path: &Path, what: &str) -> Result<Binary, String> {
     let bytes = std::fs::read(path)
-        .map_err(|e| format!("Couldn't read [remote] perchd, {}: {e}", path.display()))?;
+        .map_err(|e| format!("Couldn't read {what}, {}: {e}", path.display()))?;
     if bytes.len() as u64 > MAX_BINARY {
         return Err(format!(
-            "[remote] perchd, {}, is larger than any perchd.",
+            "{what}, {}, is larger than any perchd.",
             path.display()
         ));
     }
-    let bytes = binary_in(bytes).map_err(|why| {
-        format!(
-            "[remote] perchd, {}, can't be installed: {why}.",
-            path.display()
-        )
-    })?;
+    let bytes = binary_in(bytes)
+        .map_err(|why| format!("{what}, {}, can't be installed: {why}.", path.display()))?;
     Ok(Binary {
         build: file_build(&bytes),
         bytes,
@@ -1538,36 +1571,41 @@ pub(crate) mod tests {
             |arch| Platform::new(Os::Linux, arch),
         );
         let here = Some(mac(Arch::Arm64));
-        assert_eq!(
-            dev_build_for(mac(Arch::Arm64), here),
-            DevBuild {
-                subcommand: "build",
-                triple: None
-            }
-        );
+        let build = |subcommand, triple| DevBuild { subcommand, triple };
+        assert_eq!(dev_build_for(mac(Arch::Arm64), here), build("build", None));
         assert_eq!(
             dev_build_for(mac(Arch::X86_64), here),
-            DevBuild {
-                subcommand: "build",
-                triple: Some("x86_64-apple-darwin")
-            }
+            build("build", Some("x86_64-apple-darwin"))
         );
         let cross = dev_build_for(linux(Arch::X86_64), here);
+        assert_eq!(cross, build("zigbuild", Some("x86_64-unknown-linux-musl")));
+        // From Linux, a Linux host's is still static, its own processor's
+        // included, and through zig for the C in it.
+        for from in [linux(Arch::X86_64), linux(Arch::Arm64)] {
+            assert_eq!(
+                dev_build_for(linux(Arch::X86_64), Some(from)),
+                build("zigbuild", Some("x86_64-unknown-linux-musl"))
+            );
+        }
         assert_eq!(
-            cross,
-            DevBuild {
-                subcommand: "zigbuild",
-                triple: Some("x86_64-unknown-linux-musl")
-            }
-        );
-        assert_eq!(
-            dev_build_for(linux(Arch::Arm64), Some(linux(Arch::X86_64))),
-            DevBuild {
-                subcommand: "build",
-                triple: Some("aarch64-unknown-linux-musl")
-            }
+            dev_build_for(mac(Arch::Arm64), Some(linux(Arch::Arm64))),
+            build("zigbuild", Some("aarch64-apple-darwin"))
         );
         assert_eq!(dev_build_for(mac(Arch::Arm64), None).subcommand, "zigbuild");
+
+        // Cargo says where it put the binary.
+        let messages = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"perch-engine"},"executable":null}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"perchd"},"executable":"/t/x86_64-unknown-linux-musl/debug/perchd"}"#,
+            "\nnot json\n",
+            r#"{"reason":"build-finished","success":true}"#,
+        );
+        assert_eq!(
+            built_perchd(messages),
+            Some(PathBuf::from("/t/x86_64-unknown-linux-musl/debug/perchd"))
+        );
+        assert_eq!(built_perchd(r#"{"reason":"build-finished"}"#), None);
 
         let host = linux(Arch::X86_64);
         let no_zigbuild = dev_build_failure(cross, host, "error: no such command: `zigbuild`\n");

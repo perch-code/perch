@@ -545,13 +545,15 @@ fn add_on_host(page: &Page, host: String) -> Row {
             let (state, backend, host) = (page.state, page.backend.clone(), host.clone());
             controls::entry(
                 &page,
+                state.settings.adding,
+                state.settings.adding_sent,
                 "owner/name, or a path",
                 "Add",
-                move || {
-                    state.added_repo.track();
-                },
                 move |typed| match perch_engine::repos::repo_source(&typed) {
-                    Err(why) => state.complain(why),
+                    Err(why) => {
+                        state.complain(why);
+                        false
+                    }
                     Ok(source) => {
                         if let perch_engine::repos::RepoSource::GitHub(id) = source {
                             state.notify(
@@ -560,6 +562,7 @@ fn add_on_host(page: &Page, host: String) -> Row {
                             );
                         }
                         backend.add_repository_from(&typed);
+                        true
                     }
                 },
                 "settings-add-repository",
@@ -673,6 +676,9 @@ mod tests {
             state.notice().as_deref(),
             Some("Adding acme/gadgets on devbox…")
         );
+        // Enter again while that one is on its way sends nothing more.
+        enter_in(&mut harness, "settings-add-repository", "");
+        assert!(added(&mut commands).is_empty());
 
         // Added: the box is empty again, and what is typed next is all
         // that is sent. The button sends as Enter does.

@@ -565,13 +565,23 @@ impl Preparer {
     }
 
     /// Clone `url` into `dest`, a checkout for the reader to keep as one
-    /// of their own, with Perch's token answering for github.com: only for
-    /// this command, so nothing of it is written into the clone, whose
-    /// later fetches and pushes are the reader's git's. It is built under
-    /// a temporary name beside `dest` and moved into place whole; a clone
-    /// that fails or is dropped leaves nothing. `dest` must not exist.
+    /// of their own. Perch's token answers for github.com while the
+    /// history comes down, for that command only, so nothing of it is
+    /// written into the clone. The files are then checked out by the
+    /// reader's own git, with their config and none of the token: a
+    /// checkout runs the filters the repository names, Git LFS among them.
+    /// It is built under a name of its own beside `dest` and moved into
+    /// place whole; a clone that fails or is dropped leaves nothing, and
+    /// nothing that was there is removed. Two asked for at once take
+    /// turns, and the second finds `dest` there. `dest` must not exist.
     pub async fn clone_checkout(&self, url: &str, dest: &Path) -> Result<(), Error> {
-        if dest.exists() {
+        static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let _cloning = self
+            .cloning
+            .lock(format!("checkout:{}", dest.display()))
+            .await;
+        // A link that leads nowhere is still something there.
+        if dest.symlink_metadata().is_ok() {
             return Err(Error::Io(format!("{} is already there", dest.display())));
         }
         let Some(name) = dest.file_name() else {
@@ -580,13 +590,21 @@ impl Preparer {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io(e.to_string()))?;
         }
-        let mut staging = name.to_os_string();
-        staging.push(".partial");
+        let mut staging = std::ffi::OsString::from(".");
+        staging.push(name);
+        staging.push(format!(
+            ".cloning-{}-{}",
+            std::process::id(),
+            STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let staging = dest.with_file_name(staging);
-        let _ = std::fs::remove_dir_all(&staging);
+        if staging.symlink_metadata().is_ok() {
+            return Err(Error::Io(format!("{} is in the way", staging.display())));
+        }
         let _partial = RemoveOnDrop(&staging);
         let args = [
             "clone".into(),
+            "--no-checkout".into(),
             "--progress".into(),
             "--".into(),
             std::ffi::OsString::from(url),
@@ -594,6 +612,14 @@ impl Preparer {
         ];
         self.git
             .run_with_progress(None, args, CLONE_IDLE, |_: Progress| {})
+            .await?;
+        Git::plain()
+            .run_with_progress(
+                Some(&staging),
+                ["reset", "--hard", "--quiet", "HEAD"],
+                CLONE_IDLE,
+                |_: Progress| {},
+            )
             .await?;
         std::fs::rename(&staging, dest).map_err(|e| Error::Io(e.to_string()))
     }
@@ -1663,7 +1689,14 @@ mod tests {
         let dest = dir.path().join("code/widgets");
         preparer.clone_checkout(&url, &dest).await.unwrap();
         assert!(dest.join(".git").is_dir());
-        assert!(!dir.path().join("code/widgets.partial").exists());
+        let beside = |dir: &Path| -> Vec<String> {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(beside(&dir.path().join("code")), ["widgets"]);
+        assert!(dest.join("a.txt").is_file(), "the files are checked out");
         let origin = git(&dest, &["remote", "get-url", "origin"]);
         assert_eq!(origin.trim(), url);
 
@@ -1672,7 +1705,29 @@ mod tests {
         let gone = format!("file://{}", dir.path().join("nowhere.git").display());
         assert!(preparer.clone_checkout(&gone, &missing).await.is_err());
         assert!(!missing.exists());
-        assert!(!dir.path().join("code/missing.partial").exists());
+        assert_eq!(beside(&dir.path().join("code")), ["widgets"]);
+
+        // A link that leads nowhere is in the way too, and a folder of
+        // the reader's with a name like the staging one's is left alone.
+        let link = dir.path().join("code/linked");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+        assert!(preparer.clone_checkout(&url, &link).await.is_err());
+        let theirs = dir.path().join("code/other.partial");
+        std::fs::create_dir_all(&theirs).unwrap();
+        preparer
+            .clone_checkout(&url, &dir.path().join("code/other"))
+            .await
+            .unwrap();
+        assert!(theirs.is_dir());
+
+        // Two at once for one place: one clones, the other finds it there.
+        let twice = dir.path().join("code/twice");
+        let (first, second) = tokio::join!(
+            preparer.clone_checkout(&url, &twice),
+            preparer.clone_checkout(&url, &twice)
+        );
+        assert!(first.is_ok() != second.is_ok(), "{first:?} {second:?}");
+        assert!(twice.join(".git").is_dir());
     }
 
     #[tokio::test]

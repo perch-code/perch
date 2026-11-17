@@ -181,6 +181,35 @@ pub fn terminal_script(line: &str) -> Vec<String> {
     .collect()
 }
 
+/// `host` as a URL's authority: an IPv6 address in brackets, which a bare
+/// one's colons need to be told from a port's, and the port after.
+fn url_authority(host: &str) -> String {
+    let (name, port) = perch_engine::wire::remote::host_and_port(host);
+    let (user, machine) = match name.rsplit_once('@') {
+        Some((user, machine)) => (format!("{user}@"), machine),
+        None => (String::new(), name.as_str()),
+    };
+    let machine = if machine.contains(':') {
+        format!("[{machine}]")
+    } else {
+        machine.to_string()
+    };
+    let port = port.map(|port| format!(":{port}")).unwrap_or_default();
+    format!("{user}{machine}{port}")
+}
+
+/// Why VS Code can't be given `host`: its Remote SSH takes a name for
+/// ssh and nothing else, so a port or an IPv6 address has no place in
+/// `ssh-remote+<name>`. Zed's link is a URL and carries both.
+pub fn vs_code_cannot(host: &str) -> Option<String> {
+    let (name, port) = perch_engine::wire::remote::host_and_port(host);
+    (port.is_some() || name.contains(':')).then(|| {
+        format!(
+            "VS Code can't be given a port or an IPv6 address for {host}. Give the host a name in ~/.ssh/config and use that name in Settings > General > Engine, or install Zed."
+        )
+    })
+}
+
 /// The editor that opens `path` on `host`, and its arguments: Zed, given
 /// its own `zed` (or the app's bundled CLI), else VS Code's Remote SSH.
 pub fn editor_command(host: &str, path: &Path, zed: Option<&Path>) -> (PathBuf, Vec<String>) {
@@ -190,7 +219,11 @@ pub fn editor_command(host: &str, path: &Path, zed: Option<&Path>) -> (PathBuf, 
             let slash = if path.starts_with('/') { "" } else { "/" };
             (
                 zed.to_path_buf(),
-                vec![format!("ssh://{host}{slash}{}", url_path(&path))],
+                vec![format!(
+                    "ssh://{}{slash}{}",
+                    url_authority(host),
+                    url_path(&path)
+                )],
             )
         }
         None => (
@@ -290,7 +323,12 @@ pub fn open_editor_on(host: &str, path: &Path) {
         crate::windows::notice(why);
         return;
     }
-    let (program, args) = editor_command(host, path, zed().as_deref());
+    let zed = zed();
+    if let Some(why) = zed.is_none().then(|| vs_code_cannot(host)).flatten() {
+        crate::windows::notice(why);
+        return;
+    }
+    let (program, args) = editor_command(host, path, zed.as_deref());
     if let Err(e) = std::process::Command::new(&program).args(&args).spawn() {
         tracing::warn!(
             host,
@@ -392,6 +430,19 @@ mod tests {
             Some(Path::new("zed")),
         );
         assert_eq!(args, ["ssh://chris@halo:12354/home/chris/Code/perch"]);
+        // An IPv6 address is in brackets in a URL, bare or with a port.
+        for (host, authority) in [
+            ("chris@2001:db8::1", "chris@[2001:db8::1]"),
+            ("[fe80::1]:2222", "[fe80::1]:2222"),
+            ("halo", "halo"),
+        ] {
+            assert_eq!(url_authority(host), authority);
+        }
+        // VS Code's link has no place for either.
+        assert!(vs_code_cannot("halo").is_none());
+        assert!(vs_code_cannot("chris@halo").is_none());
+        assert!(vs_code_cannot("chris@halo:2222").is_some());
+        assert!(vs_code_cannot("fe80::1").is_some());
     }
 
     #[test]

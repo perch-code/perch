@@ -720,13 +720,20 @@ pub(crate) fn action_button(
             .selectable(false)
             .pointer_events_none()
     }))
-    .on_event_stop(el::Click, move |_, _| {
-        if event_enabled() {
+    // floem sends a Click as well when Enter or Space comes up on a
+    // button with the keyboard, and as the key repeats: the key going
+    // down is the press, heard once.
+    .on_event_stop(el::Click, move |cx, _| {
+        let by_keyboard = cx.triggered_by.is_some_and(|e| e.is_keyboard_trigger());
+        if event_enabled() && !by_keyboard {
             click();
         }
     })
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
+        let pressed = matches!(key.code, Code::Enter | Code::NumpadEnter | Code::Space)
+            && key.modifiers.is_empty()
+            && !key.repeat;
+        if pressed && enabled() {
             action();
             EventPropagation::Stop
         } else {
@@ -788,13 +795,20 @@ pub(crate) fn icon_action(
     Container::new(
         sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).pointer_events_none()),
     )
-    .on_event_stop(el::Click, move |_, _| {
-        if event_enabled() {
+    // floem sends a Click as well when Enter or Space comes up on a
+    // button with the keyboard, and as the key repeats: the key going
+    // down is the press, heard once.
+    .on_event_stop(el::Click, move |cx, _| {
+        let by_keyboard = cx.triggered_by.is_some_and(|e| e.is_keyboard_trigger());
+        if event_enabled() && !by_keyboard {
             click();
         }
     })
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
+        let pressed = matches!(key.code, Code::Enter | Code::NumpadEnter | Code::Space)
+            && key.modifiers.is_empty()
+            && !key.repeat;
+        if pressed && enabled() {
             action();
             EventPropagation::Stop
         } else {

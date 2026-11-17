@@ -14252,12 +14252,20 @@ async fn add_repository_from(
         });
     }
     let dest = config.clone_root_in(home).join(&id.repo);
-    if dest.exists() {
+    // A link that leads nowhere is still something there.
+    if dest.symlink_metadata().is_ok() {
         // One the reader cloned there themselves is theirs to add; any
-        // other folder of the name is not Perch's to write into.
-        let remotes = perch_git::remotes(ctx.preparer.git(), &dest)
-            .await
-            .unwrap_or_default();
+        // other folder of the name is not Perch's to write into. It is a
+        // clone only with a `.git` of its own: git asked in a plain
+        // folder answers for whatever repository is above it, a home
+        // directory kept in git say, and that one would be added whole.
+        let remotes = if dest.join(".git").symlink_metadata().is_ok() {
+            perch_git::remotes(ctx.preparer.git(), &dest)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let there = remotes
             .iter()
             .filter_map(|(_, url)| perch_git::repo_from_remote(url, &["github.com"]))
@@ -33911,6 +33919,18 @@ read eof || true
             other.contains("is already there and is not a clone of acme/gadgets"),
             "{other}"
         );
+        // A plain folder inside a repository that is the one asked for
+        // is not a clone of it: the repository above is not added.
+        let above = home.join("Code");
+        git(&above, &["init", "-q"]);
+        git(
+            &above,
+            &["remote", "add", "origin", "git@github.com:acme/inner.git"],
+        );
+        std::fs::create_dir_all(above.join("inner")).unwrap();
+        let inside = add("acme/inner").await.unwrap_err();
+        assert!(inside.contains("is not a clone of acme/inner"), "{inside}");
+        std::fs::remove_dir_all(above.join(".git")).unwrap();
 
         root_with_branch(&home.join("notes"), "feature");
         assert_eq!(add("~/notes").await.unwrap(), "local/notes");

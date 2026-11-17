@@ -69,7 +69,7 @@ pub enum RepoSource {
 /// cloned as a repository of that name.
 pub fn repo_source(typed: &str) -> Result<RepoSource, String> {
     let typed = typed.trim();
-    if typed.starts_with('/') || typed.starts_with('~') {
+    if typed.starts_with('/') || typed == "~" || typed.starts_with("~/") {
         return Ok(RepoSource::Path(typed.to_string()));
     }
     let slug = perch_git::repo_from_remote(typed, &["github.com"])
@@ -142,6 +142,8 @@ mod tests {
             "-x/widgets",
             "acme/wid gets",
             "acme/$(id)",
+            "~code/widgets",
+            "~alice",
             "https://gitlab.com/acme/widgets",
             "code/perch;rm",
         ] {
