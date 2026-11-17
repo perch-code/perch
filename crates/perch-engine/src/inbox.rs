@@ -105,6 +105,9 @@ pub fn filter_rows(
                 (!filters.unread_only || activity.is_unread())
                     && matches!(filters.whose, BrowseView::Yours | BrowseView::All)
                     && repository.is_none_or(|repo| item.repo_full_name.eq_ignore_ascii_case(repo))
+                    && filters
+                        .kind
+                        .is_none_or(|kind| item.subject.as_ref().is_some_and(|s| s.kind() == kind))
                     && filters.state.admits(item.is_closed())
                     && search.admits_author(viewer.unwrap_or(""))
                     && (crate::items::matches_query(item, &search.text)
@@ -173,6 +176,18 @@ fn admits_thread(
     (!filters.unread_only || thread.unread)
         && involves(filters.whose, thread, viewer)
         && repository.is_none_or(|repo| thread.repository.full_name.eq_ignore_ascii_case(repo))
+        && filters.kind.is_none_or(|kind| {
+            matches!(
+                (kind, &thread.subject.kind),
+                (
+                    perch_github::ItemKind::PullRequest,
+                    perch_github::SubjectKind::PullRequest
+                ) | (
+                    perch_github::ItemKind::Issue,
+                    perch_github::SubjectKind::Issue
+                )
+            )
+        })
         && filters.state.admits(closed(thread))
         && search.admits_author(author)
         && (query.is_empty()

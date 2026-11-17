@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 
 use jiff::Timestamp;
-use perch_github::{DeclaredRepo, Item, ItemSubject, SearchHit};
+use perch_github::{DeclaredRepo, Item, ItemKind, ItemSubject, SearchHit};
 
 /// What an item's shape makes it. Not stored anywhere: derived from which
 /// parts the item has, as the spec asks.
@@ -460,6 +460,7 @@ pub struct InboxFilters {
     /// The threads about the reader's part in them, as Browse's View
     /// searches for it.
     pub whose: BrowseView,
+    pub kind: Option<ItemKind>,
     pub unread_only: bool,
     pub state: StateFilter,
     /// GitHub's order, newest first, or turned over.
@@ -471,6 +472,7 @@ impl Default for InboxFilters {
         Self {
             view: InboxView::Inbox,
             whose: BrowseView::All,
+            kind: None,
             unread_only: false,
             state: StateFilter::Any,
             direction: Direction::Newest,
@@ -572,7 +574,7 @@ impl ItemFilters {
         let (inbox, worktrees, browse) = (&self.inbox, &self.worktrees, &self.browse);
         format!(
             "tab={};repository={};\
-             inbox={};inbox_whose={};inbox_unread={};inbox_state={};inbox_direction={};\
+             inbox={};inbox_whose={};inbox_unread={};inbox_state={};inbox_kind={};inbox_direction={};\
              worktrees={};worktrees_unread={};worktrees_state={};sort={};direction={};\
              recent_sort={};recent_direction={};\
              browse={};browse_state={};browse_sort={};browse_direction={}",
@@ -585,6 +587,7 @@ impl ItemFilters {
             inbox.whose.key(),
             u8::from(inbox.unread_only),
             inbox.state.key(),
+            inbox.kind.map(ItemKind::column).unwrap_or("any"),
             inbox.direction.key(),
             worktrees.view.key(),
             u8::from(worktrees.unread_only),
@@ -677,6 +680,14 @@ impl ItemFilters {
                 "inbox_whose" => out.inbox.whose = BrowseView::from_key(value).ok_or_else(bad)?,
                 // Before Done, Show was only ever Unread or All.
                 "unread" | "inbox_unread" => out.inbox.unread_only = flag()?,
+                "inbox_kind" => {
+                    out.inbox.kind = match value {
+                        "any" => None,
+                        "pr" => Some(ItemKind::PullRequest),
+                        "issue" => Some(ItemKind::Issue),
+                        _ => return Err(bad()),
+                    }
+                }
                 "inbox_state" => out.inbox.state = state()?,
                 "inbox_direction" => out.inbox.direction = direction()?,
                 "worktrees" => {
@@ -1914,6 +1925,7 @@ mod tests {
             inbox: InboxFilters {
                 view: InboxView::Done,
                 whose: BrowseView::Mentioned,
+                kind: Some(ItemKind::Issue),
                 unread_only: true,
                 state: StateFilter::Closed,
                 direction: Direction::Oldest,

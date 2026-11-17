@@ -822,6 +822,24 @@ fn inbox_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     });
     menu = repository_submenu(menu, f.repository.clone(), repositories, set.clone());
 
+    let kinds = set.clone();
+    let current = f.inbox.kind;
+    menu = menu.submenu("Type", move |mut sub| {
+        use perch_github::ItemKind;
+        sub = sub.icon(SidebarIcon::Filter);
+        for (label, kind) in [
+            ("Any", None),
+            ("Pull Requests", Some(ItemKind::PullRequest)),
+            ("Issues", Some(ItemKind::Issue)),
+        ] {
+            let set = kinds.clone();
+            sub = sub.item(label, move |item| {
+                item.checked(kind == current)
+                    .action(move || set(Box::new(move |f| f.inbox.kind = kind)))
+            });
+        }
+        sub
+    });
     menu = state_submenu(menu, f.inbox.state, set.clone(), |f, value| {
         f.inbox.state = value
     });
@@ -1715,6 +1733,7 @@ mod tests {
                 "View ▸",
                 "—",
                 "Repository ▸",
+                "Type ▸",
                 "State ▸",
                 "—",
                 "Sort By ▸",
@@ -1739,6 +1758,24 @@ mod tests {
                 "✓ All"
             ]
         );
+        set_filters(state, |f| f.repository = None);
+        for (label, expected) in [("Pull Requests", vec!["11"]), ("Issues", vec!["10"])] {
+            inbox_menu(state, backend.clone())
+                .submenu_named("Type")
+                .unwrap()
+                .choose(label);
+            let rows = state.visible_inbox();
+            let ids: Vec<_> = rows
+                .iter()
+                .map(|row| row.thread().unwrap().id.as_str())
+                .collect();
+            assert_eq!(ids, expected);
+        }
+        inbox_menu(state, backend.clone())
+            .submenu_named("Type")
+            .unwrap()
+            .choose("Any");
+        set_filters(state, |f| f.repository = Some("org/one".into()));
         // The two groups are picked apart.
         menu.submenu_named("View").unwrap().choose("Mentioned");
         assert_eq!(
