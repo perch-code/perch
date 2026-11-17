@@ -298,8 +298,29 @@ pub(crate) fn bridge(remote: &perch_github::RemoteConfig) -> perch_engine::wire:
     Bridge::Installed(match (remote.perchd_on_host(), remote.perchd()) {
         (Some(path), _) => Source::HostFile(path.to_string()),
         (None, Some(path)) => Source::File(path),
-        (None, None) => Source::Release,
+        (None, None) => match source_workspace() {
+            Some(workspace) => Source::Dev(workspace),
+            None => Source::Release,
+        },
     })
+}
+
+/// The workspace this app was built from, when it is run from there
+/// rather than installed, as under `cargo run`: its `perchd` is then built
+/// from the same source, since no release is. An installed app has a
+/// bundle; a binary copied off elsewhere has no workspace where it was
+/// built.
+fn source_workspace() -> Option<std::path::PathBuf> {
+    if perch_engine::update::running_bundle().is_some() {
+        return None;
+    }
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)?;
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let workspace = workspace.canonicalize().ok()?;
+    (exe.starts_with(&workspace) && workspace.join("crates/perchd/Cargo.toml").is_file())
+        .then_some(workspace)
 }
 
 /// The log goes to stderr, for a terminal launch, and to a file a day in

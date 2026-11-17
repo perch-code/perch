@@ -331,10 +331,15 @@ pub struct RemoteConfig {
 
 impl RemoteConfig {
     /// The host to connect to, when one is named: an empty one is none.
+    /// Written as a URL, `ssh://chris@halo:2222`, it is what follows the
+    /// scheme, `chris@halo:2222`: the form everything that names the host
+    /// takes, a port after it or not.
     pub fn host(&self) -> Option<&str> {
         self.host
             .as_deref()
             .map(str::trim)
+            .map(|host| host.strip_prefix("ssh://").unwrap_or(host))
+            .map(|host| host.trim_end_matches('/'))
             .filter(|host| !host.is_empty())
     }
 
@@ -1358,6 +1363,15 @@ mod tests {
         assert_eq!(dev.perchd(), Some(home_dir().join("Downloads/perchd")));
         assert_eq!(remote("[remote]\nperchd = \"\"\n").perchd(), None);
         assert_eq!(dev.perchd_on_host(), None);
+        for (written, host) in [
+            ("ssh://chris@halo:2222", "chris@halo:2222"),
+            ("ssh://halo/", "halo"),
+            (" chris@halo:2222 ", "chris@halo:2222"),
+        ] {
+            let config = remote(&format!("[remote]\nhost = {written:?}\n"));
+            assert_eq!(config.host(), Some(host));
+        }
+        assert_eq!(remote("[remote]\nhost = \"ssh://\"\n").host(), None);
         let on_host = remote("[remote]\nperchd_on_host = \" ~/code/perch/target/debug/perchd \"\n");
         assert_eq!(
             on_host.perchd_on_host(),

@@ -52,7 +52,7 @@ fn engine(page: &Page) -> Row {
             setting_text(
                 &page,
                 move || value_page.with_config(|c| c.remote.host().unwrap_or_default().to_string()),
-                "This Mac",
+                perch_engine::host::HERE_FIRST,
                 move |typed| {
                     let host = typed.trim();
                     if host.is_empty() {
@@ -74,8 +74,10 @@ fn engine(page: &Page) -> Row {
         "engine",
         "Engine",
         || {
-            "Where Perch's engine runs: this Mac, or a Linux host you can ssh to, where Perch installs perchd itself. Changing it takes effect when Perch restarts."
-                .to_string()
+            format!(
+                "Where Perch's engine runs: {}, or a Linux or macOS host you can ssh to, as you would name it to ssh, with a port after it if it has one (chris@devbox:2222). Perch installs perchd there itself. Changing it takes effect when Perch restarts.",
+                perch_engine::host::HERE
+            )
         },
         control,
     )
@@ -345,7 +347,7 @@ fn client_config_file(_page: &Page) -> Row {
     };
     Row::new(
         "client-config-file",
-        "This Mac's config.toml",
+        format!("{}'s config.toml", perch_engine::host::HERE_FIRST),
         move || {
             let path = here()
                 .map(

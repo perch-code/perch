@@ -153,7 +153,10 @@ pub fn merge(engine: SettingsFile, local: &Local) -> SettingsFile {
     let mut warnings = engine.warnings;
     warnings.extend(local.config.warnings.iter().cloned());
     if let Some(error) = &local.error {
-        warnings.push(format!("This Mac's config.toml: {error}"));
+        warnings.push(format!(
+            "{}'s config.toml: {error}",
+            perch_engine::host::HERE_FIRST
+        ));
     }
     SettingsFile {
         path: engine.path,

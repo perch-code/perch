@@ -1,13 +1,13 @@
-# Push a tag named for Cargo.toml's version (v0.2.0) to build Perch.app on an
-# Apple Silicon runner, for it and cross-compiled for Intel, and Perch and
-# perchd for Linux on x86_64 and arm64 runners, and publish them all as a
-# GitHub release. A tag with a hyphen (v0.2.0-beta.1) becomes a prerelease,
+# Push a tag named for Cargo.toml's version (v0.2.0) to build Perch.app and
+# perchd on an Apple Silicon runner, for it and cross-compiled for Intel, and
+# Perch and perchd for Linux on x86_64 and arm64 runners, and publish them all
+# as a GitHub release. A tag with a hyphen (v0.2.0-beta.1) becomes a prerelease,
 # which `releases/latest` skips.
 #
 # install.sh downloads the latest release's tarball for its platform, so
 # keep the Perch-<os>-<arch>.tar.gz names in step with it. The app downloads
-# perchd-linux-<arch>.tar.gz for a host and checks it against SHA256SUMS, so
-# keep those names too.
+# perchd-<linux|macos>-<arch>.tar.gz for a host and checks it against
+# SHA256SUMS, so keep those names too.
 
 name: Release
 
@@ -56,10 +56,26 @@ jobs:
       - name: Package for Intel
         run: COPYFILE_DISABLE=1 tar -czf Perch-macos-x86_64.tar.gz -C target Perch.app
 
+      # The engine alone, for a Mac that is a host. Signed ad hoc as the
+      # app is: Apple Silicon runs nothing unsigned.
+      - name: Build and package perchd
+        run: |
+          for pair in aarch64-apple-darwin:arm64 x86_64-apple-darwin:x86_64; do
+            triple="${pair%%:*}" arch="${pair##*:}"
+            cargo build --release --locked -p perchd --target "$triple"
+            bin="target/$triple/release/perchd"
+            codesign --force --sign - "$bin"
+            lipo -archs "$bin"
+            COPYFILE_DISABLE=1 tar -czf "perchd-macos-$arch.tar.gz" -C "target/$triple/release" perchd
+          done
+          target/aarch64-apple-darwin/release/perchd --version
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: Perch-macos-*.tar.gz
+          path: |
+            Perch-macos-*.tar.gz
+            perchd-macos-*.tar.gz
 
   # 22.04 rather than the latest, so the binary needs glibc 2.35, not
   # 24.04's 2.39, and runs on older distributions too.
@@ -145,8 +161,9 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             prerelease=(--prerelease)
           fi
-          sha256sum Perch-macos-*.tar.gz Perch-linux-*.tar.gz perchd-linux-*.tar.gz > SHA256SUMS
+          sha256sum Perch-macos-*.tar.gz Perch-linux-*.tar.gz perchd-linux-*.tar.gz \
+            perchd-macos-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
           gh release create "$GITHUB_REF_NAME" Perch-macos-*.tar.gz Perch-linux-*.tar.gz \
-            perchd-linux-*.tar.gz SHA256SUMS \
+            perchd-linux-*.tar.gz perchd-macos-*.tar.gz SHA256SUMS \
             --verify-tag --generate-notes "${prerelease[@]}"

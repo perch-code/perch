@@ -610,6 +610,24 @@ button to Settings when anything required is missing.
   of the question, when the repository has the commit grant: the session
   keeps the framing it began with, which may say to ask.
 
+- A host can be a Mac. `uname` saying Darwin picks
+  `perchd-macos-<arch>.tar.gz`, which the release now builds for both
+  processors and signs ad hoc; a `[remote] perchd` file may be a Mach-O,
+  thin or universal, and is checked against the host as an ELF is. The
+  scripts were POSIX already. `perchd serve` holds `caffeinate -i` on
+  itself there, or an idle Mac would sleep with runs under way.
+- `[remote] host` takes a port, `chris@devbox:2222` or as a URL. It is
+  split off wherever ssh is handed the host (`host_and_port`), since ssh
+  takes one only as `-p`; the config strips the scheme, so one form
+  reaches everything else, a Zed link included, whose URL it already is.
+- An app run from source builds its own `perchd` (`Source::Dev`). It
+  used to ask for its version's release, which a dev build is not, and
+  which v0.8.0 did not have. The dial can't name a build before it knows
+  what the host is, so the first try asks for one no host has; the
+  host's answer names its system, the install builds for it (cargo, or
+  cargo zigbuild across systems), and later dials name the build of the
+  binary built. A host that already has that build is not sent it again.
+
 ## Acceptance
 
 - `cargo tree -p perch-engine -e normal` names no floem, winit, gtk,

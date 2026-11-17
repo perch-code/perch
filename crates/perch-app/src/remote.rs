@@ -139,10 +139,12 @@ pub fn terminal_line(ssh: &str, host: &str, path: &Path) -> String {
         "cd -- {} && exec $SHELL -l",
         shell_quote(&path.to_string_lossy())
     );
+    let (host, port) = perch_engine::wire::remote::host_and_port(host);
+    let port = port.map(|port| format!(" -p {port}")).unwrap_or_default();
     format!(
-        "{} -t -- {} {}",
+        "{}{port} -t -- {} {}",
         shell_quote(ssh),
-        shell_quote(host),
+        shell_quote(&host),
         shell_quote(&there)
     )
 }
@@ -321,6 +323,11 @@ mod tests {
             line,
             r#"ssh -t -- chris@halo 'cd -- '\''/srv/it is here'\'' && exec $SHELL -l'"#
         );
+        // A port after the host is ssh's option.
+        assert_eq!(
+            terminal_line("ssh", "chris@halo:12354", Path::new("/srv")),
+            "ssh -p 12354 -t -- chris@halo 'cd -- /srv && exec $SHELL -l'"
+        );
         // What Terminal is told is AppleScript: its quotes and backslashes
         // escaped.
         let script = terminal_script(r#"ssh -t h 'cd "a\b"'"#);
@@ -374,6 +381,17 @@ mod tests {
                 ]
             )
         );
+    }
+
+    /// A host named with a user and a port is a URL's authority as it is.
+    #[test]
+    fn a_zed_url_carries_the_host_s_user_and_port() {
+        let (_, args) = editor_command(
+            "chris@halo:12354",
+            Path::new("/home/chris/Code/perch"),
+            Some(Path::new("zed")),
+        );
+        assert_eq!(args, ["ssh://chris@halo:12354/home/chris/Code/perch"]);
     }
 
     #[test]

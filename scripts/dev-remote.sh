@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Run this checkout's app on the Mac against an engine built from the same
-# commit on a Linux host, for working on Perch where the source and the
-# agents are on the host.
+# Run this checkout's app here against an engine built on a host from the
+# host's own checkout, for trying what was changed there: the commit that
+# checkout is on is fetched and checked out here first, so both sides are
+# the same source.
+#
+# A build run from source needs none of this to use a host: with only
+# [remote] host set, `cargo run` builds perchd from this checkout for the
+# host and installs it. This is for the host's checkout instead.
 #
 # Usage: scripts/dev-remote.sh <host> <checkout-on-host> [perch args...]
 #   scripts/dev-remote.sh halo '~/code/perch'
+#   scripts/dev-remote.sh chris@halo:2222 '~/code/perch'
 #
 # It fetches the host checkout's HEAD into this clone and checks it out
 # detached, builds perchd in the host's checkout, and runs the app here.
@@ -20,12 +26,21 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
-host="$1"
+# The host as [remote] host names it: no scheme, a port after it or not.
+host="${1#ssh://}"
+host="${host%/}"
 dir="${2%/}"
 shift 2
+# ssh takes a port only as an option.
+dest="$host"
+port=()
+if [[ "$host" =~ ^([^:]+):([0-9]+)$ ]]; then
+  dest="${BASH_REMATCH[1]}"
+  port=(-p "${BASH_REMATCH[2]}")
+fi
 
 # The same characters the app allows in a path it sends to the host.
 from_home="${dir#\~/}"
@@ -46,11 +61,11 @@ fi
 
 # In the host's login shell, for the PATH its profile sets (cargo's).
 on_host_run() {
-  ssh -o BatchMode=yes "$host" "exec \"\$SHELL\" -lc 'cd \"$on_host\" && $1'"
+  ssh ${port[@]+"${port[@]}"} -o BatchMode=yes "$dest" "exec \"\$SHELL\" -lc 'cd \"$on_host\" && $1'"
 }
 
 echo "dev-remote: fetching $host:$from_home"
-git fetch --quiet "$host:$from_home" HEAD
+GIT_SSH_COMMAND="ssh ${port[*]-}" git fetch --quiet "$dest:$from_home" HEAD
 git checkout --quiet --detach FETCH_HEAD
 commit="$(git rev-parse --short=12 HEAD)"
 echo "dev-remote: at $commit $(git log -1 --format=%s | cut -c1-72)"
@@ -97,6 +112,8 @@ NOTE
   exit 1
 }
 set_host="$(remote_value host)"
+set_host="${set_host#ssh://}"
+set_host="${set_host%/}"
 set_path="$(remote_value perchd_on_host)"
 if [[ -n "$(remote_value command)" ]]; then
   wrong "[remote] command is set, and the app runs that instead of perchd_on_host; take it out."

@@ -1084,14 +1084,16 @@ fn error_banner(page: Page) -> impl IntoView {
 fn banner_text(error: Option<String>, host_s: bool, mine_broken: bool) -> String {
     match error {
         Some(error) if host_s && mine_broken => format!(
-            "Perch can't use the host's config.toml: {error}. This Mac's doesn't parse either. \
+            "Perch can't use the host's config.toml: {error}. {}'s doesn't parse either. \
              Fix both in your editor. Until then Perch keeps the settings it read last, and \
-             they can't be changed here."
+             they can't be changed here.",
+            perch_engine::host::HERE_FIRST
         ),
         Some(error) if host_s => format!(
             "Perch can't use the host's config.toml: {error}. Fix it in your editor. Until \
-             then the engine keeps the settings it read last, and only this Mac's can be \
-             changed here."
+             then the engine keeps the settings it read last, and only {}'s can be \
+             changed here.",
+            perch_engine::host::HERE
         ),
         Some(error) => format!(
             "Perch can't use config.toml: {error}. Fix it in your editor. Until then Perch \
@@ -1236,9 +1238,14 @@ mod tests {
     #[test]
     fn the_banner_says_what_can_still_be_changed() {
         let error = || Some("line 1".to_string());
-        assert!(banner_text(error(), true, false).ends_with("only this Mac's can be changed here."));
+        use perch_engine::host::{HERE, HERE_FIRST};
+        assert!(banner_text(error(), true, false)
+            .ends_with(&format!("only {HERE}'s can be changed here.")));
         let both = banner_text(error(), true, true);
-        assert!(both.contains("This Mac's doesn't parse either."), "{both}");
+        assert!(
+            both.contains(&format!("{HERE_FIRST}'s doesn't parse either.")),
+            "{both}"
+        );
         assert!(both.ends_with("they can't be changed here."), "{both}");
         assert!(banner_text(error(), false, false).starts_with("Perch can't use config.toml"));
         assert_eq!(banner_text(None, true, true), "");

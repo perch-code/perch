@@ -100,6 +100,10 @@ pub enum Source {
     /// there from the source the app was built from. Nothing is uploaded:
     /// the host copies it into place itself.
     HostFile(String),
+    /// An app run from its source rather than installed: `perchd` is built
+    /// from the same source, the workspace at this path, for whatever the
+    /// host turns out to be, and uploaded. No release is that source.
+    Dev(PathBuf),
 }
 
 /// A host's processor, as Perch's releases name it.
@@ -117,11 +121,6 @@ impl Arch {
         }
     }
 
-    /// The release's tarball for it.
-    pub fn asset(self) -> String {
-        format!("perchd-linux-{}.tar.gz", self.name())
-    }
-
     /// Its number in an ELF header's `e_machine`.
     fn elf_machine(self) -> u16 {
         match self {
@@ -129,24 +128,228 @@ impl Arch {
             Arch::Arm64 => 183,
         }
     }
+
+    /// Its number in a Mach-O header's `cputype`.
+    fn mach_cpu(self) -> u32 {
+        match self {
+            Arch::X86_64 => 0x0100_0007,
+            Arch::Arm64 => 0x0100_000c,
+        }
+    }
 }
 
-/// The processor `uname -s` and `uname -m` name, or why Perch has no
-/// `perchd` for it.
-pub fn platform(os: &str, machine: &str) -> Result<Arch, String> {
-    match (os, machine) {
-        ("Linux", "x86_64" | "amd64") => Ok(Arch::X86_64),
-        ("Linux", "aarch64" | "arm64") => Ok(Arch::Arm64),
+/// A host's system: the ones Perch builds `perchd` for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Linux,
+    MacOs,
+}
+
+/// What a host is, as far as which `perchd` runs there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Platform {
+    pub os: Os,
+    pub arch: Arch,
+}
+
+impl Platform {
+    pub const fn new(os: Os, arch: Arch) -> Self {
+        Platform { os, arch }
+    }
+
+    /// As a reader would say it: "Linux on x86_64".
+    pub fn name(self) -> String {
+        let os = match self.os {
+            Os::Linux => "Linux",
+            Os::MacOs => "macOS",
+        };
+        format!("{os} on {}", self.arch.name())
+    }
+
+    /// The release's tarball for it.
+    pub fn asset(self) -> String {
+        let os = match self.os {
+            Os::Linux => "linux",
+            Os::MacOs => "macos",
+        };
+        format!("perchd-{os}-{}.tar.gz", self.arch.name())
+    }
+}
+
+impl Platform {
+    /// What this machine is, when it is one Perch builds `perchd` for.
+    pub fn here() -> Option<Platform> {
+        let os = match std::env::consts::OS {
+            "linux" => Os::Linux,
+            "macos" => Os::MacOs,
+            _ => return None,
+        };
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => Arch::X86_64,
+            "aarch64" => Arch::Arm64,
+            _ => return None,
+        };
+        Some(Platform::new(os, arch))
+    }
+}
+
+/// How `perchd` is built from source for a host: cargo's subcommand, and
+/// the target it is told, none for this machine's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevBuild {
+    /// `build`, or `zigbuild` where the host's system is not this one's:
+    /// a Linux `perchd` from a Mac needs a C compiler and a linker for
+    /// Linux, which zig is.
+    pub subcommand: &'static str,
+    pub triple: Option<&'static str>,
+}
+
+/// How to build `perchd` here for `platform`. Linux's is against musl, as
+/// the release's is, so it runs whatever the host's libc.
+pub fn dev_build_for(platform: Platform, here: Option<Platform>) -> DevBuild {
+    if here == Some(platform) {
+        return DevBuild {
+            subcommand: "build",
+            triple: None,
+        };
+    }
+    let triple = match (platform.os, platform.arch) {
+        (Os::Linux, Arch::X86_64) => "x86_64-unknown-linux-musl",
+        (Os::Linux, Arch::Arm64) => "aarch64-unknown-linux-musl",
+        (Os::MacOs, Arch::X86_64) => "x86_64-apple-darwin",
+        (Os::MacOs, Arch::Arm64) => "aarch64-apple-darwin",
+    };
+    // Another processor of this machine's own system is the toolchain's
+    // to build; another system needs zig.
+    let same_system = here.is_some_and(|here| here.os == platform.os);
+    DevBuild {
+        subcommand: if same_system { "build" } else { "zigbuild" },
+        triple: Some(triple),
+    }
+}
+
+/// Where cargo puts what it builds in `workspace`.
+fn target_dir(workspace: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => workspace.join(dir),
+        None => workspace.join("target"),
+    }
+}
+
+/// The `perchd` a dev build of `workspace` makes for `platform`.
+pub fn dev_binary(workspace: &Path, platform: Platform) -> PathBuf {
+    let mut path = target_dir(workspace);
+    if let Some(triple) = dev_build_for(platform, Platform::here()).triple {
+        path.push(triple);
+    }
+    path.join("debug").join("perchd")
+}
+
+/// What a failed build means for the reader: the tool to install when
+/// that is what cargo said was missing, else cargo's last error.
+pub fn dev_build_failure(build: DevBuild, platform: Platform, said: &str) -> String {
+    let what = format!("Couldn't build perchd for {}", platform.name());
+    if said.contains("no such command: `zigbuild`")
+        || said.contains("no such subcommand: `zigbuild`")
+    {
+        return format!(
+            "{what}: building it from here needs zig and cargo-zigbuild. Install them with: brew install zig && cargo install cargo-zigbuild"
+        );
+    }
+    if said.contains("zig") && (said.contains("not found") || said.contains("No such file")) {
+        return format!("{what}: cargo-zigbuild found no zig. Install it with: brew install zig");
+    }
+    if let Some(triple) = build.triple {
+        if said.contains("target may not be installed")
+            || said.contains("can't find crate for `core`")
+        {
+            return format!(
+                "{what}: the Rust target is not installed. Install it with: rustup target add {triple}"
+            );
+        }
+    }
+    let last = said
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with("error"))
+        .or_else(|| {
+            said.lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+        })
+        .unwrap_or("cargo said nothing");
+    format!("{what}: {last}")
+}
+
+/// Build `perchd` from the source in `workspace` for `platform`, and give
+/// where it is. Cargo's own incremental build makes this quick when
+/// nothing changed.
+pub async fn dev_build(workspace: &Path, platform: Platform) -> Result<PathBuf, Failed> {
+    let build = dev_build_for(platform, Platform::here());
+    let mut command = tokio::process::Command::new("cargo");
+    command
+        .current_dir(workspace)
+        .args([build.subcommand, "-p", "perchd"]);
+    if let Some(triple) = build.triple {
+        command.args(["--target", triple]);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    tracing::info!(
+        platform = platform.name(),
+        subcommand = build.subcommand,
+        triple = build.triple,
+        "building perchd from source"
+    );
+    let output = tokio::time::timeout(std::time::Duration::from_secs(1800), command.output())
+        .await
+        .map_err(|_| {
+            Failed::now(format!(
+                "Building perchd for {} took over half an hour.",
+                platform.name()
+            ))
+        })?
+        .map_err(|e| Failed::lasting(format!("Could not run cargo to build perchd: {e}")))?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        for line in said.lines().rev().take(20).collect::<Vec<_>>().iter().rev() {
+            tracing::warn!("cargo: {line}");
+        }
+        return Err(Failed::lasting(dev_build_failure(build, platform, &said)));
+    }
+    Ok(dev_binary(workspace, platform))
+}
+
+/// The host `uname -s` and `uname -m` name, or why Perch has no `perchd`
+/// for it.
+pub fn platform(os: &str, machine: &str) -> Result<Platform, String> {
+    let arch = match machine {
+        "x86_64" | "amd64" => Some(Arch::X86_64),
+        "aarch64" | "arm64" => Some(Arch::Arm64),
+        _ => None,
+    };
+    let system = match os {
+        "Linux" => Some(Os::Linux),
+        "Darwin" => Some(Os::MacOs),
+        _ => None,
+    };
+    match (system, arch) {
+        (Some(os), Some(arch)) => Ok(Platform::new(os, arch)),
         _ => Err(format!(
-            "The host is {os} on {machine}, and Perch has perchd only for Linux on x86_64 and arm64. Install perchd there by hand and set [remote] command to run it."
+            "The host is {os} on {machine}, and Perch has perchd only for Linux and macOS, on x86_64 and arm64. Install perchd there by hand and set [remote] command to run it."
         )),
     }
 }
 
 /// What a line the host said asks for: None when it is not the line
-/// saying `perchd` is missing, else the processor to install for, or why
-/// there is none.
-pub fn install_line(line: &str) -> Option<Result<Arch, String>> {
+/// saying `perchd` is missing, else what to install for, or why there is
+/// none.
+pub fn install_line(line: &str) -> Option<Result<Platform, String>> {
     let rest = line.trim().strip_prefix(INSTALL_SAID)?;
     let mut words = rest.split_whitespace();
     let (os, machine) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
@@ -324,6 +527,17 @@ mv -f "$t" "$d/perchd-$1" || {
 }
 echo "perch-installed: $d/perchd-$1""#;
 
+/// Whether the `perchd` of the build given as `$1` is installed, by how
+/// it exits: asked before an upload that would only replace it with
+/// itself.
+const HAS: &str = r#"d="${PERCH_HOME:-$HOME/.perch}/bin"
+if [ -f "$d/perchd-$1" ] && [ -x "$d/perchd-$1" ]; then
+  touch "$d/perchd-$1" 2>/dev/null || :
+  echo "perch-has: $1"
+  exit 0
+fi
+exit 1"#;
+
 /// What ssh is given to run `script` with `args` on the host: the login
 /// shell, whichever it is, runs `/bin/sh -c "<script>" <name> <args>`.
 ///
@@ -366,6 +580,12 @@ pub fn upload_command(build: &str) -> String {
         UPLOAD,
         &[build, VERSION, &PROTOCOL.to_string()],
     )
+}
+
+/// What ssh runs on the host to say whether the `perchd` of `build` is
+/// installed.
+pub fn has_command(build: &str) -> String {
+    in_login_sh("perch-has", HAS, &[build])
 }
 
 /// What ssh runs on the host to put the `perchd` at `path` there in place,
@@ -526,16 +746,57 @@ fn tar_size(field: &[u8]) -> Option<u64> {
     u64::from_str_radix(digits, 8).ok()
 }
 
-/// The processor a Linux binary is for, or why it is not one.
-pub fn elf_arch(binary: &[u8]) -> Result<Arch, String> {
-    if binary.len() < 20 || &binary[..4] != b"\x7fELF" {
-        return Err("it is not a Linux binary".to_string());
+/// What a binary runs on, or why it is no `perchd` of Perch's: a Linux
+/// binary's one processor, a macOS one's, or each of a universal macOS
+/// binary's.
+pub fn built_for(binary: &[u8]) -> Result<Vec<Platform>, String> {
+    let both = [Arch::X86_64, Arch::Arm64];
+    let word = |at: usize, big: bool| {
+        binary.get(at..at + 4).map(|bytes| {
+            let bytes = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            if big {
+                u32::from_be_bytes(bytes)
+            } else {
+                u32::from_le_bytes(bytes)
+            }
+        })
+    };
+    let mac = |cpu: u32| {
+        both.into_iter()
+            .find(|arch| arch.mach_cpu() == cpu)
+            .map(|arch| Platform::new(Os::MacOs, arch))
+    };
+    let neither = |what: String| format!("it is a binary for neither x86_64 nor arm64 ({what})");
+    match binary.get(..4) {
+        Some(b"\x7fELF") if binary.len() >= 20 => {
+            let machine = u16::from_le_bytes([binary[18], binary[19]]);
+            both.into_iter()
+                .find(|arch| arch.elf_machine() == machine)
+                .map(|arch| vec![Platform::new(Os::Linux, arch)])
+                .ok_or_else(|| neither(format!("machine {machine}")))
+        }
+        // A 64-bit Mach-O, as either processor writes it.
+        Some([0xcf, 0xfa, 0xed, 0xfe]) => {
+            let cpu = word(4, false).unwrap_or(0);
+            mac(cpu)
+                .map(|platform| vec![platform])
+                .ok_or_else(|| neither(format!("cpu {cpu:#x}")))
+        }
+        // A universal one: a count, then twenty bytes for each.
+        Some([0xca, 0xfe, 0xba, 0xbe]) => {
+            let count = word(4, true).unwrap_or(0).min(8) as usize;
+            let built: Vec<Platform> = (0..count)
+                .filter_map(|n| word(8 + 20 * n, true))
+                .filter_map(mac)
+                .collect();
+            if built.is_empty() {
+                Err(neither("a universal binary with neither in it".to_string()))
+            } else {
+                Ok(built)
+            }
+        }
+        _ => Err("it is neither a Linux nor a macOS binary".to_string()),
     }
-    let machine = u16::from_le_bytes([binary[18], binary[19]]);
-    [Arch::X86_64, Arch::Arm64]
-        .into_iter()
-        .find(|arch| arch.elf_machine() == machine)
-        .ok_or_else(|| format!("it is a binary for neither x86_64 nor arm64 (machine {machine})"))
 }
 
 /// The `perchd` in what `[remote] perchd` names: the file itself, or the
@@ -546,7 +807,7 @@ pub fn binary_in(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     } else {
         bytes
     };
-    elf_arch(&binary)?;
+    built_for(&binary)?;
     Ok(binary)
 }
 
@@ -618,8 +879,8 @@ fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// The release's `perchd` for `arch`, from the cache when what is there
 /// checks out, else downloaded and kept.
-pub async fn release_binary(arch: Arch) -> Result<Vec<u8>, Failed> {
-    let (dir, asset) = (cache_dir(), arch.asset());
+pub async fn release_binary(platform: Platform) -> Result<Vec<u8>, Failed> {
+    let (dir, asset) = (cache_dir(), platform.asset());
     let (sums_path, tarball_path) = (dir.join("SHA256SUMS"), dir.join(&asset));
     let cached = {
         let (sums_path, tarball_path, asset) =
@@ -639,8 +900,8 @@ pub async fn release_binary(arch: Arch) -> Result<Vec<u8>, Failed> {
         None => {
             let missing = |name: &str| {
                 Failed::lasting(format!(
-                    "Perch's v{VERSION} release has no {name} to download. Set [remote] perchd to a perchd built for Linux on {}, or [remote] command to run one installed by hand.",
-                    arch.name()
+                    "Perch's v{VERSION} release has no {name} to download. Set [remote] perchd to a perchd built for {}, or [remote] command to run one installed by hand.",
+                    platform.name()
                 ))
             };
             let fetch = |name: String| async move {
@@ -750,6 +1011,29 @@ pub async fn upload(host: &str, build: &str, binary: Vec<u8>) -> Result<(), Fail
     }))
 }
 
+/// Whether `host` has the `perchd` of `build` installed. A host that
+/// can't be asked has not, as far as an install goes: the upload says why.
+pub async fn has_build(host: &str, build: &str) -> bool {
+    if !plain_word(build) {
+        return false;
+    }
+    let run = tokio::process::Command::new(ssh_program())
+        .args(super::remote::ssh_args(host, &has_command(build)))
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+        Ok(Ok(output)) => {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.trim() == format!("perch-has: {build}"))
+        }
+        _ => false,
+    }
+}
+
 /// Put the `perchd` at `path` on `host` in place there, if its build is
 /// not already, and give its build: an ssh of its own before the one that
 /// connects, since the build is in the name the connection runs.
@@ -801,27 +1085,35 @@ pub(crate) mod tests {
 
     #[test]
     fn uname_names_a_release_s_processor_or_says_what_to_do() {
-        assert_eq!(platform("Linux", "x86_64"), Ok(Arch::X86_64));
-        assert_eq!(platform("Linux", "aarch64"), Ok(Arch::Arm64));
-        assert_eq!(platform("Linux", "arm64"), Ok(Arch::Arm64));
-        let why = platform("Darwin", "arm64").unwrap_err();
-        assert!(why.contains("Darwin on arm64"), "{why}");
+        let (linux, mac) = (
+            |arch| Platform::new(Os::Linux, arch),
+            |arch| Platform::new(Os::MacOs, arch),
+        );
+        assert_eq!(platform("Linux", "x86_64"), Ok(linux(Arch::X86_64)));
+        assert_eq!(platform("Linux", "aarch64"), Ok(linux(Arch::Arm64)));
+        assert_eq!(platform("Linux", "arm64"), Ok(linux(Arch::Arm64)));
+        assert_eq!(platform("Darwin", "arm64"), Ok(mac(Arch::Arm64)));
+        assert_eq!(platform("Darwin", "x86_64"), Ok(mac(Arch::X86_64)));
+        let why = platform("FreeBSD", "amd64").unwrap_err();
+        assert!(why.contains("FreeBSD on amd64"), "{why}");
         assert!(why.contains("[remote] command"), "{why}");
         assert!(platform("Linux", "riscv64").is_err());
         assert_eq!(
             install_line("perch-install: Linux x86_64"),
-            Some(Ok(Arch::X86_64))
+            Some(Ok(linux(Arch::X86_64)))
         );
         assert_eq!(
-            install_line("  perch-install: Linux aarch64 \n"),
-            Some(Ok(Arch::Arm64))
+            install_line("  perch-install: Darwin arm64 \n"),
+            Some(Ok(mac(Arch::Arm64)))
         );
         assert!(matches!(
             install_line("perch-install: FreeBSD amd64"),
             Some(Err(_))
         ));
         assert_eq!(install_line("ssh: Could not resolve hostname halo"), None);
-        assert_eq!(Arch::Arm64.asset(), "perchd-linux-arm64.tar.gz");
+        assert_eq!(linux(Arch::Arm64).asset(), "perchd-linux-arm64.tar.gz");
+        assert_eq!(mac(Arch::X86_64).asset(), "perchd-macos-x86_64.tar.gz");
+        assert_eq!(mac(Arch::Arm64).name(), "macOS on arm64");
     }
 
     #[test]
@@ -864,7 +1156,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_scripts_need_no_quote_any_login_shell_reads_its_own_way() {
-        for script in [CONNECT, UPLOAD, STAGE] {
+        for script in [CONNECT, UPLOAD, STAGE, HAS] {
             assert!(!script.contains(['\'', '\\', '`', '!']), "{script}");
         }
         let command = connect_command("0.9.0", Replace::No);
@@ -989,11 +1281,34 @@ pub(crate) mod tests {
         let mut empty = entry("README", b'0', b"hi");
         empty.extend([0u8; 1024]);
         assert!(extract_perchd(&gzip(&empty)).is_err());
-        let mac = binary_in(b"\xcf\xfa\xed\xfe macho".to_vec()).unwrap_err();
-        assert!(mac.contains("not a Linux binary"), "{mac}");
+        let text = binary_in(b"#!/bin/sh\necho perchd\n".to_vec()).unwrap_err();
+        assert!(
+            text.contains("neither a Linux nor a macOS binary"),
+            "{text}"
+        );
         assert!(read_file(&dir.path().join("nothing")).is_err());
-        assert_eq!(elf_arch(&elf(183)), Ok(Arch::Arm64));
-        assert!(elf_arch(&elf(40)).is_err());
+        let (linux, mac) = (
+            |arch| Platform::new(Os::Linux, arch),
+            |arch| Platform::new(Os::MacOs, arch),
+        );
+        assert_eq!(built_for(&elf(183)), Ok(vec![linux(Arch::Arm64)]));
+        assert!(built_for(&elf(40)).is_err());
+        // A Mach-O names its processor after its magic; a universal one
+        // lists each it holds.
+        let mut thin = b"\xcf\xfa\xed\xfe".to_vec();
+        thin.extend(0x0100_000cu32.to_le_bytes());
+        assert_eq!(built_for(&thin), Ok(vec![mac(Arch::Arm64)]));
+        let mut fat = b"\xca\xfe\xba\xbe".to_vec();
+        fat.extend(2u32.to_be_bytes());
+        for cpu in [0x0100_0007u32, 0x0100_000c] {
+            fat.extend(cpu.to_be_bytes());
+            fat.extend([0u8; 16]);
+        }
+        assert_eq!(
+            built_for(&fat),
+            Ok(vec![mac(Arch::X86_64), mac(Arch::Arm64)])
+        );
+        assert!(built_for(b"\xcf\xfa\xed\xfe\x07\x00\x00\x00").is_err());
     }
 
     /// A tarball made by the system's own tar, as the release's is, reads.
@@ -1209,6 +1524,109 @@ pub(crate) mod tests {
                 "{shell}: {said}"
             );
             assert_eq!(names().len(), 2, "{shell}: {:?}", names());
+        }
+    }
+
+    /// A dev build's `perchd` is the toolchain's own for this machine and
+    /// for another processor of its system, and zig's for another system,
+    /// against musl for Linux; what cargo says is missing is what the
+    /// reader is told to install.
+    #[test]
+    fn perchd_is_built_from_source_for_what_the_host_is() {
+        let (mac, linux) = (
+            |arch| Platform::new(Os::MacOs, arch),
+            |arch| Platform::new(Os::Linux, arch),
+        );
+        let here = Some(mac(Arch::Arm64));
+        assert_eq!(
+            dev_build_for(mac(Arch::Arm64), here),
+            DevBuild {
+                subcommand: "build",
+                triple: None
+            }
+        );
+        assert_eq!(
+            dev_build_for(mac(Arch::X86_64), here),
+            DevBuild {
+                subcommand: "build",
+                triple: Some("x86_64-apple-darwin")
+            }
+        );
+        let cross = dev_build_for(linux(Arch::X86_64), here);
+        assert_eq!(
+            cross,
+            DevBuild {
+                subcommand: "zigbuild",
+                triple: Some("x86_64-unknown-linux-musl")
+            }
+        );
+        assert_eq!(
+            dev_build_for(linux(Arch::Arm64), Some(linux(Arch::X86_64))),
+            DevBuild {
+                subcommand: "build",
+                triple: Some("aarch64-unknown-linux-musl")
+            }
+        );
+        assert_eq!(dev_build_for(mac(Arch::Arm64), None).subcommand, "zigbuild");
+
+        let host = linux(Arch::X86_64);
+        let no_zigbuild = dev_build_failure(cross, host, "error: no such command: `zigbuild`\n");
+        assert!(
+            no_zigbuild.contains("cargo install cargo-zigbuild"),
+            "{no_zigbuild}"
+        );
+        let no_target = dev_build_failure(
+            cross,
+            host,
+            "error[E0463]: can't find crate for `core`\n  = note: the `x86_64-unknown-linux-musl` target may not be installed\n",
+        );
+        assert!(
+            no_target.ends_with("rustup target add x86_64-unknown-linux-musl"),
+            "{no_target}"
+        );
+        let broken = dev_build_failure(
+            cross,
+            host,
+            "   Compiling perchd\nerror[E0425]: cannot find value `x`\nerror: could not compile `perchd`\n",
+        );
+        assert_eq!(
+            broken,
+            "Couldn't build perchd for Linux on x86_64: error: could not compile `perchd`"
+        );
+    }
+
+    /// The script that says whether a build is installed, in each login
+    /// shell: it is only once the file is there to run.
+    #[test]
+    fn a_host_says_whether_it_has_a_build() {
+        use std::os::unix::fs::PermissionsExt;
+        for shell in shells() {
+            let home = tempfile::tempdir().unwrap();
+            let has = |build: &str| {
+                std::process::Command::new(&shell)
+                    .arg("-c")
+                    .arg(has_command(build))
+                    .env_clear()
+                    .env("HOME", home.path())
+                    .env("SHELL", &shell)
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()
+                    .unwrap()
+            };
+            assert!(!has("0.9.0-0123456789ab").status.success(), "{shell}");
+            let bin = home.path().join(".perch/bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let file = bin.join("perchd-0.9.0-0123456789ab");
+            std::fs::write(&file, "").unwrap();
+            assert!(!has("0.9.0-0123456789ab").status.success(), "{shell}");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let there = has("0.9.0-0123456789ab");
+            assert!(there.status.success(), "{shell}");
+            assert_eq!(
+                String::from_utf8_lossy(&there.stdout).trim(),
+                "perch-has: 0.9.0-0123456789ab"
+            );
+            assert!(!has("0.9.0").status.success(), "{shell}");
         }
     }
 

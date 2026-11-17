@@ -1500,10 +1500,10 @@ lock and run beside an engine.
 `perchd` runs the engine with no window, for an always-on machine the Mac
 reaches over ssh. It is built from the same crates as the app, without a UI
 toolkit, so it needs no GTK. Releases carry it for Linux as
-`perchd-linux-<arch>.tar.gz`, for x86_64 and arm64, with the SHA-256 of
-every asset in the release's `SHA256SUMS`. It is built against musl and
-linked statically, so it runs on any Linux of its architecture, Alpine
-included, whatever its libc. The app installs it on a host itself (see
+`perchd-linux-<arch>.tar.gz` and for a Mac as `perchd-macos-<arch>.tar.gz`,
+for x86_64 and arm64, with the SHA-256 of every asset in the release's
+`SHA256SUMS`. Linux's is built against musl and linked statically, so it
+runs on any Linux of its architecture, Alpine included, whatever its libc. The app installs it on a host itself (see
 [Installing perchd](#installing-perchd)); to run one by hand, put it in
 `~/.local/bin`.
 
@@ -1589,20 +1589,33 @@ back while it is hidden.
 
 ### Setting up a host
 
-The host is Linux on x86_64 or arm64, always on, and reachable from the
-Mac with `ssh <host>`. The app installs `perchd` there itself (see
+The host is Linux or a Mac, on x86_64 or arm64, always on, and reachable
+with `ssh <host>`. The app installs `perchd` there itself (see
 [Installing perchd](#installing-perchd)), so nothing of Perch's has to be
 put on it first. On it:
 
-1. Install bubblewrap and socat (`apt install bubblewrap socat`, or your
-   distribution's), which Claude Code's sandbox needs on Linux.
+1. On Linux, install bubblewrap and socat (`apt install bubblewrap socat`,
+   or your distribution's), which Claude Code's sandbox needs there.
 2. Sign in to what the engine uses, as the user it runs as: `gh auth login`
    (or `token` in its config.toml), and each agent CLI you run, `claude`,
    `codex` or `agy`. Nothing is copied from the Mac.
 
-Then on the Mac, set `[remote] host` in `~/.perch/config.toml` to the name
-you `ssh` to, or type it into Settings > General > Engine, and restart Perch.
-Once it connects, the app says what of the above the host still lacks.
+Then where the app runs, set `[remote] host` in `~/.perch/config.toml` to
+the name you `ssh` to, or type it into Settings > General > Engine, and
+restart Perch. Once it connects, the app says what of the above the host
+still lacks.
+
+The host is named as ssh is given it: a name from `~/.ssh/config`, or
+`user@host`. A port goes after it, `chris@devbox:2222`, or the whole can be
+a URL, `ssh://chris@devbox:2222`; ssh itself takes a port only as an
+option, so Perch passes it as one, to the connection, the install, Open in
+Terminal and the editor's link alike. An IPv6 address with a port is in
+brackets, `[fe80::1]:2222`. ssh must connect with no question asked, a
+password or a host key to accept: Perch runs it in batch mode.
+
+A Mac that is a host is kept from idle sleep for as long as its engine
+runs (`perchd` holds `caffeinate -i` on itself), since its work is done
+with nobody at it. Shutting a laptop's lid still sleeps it.
 
 Repositories are added from the app (see [Adding a repository on a
 host](#adding-a-repository-on-a-host)); nothing has to be cloned or
@@ -1659,10 +1672,11 @@ is not there: on the first connection, and after each update of the app.
   -m>` to stderr and exits 97.
 - On that line the app installs and connects again at once, outside the
   waits between tries. The strip at the foot of the window says
-  "Installing perchd 0.9.0 on <host>…" meanwhile. Linux on `x86_64`, or on
-  `aarch64` or `arm64`, has a release's `perchd`; any other host says what
+  "Installing perchd 0.9.0 on <host>…" meanwhile. Linux and macOS, on
+  `x86_64` or on `aarch64` or `arm64`, have a release's `perchd`; any other host says what
   it is and to install `perchd` by hand and set `[remote] command`.
-- The app downloads `perchd-linux-<arch>.tar.gz` and `SHA256SUMS` from
+- The app downloads `perchd-linux-<arch>.tar.gz`, or `perchd-macos-<arch>.tar.gz`
+  for a Mac, and `SHA256SUMS` from
   the release of its own version on GitHub, with no token, checks the
   tarball against the sums, keeps both in `~/.perch/perchd/<version>/` on
   the Mac, and takes `perchd` out of the tarball. A release with no such
@@ -1684,6 +1698,29 @@ whose release has none. Its `<build>` is the app's version and the first
 binary is installed again on the next connection. A tarball and the
 binary in it are the same build. It has to be built for the host's
 processor and name the app's version and protocol.
+
+An app run from its source, as under `cargo run`, downloads nothing: no
+release is that source. It is told apart from an installed one as the
+updater tells it, by having no bundle around it, with the workspace it was
+built from still there. On the host's `perch-install` line it builds
+`perchd` from that workspace for what the host is, then uploads it as a
+`[remote] perchd` file is, under the same kind of build name. The strip
+says "Installing perchd 0.9.0 from source on <host>…" through both.
+
+- For this machine's own system and processor, `cargo build -p perchd`.
+  For another processor of the same system, the same with `--target`.
+- For another system, a Linux host from a Mac say, `cargo zigbuild -p
+  perchd --target <arch>-unknown-linux-musl`: zig is the C compiler and
+  linker for the host. It needs zig, cargo-zigbuild and the Rust target
+  (`brew install zig`, `cargo install cargo-zigbuild`, `rustup target add
+  <triple>`); when one is missing the strip says which, with the command.
+- Each launch builds again, which cargo makes quick when nothing changed,
+  and asks the host whether it has that build before uploading it, so an
+  unchanged engine is not sent twice. A change to the source is a new
+  build, which replaces the host's engine as an update does.
+
+`[remote] perchd`, `perchd_on_host` or `command`, when set, are used
+instead.
 
 `[remote] perchd_on_host` names a `perchd` that is already on the host,
 and wins over `[remote] perchd`: one built there, from the source the app

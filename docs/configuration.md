@@ -55,7 +55,7 @@ repository's `github` and `root`.
 | `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |
 | `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |
 | `clone_root` | `~` | The folder a repository added by its name is cloned into, such as `"~/Code"`; read by an engine on a host, which is where repositories are added by name |
-| `[remote] host` | none | An SSH host whose `perchd` the app uses instead of an engine of its own; applies after a restart |
+| `[remote] host` | none | An SSH host, Linux or a Mac, whose `perchd` the app uses instead of an engine of its own, as ssh is given it, with a port after it if it has one (`"chris@devbox:2222"`); applies after a restart |
 | `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app installs its own `perchd` there, runs that, and replaces an older engine it finds running |
 | `[remote] perchd` | none | A Linux `perchd`, or a release tarball of one, on the Mac, for the app to install on the host instead of downloading the release's |
 | `[remote] perchd_on_host` | none | A Linux `perchd` on the host, such as `"~/code/perch/target/debug/perchd"`, for the host to put in place itself: one built there from the source the app was built from |

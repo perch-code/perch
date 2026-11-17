@@ -752,9 +752,11 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
                 if choice().is_none() {
                     "Needs Claude Code, Codex, or agy installed.".to_string()
                 } else {
-                    "It reads Perch's logs and runs read-only commands on this Mac, offline. \
-                     Its notes go in the preview."
-                        .to_string()
+                    format!(
+                        "It reads Perch's logs and runs read-only commands on {}, offline. \
+                         Its notes go in the preview.",
+                        perch_engine::host::HERE
+                    )
                 }
             })
             .style(|s| {
@@ -1003,7 +1005,7 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
         vec![
             header(
                 || "Getting your report ready".to_string(),
-                || "Nothing has left this Mac yet.".to_string(),
+                || format!("Nothing has left {} yet.", perch_engine::host::HERE),
                 Empty::new(),
             )
             .into_any(),

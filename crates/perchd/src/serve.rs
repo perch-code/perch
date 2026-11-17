@@ -120,6 +120,27 @@ pub fn one_line(why: &str) -> String {
     why.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// On a Mac, hold off idle sleep for as long as the engine runs: a host
+/// is there to keep working with nobody at it, and a Mac left alone
+/// sleeps, runs and all. `caffeinate` holds the assertion and watches this
+/// process, so it lets go when the engine exits however it does. A lid
+/// shut still sleeps the machine. Linux hosts sleep only when told to.
+fn stay_awake() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let held = std::process::Command::new("/usr/bin/caffeinate")
+        .args(["-i", "-w", &std::process::id().to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match held {
+        Ok(_) => tracing::info!("holding off idle sleep while the engine runs"),
+        Err(error) => tracing::warn!(%error, "could not hold off idle sleep"),
+    }
+}
+
 fn serve() -> Result<(), Failed> {
     // The home first: a second engine is turned away before it touches
     // the socket the first one listens on.
@@ -163,6 +184,7 @@ fn serve() -> Result<(), Failed> {
     // perchd keeps no settings of its own beyond the engine's.
     unstarted.start(|_| {});
     tracing::info!(socket = %socket.display(), "listening");
+    stay_awake();
     let _ = std::fs::remove_file(failed_path());
     runtime.spawn(accept(listener, engine.clone()));
 

@@ -15,6 +15,20 @@ use std::time::Duration;
 
 use perch_github::Config;
 
+/// What the machine the app runs on is called to its reader, within a
+/// sentence and at the start of one: a Mac is a Mac, and Perch runs on
+/// Linux too.
+pub const HERE: &str = if cfg!(target_os = "macos") {
+    "this Mac"
+} else {
+    "this computer"
+};
+pub const HERE_FIRST: &str = if cfg!(target_os = "macos") {
+    "This Mac"
+} else {
+    "This computer"
+};
+
 /// What the check for a repository on the host is called.
 pub const REPOSITORIES: &str = "Repositories";
 

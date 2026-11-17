@@ -58,7 +58,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::provision::{self, Arch, Failed, Replace, Source};
+use super::provision::{self, Failed, Platform, Replace, Source};
 use super::{handshake, WireError, PROTOCOL, VERSION};
 use crate::backend::client::Navigations;
 use crate::backend::update::{self, Releases};
@@ -120,7 +120,7 @@ pub type Dial = Box<dyn FnMut(Replace) -> BoxFuture<Result<Dialed, String>> + Se
 /// How `perchd` is put on the host, for a try that ended with the host
 /// saying it has none, for the processor it named: the build it installs,
 /// said at once, and the install.
-pub type Install = Box<dyn FnMut(Arch) -> (String, BoxFuture<Result<(), Failed>>) + Send>;
+pub type Install = Box<dyn FnMut(Platform) -> (String, BoxFuture<Result<(), Failed>>) + Send>;
 
 /// The waits between tries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -850,7 +850,8 @@ pub fn other_said(host: &str, other: &OtherEngine) -> String {
     } = other;
     if *newer {
         return format!(
-            "{host}'s engine is perchd {engine}, newer than this app's {wanted}. Update Perch on this Mac."
+            "{host}'s engine is perchd {engine}, newer than this app's {wanted}. Update Perch on {}.",
+            crate::host::HERE
         );
     }
     let plural = |n: usize| if n == 1 { "" } else { "s" };
@@ -889,7 +890,7 @@ async fn install_if_asked(
         ))),
         (Ok(arch), None) => {
             let (build, installed) = install(arch);
-            tracing::info!(host, build, arch = arch.name(), "installing perchd");
+            tracing::info!(host, build, platform = arch.name(), "installing perchd");
             installing(&build);
             installed.await.map(|()| {
                 tracing::info!(host, build, "installed perchd");
@@ -1078,30 +1079,58 @@ pub fn in_login_shell(command: &str) -> String {
 /// in: a host whose key ssh has not seen, or a key with no agent to
 /// unlock it, fails the try with ssh's reason.
 pub fn ssh_args(host: &str, remote: &str) -> Vec<String> {
-    [
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=3",
-        "-o",
-        "ForwardAgent=no",
-        "-o",
-        "ForwardX11=no",
-        "-o",
-        "ClearAllForwardings=yes",
-        "--",
-        host,
-        remote,
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    let (host, port) = host_and_port(host);
+    let port = port.map(|port| port.to_string());
+    port.iter()
+        .flat_map(|port| ["-p", port.as_str()])
+        .chain(SSH_OPTIONS)
+        .chain(["--", host.as_str(), remote])
+        .map(str::to_string)
+        .collect()
 }
+
+/// A host as it is named in `[remote] host`, apart from the port after
+/// it: `chris@halo:2222` is `chris@halo` and 2222. ssh takes a port only
+/// as an option, so everything that hands ssh the host goes through here.
+/// An IPv6 address has a port only in brackets, `[::1]:2222`, since its
+/// own colons could be read as one; ssh is given it without them.
+pub fn host_and_port(host: &str) -> (String, Option<u16>) {
+    if let Some((before, after)) = host.rsplit_once(']') {
+        if let Some((user, address)) = before.split_once('[') {
+            let port = after.strip_prefix(':').and_then(|port| port.parse().ok());
+            if after.is_empty() || port.is_some() {
+                return (format!("{user}{address}"), port);
+            }
+        }
+        return (host.to_string(), None);
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) if !name.is_empty() && !name.contains(':') => match port.parse() {
+            Ok(port) => (name.to_string(), Some(port)),
+            Err(_) => (host.to_string(), None),
+        },
+        _ => (host.to_string(), None),
+    }
+}
+
+/// The options every ssh the app starts for the engine is given.
+const SSH_OPTIONS: [&str; 15] = [
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "ForwardX11=no",
+    "-o",
+    "ClearAllForwardings=yes",
+];
 
 /// The remote line ssh runs for `bridge`, by `build` when it is
 /// installed, replacing another build as `replace` says.
@@ -1191,12 +1220,34 @@ async fn dial_ssh(host: &str, remote: &str, build: Option<String>) -> Result<Dia
 /// for each try, so a `[remote] perchd` rebuilt while the app runs is
 /// installed on the next.
 pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
+    // What the host is, once it has said, for a `perchd` built from
+    // source: the dial can name its build only when it knows which one
+    // was built.
+    let host_is: Arc<Mutex<Option<Platform>>> = Arc::default();
     let dial: Dial = Box::new({
-        let (host, bridge) = (host.to_string(), bridge.clone());
+        let (host, bridge, host_is) = (host.to_string(), bridge.clone(), host_is.clone());
         move |replace| {
             let (host, bridge) = (host.clone(), bridge.clone());
+            let host_is = host_is.lock().ok().and_then(|is| *is);
             Box::pin(async move {
                 let build = match &bridge {
+                    // Before the host has said what it is, a build it
+                    // can't have, so it says: the install then builds for
+                    // it. After, the build of what was built.
+                    Bridge::Installed(Source::Dev(workspace)) => {
+                        let built = host_is
+                            .map(|platform| provision::dev_binary(workspace, platform))
+                            .filter(|binary| binary.is_file());
+                        match built {
+                            Some(binary) => {
+                                tokio::task::spawn_blocking(move || provision::read_file(&binary))
+                                    .await
+                                    .map_err(|e| e.to_string())??
+                                    .build
+                            }
+                            None => format!("{VERSION}-unbuilt"),
+                        }
+                    }
                     Bridge::Command(_) | Bridge::Installed(Source::Release) => {
                         provision::release_build()
                     }
@@ -1273,13 +1324,19 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                     (
                         build.clone(),
                         Box::pin(async move {
-                            match provision::elf_arch(&binary.bytes) {
-                                Ok(built) if built != arch => Err(Failed::lasting(format!(
-                                    "[remote] perchd, {}, is built for {}, and {host} is {}.",
-                                    path.display(),
-                                    built.name(),
-                                    arch.name()
-                                ))),
+                            match provision::built_for(&binary.bytes) {
+                                Ok(built) if !built.contains(&arch) => {
+                                    Err(Failed::lasting(format!(
+                                        "[remote] perchd, {}, is built for {}, and {host} is {}.",
+                                        path.display(),
+                                        built
+                                            .iter()
+                                            .map(|platform| platform.name())
+                                            .collect::<Vec<_>>()
+                                            .join(" and "),
+                                        arch.name()
+                                    )))
+                                }
                                 _ => provision::upload(&host, &build, binary.bytes).await,
                             }
                         }),
@@ -1290,6 +1347,29 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
                     Box::pin(async move { Err(Failed::lasting(why)) }),
                 ),
             },
+            // Built now, for what the host said it is, from the source
+            // as it stands; uploaded unless the host has that very build.
+            Source::Dev(workspace) => {
+                if let Ok(mut is) = host_is.lock() {
+                    *is = Some(arch);
+                }
+                let workspace = workspace.clone();
+                (
+                    format!("{VERSION} from source"),
+                    Box::pin(async move {
+                        let binary = provision::dev_build(&workspace, arch).await?;
+                        let binary =
+                            tokio::task::spawn_blocking(move || provision::read_file(&binary))
+                                .await
+                                .map_err(|e| Failed::now(e.to_string()))?
+                                .map_err(Failed::lasting)?;
+                        if provision::has_build(&host, &binary.build).await {
+                            return Ok(());
+                        }
+                        provision::upload(&host, &binary.build, binary.bytes).await
+                    }),
+                )
+            }
             Source::HostFile(_) => unreachable!("staged by the dial"),
         }
     });
@@ -1357,6 +1437,38 @@ mod tests {
             waits.iter().map(Duration::as_secs).collect::<Vec<_>>(),
             [1, 2, 4, 8, 16, 30, 30]
         );
+    }
+
+    #[test]
+    fn a_port_after_the_host_is_ssh_s_option() {
+        let split = |host: &str| {
+            let (name, port) = host_and_port(host);
+            (name, port)
+        };
+        assert_eq!(split("halo"), ("halo".into(), None));
+        assert_eq!(split("chris@halo"), ("chris@halo".into(), None));
+        assert_eq!(
+            split("chris@halo:12354"),
+            ("chris@halo".into(), Some(12354))
+        );
+        assert_eq!(split("10.0.0.5:22"), ("10.0.0.5".into(), Some(22)));
+        // An IPv6 address's own colons are not a port; in brackets one
+        // can follow.
+        assert_eq!(split("fe80::1"), ("fe80::1".into(), None));
+        assert_eq!(split("[fe80::1]"), ("fe80::1".into(), None));
+        assert_eq!(split("[fe80::1]:2222"), ("fe80::1".into(), Some(2222)));
+        assert_eq!(
+            split("chris@[fe80::1]:2222"),
+            ("chris@fe80::1".into(), Some(2222))
+        );
+        // Not a port: left for ssh to refuse.
+        assert_eq!(split("halo:ssh"), ("halo:ssh".into(), None));
+        assert_eq!(split("halo:99999"), ("halo:99999".into(), None));
+
+        let args = ssh_args("chris@halo:12354", "true");
+        assert_eq!(&args[..3], ["-p", "12354", "-T"]);
+        assert_eq!(&args[args.len() - 3..], ["--", "chris@halo", "true"]);
+        assert_eq!(ssh_args("halo", "true")[0], "-T");
     }
 
     #[test]
@@ -2048,7 +2160,7 @@ mod tests {
 
     /// An install that records what it was asked for, and fails with
     /// `failing` while that holds something.
-    fn installer(asked: Arc<Mutex<Vec<Arch>>>, failing: Option<Failed>) -> Install {
+    fn installer(asked: Arc<Mutex<Vec<Platform>>>, failing: Option<Failed>) -> Install {
         Box::new(move |arch| {
             asked.lock().unwrap().push(arch);
             let failing = failing.clone();
@@ -2101,7 +2213,10 @@ mod tests {
         );
         pipes.next().await.welcome(1).await;
         assert!(matches!(next_link(&events).await, EngineLink::Up { .. }));
-        assert_eq!(*asked.lock().unwrap(), [Arch::Arm64]);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [Platform::new(provision::Os::Linux, provision::Arch::Arm64)]
+        );
         assert_eq!(pipes.dials(), 2);
     }
 
@@ -2298,7 +2413,10 @@ mod tests {
         );
         assert_eq!(
             other_said("halo", &other(0, 0, true)),
-            "halo's engine is perchd 0.8.0, newer than this app's 0.9.0. Update Perch on this Mac."
+            format!(
+                "halo's engine is perchd 0.8.0, newer than this app's 0.9.0. Update Perch on {}.",
+                crate::host::HERE
+            )
         );
     }
 

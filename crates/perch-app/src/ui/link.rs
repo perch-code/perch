@@ -436,7 +436,7 @@ mod tests {
         assert!(said_(&newer)
             .unwrap()
             .0
-            .contains("Update Perch on this Mac"));
+            .contains(&format!("Update Perch on {}", perch_engine::host::HERE)));
         assert!(!can_restart(&newer));
     }
 }
