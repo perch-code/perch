@@ -387,17 +387,20 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      stroke-linecap="round"/>
                <circle cx="8" cy="9.45" r="1.3" fill="{c}"/>"#
         ),
-        // A megaphone: a back block, a cone out to an open oval mouth, and
-        // a handle under the block. The oval is what keeps it from reading
-        // as a speaker. Send a bug report or an idea.
+        SidebarIcon::BarChart => format!(
+            r#"<path d="M3 13 V3 M8 13 V8 M13 13 V5" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
+        // A bug with antennae, six legs, and a split shell.
         SidebarIcon::Feedback => format!(
-            r#"<ellipse cx="12.2" cy="7.4" rx="1.7" ry="4.8" fill="none" stroke="{c}"
-                        stroke-width="1.4"/>
-               <path d="M12.2 2.6 L5.3 5.5 H3.2 A1 1 0 0 0 2.2 6.5 V8.3 A1 1 0 0 0 3.2 9.3 H5.3
-                        L12.2 12.2 M5.3 5.5 V9.3" fill="none" stroke="{c}" stroke-width="1.4"
-                     stroke-linejoin="round" stroke-linecap="round"/>
-               <path d="M5.5 9.5 L6.2 12.9 A0.9 0.9 0 0 0 7.9 12.5 L7.6 10.4" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+            r#"<path d="M5.5 5 V4.5 A2.5 2.5 0 0 1 10.5 4.5 V5
+                       M6.2 2.8 L4.8 1.5 M9.8 2.8 L11.2 1.5
+                       M4.5 6 L2.5 4.5 M4.5 9 H1.5 M4.5 11.5 L2.5 13
+                       M11.5 6 L13.5 4.5 M11.5 9 H14.5 M11.5 11.5 L13.5 13"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     stroke-linejoin="round"/>
+               <path d="M4.5 5 H11.5 V10.5 A3.5 3.5 0 0 1 4.5 10.5 Z M8 5 V14"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
                      stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Thread => format!(
@@ -671,6 +674,8 @@ pub enum SidebarIcon {
     Agents,
     /// A dial with its needle: how much of a plan's limits is used.
     Gauge,
+    /// Three vertical bars: usage statistics.
+    BarChart,
     /// A speech bubble with a dot: a thread anchored here.
     Thread,
     Pin,
@@ -789,7 +794,7 @@ pub enum SidebarIcon {
     Clock,
     /// A page with its corner turned down: a file an agent read.
     File,
-    /// A megaphone: send feedback, a bug or an idea.
+    /// A bug: send feedback, a bug or an idea.
     Feedback,
     /// A branch joining a line: whether a pull request merges cleanly.
     Merge,
@@ -808,7 +813,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 84] = [
+    pub const ALL: [SidebarIcon; 85] = [
         SidebarIcon::Gear,
         SidebarIcon::Palette,
         SidebarIcon::Server,
@@ -876,6 +881,7 @@ impl SidebarIcon {
         SidebarIcon::Stop,
         SidebarIcon::Agents,
         SidebarIcon::Gauge,
+        SidebarIcon::BarChart,
         SidebarIcon::Thread,
         SidebarIcon::Branch,
         SidebarIcon::Trash,

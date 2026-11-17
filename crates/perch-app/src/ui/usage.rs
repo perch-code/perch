@@ -94,13 +94,13 @@ fn board_tone(app: AppState) -> Tone {
     })
 }
 
-/// The gauge in the drawer's footer, and the popover over it while it is
+/// The bar chart in the drawer's footer, and the popover over it while it is
 /// open.
 pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let color = move || board_tone(app).color(theme::nav_muted());
     let button = Container::new(
         icon_in(
-            move || icons::sidebar_icon(SidebarIcon::Gauge, color()),
+            move || icons::sidebar_icon(SidebarIcon::BarChart, color()),
             color,
         )
         .style(|s| s.pointer_events_none()),
