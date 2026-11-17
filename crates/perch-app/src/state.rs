@@ -2866,6 +2866,7 @@ impl AppState {
                 expected_head_sha,
                 attempt_id,
                 message,
+                moved_to,
             } => {
                 let current_subject_is_open = review.pull_request.with(|pull| {
                     pull.as_ref().is_some_and(|pull| {
@@ -2884,6 +2885,11 @@ impl AppState {
                     review.merge_pending.set(false);
                     if current_subject_is_open {
                         review.merge_error.set(Some(message));
+                        // The merge box offers the new head in place of
+                        // a merge of the old one.
+                        if moved_to.is_some() {
+                            review.head_moved.set(moved_to);
+                        }
                     }
                 }
             }
@@ -6612,6 +6618,7 @@ mod tests {
                 expected_head_sha: "head".into(),
                 attempt_id: 9,
                 message: "stale failure".into(),
+                moved_to: None,
             },
             review,
         );
@@ -6627,12 +6634,15 @@ mod tests {
                 expected_head_sha: "head".into(),
                 attempt_id: 10,
                 message: "merge failed".into(),
+                moved_to: Some("newer".into()),
             },
             review,
         );
         assert!(!review.merge_pending.get());
         assert_eq!(review.merge_attempt_id.get(), Some(10));
         assert_eq!(review.merge_error.get().as_deref(), Some("merge failed"));
+        // The head GitHub moved to comes with the refusal.
+        assert_eq!(review.head_moved.get().as_deref(), Some("newer"));
 
         app.apply_with_review(
             Event::PullRequestMergeStarted {

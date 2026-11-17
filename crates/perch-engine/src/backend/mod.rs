@@ -1560,6 +1560,9 @@ pub enum Event {
         expected_head_sha: String,
         attempt_id: u64,
         message: String,
+        /// The head GitHub has now, when the merge was refused because
+        /// the pull request moved past the one confirmed.
+        moved_to: Option<String>,
     },
     PullRequestReviewStarted {
         item_id: String,
@@ -11236,6 +11239,7 @@ async fn merge_open_pull_request(
             number,
             expected_head_sha,
             "That pull request is no longer open in Perch",
+            None,
         );
         return;
     };
@@ -11248,6 +11252,7 @@ async fn merge_open_pull_request(
             number,
             expected_head_sha,
             "The open pull request changed; review it again before merging",
+            None,
         );
         return;
     }
@@ -11260,6 +11265,7 @@ async fn merge_open_pull_request(
             number,
             expected_head_sha,
             "GitHub is unavailable while Perch is offline",
+            None,
         );
         return;
     };
@@ -11278,6 +11284,7 @@ async fn merge_open_pull_request(
                 number,
                 expected_head_sha,
                 format!("Could not refresh merge status: {error}"),
+                None,
             );
             return;
         }
@@ -11291,6 +11298,8 @@ async fn merge_open_pull_request(
         method,
         bypass_requirements,
     ) {
+        // Told with the refusal, so the view can offer the new head.
+        let moved_to = (overview.head_sha != expected_head_sha).then(|| overview.head_sha.clone());
         send_merge_failure(
             ctx,
             attempt_id,
@@ -11299,6 +11308,7 @@ async fn merge_open_pull_request(
             number,
             expected_head_sha,
             message,
+            moved_to,
         );
         return;
     }
@@ -11324,6 +11334,7 @@ async fn merge_open_pull_request(
                 number,
                 expected_head_sha,
                 format!("GitHub could not merge this pull request: {error}"),
+                None,
             );
             return;
         }
@@ -11342,6 +11353,7 @@ async fn merge_open_pull_request(
             number,
             expected_head_sha,
             message,
+            None,
         );
         return;
     }
@@ -13634,13 +13646,32 @@ fn validate_merge_attempt(
     if pull_request.draft {
         return Err("Draft pull requests cannot be merged".into());
     }
-    if pull_request.head_sha != expected_head_sha
-        || overview.head_sha != expected_head_sha
-        || checkout_head_sha != expected_head_sha
-    {
-        return Err(
-            "The pull request moved; refresh and review the new head before merging".into(),
-        );
+    // Which of the three is elsewhere is what the reader can act on:
+    // commits pushed since, a copy Perch has not caught up, or a worktree
+    // that is not at the head.
+    if overview.head_sha != expected_head_sha {
+        return Err(format!(
+            "Not merged: new commits moved the pull request from {} to {}. \
+             Refresh and review them before merging",
+            short_sha(expected_head_sha),
+            short_sha(&overview.head_sha)
+        ));
+    }
+    if pull_request.head_sha != expected_head_sha {
+        return Err(format!(
+            "Not merged: Perch read the pull request at {}, not the {} \
+             confirmed. Refresh it before merging",
+            short_sha(&pull_request.head_sha),
+            short_sha(expected_head_sha)
+        ));
+    }
+    if checkout_head_sha != expected_head_sha {
+        return Err(format!(
+            "Not merged: the worktree is at {}, not the pull request's head {}. \
+             Update it before merging",
+            short_sha(checkout_head_sha),
+            short_sha(expected_head_sha)
+        ));
     }
     if !overview.allowed_merge_methods.allows(method) {
         return Err(format!(
@@ -13701,6 +13732,7 @@ fn send_merge_failure(
     number: u64,
     expected_head_sha: &str,
     message: impl Into<String>,
+    moved_to: Option<String>,
 ) {
     let message = message.into();
     tracing::info!(item = item_id, %message, "pull request merge stopped");
@@ -13712,6 +13744,7 @@ fn send_merge_failure(
             expected_head_sha: expected_head_sha.to_string(),
             attempt_id,
             message,
+            moved_to,
         });
     }
 }
@@ -24330,7 +24363,44 @@ mod tests {
             false,
         )
         .unwrap_err()
-        .contains("moved"));
+        .contains("the worktree is at old-head, not the pull request's head h7"));
+    }
+
+    /// A refusal over a head says which head is elsewhere, and where.
+    #[test]
+    fn a_stale_head_refusal_names_the_head_that_moved() {
+        let pull = pull_request(7);
+        let mut moved = merge_overview(MergeState::Clean);
+        moved.head_sha = "h8".into();
+        assert!(validate_merge_attempt(
+            &pull,
+            "h7",
+            false,
+            &moved,
+            "h7",
+            MergeMethod::Squash,
+            false,
+        )
+        .unwrap_err()
+        .contains("new commits moved the pull request from h7 to h8"));
+
+        // Perch's own copy caught up after the confirmation was drawn.
+        let overview = merge_overview(MergeState::Clean);
+        assert!(validate_merge_attempt(
+            &pull_request(7),
+            "h6",
+            false,
+            &{
+                let mut at_confirmed = overview.clone();
+                at_confirmed.head_sha = "h6".into();
+                at_confirmed
+            },
+            "h6",
+            MergeMethod::Squash,
+            false,
+        )
+        .unwrap_err()
+        .contains("Perch read the pull request at h7, not the h6 confirmed"));
     }
 
     #[test]

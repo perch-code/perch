@@ -58,6 +58,9 @@ struct MergeSnapshot {
     offline: bool,
     historical: bool,
     stale: bool,
+    /// The head GitHub says the pull request moved to, which the files
+    /// on screen are not at. Nothing here is merged until it is read.
+    moved: Option<String>,
     selected_method: MergeMethod,
     bypass_requirements: bool,
     confirmation: Option<MergeConfirmation>,
@@ -226,6 +229,7 @@ struct Resolver {
 /// button opens, which draws `section`.
 #[derive(Clone, Copy)]
 pub(crate) struct MergeBox {
+    app: AppState,
     selected_method: RwSignal<MergeMethod>,
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
@@ -255,6 +259,7 @@ pub(crate) enum BarMerge {
 impl MergeBox {
     pub(crate) fn new(app: AppState, state: ReviewState) -> Self {
         let merge = MergeBox {
+            app,
             // GitHub's common default, and the least surprising default
             // when it is enabled. `effective_method` falls back to another
             // repository-enabled method when squash is unavailable.
@@ -311,6 +316,7 @@ impl MergeBox {
     /// Update branch and resolving conflicts.
     pub(crate) fn section(self, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         merge_section(
+            self.app,
             state,
             backend,
             self.selected_method,
@@ -378,7 +384,10 @@ impl MergeBox {
             .is_some_and(|overview| overview.merge_state == MergeState::Behind);
         Some(BarMerge::Merge {
             label: label.to_string(),
-            ready: decision == MergeDecision::Ready && !behind && !pending,
+            ready: decision == MergeDecision::Ready
+                && !behind
+                && !pending
+                && crate::review::moved_head(state).is_none(),
             pick: !pending && methods.is_some_and(|methods| method_count(methods) > 1),
         })
     }
@@ -544,6 +553,7 @@ fn check_status(state: CheckRunState) -> &'static str {
 
 #[allow(clippy::too_many_arguments)]
 fn merge_section(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     selected_method: RwSignal<MergeMethod>,
@@ -566,6 +576,7 @@ fn merge_section(
             offline: state.offline.get(),
             historical: state.historical_review.with(Option::is_some),
             stale: state.stale_head.with(Option::is_some),
+            moved: crate::review::moved_head(state),
             selected_method: selected_method.get(),
             bypass_requirements: bypass_requirements.get(),
             confirmation: confirmation.get(),
@@ -587,6 +598,7 @@ fn merge_section(
         },
         move |snapshot| {
             merge_content(
+                app,
                 state,
                 backend.clone(),
                 bypass_requirements,
@@ -601,6 +613,7 @@ fn merge_section(
 
 #[allow(clippy::too_many_arguments)]
 fn merge_content(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     bypass_requirements: RwSignal<bool>,
@@ -622,6 +635,12 @@ fn merge_content(
         )
         .debug_name("merge-finished")
         .into_any();
+    }
+    // What stands here was read at a head the pull request has left: its
+    // rules, its checks and the consent to pass them are that head's.
+    // The one thing to do is read the new one.
+    if let Some(head) = snapshot.moved.as_deref() {
+        return moved_content(app, state, backend, head, snapshot.merge_error.clone());
     }
     let decision = merge_decision(&snapshot, pull, item);
     let status = merge_status(
@@ -653,6 +672,38 @@ fn merge_content(
     ))
     .style(|s| s.flex_col().width_full().gap(12.0))
     .into_any()
+}
+
+/// The box when the pull request moved past the head on screen: where it
+/// moved to, why a merge that was asked for did not go, and Refresh, which
+/// opens the pull request again at the new head as the news pill does.
+fn moved_content(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    head: &str,
+    merge_error: Option<String>,
+) -> AnyView {
+    let status = status_row(
+        sidebar_glyph(SidebarIcon::Warning, theme::draft),
+        format!("The pull request moved to {}", short_sha(head)),
+        "New commits were pushed since it was read here. Refresh to review them before merging."
+            .to_string(),
+    );
+    let refresh = merge_button(
+        "Refresh".to_string(),
+        true,
+        || true,
+        move || {
+            // The popover goes: what comes next is reading, not merging.
+            state.merge_open.set(false);
+            crate::review::refresh(app, state, &backend);
+        },
+    );
+    Stack::vertical((status, error_line(merge_error, "merge-error"), refresh))
+        .style(|s| s.flex_col().width_full().gap(12.0))
+        .debug_name("merge-moved")
+        .into_any()
 }
 
 fn merge_status(
@@ -1430,6 +1481,9 @@ fn request_is_current(state: ReviewState, request: &MergeConfirmation) -> bool {
     if state.merge_pending.get_untracked() {
         return false;
     }
+    if Effect::untrack(|| crate::review::moved_head(state)).is_some() {
+        return false;
+    }
     let Some(pull) = state.pull_request.get_untracked() else {
         return false;
     };
@@ -1938,6 +1992,7 @@ mod tests {
         });
         let (backend, mut commands) = Backend::recording();
         let view = merge_section(
+            crate::state::AppState::new(),
             state,
             Rc::new(backend),
             RwSignal::new(MergeMethod::Squash),
@@ -2000,6 +2055,7 @@ mod tests {
         });
         let (backend, mut commands) = Backend::recording();
         let view = merge_section(
+            crate::state::AppState::new(),
             state,
             Rc::new(backend),
             RwSignal::new(MergeMethod::Squash),
@@ -2090,6 +2146,7 @@ mod tests {
         };
         let (backend, mut commands) = Backend::recording();
         let view = merge_section(
+            crate::state::AppState::new(),
             state,
             Rc::new(backend),
             RwSignal::new(MergeMethod::Squash),
@@ -2172,6 +2229,7 @@ mod tests {
         let may_set_draft = RwSignal::new(false);
         let (backend, mut commands) = Backend::recording();
         let view = merge_section(
+            crate::state::AppState::new(),
             state,
             Rc::new(backend),
             RwSignal::new(MergeMethod::Squash),
@@ -2256,6 +2314,7 @@ mod tests {
         let confirmation = RwSignal::new(None::<MergeConfirmation>);
         let message = MessageDraft::new();
         let view = merge_section(
+            crate::state::AppState::new(),
             state,
             Rc::new(backend),
             selected_method,
@@ -2332,6 +2391,7 @@ mod tests {
         read("Merge support (#42)", "* Add the merge box");
         let message = MessageDraft::new();
         let view = merge_section(
+            crate::state::AppState::new(),
             state,
             Rc::new(Backend::detached()),
             RwSignal::new(MergeMethod::Squash),
@@ -2384,6 +2444,47 @@ mod tests {
         assert!(!takes_message(MergeMethod::Rebase));
         assert!(takes_message(MergeMethod::Squash));
         assert!(takes_message(MergeMethod::Merge));
+    }
+
+    /// A merge refused because the pull request moved: the box says where
+    /// to, keeps why the merge did not go, and offers Refresh in place of
+    /// a bypass of rules read at the old head.
+    #[test]
+    fn a_moved_pull_request_offers_refresh_and_no_merge() {
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Blocked, true);
+        let view = MergeBox::new(crate::state::AppState::new(), state)
+            .section(state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "merge-bypass").is_some());
+        assert!(named(harness.root_id(), "merge-moved").is_none());
+
+        state.merge_error.set(Some("Not merged".into()));
+        state.head_moved.set(Some("head-43".into()));
+        state.merge_open.set(true);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "merge-moved").is_some());
+        assert!(named(harness.root_id(), "merge-error").is_some());
+        assert!(named(harness.root_id(), "merge-bypass").is_none());
+        let refresh =
+            named(harness.root_id(), "merge-action:Refresh").expect("Refresh in the merge box");
+
+        refresh.request_focus();
+        harness.rebuild();
+        harness.dispatch_event(key(Code::Enter));
+        harness.rebuild();
+        assert!(!state.merge_open.get_untracked());
+        assert!(state.head_moved.with_untracked(Option::is_none));
+
+        // A head the dirty worktree was already left behind by is the
+        // notice's to tell, and opening again would not change it.
+        state.head_moved.set(Some("head-43".into()));
+        state.stale_head.set(Some("head-43".into()));
+        harness.rebuild();
+        assert!(named(harness.root_id(), "merge-moved").is_none());
     }
 
     /// Merged elsewhere while GitHub's last word on the rules still says

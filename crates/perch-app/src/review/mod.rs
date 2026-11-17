@@ -221,7 +221,7 @@ pub(crate) fn refresh(app: AppState, state: ReviewState, backend: &Backend) -> b
     true
 }
 
-fn moved_head(state: ReviewState) -> Option<String> {
+pub(crate) fn moved_head(state: ReviewState) -> Option<String> {
     let head = state.head_moved.get()?;
     let behind = state.item.with(|item| {
         item.as_ref()
