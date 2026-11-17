@@ -160,10 +160,67 @@ fn toggle_button(state: AppState) -> impl IntoView {
 }
 
 /// The strip along the drawer's foot, as tall as the bar over the main
-/// pane: who is signed in, or the restart for an update that's waiting,
-/// then what belongs to the app rather than to an item, bug reports
-/// and plan usage.
+/// pane: who is signed in and where, which is the menu of the window's
+/// environments, the restart for an update that's waiting, then what
+/// belongs to the app rather than to an item, bug reports and plan usage.
 fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+    let controls = match state.review.get_untracked() {
+        Some(review) => Stack::horizontal((
+            crate::ui::feedback::button(state, review, backend.clone()),
+            crate::ui::usage::button(state, review, backend.clone()),
+        ))
+        .style(|s| s.items_center().gap(4.0))
+        .into_any(),
+        None => Empty::new().style(|s| s.hide()).into_any(),
+    };
+    // An update waiting for a restart takes the login's place.
+    let updating =
+        floem::reactive::Memo::new(move |_| state.update.with(|u| *u != UpdateStatus::Current));
+    let update = dyn_container(
+        move || updating.get(),
+        move |updating| {
+            if updating {
+                crate::ui::update::button(state, backend.clone()).into_any()
+            } else {
+                Empty::new().into_any()
+            }
+        },
+    )
+    .style(move |s| {
+        s.items_center()
+            .min_width(0.0)
+            .margin_left(4.0)
+            .apply_if(!updating.get(), |s| s.hide())
+    });
+    Stack::horizontal((
+        environment_switch(state, updating),
+        update,
+        Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(8.0)),
+        Stack::horizontal((controls, settings_button(state)))
+            .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32)),
+    ))
+    .debug_name("drawer footer")
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .height(theme::TITLEBAR_HEIGHT)
+            // The switch's own padding brings its face to the gutter.
+            .padding_left(theme::NAV_GUTTER - SWITCH_PADDING)
+            .padding_right(theme::NAV_GUTTER)
+            .flex_shrink(0.0_f32)
+            .border_top(1.0)
+            .border_color(theme::nav_divider())
+    })
+}
+
+/// How far the environment switch's lit ground reaches past its face.
+const SWITCH_PADDING: f64 = 4.0;
+
+/// Who is signed in to GitHub in the window's environment, with the
+/// environment under the login: the face and login are the environment's,
+/// so the three are one button, and its menu moves the window to another
+/// environment. While an update waits, only the face is left of it.
+fn environment_switch(state: AppState, updating: floem::reactive::Memo<bool>) -> impl IntoView {
     let login = move || {
         state
             .viewer
@@ -180,96 +237,99 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         crate::ui::widgets::avatar(state, url, 22.0, login).into_any()
     })
     .style(|s| s.flex_shrink(0.0_f32));
-    let controls = match state.review.get_untracked() {
-        Some(review) => Stack::horizontal((
-            crate::ui::feedback::button(state, review, backend.clone()),
-            crate::ui::usage::button(state, review, backend.clone()),
-        ))
-        .style(|s| s.items_center().gap(4.0))
-        .into_any(),
-        None => Empty::new().style(|s| s.hide()).into_any(),
+    let environment = move || {
+        state
+            .place
+            .with(|place| place.host())
+            .unwrap_or_else(|| perch_engine::host::HERE_FIRST.into())
     };
-    // An update waiting for a restart takes the login's place.
-    let updating =
-        floem::reactive::Memo::new(move |_| state.update.with(|u| *u != UpdateStatus::Current));
-    let middle = {
-        let backend = backend.clone();
-        dyn_container(
-            move || updating.get(),
-            move |updating| {
-                if updating {
-                    crate::ui::update::button(state, backend.clone()).into_any()
-                } else {
-                    let environment = state
-                        .place
-                        .get_untracked()
-                        .host()
-                        .unwrap_or_else(|| perch_engine::host::HERE_FIRST.into());
-                    let switch = Button::new(
-                        Label::new(environment.clone())
-                            .style(|s| s.text_ellipsis().min_width(0.0).pointer_events_none()),
-                    );
-                    let id = switch.view_id();
-                    let switch = switch
-                        .action(move || {
-                            state
-                                .settings
-                                .section
-                                .set(crate::ui::settings::Section::Environment);
-                            crate::ui::settings::show(state, Some(id));
-                        })
-                        .debug_name("window-environment")
-                        .style(|s| {
-                            crate::ui::widgets::clickable(s)
-                                .max_width_full()
-                                .min_width(0.0)
-                                .padding(0.0)
-                                .border(0.0)
-                                .font_size(theme::TEXT_BADGE)
-                                .color(theme::nav_muted())
-                                .background(theme::nav_canvas())
-                                .hover(|s| s.color(theme::nav_fg()).background(theme::nav_hover()))
-                        });
-                    Stack::vertical((
-                        Label::derived(login).style(|s| {
-                            s.font_size(theme::TEXT_BODY)
-                                .color(theme::nav_fg())
-                                .text_ellipsis()
-                                .min_width(0.0)
-                        }),
-                        crate::review::cards::tip(
-                            switch,
-                            format!("Change environment · {environment}"),
-                        ),
-                    ))
-                    .style(|s| s.min_width(0.0).max_width_full())
-                    .into_any()
-                }
-            },
-        )
-        .style(|s| {
-            s.items_center()
+    let names = Stack::vertical((
+        Label::derived(login).style(move |s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::nav_fg())
+                .text_ellipsis()
                 .min_width(0.0)
-                .flex_grow(1.0_f32)
-                .margin_left(8.0)
-                .margin_right(8.0)
-        })
-    };
-    Stack::horizontal((
-        face,
-        middle,
-        Stack::horizontal((controls, settings_button(state)))
-            .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32)),
+                .max_width_full()
+                // Nobody signed in yet: the environment has the line.
+                .apply_if(login().is_empty(), |s| s.hide())
+        }),
+        Label::derived(environment)
+            .debug_name("window-environment-name")
+            .style(|s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::nav_muted())
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .max_width_full()
+            }),
     ))
-    .debug_name("drawer footer")
-    .style(|s| {
-        s.items_center()
-            .width_full()
-            .height(theme::TITLEBAR_HEIGHT)
-            .padding_horiz(theme::NAV_GUTTER)
-            .flex_shrink(0.0_f32)
-            .border_top(1.0)
-            .border_color(theme::nav_divider())
+    .style(move |s| {
+        s.min_width(0.0)
+            .flex_shrink(1.0_f32)
+            .apply_if(updating.get(), |s| s.hide())
+    });
+    let switch = Stack::horizontal((
+        face,
+        names,
+        sidebar_glyph(SidebarIcon::ChevronUpDown, theme::nav_muted)
+            .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32)),
+    ));
+    let id = switch.view_id();
+    let switch = switch
+        .dropdown(move || environment_menu(state, id))
+        .debug_name("window-environment")
+        .style(|s| {
+            crate::ui::widgets::clickable(s)
+                .items_center()
+                .gap(8.0)
+                .min_width(0.0)
+                .flex_shrink(1.0_f32)
+                .padding(SWITCH_PADDING)
+                .padding_right(6.0)
+                .border_radius(8.0)
+                .pointer_events_auto()
+                .keyboard_navigable()
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                .hover(|s| s.background(theme::nav_hover()))
+        });
+    crate::review::cards::tip(switch, "Switch environment".to_string())
+        .style(|s| s.min_width(0.0).flex_shrink(1.0_f32))
+}
+
+/// The environments the window can be in, the one it is in checked and
+/// who is signed in to GitHub at the end of each whose engine runs, then
+/// the way to a host not yet connected to: Settings, where one is typed.
+/// A host no window has open can be taken out of the list.
+fn environment_menu(state: AppState, opener: floem::ViewId) -> Menu {
+    let mut menu = Menu::new();
+    for choice in crate::windows::environments(state) {
+        let label = choice
+            .host
+            .clone()
+            .unwrap_or_else(|| perch_engine::host::HERE_FIRST.into());
+        menu = menu.item(label, |item| {
+            let host = choice.host.clone();
+            let item = item
+                .checked(choice.current)
+                .action(move || crate::windows::switch_environment(state, host.clone()));
+            let item = match choice.login {
+                Some(login) => item.detail(login),
+                None => item,
+            };
+            match choice.host.filter(|_| choice.forgettable) {
+                Some(host) => item.removable(move || crate::windows::forget_host(&host)),
+                None => item,
+            }
+        });
+    }
+    menu.separator().item("Connect to SSH host…", |item| {
+        item.action(move || {
+            state
+                .settings
+                .section
+                .set(crate::ui::settings::Section::Environment);
+            crate::ui::settings::show(state, Some(opener));
+        })
     })
 }
 
@@ -2784,6 +2844,69 @@ mod tests {
             Ok(crate::backend::Command::InstallUpdate { version }) => assert_eq!(version, "0.2.0"),
             other => panic!("expected InstallUpdate, got {other:?}"),
         }
+    }
+
+    /// The face, the login and the environment under it are one button
+    /// in the footer, whose menu lists the environments with the window's
+    /// own checked, who is signed in there beside it, and the way to
+    /// Settings for a host not yet connected to.
+    #[test]
+    fn the_login_at_the_drawer_s_foot_is_the_menu_of_environments() {
+        let (mut harness, state) = window();
+        state.viewer.set(Some(("me".into(), String::new())));
+        harness.rebuild();
+        harness.paint();
+        let rect = |harness: &HeadlessHarness, name: &str| {
+            find(harness.root_id(), name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .get_visual_rect_no_clip()
+        };
+        let footer = rect(&harness, "drawer footer");
+        let switch = rect(&harness, "window-environment");
+        assert_eq!(switch.x0 + SWITCH_PADDING, theme::NAV_GUTTER, "{switch:?}");
+        assert!(
+            switch.y0 >= footer.y0 && switch.y1 <= footer.y1,
+            "{switch:?} in {footer:?}"
+        );
+        let name = rect(&harness, "window-environment-name");
+        assert!(
+            name.x0 > switch.x0 && name.x1 < switch.x1,
+            "{name:?} in {switch:?}"
+        );
+
+        let here = perch_engine::host::HERE_FIRST;
+        let opener = find(harness.root_id(), "window-environment").unwrap();
+        assert_eq!(
+            environment_menu(state, opener).outline(),
+            [&format!("✓ {here}"), "—", "Connect to SSH host…"]
+        );
+        state.place.set(crate::remote::Place::Host {
+            host: "devbox".into(),
+            home: Default::default(),
+            data_root: Default::default(),
+        });
+        let menu = environment_menu(state, opener);
+        assert_eq!(
+            menu.outline(),
+            [here, "✓ devbox", "—", "Connect to SSH host…"]
+        );
+        menu.choose("Connect to SSH host…");
+        assert!(state.settings.open.get_untracked());
+        assert_eq!(
+            state.settings.section.get_untracked(),
+            crate::ui::settings::Section::Environment
+        );
+        crate::ui::settings::close(state, false);
+
+        // A press opens it, over the footer: there is no room under.
+        harness.rebuild();
+        harness.paint();
+        assert!(!crate::ui::menu::is_open());
+        harness.pointer_down(switch.center().x, switch.center().y);
+        harness.pointer_up(switch.center().x, switch.center().y);
+        assert!(crate::ui::menu::is_open());
+        crate::ui::menu::close();
+        state.place.set(crate::remote::Place::ThisMac);
     }
 
     /// The whole window, so the drawer sits where it does in the app: at

@@ -3,7 +3,9 @@
 //! share a backend and its broadcasts with other windows in the same
 //! environment. Window-specific replies use the ID assigned by that backend.
 
+mod hosts;
 mod session;
+use hosts::Hosts;
 use session::{SavedWindow, Session};
 
 use std::cell::{Cell, RefCell};
@@ -25,6 +27,8 @@ use crate::state::AppState;
 #[derive(Default)]
 struct App {
     session: Option<Rc<Session>>,
+    /// The SSH hosts windows have connected to, for the environment menu.
+    hosts: Option<Hosts>,
     environments: RefCell<std::collections::HashMap<Option<String>, Rc<Environment>>>,
     windows: RefCell<Vec<Window>>,
     /// The window that last had the keyboard, for New Window to take its
@@ -246,6 +250,7 @@ fn start(session: Rc<Session>) {
         watch_client_file(None);
         APP.set(Some(Rc::new(App {
             session: Some(session),
+            hosts: Some(Hosts::load(&perch_github::config::perch_home())),
             ..Default::default()
         })));
     });
@@ -516,6 +521,11 @@ fn linked(app: &Environment, link: &crate::backend::EngineLink) {
         return;
     };
     app.model.place.update(|place| place.connected(welcome));
+    if let (Some(host), Some(registry)) = (&app.host, self::app()) {
+        if let Some(hosts) = &registry.hosts {
+            hosts.remember(host);
+        }
+    }
     for window in environment_windows(app) {
         if !restore_item(&window) && *again {
             reopen_item(window.state, window.review, &window.backend, host);
@@ -616,9 +626,15 @@ fn view(
         move || destination.get(),
         move |host| {
             let initial = initial.replace(false);
-            if !initial {
+            // A window that changes environment with Settings open stays
+            // on Settings, on the section it showed.
+            let settings = if initial {
+                None
+            } else {
+                let section = open_settings_section(raise_id);
                 detach(raise_id);
-            }
+                section
+            };
             let env = environment(host);
             let (state, review, backend) = window(&env, if initial { from } else { None });
             floem::reactive::Context::provide(state);
@@ -657,11 +673,8 @@ fn view(
                     Effect::untrack(save_windows);
                 });
             }
-            if !initial {
-                state
-                    .settings
-                    .section
-                    .set(crate::ui::settings::Section::Environment);
+            if let Some(section) = settings {
+                state.settings.section.set(section);
                 crate::ui::settings::show(state, None);
             }
             crate::ui::app_view(state, review, backend).into_any()
@@ -786,6 +799,101 @@ fn detach(raise: floem::ViewId) {
     }
 }
 
+/// The section Settings shows in the window `raise` brings forward, while
+/// Settings is open there.
+fn open_settings_section(raise: floem::ViewId) -> Option<crate::ui::settings::Section> {
+    let app = app()?;
+    let windows = app.windows.borrow();
+    let settings = windows.iter().find(|w| w.raise == raise)?.state.settings;
+    settings
+        .open
+        .try_get_untracked()
+        .filter(|open| *open)
+        .and_then(|_| settings.section.try_get_untracked())
+}
+
+/// An environment a window can be in, as the menu at the drawer's foot
+/// lists it.
+pub struct EnvironmentChoice {
+    /// The SSH host, or none for this machine.
+    pub host: Option<String>,
+    /// Whether it is the asking window's.
+    pub current: bool,
+    /// Who is signed in to GitHub there, known while its engine runs:
+    /// a host's while a window has it open, this machine's from its first
+    /// window on.
+    pub login: Option<String>,
+    /// Whether the reader can take it out of the menu: a host no window
+    /// has open.
+    pub forgettable: bool,
+}
+
+/// The environments the window of `state` can be in: this machine, then
+/// the hosts windows have connected to, then any other a window has open.
+pub fn environments(state: AppState) -> Vec<EnvironmentChoice> {
+    let login = |state: AppState| {
+        state
+            .viewer
+            .with_untracked(|viewer| viewer.as_ref().map(|(login, _)| login.clone()))
+            .filter(|login| !login.is_empty())
+    };
+    let current = state.place.get_untracked().host();
+    let app = app();
+    // Each environment a window has open, and who is signed in there.
+    let mut open: std::collections::HashMap<Option<String>, Option<String>> = app
+        .iter()
+        .flat_map(|app| {
+            let environments = app.environments.borrow();
+            environments
+                .iter()
+                .map(|(host, env)| (host.clone(), login(env.model)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    open.insert(current.clone(), login(state));
+    let mut hosts = app
+        .as_ref()
+        .and_then(|app| app.hosts.as_ref())
+        .map(Hosts::list)
+        .unwrap_or_default();
+    let mut others: Vec<String> = open
+        .keys()
+        .flatten()
+        .filter(|host| !hosts.contains(host))
+        .cloned()
+        .collect();
+    others.sort();
+    hosts.extend(others);
+    std::iter::once(None)
+        .chain(hosts.into_iter().map(Some))
+        .map(|host| EnvironmentChoice {
+            current: host == current,
+            login: open.get(&host).cloned().flatten(),
+            forgettable: host.is_some() && !open.contains_key(&host),
+            host,
+        })
+        .collect()
+}
+
+/// Take `host` out of the environments the menu lists, unless a window
+/// has it open. A menu can have been up since before another window
+/// opened the host, and still offer to: it is put away then, having
+/// already taken the row out, so the next one lists the host again.
+pub fn forget_host(host: &str) {
+    let Some(app) = app() else { return };
+    let open = app
+        .environments
+        .borrow()
+        .contains_key(&Some(host.to_owned()));
+    if open {
+        crate::ui::menu::close();
+    } else if let Some(hosts) = &app.hosts {
+        hosts.forget(host);
+    }
+}
+
+/// Move the window of `state` to the engine on `host`, or with none to
+/// this machine's. Settings stays open when it was.
 pub fn switch_environment(state: AppState, host: Option<String>) {
     if let Some(app) = app() {
         let window = app
@@ -1323,15 +1431,32 @@ mod tests {
         let second = app.windows.borrow()[1].clone();
         assert!(Rc::ptr_eq(&first.environment, &second.environment));
 
+        // Settings is open: it stays open, on its section, in the
+        // window's new environment.
+        second
+            .state
+            .settings
+            .section
+            .set(crate::ui::settings::Section::Appearance);
+        second.state.settings.open.set(true);
         switch_environment(second.state, Some("devbox".into()));
         second_view.rebuild();
         let switched = app.windows.borrow()[1].clone();
         assert_eq!(switched.raise, second.raise);
         assert!(Rc::ptr_eq(&switched.environment, &remote));
         assert_eq!(switched.id, first.id, "IDs belong to their engine");
+        assert!(switched.state.settings.open.get_untracked());
         assert_eq!(
             switched.state.settings.section.get_untracked(),
-            crate::ui::settings::Section::Environment
+            crate::ui::settings::Section::Appearance
+        );
+        let choices: Vec<_> = environments(switched.state)
+            .into_iter()
+            .map(|c| (c.host, c.current, c.forgettable))
+            .collect();
+        assert_eq!(
+            choices,
+            [(None, false, false), (Some("devbox".into()), true, false)]
         );
         deliver(&remote, switched.id, Event::Notice("remote only".into()));
         assert_eq!(switched.state.notice().as_deref(), Some("remote only"));
@@ -1348,10 +1473,21 @@ mod tests {
         assert!(first.state.viewer.get_untracked().is_some());
         assert!(switched.state.viewer.get_untracked().is_none());
 
+        // With Settings shut, as from the menu at the drawer's foot, it
+        // stays shut.
+        crate::ui::settings::close(switched.state, false);
         switch_environment(switched.state, None);
         second_view.rebuild();
         let returned = app.windows.borrow()[1].clone();
         assert!(Rc::ptr_eq(&returned.environment, &local));
+        assert!(!returned.state.settings.open.get_untracked());
+        assert_eq!(
+            environments(returned.state)
+                .iter()
+                .find(|c| c.current)
+                .and_then(|c| c.login.as_deref()),
+            Some("local-reader")
+        );
         assert_eq!(
             returned.state.viewer.get_untracked(),
             first.state.viewer.get_untracked()
@@ -1369,6 +1505,7 @@ mod tests {
         session.opening.set(0);
         let app = Rc::new(App {
             session: Some(session),
+            hosts: Some(Hosts::load(home)),
             ..Default::default()
         });
         APP.set(Some(app.clone()));
@@ -1414,6 +1551,36 @@ mod tests {
                 },
             }),
         );
+    }
+
+    /// A host is kept for the menu once it connects, and the menu's ×
+    /// takes it out only while no window has it open: a menu up since
+    /// before a window opened the host still offers to.
+    #[test]
+    fn a_connected_host_is_kept_for_the_menu_until_forgotten_with_no_window_on_it() {
+        let home = tempfile::tempdir().unwrap();
+        let (app, remote) = session_with_host(home.path());
+        let kept = || Hosts::load(home.path()).list();
+        assert!(kept().is_empty(), "not before it connects");
+        connected(&remote);
+        connected(&remote);
+        assert_eq!(kept(), ["devbox"]);
+
+        forget_host("devbox");
+        assert_eq!(kept(), ["devbox"], "a window has it open");
+        app.environments.borrow_mut().remove(&remote.host);
+        let choices: Vec<_> = environments(remote.model)
+            .into_iter()
+            .map(|c| (c.host, c.forgettable))
+            .collect();
+        assert_eq!(
+            choices,
+            [(None, false), (Some("devbox".into()), false)],
+            "the asking window's own"
+        );
+        forget_host("devbox");
+        assert!(kept().is_empty());
+        APP.set(None);
     }
 
     #[test]

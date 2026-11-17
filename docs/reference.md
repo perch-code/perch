@@ -1615,12 +1615,21 @@ put on it first. On it:
    (or `token` in its config.toml), and each agent CLI you run, `claude`,
    `codex` or `agy`. Nothing is copied from the Mac.
 
-Click the environment name at the foot of the sidebar, or open
-**Settings > Environment** in the window you want to change. Enter
+Open **Settings > Environment** in the window you want to change. Enter
 the SSH host and select **Connect**. That window opens the host’s
 repositories and agent runs. **Use local environment** brings it back to
 this machine. Switching closes the current item. Other windows keep their
 environment and open items.
+
+Your login at the foot of the sidebar is the one signed in to GitHub in
+the window’s environment, with the environment’s name under it. Click it
+for a menu of environments: this machine, each host a window has
+connected to and any host a window has open, with the window’s own
+checked. Choosing one switches the
+window to it. **Connect to SSH host…** opens **Settings > Environment**
+for a new host. The × on a host no window has open takes it out of the
+menu. The hosts connected to are kept in `hosts.json` in this machine’s
+Perch home.
 
 Perch reopens the windows from your previous session, including each
 window’s environment, size and open item. A remote window reopens its item
