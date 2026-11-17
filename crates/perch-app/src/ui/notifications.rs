@@ -450,13 +450,21 @@ fn inbox_row_of(state: AppState, item: &Item) -> Option<InboxRow> {
     row_about(rows, item)
 }
 
+/// GitHub's notification first: an issue a run ended on has a row of
+/// each, the run's above when it is the newer, and the notification is
+/// the one with more to do about it.
 fn row_about(rows: Vec<InboxRow>, item: &Item) -> Option<InboxRow> {
-    rows.into_iter().find(|row| match row {
+    let about = |row: &InboxRow| match row {
         InboxRow::Thread(thread) => item.subject.as_ref().is_some_and(|subject| {
             thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
         }),
         InboxRow::Local { item: local, .. } => local.id == item.id,
-    })
+    };
+    let at = rows
+        .iter()
+        .position(|row| row.thread().is_some() && about(row))
+        .or_else(|| rows.iter().position(about))?;
+    rows.into_iter().nth(at)
 }
 
 /// Where an item stands in the inbox, as the Inbox row of its details
@@ -527,8 +535,8 @@ pub(crate) fn snooze_menu_of(state: AppState, backend: Rc<Backend>, item: &Item)
     }
 }
 
-/// The rest of what `item`'s row in the inbox offers: Mark Unread, and on
-/// a notification of GitHub's, Unsubscribe.
+/// The rest of what `item`'s row in the inbox offers: Mark Unread, on
+/// that row alone, and on a notification of GitHub's, Unsubscribe.
 pub(crate) fn more_menu_of(state: AppState, backend: Rc<Backend>, item: &Item) -> Menu {
     let row = inbox_row_of(state, item);
     let read = match &row {
@@ -537,14 +545,20 @@ pub(crate) fn more_menu_of(state: AppState, backend: Rc<Backend>, item: &Item) -
         None => false,
     };
     let unread_backend = backend.clone();
-    let unread_item = item.clone();
+    let unread_row = row.clone();
     let mut menu = Menu::new().item("Mark Unread", move |entry| {
         entry
             .icon(SidebarIcon::Unread)
             .enabled(read)
             .accelerator_for(Action::MarkUnread)
-            .action(move || {
-                crate::ui::items::mark_unread(state, &unread_backend, &unread_item);
+            .action(move || match &unread_row {
+                Some(InboxRow::Thread(thread)) => {
+                    unread_backend.mark_notification_unread(&thread.id)
+                }
+                Some(InboxRow::Local { item, .. }) => {
+                    unread_backend.mark_item_activity_unread(&item.id)
+                }
+                None => {}
             })
     });
     if let Some(InboxRow::Thread(thread)) = row {
@@ -970,6 +984,81 @@ pub(crate) fn github_url(thread: &Thread) -> Option<String> {
 mod tests {
     use super::*;
     use perch_github::{Reason, Repository, Subject};
+
+    /// An issue a run ended on has two rows in the inbox, the run's first
+    /// when it is the newer. Its details act on GitHub's notification,
+    /// which can be snoozed and unsubscribed from, and Mark Unread there
+    /// is that row's alone.
+    #[test]
+    fn an_item_with_a_run_and_a_notification_stands_by_the_notification() {
+        use crate::backend::Command;
+        let _root = floem::headless::TestRoot::new();
+        let state = AppState::new();
+        let mut item = Item::new("a/b", "2026-09-19T12:00:00Z".parse().unwrap());
+        item.id = "issue".into();
+        let mut issue = perch_engine::test_support::issue("");
+        issue.repo_full_name = "a/b".into();
+        item.subject = Some(perch_github::ItemSubject::Issue(issue));
+        let at: Timestamp = "2026-09-20T12:00:00Z".parse().unwrap();
+        state.items.set(vec![item.clone()]);
+        state.item_activity.update(|all| {
+            all.insert(
+                "issue".into(),
+                ItemActivity {
+                    item_id: "issue".into(),
+                    at,
+                    event: perch_github::ActivityEvent::Review {
+                        group_id: "g".into(),
+                        outcome: perch_github::ActivityOutcome::Completed,
+                        findings: 0,
+                    },
+                    read_at: Some(at),
+                    done_at: None,
+                    local_unread: false,
+                },
+            );
+        });
+        assert_eq!(
+            standing(state, &item),
+            Some(InboxStanding::Here {
+                notification: false,
+                read: true
+            }),
+            "the run alone"
+        );
+
+        state.notifications.set(vec![thread(
+            "7",
+            "a/b",
+            "Fence",
+            SubjectKind::Issue,
+            Reason::Mention,
+            false,
+        )]);
+        assert!(
+            matches!(
+                state.inbox_rows(InboxView::Inbox).first(),
+                Some(InboxRow::Local { .. })
+            ),
+            "the run's row is not the first"
+        );
+        assert_eq!(
+            standing(state, &item),
+            Some(InboxStanding::Here {
+                notification: true,
+                read: true
+            })
+        );
+        let (backend, mut commands) = Backend::recording();
+        let menu = more_menu_of(state, Rc::new(backend), &item);
+        assert_eq!(menu.outline(), ["Mark Unread", "Unsubscribe"]);
+        menu.choose("Mark Unread");
+        let sent: Vec<Command> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            matches!(&sent[..], [Command::MarkNotificationUnread { thread_id }] if thread_id == "7"),
+            "{sent:?}"
+        );
+    }
 
     fn thread(
         id: &str,

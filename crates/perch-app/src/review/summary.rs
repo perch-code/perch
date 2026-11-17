@@ -444,6 +444,13 @@ pub(crate) fn details(app: AppState, state: ReviewState, backend: Rc<Backend>) -
 // What can be done with the item
 // ---------------------------------------------------------------------
 
+/// A control in the details that Tab reaches, with a ring while it has
+/// the keyboard: Enter or Space presses it, or drops its menu down.
+fn reached_by_tab(s: floem::style::Style) -> floem::style::Style {
+    s.keyboard_navigable()
+        .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+}
+
 /// A round glyph in the details that does one thing, with a tip saying
 /// what, and the key for it. Tab reaches it, and Enter or Space presses
 /// it then.
@@ -456,10 +463,7 @@ fn glyph_button(
     tip_with(
         icon_button(move || glyph, theme::fg_muted, act)
             .into_view()
-            .style(|s| {
-                s.keyboard_navigable()
-                    .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            }),
+            .style(reached_by_tab),
         says,
     )
     .debug_name(name)
@@ -600,7 +604,8 @@ fn menu_chip(
     .dropdown(menu)
     .debug_name(name)
     .style(|s| {
-        s.items_center()
+        reached_by_tab(s)
+            .items_center()
             .height(22.0)
             .padding_horiz(8.0)
             .background(theme::canvas())
@@ -673,7 +678,9 @@ fn inbox(
                     Some(item) => notifications::more_menu_of(app, backend.clone(), &item),
                     None => Menu::new(),
                 },
-            ),
+            )
+            .into_view()
+            .style(reached_by_tab),
         ))
         .style(|s| s.items_center().min_width(0.0).col_gap(6.0))
         .into_any();
@@ -2182,7 +2189,8 @@ fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
             })
             .debug_name("worktree menu")
             .style(|s| {
-                s.items_center()
+                reached_by_tab(s)
+                    .items_center()
                     .height(22.0)
                     .padding_horiz(8.0)
                     .background(theme::canvas())
