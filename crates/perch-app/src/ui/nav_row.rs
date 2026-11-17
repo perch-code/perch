@@ -11,9 +11,11 @@
 //! Item rows and notification rows share these pieces so the three
 //! scopes read as one list.
 
+use floem::event::EventPropagation;
 use floem::prelude::*;
-use floem::reactive::{Memo, SignalGet};
+use floem::reactive::{Memo, SignalGet, SignalUpdate};
 use floem::style::{CursorStyle, Style};
+use floem::text::TextOverflowChanged;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use jiff::Timestamp;
 use perch_github::{CheckStatus, ReviewDecision};
@@ -139,23 +141,39 @@ pub fn title_label(
     muted: bool,
     unread: impl Fn() -> bool + 'static,
 ) -> impl IntoView {
-    Label::derived(move || text.clone()).style(move |s| {
-        let unread = unread();
-        s.font_size(theme::TEXT_TITLE)
-            .font_weight(if unread {
-                theme::weight_emphasis()
-            } else {
-                theme::weight_read()
-            })
-            .color(if muted {
-                theme::nav_subtle()
-            } else if unread {
-                theme::nav_fg()
-            } else {
-                theme::nav_read()
-            })
-            .text_ellipsis()
+    let cut_short = RwSignal::new(false);
+    let label = Label::new(text.clone())
+        .on_event(
+            TextOverflowChanged::listener(),
+            move |_, change: &TextOverflowChanged| {
+                cut_short.set(change.is_overflowing);
+                EventPropagation::Continue
+            },
+        )
+        .style(move |s| {
+            let unread = unread();
+            s.font_size(theme::TEXT_TITLE)
+                .font_weight(if unread {
+                    theme::weight_emphasis()
+                } else {
+                    theme::weight_read()
+                })
+                .color(if muted {
+                    theme::nav_subtle()
+                } else if unread {
+                    theme::nav_fg()
+                } else {
+                    theme::nav_read()
+                })
+                .text_ellipsis()
+                .min_width(0.0)
+                .max_width_full()
+        });
+    tip(label, text).style(move |s| {
+        s.min_width(0.0)
             .max_width_full()
+            .pointer_events_none()
+            .apply_if(cut_short.get(), |s| s.pointer_events_auto())
     })
 }
 
