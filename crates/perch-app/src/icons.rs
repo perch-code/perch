@@ -98,6 +98,12 @@ fn issue_body(c: &str) -> String {
     )
 }
 
+/// Refresh's strokes in its 16px box, an arc about the box's centre and
+/// the arrow's head: the SVG's, and the ones a turning arrow draws.
+pub const REFRESH_PATHS: [&str; 2] = ["M13.2 8 a5.2 5.2 0 1 1 -1.6 -3.7", "M13.4 1.8 v3.1 h-3.1"];
+/// How wide Refresh's strokes are in that box.
+pub const REFRESH_STROKE: f64 = 1.5;
+
 /// Sidebar glyphs. Drawn at 16px, tinted by the caller's colour.
 pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
     let c = hex(color);
@@ -125,12 +131,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<circle cx="7" cy="7" r="4.4" fill="none" stroke="{c}" stroke-width="1.5"/>
                <path d="M10.4 10.4 L14 14" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
         ),
-        SidebarIcon::Refresh => format!(
-            r#"<path d="M13.2 8 a5.2 5.2 0 1 1 -1.6 -3.7" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>
-               <path d="M13.4 1.8 v3.1 h-3.1" fill="none" stroke="{c}" stroke-width="1.5"
+        SidebarIcon::Refresh => {
+            let [arc, head] = REFRESH_PATHS;
+            format!(
+                r#"<path d="{arc}" fill="none" stroke="{c}"
+                     stroke-width="{REFRESH_STROKE}" stroke-linecap="round"/>
+               <path d="{head}" fill="none" stroke="{c}" stroke-width="{REFRESH_STROKE}"
                      stroke-linecap="round" stroke-linejoin="round"/>"#
-        ),
+            )
+        }
         // Close, smaller and ringed: empty a field.
         SidebarIcon::Clear => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"/>

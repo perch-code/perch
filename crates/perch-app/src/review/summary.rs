@@ -1211,6 +1211,16 @@ fn merge_standing(state: ReviewState) -> Option<Standing> {
 /// A status's glyph.
 const STATUS_GLYPH: f64 = 14.0;
 
+/// A status's glyph in its tone's colour. The arrow of what is still in
+/// progress, checks that run, goes round while it shows.
+fn status_glyph(icon: SidebarIcon, ink: fn() -> floem::peniko::Color) -> floem::AnyView {
+    if icon == SidebarIcon::Refresh {
+        crate::review::run_view::turning_arrow(ink).into_any()
+    } else {
+        sidebar_glyph(icon, ink).into_any()
+    }
+}
+
 /// A place in the status group for one property: built again when how
 /// it stands changes, and gone, with its place, when there is nothing to
 /// say. One that `gives_way` shrinks with what it holds in a narrow
@@ -1262,7 +1272,7 @@ fn property(
                 .pointer_events_none()
                 .apply_if(!divided(), |s| s.hide())
         }),
-        sidebar_glyph(icon, ink).style(|s| {
+        status_glyph(icon, ink).style(|s| {
             s.size(STATUS_GLYPH, STATUS_GLYPH)
                 .flex_shrink(0.0_f32)
                 .pointer_events_none()
@@ -4256,6 +4266,18 @@ pub(crate) mod tests {
             checks_say(state),
             Some((Tone::Waiting, "Checks running".into()))
         );
+        // Its arrow goes round while they run, and only then.
+        let turns = |harness: &floem::headless::HeadlessHarness| {
+            let status = named(harness.root_id(), "checks status").expect("no checks status");
+            named(status, "turning arrow").is_some()
+        };
+        assert!(turns(&harness), "running checks' arrow stands still");
+        state
+            .pull_request_overview
+            .set(Some(Arc::new(overview(checks_of(&[], 14)))));
+        harness.rebuild();
+        harness.paint();
+        assert!(!turns(&harness), "passed checks' glyph turns");
 
         // Merge is the item bar's, and the checks' detail their menu:
         // the head says whether it merges cleanly, and has none of

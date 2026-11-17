@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use floem::context::PaintCx;
-use floem::kurbo::{Circle, Point, Stroke, Vec2};
+use floem::kurbo::{Affine, BezPath, Circle, Point, Stroke, Vec2};
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
@@ -25,7 +25,7 @@ use floem::{View, ViewId};
 use perch_github::{RunRecord, RunStatus, RunStep};
 
 use crate::backend::Backend;
-use crate::icons::SidebarIcon;
+use crate::icons::{self, SidebarIcon};
 use crate::review::cards;
 use crate::review::code_refs::{written_place, Refs};
 use crate::review::model::ReviewState;
@@ -280,27 +280,93 @@ impl View for Spinner {
             theme::border(),
             &Stroke::new(stroke),
         );
-        let seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
         let arc = floem::kurbo::Arc {
             center,
             radii: Vec2::new(radius, radius),
-            start_angle: (seconds / TURN).fract() * TAU,
+            start_angle: turned() * TAU,
             sweep_angle: TAU / 4.0,
             x_rotation: 0.0,
         };
         cx.stroke(&arc, (self.color)(), &Stroke::new(stroke));
-        if !self.armed.replace(true) {
-            let (id, armed) = (self.id, self.armed.clone());
-            floem::action::exec_after(FRAME, move |_| {
-                armed.set(false);
-                if id.is_valid() {
-                    id.request_paint();
-                }
-            });
+        turn_again(self.id, &self.armed);
+    }
+}
+
+/// How far round a turning mark is now, of one turn.
+fn turned() -> f64 {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    (seconds / TURN).fract()
+}
+
+/// Asks for a turning mark's next frame from its paint, once a frame
+/// however often it is painted.
+fn turn_again(id: ViewId, armed: &Rc<Cell<bool>>) {
+    if !armed.replace(true) {
+        let armed = armed.clone();
+        floem::action::exec_after(FRAME, move |_| {
+            armed.set(false);
+            if id.is_valid() {
+                id.request_paint();
+            }
+        });
+    }
+}
+
+/// The refresh arrow going round, sized by its style: something still
+/// in progress. Drawn from the glyph's own strokes, as the spinner is
+/// drawn and for its reason, and turning on its clock.
+pub struct TurningArrow {
+    id: ViewId,
+    color: Box<dyn Fn() -> Color>,
+    armed: Rc<Cell<bool>>,
+    strokes: Vec<BezPath>,
+}
+
+pub fn turning_arrow(color: impl theme::Ink) -> TurningArrow {
+    TurningArrow {
+        id: ViewId::new(),
+        color: Box::new(color),
+        armed: Rc::new(Cell::new(false)),
+        strokes: icons::REFRESH_PATHS
+            .iter()
+            .filter_map(|path| BezPath::from_svg(path).ok())
+            .collect(),
+    }
+}
+
+impl View for TurningArrow {
+    fn id(&self) -> ViewId {
+        self.id
+    }
+
+    fn debug_name(&self) -> Cow<'static, str> {
+        "turning arrow".into()
+    }
+
+    fn paint(&mut self, cx: &mut PaintCx) {
+        let Some(layout) = self.id.get_layout() else {
+            return;
+        };
+        let (width, height) = (f64::from(layout.size.width), f64::from(layout.size.height));
+        // The glyph's 16px box, fitted to the view.
+        let scale = width.min(height) / 16.0;
+        if scale <= 0.0 {
+            return;
         }
+        // The way the arrow points: clockwise.
+        let placed = Affine::translate((width / 2.0, height / 2.0))
+            * Affine::rotate(turned() * TAU)
+            * Affine::scale(scale)
+            * Affine::translate((-8.0, -8.0));
+        let stroke = Stroke::new(icons::REFRESH_STROKE * scale);
+        let color = (self.color)();
+        for path in &self.strokes {
+            cx.stroke(&(placed * path), color, &stroke);
+        }
+        turn_again(self.id, &self.armed);
     }
 }
 
@@ -909,6 +975,28 @@ fn fold_words(run: &RunRecord, steps: &[RunStep]) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The turning arrow draws both of Refresh's strokes, inside the
+    /// glyph's box and about its centre, so it turns in place.
+    #[test]
+    fn the_turning_arrow_is_the_refresh_glyph() {
+        use floem::kurbo::Shape;
+
+        let arrow = turning_arrow(theme::fg_muted);
+        assert_eq!(arrow.strokes.len(), icons::REFRESH_PATHS.len());
+        let arc = arrow.strokes[0].bounding_box();
+        assert!(
+            (arc.center() - Point::new(8.0, 8.0)).hypot() < 0.1,
+            "{arc:?}"
+        );
+        for stroke in &arrow.strokes {
+            let bounds = stroke.bounding_box();
+            assert!(
+                bounds.x0 >= 0.0 && bounds.y0 >= 0.0 && bounds.x1 <= 16.0 && bounds.y1 <= 16.0,
+                "{bounds:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_step_line_is_read_back_into_its_parts() {
