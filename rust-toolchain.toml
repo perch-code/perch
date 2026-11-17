@@ -3,3 +3,11 @@
 [toolchain]
 channel = "1.97.0"
 components = ["rustfmt", "clippy"]
+# The app carries perchd for each of these, so building the app builds
+# them: see crates/perch-app/build.rs.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]

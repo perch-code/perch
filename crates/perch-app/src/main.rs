@@ -287,34 +287,39 @@ fn start_engine(
 }
 
 /// What ssh runs on the host: `[remote] command` as given, or else the
-/// `perchd` the app installs there: the one `[remote] perchd_on_host`
-/// names there, else `[remote] perchd` from this machine, else the
-/// release's.
+/// app's own `perchd`, which it sends there.
 pub(crate) fn bridge(remote: &perch_github::RemoteConfig) -> perch_engine::wire::remote::Bridge {
-    use perch_engine::wire::{provision::Source, remote::Bridge};
+    use perch_engine::wire::remote::Bridge;
     if let Some(command) = remote.command() {
         return Bridge::Command(command.to_string());
     }
-    Bridge::Installed(match (remote.perchd_on_host(), remote.perchd()) {
-        (Some(path), _) => Source::HostFile(path.to_string()),
-        (None, Some(path)) => Source::File(path),
-        (None, None) => match source_workspace() {
-            Some(workspace) => Source::Dev(workspace),
-            None => Source::Release,
-        },
-    })
+    Bridge::Installed(own_engine())
 }
 
-/// The workspace this app was built from, when it is not an installed
-/// one: its `perchd` is then built from the same source, since no release
-/// is. An installed app has a bundle. A binary built somewhere else, a
-/// release's on its runner say, has no workspace here at the path it was
-/// built from. Where the binary itself sits says nothing: cargo's target
-/// directory can be anywhere.
-fn source_workspace() -> Option<std::path::PathBuf> {
-    if perch_engine::update::running_bundle().is_some() {
-        return None;
+// `ENGINES`: what build.rs built into this app, each a platform's key,
+// the SHA-256 of its `perchd`, and that `perchd` gzipped.
+include!(concat!(env!("OUT_DIR"), "/engines.rs"));
+
+/// Where the app's own `perchd` comes from: the engines it carries, one
+/// for each platform its build could build for; and, for a host it
+/// carries none for, its source, when it was built here and that is
+/// still there.
+fn own_engine() -> perch_engine::wire::provision::Source {
+    use perch_engine::wire::provision::{Carried, Source};
+    Source {
+        carried: ENGINES
+            .iter()
+            .filter_map(|(platform, sum, packed)| Carried::embedded(platform, sum, packed))
+            .collect(),
+        workspace: source_workspace(),
     }
+}
+
+/// The workspace this app was built from, when it is still there. A
+/// binary built somewhere else, a release's on its runner say, has no
+/// workspace here at the path it was built from. Where the binary itself
+/// sits says nothing: cargo's target directory can be anywhere.
+fn source_workspace() -> Option<std::path::PathBuf> {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)?
@@ -353,4 +358,28 @@ fn init_logging() {
         .with(file)
         .init();
     log_file::install_panic_hook();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{own_engine, ENGINES};
+
+    /// Every engine the build put in the app is one the app can name: a
+    /// platform Perch knows, once, under a whole SHA-256.
+    #[test]
+    fn the_engines_built_into_the_app_are_ones_it_can_send() {
+        let source = own_engine();
+        assert_eq!(source.carried.len(), ENGINES.len());
+        let mut platforms: Vec<String> = source
+            .carried
+            .iter()
+            .map(|engine| engine.platform.key())
+            .collect();
+        platforms.sort();
+        platforms.dedup();
+        assert_eq!(platforms.len(), ENGINES.len());
+        for engine in &source.carried {
+            assert_eq!(engine.build().len(), 12);
+        }
+    }
 }

@@ -1,13 +1,16 @@
-# Push a tag named for Cargo.toml's version (v0.2.0) to build Perch.app and
-# perchd on an Apple Silicon runner, for it and cross-compiled for Intel, and
-# Perch and perchd for Linux on x86_64 and arm64 runners, and publish them all
-# as a GitHub release. A tag with a hyphen (v0.2.0-beta.1) becomes a prerelease,
-# which `releases/latest` skips.
+# Push a tag named for Cargo.toml's version (v0.2.0) to build perchd for
+# Linux and macOS, on x86_64 and arm64, then Perch.app on an Apple Silicon
+# runner, for it and cross-compiled for Intel, and Perch for Linux on x86_64
+# and arm64 runners, each carrying all four engines, and publish them all
+# as a GitHub release. A tag with a hyphen (v0.2.0-beta.1) becomes a
+# prerelease, which `releases/latest` skips.
 #
 # install.sh downloads the latest release's tarball for its platform, so
-# keep the Perch-<os>-<arch>.tar.gz names in step with it. The app downloads
-# perchd-<linux|macos>-<arch>.tar.gz for a host and checks it against
-# SHA256SUMS, so keep those names too.
+# keep the Perch-<os>-<arch>.tar.gz names in step with it. Every app carries
+# all four engines in its own binary: its build (crates/perch-app/build.rs)
+# takes perchd-<linux|macos>-<arch>.tar.gz from PERCH_ENGINES by those names,
+# so keep those too. They are published beside the apps as well, for running
+# one by hand.
 
 name: Release
 
@@ -33,7 +36,9 @@ jobs:
             exit 1
           fi
 
-  macos:
+  # The engine alone, for a Mac that is a host. Signed ad hoc as the app
+  # is: Apple Silicon runs nothing unsigned.
+  perchd-macos:
     needs: check
     runs-on: macos-15
     steps:
@@ -41,25 +46,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build Perch.app for Apple Silicon
-        run: ./scripts/bundle.sh
-
-      # COPYFILE_DISABLE keeps macOS tar from adding ._ AppleDouble files.
-      - name: Package for Apple Silicon
-        run: COPYFILE_DISABLE=1 tar -czf Perch-macos-arm64.tar.gz -C target Perch.app
-
-      - name: Build Perch.app for Intel
-        run: |
-          rustup target add x86_64-apple-darwin
-          ./scripts/bundle.sh x86_64-apple-darwin
-
-      - name: Package for Intel
-        run: COPYFILE_DISABLE=1 tar -czf Perch-macos-x86_64.tar.gz -C target Perch.app
-
-      # The engine alone, for a Mac that is a host. Signed ad hoc as the
-      # app is: Apple Silicon runs nothing unsigned.
       - name: Build and package perchd
         run: |
+          rustup target add x86_64-apple-darwin
           for pair in aarch64-apple-darwin:arm64 x86_64-apple-darwin:x86_64; do
             triple="${pair%%:*}" arch="${pair##*:}"
             cargo build --release --locked -p perchd --target "$triple"
@@ -72,14 +61,14 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
-          path: |
-            Perch-macos-*.tar.gz
-            perchd-macos-*.tar.gz
+          name: perchd-macos
+          path: perchd-macos-*.tar.gz
 
-  # 22.04 rather than the latest, so the binary needs glibc 2.35, not
-  # 24.04's 2.39, and runs on older distributions too.
-  linux:
+  # The engine alone, for a host: no GTK, no window. Built against musl
+  # and linked statically, so it runs on any Linux of its architecture,
+  # whatever its libc. ring and the bundled SQLite are C, compiled with
+  # musl-gcc.
+  perchd-linux:
     needs: check
     strategy:
       matrix:
@@ -92,26 +81,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # muda's menus link GTK 3 and fontique links fontconfig, as in CI.
-      - name: Install GTK and fontconfig headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libfontconfig1-dev
-
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build Perch
-        run: ./scripts/bundle.sh
-
-      - name: Package
-        run: tar -czf Perch-linux-${{ matrix.arch }}.tar.gz -C target perch
-
-      # The engine alone, for a host: no GTK, no window. Built against musl
-      # and linked statically, so it runs on any Linux of its architecture,
-      # whatever its libc. ring and the bundled SQLite are C, compiled with
-      # musl-gcc.
       - name: Build perchd
         run: |
+          sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools
           target="$(uname -m)-unknown-linux-musl"
           rustup target add "$target"
@@ -138,10 +112,90 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          name: perchd-linux-${{ matrix.arch }}
+          path: perchd-linux-*.tar.gz
+
+  # The apps, once every engine is built: each carries all four, so it can
+  # start its own on whatever host it is pointed at. The app's build takes
+  # them from PERCH_ENGINES, where one runner could not build them all,
+  # and fails if one is missing.
+  macos:
+    needs: [perchd-macos, perchd-linux]
+    runs-on: macos-15
+    env:
+      PERCH_ENGINES: ${{ github.workspace }}/engines
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perchd-*
+          path: engines
+          merge-multiple: true
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Perch.app for Apple Silicon
+        run: ./scripts/bundle.sh
+
+      # COPYFILE_DISABLE keeps macOS tar from adding ._ AppleDouble files.
+      - name: Package for Apple Silicon
+        run: COPYFILE_DISABLE=1 tar -czf Perch-macos-arm64.tar.gz -C target Perch.app
+
+      - name: Build Perch.app for Intel
+        run: |
+          rustup target add x86_64-apple-darwin
+          ./scripts/bundle.sh x86_64-apple-darwin
+
+      - name: Package for Intel
+        run: COPYFILE_DISABLE=1 tar -czf Perch-macos-x86_64.tar.gz -C target Perch.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: Perch-macos-*.tar.gz
+
+  # 22.04 rather than the latest, so the binary needs glibc 2.35, not
+  # 24.04's 2.39, and runs on older distributions too.
+  linux:
+    needs: [perchd-macos, perchd-linux]
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      PERCH_ENGINES: ${{ github.workspace }}/engines
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perchd-*
+          path: engines
+          merge-multiple: true
+
+      # muda's menus link GTK 3 and fontique links fontconfig, as in CI.
+      - name: Install GTK and fontconfig headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libfontconfig1-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Perch
+        run: ./scripts/bundle.sh
+
+      - name: Package
+        run: tar -czf Perch-linux-${{ matrix.arch }}.tar.gz -C target perch
+
+      - uses: actions/upload-artifact@v4
+        with:
           name: linux-${{ matrix.arch }}
-          path: |
-            Perch-linux-*.tar.gz
-            perchd-linux-*.tar.gz
+          path: Perch-linux-*.tar.gz
 
   publish:
     needs: [macos, linux]

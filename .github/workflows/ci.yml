@@ -23,11 +23,14 @@ jobs:
       - uses: actions/checkout@v5
 
       # muda's menus link GTK 3 and fontique links fontconfig; wayland and
-      # xkbcommon are loaded at runtime and need no headers.
-      - name: Install GTK and fontconfig headers
+      # xkbcommon are loaded at runtime and need no headers. musl-gcc is
+      # for the perchd the app's build puts in the app: this machine's
+      # own, against musl. The other three need zig or a Mac, and the
+      # build says it left them out.
+      - name: Install GTK and fontconfig headers, and musl
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libfontconfig1-dev
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libfontconfig1-dev musl-tools
 
       - uses: Swatinem/rust-cache@v2
 
@@ -37,16 +40,14 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
-      # Releases ship perchd built against musl and linked statically, so a
-      # host needs no particular libc. This fails a change that pulls in
-      # OpenSSL or something else that will not link that way.
-      - name: Build perchd static
+      # Every app carries perchd built against musl and linked statically,
+      # so a host needs no particular libc. This fails a change that pulls
+      # in OpenSSL or something else that will not link that way: the one
+      # the build above made for the app is looked at.
+      - name: Check the app's perchd is static
         run: |
-          sudo apt-get install -y --no-install-recommends musl-tools
-          rustup target add x86_64-unknown-linux-musl
-          CC_x86_64_unknown_linux_musl=musl-gcc \
-            cargo build --locked -p perchd --target x86_64-unknown-linux-musl
-          bin=target/x86_64-unknown-linux-musl/debug/perchd
+          bin=target/engines/x86_64-unknown-linux-musl/debug/perchd
+          "$bin" --version
           if readelf -lW "$bin" | grep -q INTERP || readelf -dW "$bin" | grep -q NEEDED; then
             echo "::error::perchd is dynamically linked"
             exit 1

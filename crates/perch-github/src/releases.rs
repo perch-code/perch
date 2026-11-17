@@ -40,16 +40,6 @@ pub struct ReleaseAsset {
     pub browser_download_url: String,
 }
 
-/// Where Perch's own releases are downloaded from. The repository is
-/// public, so no token is sent: one for another account's repositories
-/// would be no help, and nothing of the reader's leaves the Mac.
-pub const PERCH_DOWNLOADS: &str = "https://github.com/perch-code/perch/releases/download";
-
-/// The address of `name` in Perch's release of `version` (`0.9.0`).
-pub fn perch_download_url(version: &str, name: &str) -> String {
-    format!("{PERCH_DOWNLOADS}/v{version}/{name}")
-}
-
 /// Where Perch's latest release is asked after with no token.
 pub const PERCH_LATEST: &str = "https://api.github.com/repos/perch-code/perch/releases/latest";
 
@@ -198,13 +188,5 @@ mod tests {
             assert_eq!(updates.last(), Some(&(6, total)));
             assert!(updates.windows(2).all(|w| w[0].0 <= w[1].0));
         }
-    }
-
-    #[test]
-    fn a_perch_download_is_under_its_version_s_tag() {
-        assert_eq!(
-            perch_download_url("0.9.0", "SHA256SUMS"),
-            "https://github.com/perch-code/perch/releases/download/v0.9.0/SHA256SUMS"
-        );
     }
 }

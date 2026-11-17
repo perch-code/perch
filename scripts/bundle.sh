@@ -3,6 +3,11 @@
 # processor or the target triple given (x86_64-apple-darwin). On Linux,
 # build target/perch: the binary and a VERSION file, which the updater
 # reads the way it reads Perch.app's Info.plist.
+#
+# The app's own build puts the engines it runs on its hosts into its
+# binary (crates/perch-app/build.rs): built here, or, with PERCH_ENGINES
+# naming a directory, taken from its perchd-<linux|macos>-<x86_64|arm64>.tar.gz,
+# as a release does.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

@@ -75,7 +75,7 @@ fn engine(page: &Page) -> Row {
         "Engine",
         || {
             format!(
-                "Where Perch's engine runs: {}, or a Linux or macOS host you can ssh to, as you would name it to ssh, with a port after it if it has one (chris@devbox:2222). Perch installs perchd there itself. Changing it takes effect when Perch restarts.",
+                "Where Perch's engine runs: {}, or a Linux or macOS host you can ssh to, as you would name it to ssh, with a port after it if it has one (chris@devbox:2222). Perch brings its own engine and starts it there. Changing it takes effect when Perch restarts.",
                 perch_engine::host::HERE
             )
         },

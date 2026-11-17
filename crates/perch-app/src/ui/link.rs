@@ -3,10 +3,9 @@
 //! stays until the connection is back, as a toast would not: what the
 //! window shows meanwhile is what it had, and nothing done in it goes.
 //!
-//! It also stays while the host's engine is another build than the one
-//! the app installs there, left running: an older one busy with runs or
-//! other clients, with a button to restart it, or a newer one, which only
-//! updating the app answers.
+//! It also stays while the host's engine is another build than the
+//! app's own, left running because it is busy with runs or other
+//! clients, with a button to restart it.
 //!
 //! Connected, it says the host needs setup while the host's engine finds
 //! something it can't work without, with a button to Settings, where each
@@ -28,8 +27,8 @@ use perch_engine::wire::remote::other_said;
 
 /// What the strip says, and the line under it, for how the connection
 /// stands and what the host's engine found missing; `None` while it is up
-/// to the build the app installs with nothing required missing, or with
-/// the engine in process.
+/// to the app's own build with nothing required missing, or with the
+/// engine in process.
 pub fn said(link: &EngineLink, checks: &[HostCheck]) -> Option<(String, Option<String>)> {
     match link {
         EngineLink::Up {
@@ -57,10 +56,10 @@ pub fn said(link: &EngineLink, checks: &[HostCheck]) -> Option<(String, Option<S
                 Some(percent) => format!("{} · {percent}%", p.phase),
                 None => format!("{}…", p.phase),
             });
-            Some((format!("Installing perchd {build} on {host}…"), detail))
+            Some((format!("Sending perchd {build} to {host}…"), detail))
         }
         EngineLink::Restarting { host, build } => Some((
-            format!("Restarting the engine on {host} to update it to perchd {build}…"),
+            format!("Restarting the engine on {host} to run perchd {build}…"),
             None,
         )),
         EngineLink::Down {
@@ -89,8 +88,8 @@ pub fn said(link: &EngineLink, checks: &[HostCheck]) -> Option<(String, Option<S
     }
 }
 
-/// Whether the strip offers Settings: connected to the build the app
-/// installs, which found something required missing. Another build's
+/// Whether the strip offers Settings: connected to the app's own build,
+/// which found something required missing. Another build's
 /// strip says what matters more.
 fn needs_setup(link: &EngineLink, checks: &[HostCheck]) -> bool {
     matches!(link, EngineLink::Up { other: None, .. }) && perch_engine::host::needs_setup(checks)
@@ -101,13 +100,12 @@ fn can_retry(link: &EngineLink) -> bool {
     matches!(link, EngineLink::Down { .. })
 }
 
-/// Whether the reader can restart the host's engine: an older build left
-/// running. A newer one is never stopped.
+/// Whether the reader can restart the host's engine: another build than
+/// the app's, left running.
 fn can_restart(link: &EngineLink) -> bool {
     matches!(
         link,
-        EngineLink::Up { other: Some(other), .. } | EngineLink::Down { other: Some(other), .. }
-            if !other.newer
+        EngineLink::Up { other: Some(_), .. } | EngineLink::Down { other: Some(_), .. }
     )
 }
 
@@ -477,7 +475,6 @@ mod tests {
             wanted: "0.9.0".into(),
             runs,
             clients: 0,
-            newer: false,
         }
     }
 
@@ -519,7 +516,7 @@ mod tests {
                 build: "0.9.0".into(),
                 progress: None,
             }),
-            Some(("Installing perchd 0.9.0 on halo…".to_string(), None))
+            Some(("Sending perchd 0.9.0 to halo…".to_string(), None))
         );
         assert_eq!(
             said_(&EngineLink::Restarting {
@@ -527,7 +524,7 @@ mod tests {
                 build: "0.9.0".into()
             }),
             Some((
-                "Restarting the engine on halo to update it to perchd 0.9.0…".to_string(),
+                "Restarting the engine on halo to run perchd 0.9.0…".to_string(),
                 None
             ))
         );
@@ -536,7 +533,7 @@ mod tests {
             host: "halo".into()
         }));
 
-        // Refused by an older engine with runs: what a restart would stop,
+        // Refused by another build's engine with runs: what a restart would stop,
         // why there is no connection, and both buttons.
         let refused = EngineLink::Down {
             host: "halo".into(),
@@ -549,25 +546,19 @@ mod tests {
         let (headline, why) = said_(&refused).unwrap();
         assert_eq!(
             headline,
-            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (1 agent run would be stopped)."
+            "halo's engine is perchd 0.8.0; restart it to run this app's, perchd 0.9.0 (1 agent run would be stopped)."
         );
         assert!(why.unwrap().contains("protocol 4"));
         assert!(can_restart(&refused) && can_retry(&refused));
-        // A newer one is never offered a restart.
-        let newer = EngineLink::Down {
-            host: "halo".into(),
-            why: "Update the app.".into(),
-            retry_in: None,
-            ever: false,
-            other: Some(perch_engine::backend::OtherEngine {
-                newer: true,
-                ..older(0)
-            }),
-        };
-        assert!(said_(&newer)
-            .unwrap()
-            .0
-            .contains(&format!("Update Perch on {}", perch_engine::host::HERE)));
-        assert!(!can_restart(&newer));
+        // Whichever version is the later, the restart is offered.
+        let later = up(Some(perch_engine::backend::OtherEngine {
+            engine: "1.0.0 (ba9876543210)".into(),
+            ..older(0)
+        }));
+        assert_eq!(
+            said_(&later).unwrap().0,
+            "halo's engine is perchd 1.0.0 (ba9876543210); restart it to run this app's, perchd 0.9.0."
+        );
+        assert!(can_restart(&later));
     }
 }

@@ -5,10 +5,11 @@
 //!
 //! With no engine answering, the bridge starts `perchd serve` in a session
 //! of its own, so the engine outlives the ssh session that started it, and
-//! waits for its socket.
+//! waits for its socket. The engine it starts stops by itself once it has
+//! had no client and no run for [`IDLE`].
 //!
-//! A bridge the app installed clears the older builds beside it as it
-//! starts (see `cleanup`).
+//! A bridge the app put there clears the builds beside it that nothing
+//! has used in a week as it starts (see `cleanup`).
 //!
 //! `--replace` and `--replace-if-idle` make way for this bridge's own
 //! build: an engine of another build is asked over the wire to stop (it
@@ -30,6 +31,11 @@ use perch_engine::wire::provision::{Replace, BUSY_EXIT, BUSY_SAID};
 use perch_engine::wire::{self, Answer};
 
 use crate::socket;
+
+/// How long an engine started here stays with no client and no run: long
+/// enough to be there when a laptop wakes or an app restarts, and not so
+/// long that a host keeps one nobody uses.
+pub const IDLE: Duration = Duration::from_secs(15 * 60);
 
 /// How long an engine started here gets to answer.
 const STARTING: Duration = Duration::from_secs(10);
@@ -317,12 +323,17 @@ fn start_and_connect(socket: &Path, since: SystemTime) -> Result<UnixStream, Str
 
 /// `perchd serve`, detached: a session of its own, so the ssh session
 /// ending does not end it, and no stdio of the bridge's, which belongs to
-/// the wire. It logs to its file.
+/// the wire. It logs to its file, and stops by itself once idle for
+/// [`IDLE`], or `PERCH_IDLE_EXIT_SECS` when that is set, for a test.
 fn start() -> Result<Child, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("could not find perchd itself: {e}"))?;
+    let exe = crate::own_exe().map_err(|e| format!("could not find perchd itself: {e}"))?;
     let mut command = Command::new(&exe);
+    let idle = std::env::var("PERCH_IDLE_EXIT_SECS")
+        .ok()
+        .filter(|seconds| seconds.parse::<u64>().is_ok_and(|seconds| seconds > 0))
+        .unwrap_or_else(|| IDLE.as_secs().to_string());
     command
-        .arg("serve")
+        .args(["serve", "--exit-after-idle", &idle])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

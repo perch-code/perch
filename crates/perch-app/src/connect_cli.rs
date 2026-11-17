@@ -2,11 +2,11 @@
 //!
 //! Connects to the engine on `host`, or on `[remote] host` with none
 //! given, as the app would: through `[remote] command` when the Mac's
-//! config.toml sets one, else through the `perchd` the app installs there,
-//! installing it first when the host has none, and replacing an older
-//! engine with nothing running as the app would. Prints the engine's
-//! welcome and exits 0, or says why not and exits 1. An older engine left
-//! running for its runs or clients, or a newer one, is said after the
+//! config.toml sets one, else through the app's own `perchd`, sending it
+//! first when the host has none of that build, and replacing an engine
+//! of another build with nothing running as the app would. Prints the
+//! engine's welcome and exits 0, or says why not and exits 1. An engine
+//! of another build left running for its runs or clients is said after the
 //! welcome, and then what the host lacks, with what to run for each. No
 //! window is opened; the engine is left running, as the app leaves it.
 

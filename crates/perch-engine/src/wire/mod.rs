@@ -131,10 +131,9 @@ pub enum Intent {
     /// client speaks: `perchd bridge --replace`, making way for its own
     /// build. Only an engine under `perchd serve` stops, and with
     /// `if_idle`, only one with no runs and no clients. One of
-    /// `unless_build` stays, as it is what the client would start, and so
-    /// does one of a newer version than the hello's `app_version`: the
-    /// client judged an engine older some time before it asked, and the
-    /// engine may have been replaced by a newer one since.
+    /// `unless_build` stays, as it is what the client would start: the
+    /// client judged an engine another build some time before it asked,
+    /// and the engine may have been replaced by its own since.
     Stop {
         if_idle: bool,
         #[serde(default)]
@@ -150,8 +149,8 @@ pub enum Intent {
 pub struct About {
     pub engine_version: String,
     pub protocol: u32,
-    /// The `<build>` of the `perchd-<build>` it runs as, or its version
-    /// when it was not installed by the app.
+    /// The `<build>` of the `perchd-<build>` it runs as, the start of its
+    /// binary's SHA-256, or its version when no app put it there.
     pub build: String,
     /// Agent runs queued or under way.
     pub runs: usize,
@@ -413,9 +412,10 @@ fn about(engine: &Engine) -> About {
 }
 
 /// This process's build: the `<build>` of the `perchd-<build>` it runs as,
-/// which the app installed, else its version. Read once, as the engine
-/// first says it: a newer build's bridge may remove this one's binary
-/// while it runs, and Linux then names it `perchd-<build> (deleted)`.
+/// which an app put there under the start of its SHA-256, else its
+/// version. Read once, as the engine first says it: another build's
+/// bridge may remove this one's binary while it runs, and Linux then
+/// names it `perchd-<build> (deleted)`.
 pub fn build() -> &'static str {
     static BUILD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BUILD.get_or_init(|| {
@@ -465,12 +465,10 @@ fn refusal(protocol: u64, app_version: &str) -> String {
 enum Asked {
     /// To connect, speaking this engine's protocol.
     Connect(Hello),
-    /// To stop, whatever its protocol, asked by a client of
-    /// `app_version`.
+    /// To stop, whatever its protocol.
     Stop {
         if_idle: bool,
         unless_build: Option<String>,
-        app_version: String,
     },
 }
 
@@ -496,7 +494,6 @@ fn check_hello(hello: serde_json::Value) -> Result<Asked, WireError> {
         return Ok(Asked::Stop {
             if_idle,
             unless_build,
-            app_version: app_version.unwrap_or_default().to_string(),
         });
     }
     if protocol != u64::from(PROTOCOL) {
@@ -511,11 +508,11 @@ fn check_hello(hello: serde_json::Value) -> Result<Asked, WireError> {
         .map_err(|error| WireError::Malformed(error.to_string()))
 }
 
-/// The answer to a client of `app_version` asking the engine to stop: one
-/// of the build it would start stays, and so does one newer than the
-/// client, which never makes way for an older build; only an engine that
-/// runs as a service stops for the wire, the app's own never; one with
-/// runs or clients is busy when the client asked only if idle.
+/// The answer to a client asking the engine to stop: one of the build it
+/// would start stays; only an engine that runs as a service stops for the
+/// wire, the app's own never; one with runs or clients is busy when the
+/// client asked only if idle. Whether the engine's version is the newer
+/// is never asked: a build makes way for another whichever it is.
 ///
 /// The client weighed the engine before it asked, but not as it asked: a
 /// restart offered hours ago, or a replace raced by another Mac, can reach
@@ -526,10 +523,8 @@ fn answer_stop(
     lifetime: Lifetime,
     if_idle: bool,
     unless_build: Option<&str>,
-    app_version: &str,
 ) -> Answer {
-    if unless_build == Some(about.build.as_str()) || newer_than(&about.engine_version, app_version)
-    {
+    if unless_build == Some(about.build.as_str()) {
         return Answer::Staying(about);
     }
     if lifetime != Lifetime::Service {
@@ -543,18 +538,6 @@ fn answer_stop(
         return Answer::Busy(about);
     }
     Answer::Stopping(about)
-}
-
-/// Whether `version` is newer than `than`, both semantic versions. Not when
-/// either is not one.
-fn newer_than(version: &str, than: &str) -> bool {
-    match (
-        semver::Version::parse(version),
-        semver::Version::parse(than),
-    ) {
-        (Ok(version), Ok(than)) => version > than,
-        _ => false,
-    }
 }
 
 /// Serve one client on `stream` until it hangs up, its stream fails, or
@@ -597,14 +580,12 @@ where
         Ok(Asked::Stop {
             if_idle,
             unless_build,
-            app_version,
         }) => {
             let answer = answer_stop(
                 about(&engine),
                 engine.lifetime(),
                 if_idle,
                 unless_build.as_deref(),
-                &app_version,
             );
             tracing::info!(?answer, "a client asked the engine to stop");
             write_line(&mut write, &answer).await?;
@@ -1128,7 +1109,6 @@ mod tests {
                 Asked::Stop {
                     if_idle: true,
                     unless_build: Some("9.9.9".into()),
-                    app_version: "9.9.9".into(),
                 }
             );
         }
@@ -1325,7 +1305,7 @@ mod tests {
             clients,
         };
         let stop = |runs, clients, lifetime, if_idle, unless: Option<&str>| {
-            answer_stop(about(runs, clients), lifetime, if_idle, unless, VERSION)
+            answer_stop(about(runs, clients), lifetime, if_idle, unless)
         };
         assert!(matches!(
             stop(0, 0, Lifetime::Service, true, Some("0.9.1")),
@@ -1353,31 +1333,25 @@ mod tests {
             stop(0, 0, Lifetime::WhileConnected, false, None),
             Answer::Refused { .. }
         ));
-        // Nor does one newer than the client asking, whatever it was told
-        // of the engine before: it stays, busy or idle, and the client
-        // joins it. One of an older version, the same, or one that names
-        // none, stops as asked.
-        let asked_by = |version: &str, if_idle| {
-            let mut newer = about(3, 1);
-            newer.engine_version = "0.10.0".into();
-            answer_stop(
-                newer,
-                Lifetime::Service,
-                if_idle,
-                Some("0.9.0-0123456789ab"),
-                version,
-            )
+        // One of a later version than the client asking stops as any
+        // other does: builds are never ordered.
+        let later = |if_idle| {
+            let mut later = about(3, 1);
+            later.engine_version = "99.0.0".into();
+            answer_stop(later, Lifetime::Service, if_idle, Some("0123456789ab"))
         };
-        assert!(matches!(asked_by("0.9.0", false), Answer::Staying(_)));
-        assert!(matches!(asked_by("0.9.0", true), Answer::Staying(_)));
-        assert!(matches!(asked_by("0.10.0", false), Answer::Stopping(_)));
-        assert!(matches!(asked_by("0.11.0", false), Answer::Stopping(_)));
-        assert!(matches!(asked_by("0.11.0", true), Answer::Busy(_)));
-        assert!(matches!(asked_by("", false), Answer::Stopping(_)));
+        assert!(matches!(later(false), Answer::Stopping(_)));
+        assert!(matches!(later(true), Answer::Busy(_)));
     }
 
     #[test]
-    fn a_build_is_read_from_the_name_the_app_installed_it_by() {
+    fn a_build_is_read_from_the_name_the_app_put_it_there_by() {
+        assert_eq!(build_named(Some("perchd-0123456789ab")), "0123456789ab");
+        assert_eq!(
+            build_named(Some("perchd-0123456789ab (deleted)")),
+            "0123456789ab"
+        );
+        // As an app from before builds were hashes named them.
         assert_eq!(build_named(Some("perchd-0.9.0")), "0.9.0");
         assert_eq!(
             build_named(Some("perchd-0.9.0-0123456789ab (deleted)")),

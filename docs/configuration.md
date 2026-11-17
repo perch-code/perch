@@ -10,8 +10,12 @@ same home refuses to start and says which process has it (see
 `perchd` reads the config.toml of the machine it runs on.
 
 `PERCH_SSH`, in the app's environment, names the ssh program the app runs
-to reach a host, install `perchd` there and open a terminal on it, in
+to reach a host, send its `perchd` there and open a terminal on it, in
 place of `ssh`: a wrapper that adds `-F <config>`, for tests.
+
+`PERCH_IDLE_EXIT_SECS`, in a host's login environment, is how many seconds
+the engine the app starts there stays with no client and no agent run
+before it stops, in place of 900.
 
 With `[remote] host` set, the app uses the engine on that host (see
 [An engine on another machine](reference.md#an-engine-on-another-machine))
@@ -56,9 +60,7 @@ repository's `github` and `root`.
 | `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |
 | `clone_root` | `~` | The folder a repository added by its name is cloned into, such as `"~/Code"`; read by an engine on a host, which is where repositories are added by name |
 | `[remote] host` | none | An SSH host, Linux or a Mac, whose `perchd` the app uses instead of an engine of its own, as ssh is given it, with a port after it if it has one (`"chris@devbox:2222"`); applies after a restart |
-| `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app installs its own `perchd` there, runs that, and replaces an older engine it finds running |
-| `[remote] perchd` | none | A Linux `perchd`, or a release tarball of one, on the Mac, for the app to install on the host instead of downloading the release's |
-| `[remote] perchd_on_host` | none | A Linux `perchd` on the host, such as `"~/code/perch/target/debug/perchd"`, for the host to put in place itself: one built there from the source the app was built from |
+| `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app sends the `perchd` it carries there, starts it, and replaces an engine of another build it finds running idle |
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |

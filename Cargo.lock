@@ -3690,6 +3690,7 @@ version = "0.8.0"
 dependencies = [
  "block2 0.6.2",
  "emojis",
+ "flate2",
  "floem",
  "floem_renderer",
  "fontique",
@@ -3709,6 +3710,7 @@ dependencies = [
  "pulldown-cmark",
  "regex",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",

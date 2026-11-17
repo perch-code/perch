@@ -1497,20 +1497,24 @@ lock and run beside an engine.
 
 ## perchd
 
-`perchd` runs the engine with no window, for an always-on machine the Mac
-reaches over ssh. It is built from the same crates as the app, without a UI
-toolkit, so it needs no GTK. Releases carry it for Linux as
-`perchd-linux-<arch>.tar.gz` and for a Mac as `perchd-macos-<arch>.tar.gz`,
-for x86_64 and arm64, with the SHA-256 of every asset in the release's
-`SHA256SUMS`. Linux's is built against musl and linked statically, so it
-runs on any Linux of its architecture, Alpine included, whatever its libc. The app installs it on a host itself (see
-[Installing perchd](#installing-perchd)); to run one by hand, put it in
-`~/.local/bin`.
+`perchd` runs the engine with no window, on a machine the Mac reaches over
+ssh. It is built from the same crates as the app, without a UI toolkit, so
+it needs no GTK. It is built for Linux and for a Mac, on x86_64 and arm64,
+as `perchd-linux-<arch>.tar.gz` and `perchd-macos-<arch>.tar.gz`. Linux's
+is built against musl and linked statically, so it runs on any Linux of
+its architecture, Alpine included, whatever its libc. Every app has all
+four built into it and brings the one a host needs to it (see [The app's
+own engine](#the-apps-own-engine)), so nothing is installed on a host first.
+Releases publish them too, with the SHA-256 of every asset in the release's
+`SHA256SUMS`: to run one by hand, put it in `~/.local/bin`.
 
 - `perchd serve` runs the engine and listens on
   `$PERCH_HOME/run/perchd.sock` (the directory owner-only, the socket mode
   0600). It keeps polling, sweeping and running agents with no client
-  connected. SIGTERM, SIGINT or SIGHUP stops it as quitting the app does:
+  connected. With `--exit-after-idle <seconds>` it stops by itself once it
+  has had no client connected and no agent run queued or under way for
+  that long: how a bridge starts one (below). Run by hand with no flag,
+  it stays until it is stopped. SIGTERM, SIGINT or SIGHUP stops it as quitting the app does:
   running agents are stopped and recorded Interrupted, the socket is
   removed and the home let go. A bridge of another build asking it to stop
   over the socket stops it the same way. A second SIGTERM or SIGINT while
@@ -1531,30 +1535,36 @@ runs on any Linux of its architecture, Alpine included, whatever its libc. The a
   host's own agent.
 - `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
   until either side closes. It is what the app has ssh run. With
-  no engine answering it starts `perchd serve` in a session of its own, so
-  the engine outlives the ssh connection, and waits up to 10 seconds for
-  it. An engine that failed to start for a reason it left in
+  no engine answering it starts `perchd serve --exit-after-idle 900` in a
+  session of its own, so the engine outlives the ssh connection, and waits
+  up to 10 seconds for it. That engine stops 15 minutes after its last
+  client has gone and its last run has ended (see [What runs
+  where](#what-runs-where)); `PERCH_IDLE_EXIT_SECS` in the host's login
+  environment sets another wait. An engine that failed to start for a reason it left in
   `serve-failed` is not waited for: the bridge says that reason. When
   something holds the home's lock without listening, an engine still
   stopping or the Perch app running on the host, it names that process.
   It writes nothing but the engine's messages to stdout. A bridge the app
-  installed, one run from `$PERCH_HOME/bin/perchd-<build>`, removes the
-  other `perchd-*` there but the newest, and the temporary files of
-  uploads that stopped over an hour ago.
+  put there, one run from `$PERCH_HOME/bin/perchd-<build>`, marks its own
+  file as used now, and removes the other `perchd-*` there that nothing
+  has used in a week, and the temporary files of uploads that stopped
+  over an hour ago. When a build was last used is its file's modification
+  time.
 - `perchd bridge --replace` makes way for its own build. An engine of
   another build is asked over the socket to stop, and stops as SIGTERM
   stops it. The bridge waits up to a minute for its socket to stop
   answering and the home's lock to be free, then starts its own engine
   and carries on as a bridge; if another bridge has started an engine
   there meanwhile, it joins that one. An engine of its own build is
-  joined as it is, and so is one of a newer version than the bridge's,
-  which never stops for an older one. `--replace-if-idle` does the same only when the engine has no runs
+  joined as it is. Builds are the same or they are not: which version is
+  the later is never asked. `--replace-if-idle` does the same only when the engine has no runs
   and no clients; otherwise it writes `perch-busy: <version> <runs>
   <clients>` to stderr and exits 98, leaving the engine running. Nothing
   is ever signalled or killed by its pid. The Perch app running on the
   host holds the home with no socket, and can't be replaced: quit it
-  there. A build is the `<build>` of the `perchd-<build>` it runs as, or
-  its version when it was not installed by the app.
+  there. A build is the `<build>` of the `perchd-<build>` it runs as, the
+  first 12 hex digits of the binary's SHA-256, or its version when no app
+  put it there.
 - `perchd status` connects without starting anything and prints whether
   an engine is running, its version, protocol and build, its Perch home, how many
   other clients are connected and how many agent runs are queued or under
@@ -1566,8 +1576,8 @@ A socket file left by an engine that was killed is removed when the next
 one starts, once nothing answers on it.
 
 A bridge is the only thing that starts an engine on a host. After the
-host boots, or after an engine crashes, nothing runs there until the app
-next connects. Stopping the engine while the app is connected does not
+host boots, after an engine crashes, or once one has stopped for having
+nothing to do, nothing runs there until the app next connects. Stopping the engine while the app is connected does not
 keep it stopped: the app reconnects and its bridge starts another. Quit
 the app, or set it to This Mac, first. On Linux the engine needs logind's
 `KillUserProcesses=no`, the default on most distributions; with `yes`, it
@@ -1589,9 +1599,9 @@ back while it is hidden.
 
 ### Setting up a host
 
-The host is Linux or a Mac, on x86_64 or arm64, always on, and reachable
-with `ssh <host>`. The app installs `perchd` there itself (see
-[Installing perchd](#installing-perchd)), so nothing of Perch's has to be
+The host is Linux or a Mac, on x86_64 or arm64, and reachable with `ssh
+<host>`. The app brings its own `perchd` and starts it there (see [The
+app's own engine](#the-apps-own-engine)), so nothing of Perch's has to be
 put on it first. On it:
 
 1. On Linux, install bubblewrap and socat (`apt install bubblewrap socat`,
@@ -1662,129 +1672,137 @@ Each command runs with a timeout of ten seconds, beside the engine's work,
 and one that runs out counts as missing. The app's own engine, on the Mac,
 checks nothing.
 
-### Installing perchd
+### The app's own engine
 
-With no `[remote] command`, the app runs a `perchd` of its own build on the
-host, `${PERCH_HOME:-~/.perch}/bin/perchd-<build>`, and installs it when it
-is not there: on the first connection, and after each update of the app.
-`<build>` is the app's version, `0.9.0`, for the release's `perchd`.
+With no `[remote] command`, the app runs its own `perchd` on the host. It
+carries one for each system and processor inside its own binary, put there
+when the app was built (see [How an app gets its
+engines](#how-an-app-gets-its-engines)): nothing is downloaded, and nothing
+is read from beside the app. The host keeps the one it
+was sent as `${PERCH_HOME:-~/.perch}/bin/perchd-<build>`, where `<build>`
+is the first 12 hex digits of the binary's SHA-256, `1a2b3c4d5e6f`. So the
+same engine is never sent twice, whichever app has it, and a different one
+never takes its name. There are no versions in it: two apps carry the same
+engine or they do not.
 
-- The host's login shell runs a short `sh` script that starts the bridge
-  of that build, or, with none, writes `perch-install: <uname -s> <uname
-  -m>` to stderr and exits 97.
-- On that line the app installs and connects again at once, outside the
-  waits between tries. The strip at the foot of the window says
-  "Installing perchd 0.9.0 on <host>…" meanwhile. Linux and macOS, on
-  `x86_64` or on `aarch64` or `arm64`, have a release's `perchd`; any other host says what
-  it is and to install `perchd` by hand and set `[remote] command`.
-- The app downloads `perchd-linux-<arch>.tar.gz`, or `perchd-macos-<arch>.tar.gz`
-  for a Mac, and `SHA256SUMS` from
-  the release of its own version on GitHub, with no token, checks the
-  tarball against the sums, keeps both in `~/.perch/perchd/<version>/` on
-  the Mac, and takes `perchd` out of the tarball. A release with no such
-  file says to set `[remote] perchd`.
+- The host's login shell runs a short `sh` script, which is given the
+  build of each engine the app carries. It starts the bridge of the one
+  for what the host is, which starts the engine if none is running and
+  joins it if one is. With that build not there, it writes
+  `perch-install: <uname -s> <uname -m>` to stderr and exits 97.
+- On that line the app sends the engine and connects again at once,
+  outside the waits between tries. The strip at the foot of the window
+  says "Sending perchd 0.9.0 to <host>…" meanwhile, with how far it has
+  got under it. Linux and macOS, on `x86_64` or on `aarch64` or `arm64`,
+  have a `perchd`; any other host says what it is and to put `perchd`
+  there by hand and set `[remote] command`.
 - A second ssh, with the same options, sends the binary to a script on the
   host that writes it to a temporary file in `bin` (the directory and the
-  file owner-only), runs it with `--version`, and moves it into place only
-  when it names the app's version and protocol. The temporary file is
-  removed when anything fails, the ssh session ending under it included.
-- An install that goes through, after which the host still says it has
-  no `perchd`, stops the tries and says so rather than installing again:
-  most often a login shell there that sets another `PERCH_HOME`. A
-  download or upload that fails is tried again with the next try.
+  file owner-only), takes its SHA-256, and puts it in place only when
+  that is the one the app said: an upload cut short, or changed on the
+  way, is never run. The host needs `sha256sum`, `shasum` or `openssl`
+  for it. A build that is already there is left as it is, so two apps
+  sending the same one at once do not put a file under one another. The
+  temporary file is removed when anything fails, the ssh session ending
+  under it included.
+- A send that goes through, after which the host still says it has no
+  `perchd`, stops the tries and says so rather than sending again: most
+  often a login shell there that sets another `PERCH_HOME`. An upload
+  that fails is tried again with the next try.
+- An app with no `perchd` for the host, and no source to build one
+  from, says so and stops the tries.
 
-`[remote] perchd` names a Linux `perchd`, or a release tarball of one, on
-the Mac, to install instead of the release's: a dev build, or a host
-whose release has none. Its `<build>` is the app's version and the first
-12 hex digits of the binary's SHA-256, `0.9.0-1a2b3c4d5e6f`, so a rebuilt
-binary is installed again on the next connection. A tarball and the
-binary in it are the same build. It has to be built for the host's
-processor and name the app's version and protocol.
+#### How an app gets its engines
 
-An app run from its source, as under `cargo run`, downloads nothing: no
-release is that source. It is told apart from an installed one as the
-updater tells it, by having no bundle around it, with the workspace it was
-built from still there. On the host's `perch-install` line it builds
-`perchd` from that workspace for what the host is, then uploads it as a
-`[remote] perchd` file is, under the same kind of build name. The strip
-says "Installing perchd 0.9.0 from source on <host>…" through both.
+Building the app builds its engines: `crates/perch-app/build.rs` builds
+`perchd` for Linux and macOS, on x86_64 and arm64, with the app's own
+profile, gzips each into the app's binary and records its SHA-256, so the
+app can name its builds without unpacking them. The app itself is built
+for the machine it is built on only. This is so of every build, `cargo
+run` as much as a release's.
 
-- For this machine's own system and processor, `cargo build -p perchd`.
-  For another processor of the same system, the same with `--target`.
-- For another system, a Linux host from a Mac say, `cargo zigbuild -p
-  perchd --target <arch>-unknown-linux-musl`: zig is the C compiler and
-  linker for the host. It needs zig, cargo-zigbuild and the Rust target
-  (`brew install zig`, `cargo install cargo-zigbuild`, `rustup target add
-  <triple>`); when one is missing the strip says which, with the command.
-- Each launch builds again, which cargo makes quick when nothing changed,
-  and asks the host whether it has that build before uploading it, so an
-  unchanged engine is not sent twice. A change to the source is a new
-  build, which replaces the host's engine as an update does.
+- A Linux `perchd` is built against musl through `cargo zigbuild`, zig
+  being the C compiler and linker for it from any machine: it needs zig
+  and cargo-zigbuild (`brew install zig`, `cargo install cargo-zigbuild`).
+  On Linux with neither, this machine's own processor's is built with
+  `musl-gcc` when that is installed.
+- A macOS `perchd` is built by the Rust toolchain on a Mac, for either
+  processor. Anywhere else it needs Apple's SDK: it is built through zig
+  when `SDKROOT` names one, and is left out otherwise.
+- `rust-toolchain.toml` names the four targets, so rustup installs them.
+- One whose tools are missing is left out, with a warning from the build
+  that says what to install, and the app carries the rest. One that does
+  not compile fails the app's build.
+- They are built in `engines` under cargo's target directory, apart from
+  the app, and built again when anything `perchd` is made from changes.
+- With `PERCH_ENGINES` set to a directory, by its whole path, nothing is
+  built: the four `perchd-<linux|macos>-<x86_64|arm64>.tar.gz` there are
+  taken, and one missing fails the build. A release is built so, each
+  engine on a runner of its own system. With `PERCH_ENGINES=none` the app
+  carries none and nothing is built, for a quick build of the app alone.
+  Under clippy and rust-analyzer nothing is built either.
 
-`[remote] perchd`, `perchd_on_host` or `command`, when set, are used
-instead.
+For a host the app carries no engine for, an app whose source is still
+where it was built builds `perchd` from it then: on the host's
+`perch-install` line it builds for what the host is, and uploads it as a
+carried one is, under its own hash. The strip says "Sending perchd 0.9.0
+(built from source) to <host>…" through both. A Linux host's is built with
+`cargo zigbuild` against musl, and a Mac's with `cargo build` from a Mac;
+when a tool is missing the strip says which, with the command. Each
+launch builds again, which cargo makes quick when nothing changed, and
+asks the host whether it has that build before uploading it.
 
-`[remote] perchd_on_host` names a `perchd` that is already on the host,
-and wins over `[remote] perchd`: one built there, from the source the app
-on the Mac was built from. Nothing is uploaded. Before each connection an
-ssh of its own has the host take the file's SHA-256, name its build the
-same way, and, when that build is not installed, copy the file into `bin`
-as an upload would be: owner-only, asked its version, moved into place
-only when it names the app's version and protocol. A file that changed
-while it was copied, as under a build still running, is not installed, and
-the next try looks again, still replacing or restarting the engine if that
-is what the try was for. The path is from the host's home when it starts
-with `~/` or names no root, and can hold only letters, digits and
-`. _ + - /`.
+`[remote] command`, when set, is run instead, and nothing is sent.
 
-`scripts/dev-remote.sh <host> <checkout-on-host>` is that loop for working
-on Perch with the source on the host: it fetches the host checkout's
-commit into the Mac's clone, builds `perchd` in the host's checkout, and
-runs the app on the Mac. A rebuilt `perchd` is another build, so it
-replaces the host's engine as an update does (see below): at once when
-nothing is running in it, and by Restart when something is.
+Each bridge the app put there removes the builds beside it that nothing
+has used in a week (see [perchd](#perchd)). A build an app still connects
+with is used each time it does, so two apps of different builds each keep
+theirs on the host.
 
-Each bridge the app installed removes the older builds beside it but the
-newest one (see [perchd](#perchd)).
-
-### When the app is updated
+### When the engine is another build
 
 The app on the Mac looks for its own updates, as it does with no host:
 Check for Updates… and Restart to update work while disconnected, and
 never go to the host's engine. It asks GitHub with no token, since the
 host has the token and the repository is public.
 
-Updating the app changes the build it wants, so its next connection
-installs the new `perchd` beside the old. The engine already running on
-the host is the old build, and the app weighs it against its own:
+An updated app carries another engine, so its next connection sends the
+new `perchd`, which goes beside the old. The engine already running on the
+host may be the old build still, though one nobody has used for 15 minutes
+has stopped by then (see [What runs where](#what-runs-where)) and the new
+one simply starts. One still running is another build than the app's, as
+is a dev build rebuilt, or another Mac's app of another version. Builds
+are never ordered, only told apart, and the app wants its own:
 
 - No runs and no other client connected: the app hangs up and connects
-  again with `perchd bridge --replace-if-idle`, which stops the old engine
-  and starts the new one. The strip says "Restarting the engine on <host>
-  to update it to perchd <build>…" meanwhile, and the log says so. It does
-  this once a connection: an engine still older after it is left running.
+  again with `perchd bridge --replace-if-idle`, which stops that engine
+  and starts the app's. The strip says "Restarting the engine on <host>
+  to run perchd <build>…" meanwhile, and the log says so. It does
+  this once a connection: an engine still another build after it is left
+  running.
 - Busy, with runs or another Mac connected: the app leaves it running. When
-  it still speaks the app's protocol, the app connects to it as usual and
-  the strip says "<host>'s engine is perchd 0.8.0; restart it to update to
-  0.9.0 (2 agent runs would be stopped)", with a Restart button. When it
+  it speaks the app's protocol, the app connects to it as usual and
+  the strip says "<host>'s engine is perchd 0.8.0 (1a2b3c4d5e6f); restart
+  it to run this app's, perchd 0.9.0 (2 agent runs would be stopped)",
+  with a Restart button. When it
   doesn't, the strip says the same without a connection, with Restart and
   Reconnect. Restart connects with `perchd bridge --replace`, which stops
-  the old engine whatever it is doing: its runs are recorded Interrupted,
+  the engine whatever it is doing: its runs are recorded Interrupted,
   as when the app quits, and other Macs connected to it reconnect to the
   new one. An engine that comes into use between the app's look and its
   `--replace-if-idle` is left running, and the strip offers the restart;
-  the app connects to it when it speaks the app's protocol. A restart
-  that reaches an engine newer than the app, started meanwhile by another
-  Mac, leaves it running, and the app connects to it as to any newer one.
+  the app connects to it when it speaks the app's protocol.
   The counts the strip names are from when the app connected, and are not
   brought up to date while it stays connected.
-- Newer than the app, by version: the app never stops it. The strip says
-  "<host>'s engine is perchd 1.0.0, newer than this app's 0.9.0. Update
-  Perch on this Mac."; while it speaks the app's protocol the app is still
-  connected to it.
+- Two Macs with different builds, at the same host, take turns: the first
+  to connect has its engine, the second joins it while it speaks the
+  second's protocol, and each replaces the other's only when the other's
+  has nothing running and nobody connected. An app older than the engine
+  it replaces can find `perch.db` moved on by the newer one, which its
+  own `perchd` does not start on: the strip says so, and to update Perch
+  on that Mac.
 
-A dev build of the same version as the engine's, but another build, counts
-as older. With `[remote] command` set none of this happens: the app uses
+With `[remote] command` set none of this happens: the app uses
 whatever engine the command reaches.
 
 The app's first message, and the engine's answer, are frozen as of
@@ -1795,11 +1813,11 @@ nothing of itself and can't be asked to stop; the strip says to stop its
 `perchd serve` on the host and reconnect.
 
 `perch --connect [host]` does what the app does to connect, with no
-window: it installs `perchd` if the host needs it, replaces an older
-engine with nothing running, prints the engine's version, protocol, build,
+window: it sends `perchd` if the host needs it, replaces an engine of
+another build with nothing running, prints the engine's version, protocol, build,
 host name, home and data folder, how many other clients it has and how
-many runs, and exits 0. An older engine left running for its runs, or a
-newer one, is said after that, and then the host's checks, a line each,
+many runs, and exits 0. An engine of another build left running for its
+runs is said after that, and then the host's checks, a line each,
 with the command to run under each that failed (see [What the app
 checks](#what-the-app-checks)). It waits up to 30 seconds for them, as an
 engine that has just started looks after it has found the agents. It reads `[remote]` from the Mac's
@@ -1814,10 +1832,17 @@ and its config.toml's settings. The Mac runs the windows, draws the code and
 pictures, and keeps its own `[ui]`, `[display]`, `[keybindings]` and
 `[remote]`, and where its windows were left, in its own Perch home.
 
-With the Mac closed or asleep, the engine goes on: the inbox is polled, runs
-started from the Mac keep going, queued ones start as others finish, and checks are watched.
-Reopening the app, or waking the Mac, catches every window up with what
-happened. A Work run that asks something while no Mac is connected waits for
+With the Mac closed or asleep, the engine goes on for as long as it has
+work: runs started from the Mac keep going, queued ones start as others
+finish, and meanwhile the inbox is polled and checks are watched. Once it
+has had no client connected and no run queued or under way for 15 minutes,
+the engine the app started stops, as SIGTERM stops it, and nothing of
+Perch's runs on the host. The app starts it again when it next connects:
+reopening the app, or waking the Mac, catches every window up with what
+happened, from GitHub and from what the engine recorded. A run counts
+until it has ended, one waiting on an answer included, and so does a
+repository still being cloned for Add repository. An engine started
+by hand with `perchd serve` stays until it is stopped. A Work run that asks something while no Mac is connected waits for
 an answer, up to eight hours by default; the card is there when a window
 connects, and is answered from there as on the Mac. Stopping `perchd`
 interrupts its runs, as quitting the app does.
@@ -1835,8 +1860,8 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
 ```
 
 and talks to the engine on the host over ssh's stdin and stdout. The
-command runs `~/.perch/bin/perchd-<build> bridge` (see [Installing
-perchd](#installing-perchd)), or `[remote] command` when the Mac's
+command runs `~/.perch/bin/perchd-<build> bridge` (see [The app's own
+engine](#the-apps-own-engine)), or `[remote] command` when the Mac's
 config.toml sets one, in your login shell either way. ssh's own
 config, keys and agent apply to logging in, but nothing is forwarded,
 whatever the config says: not the agent, not X11, no ports. Nothing is
@@ -1891,8 +1916,8 @@ itself, since Start work done twice makes two branches.
 
 When the app and the engine speak different versions of the wire, the
 engine refuses the app and Perch stops trying until you press Reconnect.
-With the app installing `perchd`, the strip offers to restart an older
-engine (see [When the app is updated](#when-the-app-is-updated)); with
+With the app's own `perchd`, the strip offers to restart the engine
+(see [When the engine is another build](#when-the-engine-is-another-build)); with
 `[remote] command`, it says which one to update.
 
 Settings shows the host's config.toml, with the Mac's `[ui]`, `[display]`,

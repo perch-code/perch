@@ -313,20 +313,10 @@ pub struct RemoteConfig {
     #[serde(default)]
     pub host: Option<String>,
     /// What ssh runs there, in the login shell, to reach the engine. Unset
-    /// or empty, the app runs the `perchd` it installed there itself, and
-    /// installs it first when it is missing.
+    /// or empty, the app runs its own `perchd` there, and sends it first
+    /// when the host has none of that build.
     #[serde(default)]
     pub command: Option<String>,
-    /// A Linux `perchd`, or a release tarball of one, on this machine: what
-    /// the app installs on the host in place of the release's download.
-    #[serde(default)]
-    pub perchd: Option<PathBuf>,
-    /// A Linux `perchd` on the host, as one built there: what the app has
-    /// the host put in place, in place of `perchd` or the release's
-    /// download. From the host's home when it starts with `~/` or names
-    /// no root.
-    #[serde(default)]
-    pub perchd_on_host: Option<String>,
 }
 
 /// A host as it is typed or written, in the one form everything that
@@ -351,31 +341,12 @@ impl RemoteConfig {
     }
 
     /// The command ssh runs on the host as given, when one is: an empty
-    /// one is none, and the app installs and runs its own `perchd`.
+    /// one is none, and the app sends and runs its own `perchd`.
     pub fn command(&self) -> Option<&str> {
         self.command
             .as_deref()
             .map(str::trim)
             .filter(|command| !command.is_empty())
-    }
-
-    /// The `perchd` to install from this machine, with `~` read as its
-    /// home, when one is named.
-    pub fn perchd(&self) -> Option<PathBuf> {
-        let path = self.perchd.as_deref()?;
-        match path.to_str().map(str::trim) {
-            Some("") => None,
-            Some(text) => Some(expand_home(text)),
-            None => Some(path.to_path_buf()),
-        }
-    }
-
-    /// The `perchd` on the host to run, as written, when one is named.
-    pub fn perchd_on_host(&self) -> Option<&str> {
-        self.perchd_on_host
-            .as_deref()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
     }
 }
 
@@ -1354,22 +1325,22 @@ pub fn avatar_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// A file from before installs keeps working: a command spelled out is
-    /// run as given. With none, or an empty one, the app installs its own.
+    /// A command spelled out is run as given. With none, or an empty one,
+    /// the app runs its own engine. What a file from before still says of
+    /// which `perchd` to send is read past.
     #[test]
     fn remote_reads_old_and_new_files() {
         let remote = |text: &str| Config::parse_text(text).unwrap().remote;
         let old = remote("[remote]\nhost = \"halo\"\ncommand = \"perchd bridge\"\n");
         assert_eq!(old.host(), Some("halo"));
         assert_eq!(old.command(), Some("perchd bridge"));
-        assert_eq!(old.perchd(), None);
         assert_eq!(remote("[remote]\nhost = \"halo\"\n").command(), None);
         assert_eq!(remote("[remote]\ncommand = \"  \"\n").command(), None);
-        let dev = remote("[remote]\nhost = \"halo\"\nperchd = \"~/Downloads/perchd\"\n");
-        assert_eq!(dev.command(), None);
-        assert_eq!(dev.perchd(), Some(home_dir().join("Downloads/perchd")));
-        assert_eq!(remote("[remote]\nperchd = \"\"\n").perchd(), None);
-        assert_eq!(dev.perchd_on_host(), None);
+        let before = remote(
+            "[remote]\nhost = \"halo\"\nperchd = \"~/Downloads/perchd\"\nperchd_on_host = \"~/code/perch/target/debug/perchd\"\n",
+        );
+        assert_eq!(before.host(), Some("halo"));
+        assert_eq!(before.command(), None);
         for (written, host) in [
             ("ssh://chris@halo:2222", "chris@halo:2222"),
             ("ssh://halo/", "halo"),
@@ -1379,15 +1350,6 @@ mod tests {
             assert_eq!(config.host(), Some(host));
         }
         assert_eq!(remote("[remote]\nhost = \"ssh://\"\n").host(), None);
-        let on_host = remote("[remote]\nperchd_on_host = \" ~/code/perch/target/debug/perchd \"\n");
-        assert_eq!(
-            on_host.perchd_on_host(),
-            Some("~/code/perch/target/debug/perchd")
-        );
-        assert_eq!(
-            remote("[remote]\nperchd_on_host = \"\"\n").perchd_on_host(),
-            None
-        );
         assert_eq!(remote(""), RemoteConfig::default());
     }
 

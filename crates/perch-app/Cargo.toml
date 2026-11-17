@@ -9,6 +9,12 @@ license.workspace = true
 name = "perch"
 path = "src/main.rs"
 
+# build.rs builds the engines the app carries, gzips each into the app
+# and takes its SHA-256.
+[build-dependencies]
+flate2 = "1"
+sha2 = "0.10"
+
 [dependencies]
 perch-github = { path = "../perch-github" }
 perch-git = { path = "../perch-git" }

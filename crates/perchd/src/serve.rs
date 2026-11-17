@@ -5,12 +5,23 @@
 //! the home let go and the socket removed. A second SIGTERM or SIGINT
 //! while it stops ends it at once.
 //!
+//! With `--exit-after-idle <seconds>` it also stops, the same way, once
+//! it has had no client connected and no run queued or under way for
+//! that long. A bridge starts its engine so: the app brings its engine
+//! with it and starts it when it connects, so one nobody is using has no
+//! reason to stay. A run keeps it, waiting on an answer included, so a
+//! Mac closed over its work finds the work done. One run by hand, with
+//! no flag, stays until it is stopped.
+//!
 //! An engine that cannot start says why in `$PERCH_HOME/run/serve-failed`
 //! as well as in its log, for the bridge that started it to pass on; one
 //! that starts removes the file.
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use perch_engine::backend::{Engine, Lifetime};
 use perch_engine::log_file;
@@ -42,7 +53,71 @@ impl From<String> for Failed {
     }
 }
 
-pub fn run() -> ExitCode {
+/// What `perchd serve`'s arguments ask: `Some(None)` for none, to run
+/// until stopped; `Some(Some(idle))` for `--exit-after-idle <seconds>`;
+/// None for ones it does not take.
+pub fn parse(args: &[String]) -> Option<Option<Duration>> {
+    match args {
+        [] => Some(None),
+        [flag, seconds] if flag == "--exit-after-idle" => seconds
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds > 0)
+            .map(|seconds| Some(Duration::from_secs(seconds))),
+        _ => None,
+    }
+}
+
+/// How often an engine that exits when idle looks at whether it is.
+const IDLE_LOOK: Duration = Duration::from_secs(15);
+
+/// How long an engine has been idle at `now`, keeping in `since` when it
+/// was last seen in use: `used` when it has a client or a run, or had a
+/// client since the last look. In use, it has not been.
+fn idle_for(since: &mut Instant, now: Instant, used: bool) -> Duration {
+    if used {
+        *since = now;
+    }
+    now.saturating_duration_since(*since)
+}
+
+/// The streams the socket has taken: how many are open, and how many
+/// there have ever been. A stream counts from when it is taken, before
+/// its client has said hello, so a bridge that has just connected is seen
+/// while its app's first words are still on their way over ssh.
+#[derive(Default)]
+struct Taken {
+    open: AtomicUsize,
+    ever: AtomicU64,
+}
+
+/// Done once the engine has had no client, no run and no other work for
+/// `idle`; never, with none given. It is looked at every [`IDLE_LOOK`],
+/// or more often for a shorter `idle`, so the engine may stay that much
+/// longer. A client that came and went between two looks counts.
+async fn gone_idle(engine: Engine, taken: Arc<Taken>, idle: Option<Duration>) {
+    let Some(idle) = idle else {
+        return std::future::pending().await;
+    };
+    let mut since = Instant::now();
+    let mut seen = taken.ever.load(Ordering::SeqCst);
+    let look = IDLE_LOOK.min(idle / 4).max(Duration::from_millis(50));
+    loop {
+        tokio::time::sleep(look).await;
+        let ever = taken.ever.load(Ordering::SeqCst);
+        let used = taken.open.load(Ordering::SeqCst) > 0
+            || engine.connections() > 0
+            || engine.active_runs() > 0
+            || engine.other_work() > 0
+            || ever != seen;
+        seen = ever;
+        if idle_for(&mut since, Instant::now(), used) >= idle {
+            return;
+        }
+    }
+}
+
+pub fn run(idle: Option<Duration>) -> ExitCode {
     prepare_environment();
     init_logging();
     // Read while the binary is still there under its own name.
@@ -50,9 +125,10 @@ pub fn run() -> ExitCode {
     tracing::info!(
         version = perch_engine::wire::VERSION,
         build,
+        exits_after_idle_secs = idle.map(|idle| idle.as_secs()),
         "perchd starting"
     );
-    match serve() {
+    match serve(idle) {
         Ok(()) => {
             tracing::info!("perchd stopped");
             ExitCode::SUCCESS
@@ -141,7 +217,7 @@ fn stay_awake() {
     }
 }
 
-fn serve() -> Result<(), Failed> {
+fn serve(idle: Option<Duration>) -> Result<(), Failed> {
     // The home first: a second engine is turned away before it touches
     // the socket the first one listens on.
     let unstarted = Engine::build(Lifetime::Service).map_err(|error| {
@@ -186,7 +262,8 @@ fn serve() -> Result<(), Failed> {
     tracing::info!(socket = %socket.display(), "listening");
     stay_awake();
     let _ = std::fs::remove_file(failed_path());
-    runtime.spawn(accept(listener, engine.clone()));
+    let taken = Arc::new(Taken::default());
+    runtime.spawn(accept(listener, engine.clone(), taken.clone()));
 
     // An engine that stops by itself has failed: its thread panicked. The
     // exit says so, and the next bridge starts another.
@@ -198,14 +275,16 @@ fn serve() -> Result<(), Failed> {
             let _ = stopped.send(());
         }
     });
-    // A client asking it to stop, a newer build's bridge making way for
-    // its own engine, stops it as a signal does.
+    // A client asking it to stop, another build's bridge making way for
+    // its own engine, stops it as a signal does; and so does having had
+    // nobody and nothing to run for as long as it was told to wait.
     let signal = runtime.block_on(async {
         tokio::select! {
             biased;
             _ = stopped_by_itself => None,
             signal = signals.next() => Some(signal.unwrap_or("no signal; the runtime went")),
             () = engine.stop_asked() => Some("a stop asked for over the wire"),
+            () = gone_idle(engine.clone(), taken, idle) => Some("no client and no run for long enough"),
         }
     });
     let Some(signal) = signal else {
@@ -273,12 +352,23 @@ impl Signals {
 }
 
 /// Serve each client that connects, for as long as the engine runs.
-async fn accept(listener: UnixListener, engine: Engine) {
+async fn accept(listener: UnixListener, engine: Engine, taken: Arc<Taken>) {
+    /// One stream, counted open until it is done with however it ends.
+    struct Open(Arc<Taken>);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            self.0.open.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                taken.open.fetch_add(1, Ordering::SeqCst);
+                taken.ever.fetch_add(1, Ordering::SeqCst);
+                let open = Open(taken.clone());
                 let engine = engine.clone();
                 tokio::spawn(async move {
+                    let _open = open;
                     if let Err(error) = perch_engine::wire::serve(engine, stream).await {
                         tracing::info!(%error, "a client's connection ended");
                     }
@@ -375,6 +465,45 @@ mod tests {
         let why = newer_database(path, Some(&(current + 1).to_string())).unwrap_err();
         assert!(why.contains("newer Perch"), "{why}");
         assert!(why.contains(&format!("schema {}", current + 1)), "{why}");
+    }
+
+    #[test]
+    fn an_engine_is_idle_only_since_it_was_last_in_use() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        let mut since = start;
+        // In use, it has not been idle at all.
+        assert_eq!(idle_for(&mut since, at(60), true), Duration::ZERO);
+        assert_eq!(idle_for(&mut since, at(120), true), Duration::ZERO);
+        // From when it was last seen in use, not from when it started.
+        assert_eq!(
+            idle_for(&mut since, at(300), false),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            idle_for(&mut since, at(1020), false),
+            Duration::from_secs(900)
+        );
+        // In use again, the wait starts over.
+        assert_eq!(idle_for(&mut since, at(1030), true), Duration::ZERO);
+        assert_eq!(
+            idle_for(&mut since, at(1040), false),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn serve_takes_how_long_to_wait_idle_or_nothing() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse(&args(&[])), Some(None));
+        assert_eq!(
+            parse(&args(&["--exit-after-idle", "900"])),
+            Some(Some(Duration::from_secs(900)))
+        );
+        assert_eq!(parse(&args(&["--exit-after-idle"])), None);
+        assert_eq!(parse(&args(&["--exit-after-idle", "0"])), None);
+        assert_eq!(parse(&args(&["--exit-after-idle", "soon"])), None);
+        assert_eq!(parse(&args(&["--daemon"])), None);
     }
 
     #[test]

@@ -110,6 +110,12 @@ impl Engine {
         self.hub.state().connections.len()
     }
 
+    /// How much work that is no run is under way: a repository being
+    /// cloned for Add repository. None before the engine has started.
+    pub fn other_work(&self) -> usize {
+        self.hub.runs.get().map_or(0, |runs| runs.other_work())
+    }
+
     /// How many agent runs are queued or under way: none before the
     /// engine has started them.
     pub fn active_runs(&self) -> usize {

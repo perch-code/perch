@@ -39,8 +39,20 @@ struct Inner {
     worktrees: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     admission: Mutex<AdmissionGate>,
     entries: Mutex<HashMap<String, Arc<Entry>>>,
+    /// Work under way that is no run and that an engine should not stop
+    /// under for want of anything to do: see [`RunManager::working`].
+    other_work: Arc<std::sync::atomic::AtomicUsize>,
     cache: SharedCache,
     events: super::EventSender<Event>,
+}
+
+/// Work that is no run, counted for as long as this is held.
+pub(crate) struct Working(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -156,6 +168,7 @@ impl RunManager {
                 worktrees: Mutex::new(HashMap::new()),
                 admission: Mutex::new(AdmissionGate::default()),
                 entries: Mutex::new(HashMap::new()),
+                other_work: Arc::default(),
                 cache,
                 events,
             }),
@@ -193,6 +206,23 @@ impl RunManager {
             .lock()
             .map(|entries| entries.len())
             .unwrap_or(0)
+    }
+
+    /// Count work that is no run, a clone for Add repository say, until
+    /// what this gives is dropped: a host's engine with nobody connected
+    /// stays for it as it stays for a run.
+    pub(crate) fn working(&self) -> Working {
+        self.inner
+            .other_work
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Working(self.inner.other_work.clone())
+    }
+
+    /// How much work that is no run is under way.
+    pub(crate) fn other_work(&self) -> usize {
+        self.inner
+            .other_work
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// How many runs could start now.

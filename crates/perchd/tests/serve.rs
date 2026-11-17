@@ -193,6 +193,15 @@ fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
+/// `perchd` under another name, at `to`: a file of its own, so its times
+/// are its own. Copied by `cp`, not here: a file this process has open to
+/// write is open in every child another test starts meanwhile, until that
+/// child runs its program, and cannot be run till then ("Text file busy").
+fn copy_of_perchd(to: &Path) {
+    let copied = Command::new("cp").arg(PERCHD).arg(to).status().unwrap();
+    assert!(copied.success());
+}
+
 /// A client through a bridge: the engine's handle and its events.
 struct Client {
     bridge: tokio::process::Child,
@@ -208,7 +217,12 @@ async fn client(home: &Home) -> Client {
 
 /// A client through a bridge run as `exe` with `args`, and its welcome.
 async fn client_as(home: &Home, exe: &Path, args: &[&str]) -> (Client, wire::Welcome) {
-    let mut bridge = tokio::process::Command::from(home.perchd_as(exe, args))
+    client_through(home.perchd_as(exe, args)).await
+}
+
+/// A client through the bridge `command` runs, and its welcome.
+async fn client_through(command: Command) -> (Client, wire::Welcome) {
+    let mut bridge = tokio::process::Command::from(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -536,12 +550,11 @@ async fn a_bridge_of_another_build_replaces_the_engine_as_asked() {
     wait(&a.events, resynced).await;
     let first = home.engine_pid().expect("an engine holds the home");
 
-    // Another build: the same binary, by the name the app installs it by.
-    let other = home.dir.path().join("other/perchd-9.9.9-test");
+    // Another build: the same binary, by a name the app would keep one
+    // under.
+    let other = home.dir.path().join("other/perchd-ba9876543210");
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
-    if std::fs::hard_link(PERCHD, &other).is_err() {
-        std::fs::copy(PERCHD, &other).unwrap();
-    }
+    copy_of_perchd(&other);
 
     // In use, it is left running, and the bridge says so.
     let busy = tokio::time::timeout(
@@ -569,7 +582,7 @@ async fn a_bridge_of_another_build_replaces_the_engine_as_asked() {
         home.status().1.contains("clients: 0")
     });
     let (b, welcome) = client_as(&home, &other, &["bridge", "--replace-if-idle"]).await;
-    assert_eq!(welcome.build, "9.9.9-test");
+    assert_eq!(welcome.build, "ba9876543210");
     assert_eq!(welcome.clients, 0);
     let second = home.engine_pid().expect("an engine holds the home");
     assert_ne!(second, first);
@@ -581,7 +594,7 @@ async fn a_bridge_of_another_build_replaces_the_engine_as_asked() {
 
     // Of the bridge's own build, it is joined, busy or not.
     let (c, welcome) = client_as(&home, &other, &["bridge", "--replace"]).await;
-    assert_eq!(welcome.build, "9.9.9-test");
+    assert_eq!(welcome.build, "ba9876543210");
     assert_eq!(welcome.clients, 1);
     assert_eq!(home.engine_pid(), Some(second));
 
@@ -598,6 +611,85 @@ async fn a_bridge_of_another_build_replaces_the_engine_as_asked() {
         assert!(ended.success(), "{ended:?}");
     }
     leave(d).await;
+}
+
+/// An engine a bridge started stops by itself once it has had no client
+/// for as long as it was told to wait, as SIGTERM stops it, and not while
+/// one is connected. The next bridge starts another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_engine_a_bridge_started_stops_once_nobody_uses_it() {
+    let home = Home::new();
+    let bridge = || {
+        let mut command = home.perchd(&["bridge"]);
+        command.env("PERCH_IDLE_EXIT_SECS", "1");
+        command
+    };
+    let (a, _) = client_through(bridge()).await;
+    a.backend.resync();
+    wait(&a.events, resynced).await;
+    let first = home.engine_pid().expect("an engine holds the home");
+
+    // Connected for longer than the wait, it stays.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(home.engine_pid(), Some(first));
+    assert!(home.status().1.contains("clients: 1"));
+
+    // With its client gone, it goes, and leaves nothing behind.
+    leave(a).await;
+    eventually("the idle engine to stop", || home.engine_pid().is_none());
+    assert!(!home.socket().exists());
+    let log = engine_log(&home);
+    assert!(
+        log.contains("no client and no run for long enough"),
+        "{log}"
+    );
+    assert_eq!(home.status().0, Some(3));
+
+    // The next to connect starts its own.
+    let (b, _) = client_through(bridge()).await;
+    b.backend.resync();
+    wait(&b.events, resynced).await;
+    let second = home.engine_pid().expect("an engine holds the home");
+    assert_ne!(second, first);
+    leave(b).await;
+}
+
+/// A bridge run from the Perch home's `bin`, where the app keeps its
+/// engines by build, marks its own binary as used now and clears the
+/// builds beside it that nothing has used in a week.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bridge_clears_the_builds_nothing_has_used_in_a_week() {
+    let home = Home::new();
+    let bin = home.perch().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let own = bin.join("perchd-0123456789ab");
+    copy_of_perchd(&own);
+    let day = Duration::from_secs(24 * 60 * 60);
+    // Opened to read, as the bridge opens its own: a file open to write
+    // here cannot be run until every process started meanwhile has let
+    // go of it.
+    let dated = |path: &Path, age: Duration| {
+        if path != own {
+            std::fs::write(path, "an engine").unwrap();
+        }
+        let file = std::fs::File::open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
+    };
+    let (used, unused) = (bin.join("perchd-ba9876543210"), bin.join("perchd-0.7.0"));
+    dated(&own, day * 30);
+    dated(&used, day * 6);
+    dated(&unused, day * 8);
+    let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    let before = modified(&own);
+
+    let (a, welcome) = client_as(&home, &own, &["bridge"]).await;
+    assert_eq!(welcome.build, "0123456789ab");
+    eventually("the unused build to go", || !unused.exists());
+    assert!(used.exists());
+    assert!(own.exists());
+    assert!(modified(&own) > before + day * 29);
+    leave(a).await;
 }
 
 /// An engine a bridge started that would not start says why, and the

@@ -1931,26 +1931,26 @@ impl InstallProgress {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum EngineLink {
     /// The first try is under way, or the one right after `perchd` was
-    /// installed.
+    /// sent.
     Connecting { host: String },
-    /// The host had no `perchd` of the build the app wants, and it is being
-    /// installed: downloaded, or read from `[remote] perchd`, and uploaded.
+    /// The host had no `perchd` of the app's build, and it is being sent:
+    /// the one the app carries, or one built from the app's source.
+    /// `build` is how the windows say which.
     Installing {
         host: String,
         build: String,
         #[serde(default)]
         progress: Option<InstallProgress>,
     },
-    /// The host's engine is an older build, and is being stopped so that
-    /// `build` can start: by itself when it had nothing running, or by the
-    /// reader's Restart.
+    /// The host's engine is another build than the app's, and is being
+    /// stopped so that `build` can start: by itself when it had nothing
+    /// running, or by the reader's Restart.
     Restarting { host: String, build: String },
     /// Let in. `again` when something a window asked for may have been
     /// lost: the client had been connected before and lost it, or its
     /// first try failed. The engine has been asked for everything again,
     /// and each window reopens what it had open, or was opening. `other`
-    /// when the engine is not the build the app installs, and was left
-    /// running.
+    /// when the engine is not the app's build, and was left running.
     Up {
         host: String,
         welcome: crate::wire::Welcome,
@@ -1972,20 +1972,18 @@ pub enum EngineLink {
     },
 }
 
-/// A host's engine of another build than the one the app installs there,
-/// which the app left running: one with runs or other clients that a
-/// restart would stop, or one newer than the app, which it never stops.
+/// A host's engine of another build than the app's own, which the app
+/// left running: one with runs or other clients that a restart would
+/// stop.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OtherEngine {
-    /// The engine's build, and the one the app wants.
+    /// The engine's build, and the app's, as the windows say them.
     pub engine: String,
     pub wanted: String,
     /// Agent runs a restart would stop, and other clients it would
     /// disconnect.
     pub runs: usize,
     pub clients: usize,
-    /// Newer than the app: only updating Perch on the Mac helps.
-    pub newer: bool,
 }
 
 impl EngineLink {
@@ -5539,7 +5537,12 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
             Command::AddRepositoryFrom { source } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
+                // A clone can outlast the client that asked for it, a
+                // laptop closed over a large one: a host's engine counts
+                // it as work, and does not stop under it for being idle.
+                let working = ctx.runs.working();
                 tokio::spawn(async move {
+                    let _working = working;
                     let Some(config) = perch_github::config::config_path() else {
                         let _ = ctx
                             .events

@@ -30,21 +30,22 @@
 //!   (`EngineLink::Up`'s `again`).
 //!
 //! - With no `[remote] command`, a try that ends with the host saying it
-//!   has no `perchd` of the build the app wants installs it and tries
-//!   again at once, outside the waits (see `provision`). Installing once
-//!   is all a try gets: a host that still says so after is a fault the
-//!   reader has to look at, and the tries stop.
-//! - With no `[remote] command`, an engine of an older build than the
+//!   has no `perchd` of the app's build sends it and tries again at once,
+//!   outside the waits (see `provision`). Sending once is all a try gets:
+//!   a host that still says so after is a fault the reader has to look
+//!   at, and the tries stop.
+//! - With no `[remote] command`, an engine of another build than the
 //!   app's, already running there, is replaced when it has nothing
-//!   running, and otherwise left running with a restart offered; one of a
-//!   newer build is never stopped (see `keep_connected`).
+//!   running, and otherwise left running with a restart offered (see
+//!   `keep_connected`). Builds are told apart, never ordered: the app's
+//!   is the one it carries.
 //!
 //! - Perch's own updates are this Mac's to look for and install: the
 //!   engine on the host has no app here to replace. Check for Updates…
 //!   and Restart to update never go to it, connected or not; the app asks
 //!   GitHub itself, with no token, and the clock that looks every six
 //!   hours runs here (`over_ssh`). The next connection after the app
-//!   updates installs the `perchd` of its new build.
+//!   updates sends the `perchd` the new app carries.
 //!
 //! How the connection stands goes to the windows as `Event::Link`, with
 //! the engine's own events, in order.
@@ -61,6 +62,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::provision::{self, Failed, Platform, Replace, Source};
 use super::{handshake, WireError, PROTOCOL, VERSION};
+
+/// The builds of `perchd` a dial may have run on the host: the app's, one
+/// for each platform it has an engine for.
+pub type Wanted = Vec<String>;
 use crate::backend::client::Navigations;
 use crate::backend::update::{self, Releases};
 use crate::backend::{
@@ -88,9 +93,9 @@ fn answer_wait(answer: Duration, replace: Replace) -> Duration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bridge {
     /// `[remote] command`, run in the login shell as given. Nothing is
-    /// installed.
+    /// sent.
     Command(String),
-    /// The `perchd` the app installs there, from `Source`, when it is not
+    /// The app's own `perchd`, from `Source`, sent there when it is not
     /// there already.
     Installed(Source),
 }
@@ -104,9 +109,10 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 /// A stream to an engine, as a dial made it.
 pub struct Dialed {
     pub stream: Box<dyn Stream>,
-    /// The build of `perchd` the dial ran, when the app installs it; None
-    /// for a `[remote] command`, which may run any.
-    pub build: Option<String>,
+    /// The builds of `perchd` the dial would run, whichever the host is,
+    /// when it is the app's own; None for a `[remote] command`, which may
+    /// run any.
+    pub build: Option<Wanted>,
     /// Let go of what carries the stream, once the stream is done with,
     /// and say what it said last on its way out, such as ssh's last line
     /// of stderr: why it ended, most often.
@@ -119,8 +125,8 @@ pub struct Dialed {
 pub type Dial = Box<dyn FnMut(Replace) -> BoxFuture<Result<Dialed, String>> + Send>;
 
 /// How `perchd` is put on the host, for a try that ended with the host
-/// saying it has none, for the processor it named: the build it installs,
-/// said at once, and the install. The watch sender carries the latest phase
+/// saying it has none, for the platform it named: what it sends, as the
+/// windows say it, said at once, and the sending. The watch sender carries the latest phase
 /// and transfer counts without queuing every network chunk.
 pub type Install =
     Box<dyn FnMut(Platform, provision::Progress) -> (String, BoxFuture<Result<(), Failed>>) + Send>;
@@ -184,7 +190,8 @@ struct Linked {
     /// What the windows sent before the first try ended, while it is
     /// under way; `None` after.
     starting: Option<Vec<(WindowId, Command)>>,
-    /// The older engine the windows offer to restart, while they do.
+    /// The engine of another build the windows offer to restart, while
+    /// they do.
     offer: Option<OtherEngine>,
     /// The build the reader asked a restart for, while it is not yet
     /// under way.
@@ -345,9 +352,9 @@ impl Link {
         }
     }
 
-    /// Offer to restart `other` when it is older, else nothing.
+    /// Offer to restart `other`, an engine of another build left running.
     fn offering(&self, linked: &mut Linked, other: Option<&OtherEngine>) {
-        linked.offer = other.filter(|other| !other.newer).cloned();
+        linked.offer = other.cloned();
     }
 
     /// Connected: the windows are opened in the engine, each said key or
@@ -472,11 +479,11 @@ fn start(
 /// Make the connection, and make it again each time it is lost, until the
 /// app stops listening.
 ///
-/// With `perchd` installed by the app, the engine reached is weighed
-/// against the build the app wants (`judge`). An older one with nothing
-/// running is replaced at once, once a connect: the next dial passes
-/// `--replace-if-idle`. One busy is left running, and the windows offer a
-/// restart, which dials with `--replace`. A newer one is never stopped.
+/// With the app's own `perchd`, the engine reached is weighed against the
+/// app's build (`judge`). Another build with nothing running is replaced
+/// at once, once a connect: the next dial passes `--replace-if-idle`. One
+/// busy is left running, and the windows offer a restart, which dials
+/// with `--replace`.
 async fn keep_connected(
     link: Arc<Link>,
     mut dial: Dial,
@@ -489,15 +496,15 @@ async fn keep_connected(
     }
     let mut wait = backoff.first;
     let mut ever = false;
-    // The build the last try installed, while the try after it is made.
+    // What the last try sent, while the try after it is made.
     let mut installed: Option<String> = None;
     // How the next dial treats an engine of another build.
     let mut replace = Replace::No;
     // Whether this connect has replaced an engine by itself: it does so
     // once, so two builds can never take turns stopping each other.
     let mut replaced = false;
-    // The older engine an automatic replace was for, which a busy line
-    // from that dial is about.
+    // The engine an automatic replace was for, which a busy line from
+    // that dial is about.
     let mut replacing: Option<Replacing> = None;
     loop {
         let just_installed = installed.take();
@@ -509,9 +516,12 @@ async fn keep_connected(
             dialed = dial(asked) => Some(dialed),
             () = link.retry.notified() => None,
         };
-        // Whether the try ended before the host's bridge ran: what it
-        // was to replace, it has not, and the next try is still asked to.
-        let mut unreached = false;
+        // Whether the try ended before an engine answered it: ssh never
+        // reached the host, or the bridge there failed. What the try was
+        // to replace is not known to have been, so the next try is still
+        // asked to. Asking again is harmless: an engine of the app's own
+        // build is joined as it is.
+        let mut unanswered = false;
         let why = match dialed {
             None => {
                 tracing::info!(host, "trying again now, as asked");
@@ -519,7 +529,7 @@ async fn keep_connected(
                 continue;
             }
             Some(Err(why)) => {
-                unreached = true;
+                unanswered = true;
                 why
             }
             Some(Ok(Dialed {
@@ -541,9 +551,12 @@ async fn keep_connected(
                         (replace, installed) = (asked, just_installed);
                         continue;
                     }
-                    Some(Err(_)) => hang_up().await.unwrap_or_else(|| {
-                        format!("{host} did not answer within {} s.", within.as_secs())
-                    }),
+                    Some(Err(_)) => {
+                        unanswered = true;
+                        hang_up().await.unwrap_or_else(|| {
+                            format!("{host} did not answer within {} s.", within.as_secs())
+                        })
+                    }
                     Some(Ok(Ok((welcome, session)))) => {
                         let other = match judge(wanted.as_deref(), &welcome.about(), !replaced) {
                             Judged::Replace(other) => {
@@ -553,7 +566,7 @@ async fn keep_connected(
                                     host,
                                     engine = other.engine,
                                     wanted = other.wanted,
-                                    "the engine is an older build with nothing running; replacing it"
+                                    "the engine is another build with nothing running; replacing it"
                                 );
                                 if !link.say(EngineLink::Restarting {
                                     host: host.clone(),
@@ -575,7 +588,6 @@ async fn keep_connected(
                                     wanted = other.wanted,
                                     runs = other.runs,
                                     clients = other.clients,
-                                    newer = other.newer,
                                     "the engine is another build; leaving it running"
                                 );
                                 Some(other)
@@ -647,7 +659,7 @@ async fn keep_connected(
                                     host,
                                     engine = other.engine,
                                     wanted = other.wanted,
-                                    "the engine is an older build with nothing running; replacing it"
+                                    "the engine is another build with nothing running; replacing it"
                                 );
                                 if !link.say(EngineLink::Restarting {
                                     host: host.clone(),
@@ -662,14 +674,13 @@ async fn keep_connected(
                                 });
                                 continue;
                             }
-                            Judged::Leave(other) if !other.newer => (
+                            Judged::Leave(other) => (
                                 format!(
                                     "It speaks protocol {}, and this app {PROTOCOL}, so Perch can't use it until it restarts.",
                                     about.protocol
                                 ),
                                 Some(other),
                             ),
-                            Judged::Leave(other) => (reason, Some(other)),
                             Judged::Use => (reason, None),
                         };
                         if !link.halt(why, ever, other).await {
@@ -679,7 +690,10 @@ async fn keep_connected(
                         wait = backoff.first;
                         continue;
                     }
-                    Some(Ok(Err(error))) => hang_up().await.unwrap_or_else(|| error.to_string()),
+                    Some(Ok(Err(error))) => {
+                        unanswered = true;
+                        hang_up().await.unwrap_or_else(|| error.to_string())
+                    }
                 }
             }
         };
@@ -701,7 +715,7 @@ async fn keep_connected(
                 clients: busy.clients,
                 ..seen.other.clone()
             };
-            let why = "Perch would have restarted it to update it, but it is in use.".to_string();
+            let why = "Perch would have restarted it to run its own, but it is in use.".to_string();
             if !link.halt(why, ever, Some(other)).await {
                 return;
             }
@@ -731,7 +745,7 @@ async fn keep_connected(
                 continue;
             }
             Some(Err(Failed { why, lasting: true })) => {
-                tracing::warn!(host, %why, "perchd could not be installed");
+                tracing::warn!(host, %why, "perchd could not be put on the host");
                 if !link.halt(why, ever, None).await {
                     return;
                 }
@@ -759,54 +773,28 @@ async fn keep_connected(
         };
         if asked_now {
             (replace, replaced) = (link.after_wake(), false);
-        } else if unreached {
+        } else if unanswered {
             (replace, replacing) = (asked, seen);
         }
         wait = backoff.after(wait);
     }
 }
 
-/// How an engine's build stands to the one the app wants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Age {
-    Same,
-    Older,
-    Newer,
-}
-
-/// The engine's build `engine_build`, of `engine_version`, against
-/// `wanted`, a build of the app's version `app_version`. Newer only by
-/// version: an engine of the same version and another build, a dev build
-/// rebuilt or a release beside a dev build, is replaced as an older one
-/// is. One that names no build, from before builds were named, is older.
-pub fn age(app_version: &str, wanted: &str, engine_version: &str, engine_build: &str) -> Age {
-    if !engine_build.is_empty() && engine_build == wanted {
-        return Age::Same;
-    }
-    match (
-        semver::Version::parse(engine_version),
-        semver::Version::parse(app_version),
-    ) {
-        (Ok(engine), Ok(app)) if engine > app => Age::Newer,
-        _ => Age::Older,
-    }
-}
-
 /// What a try does with the engine it reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Judged {
-    /// Use it: the build wanted, or any engine, for a `[remote] command`,
+    /// Use it: the app's build, or any engine, for a `[remote] command`,
     /// which wants none.
     Use,
-    /// An older build with no runs and no other client, and this connect
+    /// Another build with no runs and no other client, and this connect
     /// has not replaced one yet: dial again, replacing it if still idle.
     Replace(OtherEngine),
-    /// Leave it running and say so: an older build that is busy, or one
-    /// already replaced once this connect, or a newer one.
+    /// Leave it running and say so: another build that is busy, or one
+    /// already replaced once this connect.
     Leave(OtherEngine),
 }
 
-/// An automatic replace under way: the older engine it is for, and whether
+/// An automatic replace under way: the engine it is for, and whether
 /// that engine let the app in, speaking its protocol.
 #[derive(Debug, Clone)]
 struct Replacing {
@@ -814,29 +802,46 @@ struct Replacing {
     welcomed: bool,
 }
 
-/// Weigh the engine `about` describes against the build `wanted`.
-/// `may_replace` while this connect has not replaced one.
-fn judge(wanted: Option<&str>, about: &super::About, may_replace: bool) -> Judged {
+/// An engine's build as the windows say it: its version, and the build
+/// when that is a hash, which says which of a version's it is. One from
+/// before builds were hashes names its version in its build already.
+pub fn engine_said(version: &str, build: &str) -> String {
+    if build.is_empty() || build == version {
+        version.to_string()
+    } else if build.starts_with(version) {
+        build.to_string()
+    } else {
+        format!("{version} ({build})")
+    }
+}
+
+/// The app's own build as the windows say it, of `wanted`: its version,
+/// and the build when there is only one it could be.
+fn wanted_said(wanted: &[String]) -> String {
+    match wanted {
+        [build] => engine_said(VERSION, build),
+        _ => VERSION.to_string(),
+    }
+}
+
+/// Weigh the engine `about` describes against `wanted`, the app's builds.
+/// `may_replace` while this connect has not replaced one. Builds are the
+/// same or they are not: neither is the newer, and an engine that is not
+/// the app's makes way for it once it has nothing running.
+fn judge(wanted: Option<&[String]>, about: &super::About, may_replace: bool) -> Judged {
     let Some(wanted) = wanted else {
         return Judged::Use;
     };
-    let newer = match age(VERSION, wanted, &about.engine_version, &about.build) {
-        Age::Same => return Judged::Use,
-        Age::Newer => true,
-        Age::Older => false,
-    };
+    if wanted.contains(&about.build) {
+        return Judged::Use;
+    }
     let other = OtherEngine {
-        engine: if about.build.is_empty() {
-            about.engine_version.clone()
-        } else {
-            about.build.clone()
-        },
-        wanted: wanted.to_string(),
+        engine: engine_said(&about.engine_version, &about.build),
+        wanted: wanted_said(wanted),
         runs: about.runs,
         clients: about.clients,
-        newer,
     };
-    if !newer && may_replace && about.runs == 0 && about.clients == 0 {
+    if may_replace && about.runs == 0 && about.clients == 0 {
         Judged::Replace(other)
     } else {
         Judged::Leave(other)
@@ -850,14 +855,7 @@ pub fn other_said(host: &str, other: &OtherEngine) -> String {
         wanted,
         runs,
         clients,
-        newer,
     } = other;
-    if *newer {
-        return format!(
-            "{host}'s engine is perchd {engine}, newer than this app's {wanted}. Update Perch on {}.",
-            crate::host::HERE
-        );
-    }
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     let cost = if *runs > 0 {
         format!(" ({runs} agent run{} would be stopped)", plural(*runs))
@@ -869,15 +867,17 @@ pub fn other_said(host: &str, other: &OtherEngine) -> String {
     } else {
         String::new()
     };
-    format!("{host}'s engine is perchd {engine}; restart it to update to {wanted}{cost}.")
+    format!(
+        "{host}'s engine is perchd {engine}; restart it to run this app's, perchd {wanted}{cost}."
+    )
 }
 
 /// When `why`, the last thing a try said, is the host saying it has no
-/// `perchd` of the build asked for: install it, saying so with
-/// `installing`, and give the build installed. None for any other end, or
-/// with nothing to install with. A try right after an install that says
-/// so again is not installed for again: the host does not find what was
-/// put there, and installing it again would find it no better.
+/// `perchd` of the app's build: send it, saying so with `installing`, and
+/// give what was sent. None for any other end, or with nothing to send
+/// with. A try right after a send that says so again is not sent for
+/// again: the host does not find what was put there, and sending it again
+/// would find it no better.
 async fn install_if_asked(
     install: Option<&mut Install>,
     host: &str,
@@ -890,17 +890,17 @@ async fn install_if_asked(
     Some(match (asked, just_installed) {
         (Err(why), _) => Err(Failed::lasting(why)),
         (Ok(_), Some(build)) => Err(Failed::lasting(format!(
-            "Perch installed perchd {build} on {host}, and the host still says it has none. Check that a login shell there sees the same $PERCH_HOME, or set [remote] command to run perchd yourself."
+            "Perch put perchd {build} on {host}, and the host still says it has none. Check that a login shell there sees the same $PERCH_HOME, or set [remote] command to run perchd yourself."
         ))),
         (Ok(arch), None) => {
             let (progress, mut updates) = tokio::sync::watch::channel(None);
             let (build, mut installed) = install(arch, progress);
-            tracing::info!(host, build, platform = arch.name(), "installing perchd");
+            tracing::info!(host, build, platform = arch.name(), "sending perchd");
             installing(&build, None);
             loop {
                 tokio::select! {
                     result = &mut installed => break result.map(|()| {
-                        tracing::info!(host, build, "installed perchd");
+                        tracing::info!(host, build, "sent perchd");
                         build
                     }),
                     Ok(()) = updates.changed() => {
@@ -913,8 +913,8 @@ async fn install_if_asked(
     })
 }
 
-/// Connect to the engine on `host` once, installing `perchd` first if it
-/// is missing, and replacing an older one with nothing running, and give
+/// Connect to the engine on `host` once, sending `perchd` first if it is
+/// missing, and replacing one of another build with nothing running, and give
 /// its welcome, with the engine of another build left running if it is
 /// one, and the host's checks, or why there was none: what `perch
 /// --connect` does. `said` hears what is done on the way: the build being
@@ -947,7 +947,7 @@ pub async fn connect_once(
                         drop(session);
                         let _ = hang_up().await;
                         said(&format!(
-                            "Restarting {host}'s engine, perchd {}, to update it to {}…",
+                            "Restarting {host}'s engine, perchd {}, to run perchd {}…",
                             other.engine, other.wanted
                         ));
                         replace = Replace::IfIdle;
@@ -972,7 +972,7 @@ pub async fn connect_once(
                 match judge(wanted.as_deref(), &about, may_replace) {
                     Judged::Replace(other) if about.protocol != 0 => {
                         said(&format!(
-                            "Restarting {host}'s engine, perchd {}, to update it to {}…",
+                            "Restarting {host}'s engine, perchd {}, to run perchd {}…",
                             other.engine, other.wanted
                         ));
                         replace = Replace::IfIdle;
@@ -1013,7 +1013,7 @@ pub async fn connect_once(
         }
         let mut installing = |build: &str, progress: Option<crate::backend::InstallProgress>| {
             if progress.is_none() {
-                said(&format!("Installing perchd {build} on {host}…"));
+                said(&format!("Sending perchd {build} to {host}…"));
             }
         };
         match install_if_asked(
@@ -1160,12 +1160,13 @@ const SSH_OPTIONS: [&str; 15] = [
     "ClearAllForwardings=yes",
 ];
 
-/// The remote line ssh runs for `bridge`, by `build` when it is
-/// installed, replacing another build as `replace` says.
-fn remote_line(bridge: &Bridge, build: &str, replace: Replace) -> String {
+/// The remote line ssh runs for `bridge`: its command, or the bridge of
+/// whichever of `builds` is the host's, replacing an engine of another
+/// build as `replace` says.
+fn remote_line(bridge: &Bridge, builds: &[(String, String)], replace: Replace) -> String {
     match bridge {
         Bridge::Command(command) => in_login_shell(command),
-        Bridge::Installed(_) => provision::connect_command(build, replace),
+        Bridge::Installed(_) => provision::connect_command(builds, replace),
     }
 }
 
@@ -1173,7 +1174,7 @@ fn remote_line(bridge: &Bridge, build: &str, replace: Replace) -> String {
 /// ssh's stderr goes to the log, and its last line is why a connection
 /// ended. A host saying it has no `perchd` to run, or a bridge saying the
 /// engine is busy, keeps that as the last line, whatever ssh says after it.
-async fn dial_ssh(host: &str, remote: &str, build: Option<String>) -> Result<Dialed, String> {
+async fn dial_ssh(host: &str, remote: &str, build: Option<Wanted>) -> Result<Dialed, String> {
     if let Some(why) = bad_host(host) {
         return Err(why);
     }
@@ -1243,13 +1244,16 @@ async fn dial_ssh(host: &str, remote: &str, build: Option<String>) -> Result<Dia
     })
 }
 
-/// How to reach the engine on `host` through `bridge`, and, with no
-/// command given, how to install `perchd` there. The build is worked out
-/// for each try, so a `[remote] perchd` rebuilt while the app runs is
-/// installed on the next.
 /// What a reader knows the `perchd` an app run from source built as.
 const DEV_BINARY: &str = "The perchd built from source";
 
+/// How to reach the engine on `host` through `bridge`, and, with no
+/// command given, how to send `perchd` there. The app names the build of
+/// each engine it carries, and the host runs the one for what it is. For
+/// a host it carries none for, it builds one from its source once the
+/// host has said what it is, and names that from then on: its build is
+/// worked out for each try, so one built again while the app runs is
+/// sent on the next.
 pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
     // The `perchd` built from source for this host, once one has been:
     // the dial can name its build only then. Set when a build succeeds
@@ -1262,158 +1266,91 @@ pub fn dial_for(host: &str, bridge: Bridge) -> (Dial, Option<Install>) {
             let (host, bridge) = (host.clone(), bridge.clone());
             let built = built.lock().ok().and_then(|built| built.clone());
             Box::pin(async move {
-                let build = match &bridge {
-                    // Before the host has said what it is, a build it
-                    // can't have, so it says: the install then builds for
-                    // it. After, the build of what was built.
-                    Bridge::Installed(Source::Dev(_)) => {
-                        match built.filter(|binary| binary.is_file()) {
-                            Some(binary) => {
-                                tokio::task::spawn_blocking(move || {
-                                    provision::read_binary(&binary, DEV_BINARY)
-                                })
-                                .await
-                                .map_err(|e| e.to_string())??
-                                .build
-                            }
-                            None => format!("{VERSION}-unbuilt"),
-                        }
-                    }
-                    Bridge::Command(_) | Bridge::Installed(Source::Release) => {
-                        provision::release_build()
-                    }
-                    Bridge::Installed(Source::File(path)) => {
-                        let path = path.clone();
-                        tokio::task::spawn_blocking(move || provision::read_file(&path))
+                let builds = match &bridge {
+                    Bridge::Command(_) => Vec::new(),
+                    Bridge::Installed(source) => {
+                        // One for each platform the app carries an engine
+                        // for: the host runs its own, or says what it is.
+                        let mut builds: Vec<(String, String)> = source
+                            .carried
+                            .iter()
+                            .map(|engine| (engine.platform.key(), engine.build().to_string()))
+                            .collect();
+                        // And the one built from source for this host,
+                        // which carries none for it: the last named wins.
+                        if let Some(binary) = built.filter(|binary| binary.is_file()) {
+                            let binary = tokio::task::spawn_blocking(move || {
+                                provision::read_binary(&binary, DEV_BINARY)
+                            })
                             .await
-                            .map_err(|e| e.to_string())??
-                            .build
-                    }
-                    // The host has the file: it puts it in place itself
-                    // and says its build, before the ssh that connects.
-                    Bridge::Installed(Source::HostFile(path)) => {
-                        provision::stage(&host, path).await?
+                            .map_err(|e| e.to_string())??;
+                            builds.push((provision::ANY.to_string(), binary.build));
+                        }
+                        builds
                     }
                 };
-                if !provision::plain_word(&build) {
-                    return Err(format!(
-                        "perchd's build, {build}, has a character Perch won't put on a command line."
-                    ));
-                }
-                let remote = remote_line(&bridge, &build, replace);
-                let installed = matches!(bridge, Bridge::Installed(_)).then_some(build);
-                let mut dialed = dial_ssh(&host, &remote, installed).await?;
-                if matches!(bridge, Bridge::Installed(Source::HostFile(_))) {
-                    // The host readied its own `perchd` a moment ago. If
-                    // it says it has none now, another bridge cleared it
-                    // in between, and the next try readies it again:
-                    // there is nothing of the app's to install.
-                    let hang_up = dialed.hang_up;
-                    dialed.hang_up = Box::new(move || {
-                        Box::pin(async move {
-                            let said = hang_up().await;
-                            match said.as_deref().and_then(provision::install_line) {
-                                Some(_) => Some(format!(
-                                    "The perchd readied on {host} was gone when the connection ran."
-                                )),
-                                None => said,
-                            }
-                        })
-                    });
-                }
-                Ok(dialed)
+                let remote = remote_line(&bridge, &builds, replace);
+                let wanted = matches!(bridge, Bridge::Installed(_))
+                    .then(|| builds.into_iter().map(|(_, build)| build).collect());
+                dial_ssh(&host, &remote, wanted).await
             })
         }
     });
     let source = match bridge {
-        // Each dial stages the host's own file, so there is nothing for
-        // the app to install.
-        Bridge::Command(_) | Bridge::Installed(Source::HostFile(_)) => return (dial, None),
+        Bridge::Command(_) => return (dial, None),
         Bridge::Installed(source) => source,
     };
     let host = host.to_string();
-    let install: Install = Box::new(move |arch, progress| {
+    let install: Install = Box::new(move |platform, progress| {
         let host = host.clone();
-        match &source {
-            Source::Release => {
-                let build = provision::release_build();
-                let to = build.clone();
-                (
-                    build,
-                    Box::pin(async move {
-                        let binary = provision::release_binary(arch, &progress).await?;
-                        provision::upload(&host, &to, binary, &progress).await
-                    }),
-                )
-            }
-            // Read again: the file may have changed since the try that
-            // asked, and the build installed has to be the file's now.
-            Source::File(path) => match provision::read_file(path) {
-                Ok(binary) => {
-                    let build = binary.build.clone();
-                    let path = path.clone();
-                    (
-                        build.clone(),
-                        Box::pin(async move {
-                            match provision::built_for(&binary.bytes) {
-                                Ok(built) if !built.contains(&arch) => {
-                                    Err(Failed::lasting(format!(
-                                        "[remote] perchd, {}, is built for {}, and {host} is {}.",
-                                        path.display(),
-                                        built
-                                            .iter()
-                                            .map(|platform| platform.name())
-                                            .collect::<Vec<_>>()
-                                            .join(" and "),
-                                        arch.name()
-                                    )))
-                                }
-                                _ => {
-                                    provision::upload(&host, &build, binary.bytes, &progress).await
-                                }
-                            }
-                        }),
-                    )
-                }
-                Err(why) => (
-                    path.display().to_string(),
-                    Box::pin(async move { Err(Failed::lasting(why)) }),
-                ),
-            },
-            // Built now, for what the host said it is, from the source
-            // as it stands; uploaded unless the host has that very build.
-            Source::Dev(workspace) => {
-                // Forgotten until this build is done: one that fails
-                // leaves the next try to build again.
-                if let Ok(mut built) = built.lock() {
-                    *built = None;
-                }
-                let (workspace, built) = (workspace.clone(), built.clone());
-                (
-                    format!("{VERSION} from source"),
-                    Box::pin(async move {
-                        provision::phase(&progress, "Building perchd from source");
-                        let path = provision::dev_build(&workspace, arch).await?;
-                        let read = path.clone();
-                        let binary = tokio::task::spawn_blocking(move || {
-                            provision::read_binary(&read, DEV_BINARY)
-                        })
+        // The one the app carries for what the host said it is. The host
+        // has just said it has no such build.
+        if let Some(engine) = source.carried_for(platform).cloned() {
+            return (
+                VERSION.to_string(),
+                Box::pin(async move {
+                    provision::phase(&progress, "Unpacking perchd");
+                    let binary = tokio::task::spawn_blocking(move || engine.binary())
+                        .await
+                        .map_err(|e| Failed::now(e.to_string()))??;
+                    provision::upload(&host, binary, &progress).await
+                }),
+            );
+        }
+        let Some(workspace) = source.workspace.clone() else {
+            return (
+                VERSION.to_string(),
+                Box::pin(async move { Err(Failed::lasting(provision::none_carried(platform))) }),
+            );
+        };
+        // None carried for it: built now, for what the host said it is,
+        // from the source as it stands; uploaded unless the host has
+        // that very build. Forgotten until this build is done: one that
+        // fails leaves the next try to build again.
+        if let Ok(mut built) = built.lock() {
+            *built = None;
+        }
+        let built = built.clone();
+        (
+            format!("{VERSION} (built from source)"),
+            Box::pin(async move {
+                provision::phase(&progress, "Building perchd from source");
+                let path = provision::dev_build(&workspace, platform).await?;
+                let read = path.clone();
+                let binary =
+                    tokio::task::spawn_blocking(move || provision::read_binary(&read, DEV_BINARY))
                         .await
                         .map_err(|e| Failed::now(e.to_string()))?
                         .map_err(Failed::lasting)?;
-                        if !provision::has_build(&host, &binary.build).await {
-                            provision::upload(&host, &binary.build, binary.bytes, &progress)
-                                .await?;
-                        }
-                        if let Ok(mut built) = built.lock() {
-                            *built = Some(path);
-                        }
-                        Ok(())
-                    }),
-                )
-            }
-            Source::HostFile(_) => unreachable!("staged by the dial"),
-        }
+                if !provision::has_build(&host, &binary.build).await {
+                    provision::upload(&host, binary, &progress).await?;
+                }
+                if let Ok(mut built) = built.lock() {
+                    *built = Some(path);
+                }
+                Ok(())
+            }),
+        )
     });
     (dial, Some(install))
 }
@@ -1449,6 +1386,10 @@ pub fn over_ssh(
             }
         },
     };
+    // What an app from before engines were carried downloaded here.
+    runtime.spawn_blocking(|| {
+        provision::clear_old_downloads(&perch_github::config::perch_home().join("perchd"))
+    });
     let (dial, install) = dial_for(host, bridge);
     let (link, received) = start(host, dial, install, Backoff::default(), runtime.handle());
     // This app's own updates, looked for here: the engine on the host
@@ -1656,9 +1597,9 @@ mod tests {
         pipes_for(None)
     }
 
-    /// Dials of the `perchd` of `build`, as the app installs it.
+    /// Dials of the `perchd` of `build`, the app's own.
     fn pipes_for(build: Option<&str>) -> (Dial, Pipes) {
-        let build = build.map(str::to_string);
+        let build = build.map(|build| vec![build.to_string()]);
         let (to_test, far) = tokio::sync::mpsc::unbounded_channel();
         let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failing = Arc::new(Mutex::new(None::<String>));
@@ -2414,6 +2355,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn with_a_command_given_nothing_is_installed() {
         let (dial, mut pipes) = pipes();
+        // Before the link dials: a dial takes what it will say last as
+        // it is made.
+        *pipes.last.lock().unwrap() = Some(MISSING.into());
         let (_backend, events) = link(
             "halo",
             dial,
@@ -2421,7 +2365,6 @@ mod tests {
             QUICK,
             &tokio::runtime::Handle::current(),
         );
-        *pipes.last.lock().unwrap() = Some(MISSING.into());
         drop(pipes.next().await);
         loop {
             if let EngineLink::Down { why, retry_in, .. } = next_link(&events).await {
@@ -2433,93 +2376,114 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_is_older_unless_its_version_is_newer() {
-        let age = |wanted, version, build| age("0.9.0", wanted, version, build);
-        assert_eq!(age("0.9.0", "0.9.0", "0.9.0"), Age::Same);
-        assert_eq!(age("0.9.0", "0.8.2", "0.8.2"), Age::Older);
-        assert_eq!(age("0.9.0", "0.10.0", "0.10.0"), Age::Newer);
-        assert_eq!(age("0.9.0", "1.0.0-beta.1", "1.0.0-beta.1"), Age::Newer);
-        // A dev build of the same version, rebuilt, or a release beside
-        // one, is replaced.
-        assert_eq!(
-            age("0.9.0-0123456789ab", "0.9.0", "0.9.0-ba9876543210"),
-            Age::Older
-        );
-        assert_eq!(age("0.9.0", "0.9.0", "0.9.0-ba9876543210"), Age::Older);
-        assert_eq!(
-            age("0.9.0-0123456789ab", "0.9.0", "0.9.0-0123456789ab"),
-            Age::Same
-        );
-        // An engine that names no build is from before builds were named.
-        assert_eq!(age("0.9.0", "", ""), Age::Older);
-        assert_eq!(age("0.9.0", "0.9.0", ""), Age::Older);
-    }
-
-    #[test]
-    fn an_older_engine_is_replaced_only_idle_and_once() {
-        let wanted = Some("0.9.0-0123456789ab");
-        let older = |runs, clients| engine("0.8.0", "0.8.0", runs, clients);
+    fn an_engine_of_another_build_is_replaced_only_idle_and_once() {
+        let wanted = ["0123456789ab".to_string()];
+        let wanted = Some(&wanted[..]);
+        let other = |runs, clients| engine("0.8.0", "ba9876543210", runs, clients);
         assert!(matches!(
-            judge(wanted, &older(0, 0), true),
-            Judged::Replace(OtherEngine { ref engine, newer: false, .. }) if engine == "0.8.0"
+            judge(wanted, &other(0, 0), true),
+            Judged::Replace(OtherEngine { ref engine, .. }) if engine == "0.8.0 (ba9876543210)"
         ));
         assert!(matches!(
-            judge(wanted, &older(0, 0), false),
+            judge(wanted, &other(0, 0), false),
             Judged::Leave(_)
         ));
         assert!(matches!(
-            judge(wanted, &older(2, 0), true),
+            judge(wanted, &other(2, 0), true),
             Judged::Leave(OtherEngine { runs: 2, .. })
         ));
         assert!(matches!(
-            judge(wanted, &older(0, 1), true),
+            judge(wanted, &other(0, 1), true),
             Judged::Leave(OtherEngine { clients: 1, .. })
         ));
-        // A newer one is never replaced, idle or not.
+        // Whichever version is the later: a build is the app's or it is
+        // not, and one that is not makes way.
         assert!(matches!(
-            judge(wanted, &engine("99.0.0", "99.0.0", 0, 0), true),
-            Judged::Leave(OtherEngine { newer: true, .. })
+            judge(wanted, &engine("99.0.0", "ba9876543210", 0, 0), true),
+            Judged::Replace(_)
+        ));
+        // The same version built again is another build.
+        assert!(matches!(
+            judge(wanted, &engine(VERSION, "ba9876543210", 0, 0), true),
+            Judged::Replace(_)
+        ));
+        // One that names no build, or its version, is from before builds
+        // were hashes.
+        assert!(matches!(
+            judge(wanted, &engine(VERSION, "", 0, 0), true),
+            Judged::Replace(_)
+        ));
+        assert!(matches!(
+            judge(wanted, &engine(VERSION, VERSION, 0, 0), true),
+            Judged::Replace(_)
         ));
         assert_eq!(
-            judge(wanted, &engine(VERSION, "0.9.0-0123456789ab", 3, 3), true),
+            judge(wanted, &engine("0.1.0", "0123456789ab", 3, 3), true),
             Judged::Use
         );
+        // An app that carries an engine for each platform takes any of
+        // them as its own.
+        let carried = ["ba9876543210".to_string(), "0123456789ab".to_string()];
+        assert_eq!(judge(Some(&carried[..]), &other(3, 3), true), Judged::Use);
         // A command of the reader's own wants no build: any engine goes.
-        assert_eq!(judge(None, &older(0, 0), true), Judged::Use);
+        assert_eq!(judge(None, &other(0, 0), true), Judged::Use);
+    }
+
+    #[test]
+    fn a_build_is_said_with_its_version() {
+        assert_eq!(engine_said("0.9.0", "0123456789ab"), "0.9.0 (0123456789ab)");
+        assert_eq!(engine_said("0.9.0", ""), "0.9.0");
+        assert_eq!(engine_said("0.9.0", "0.9.0"), "0.9.0");
+        assert_eq!(
+            engine_said("0.9.0", "0.9.0-0123456789ab"),
+            "0.9.0-0123456789ab"
+        );
+        assert_eq!(
+            wanted_said(&["0123456789ab".to_string()]),
+            format!("{VERSION} (0123456789ab)")
+        );
+        assert_eq!(
+            wanted_said(&["0123456789ab".to_string(), "ba9876543210".to_string()]),
+            VERSION
+        );
     }
 
     #[test]
     fn the_windows_say_what_a_restart_would_stop() {
-        let other = |runs, clients, newer| OtherEngine {
+        let other = |runs, clients| OtherEngine {
             engine: "0.8.0".into(),
             wanted: "0.9.0".into(),
             runs,
             clients,
-            newer,
         };
         assert_eq!(
-            other_said("halo", &other(2, 1, false)),
-            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (2 agent runs would be stopped)."
+            other_said("halo", &other(2, 1)),
+            "halo's engine is perchd 0.8.0; restart it to run this app's, perchd 0.9.0 (2 agent runs would be stopped)."
         );
         assert_eq!(
-            other_said("halo", &other(1, 0, false)),
-            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (1 agent run would be stopped)."
+            other_said("halo", &other(1, 0)),
+            "halo's engine is perchd 0.8.0; restart it to run this app's, perchd 0.9.0 (1 agent run would be stopped)."
         );
         assert_eq!(
-            other_said("halo", &other(0, 1, false)),
-            "halo's engine is perchd 0.8.0; restart it to update to 0.9.0 (1 other client would be disconnected)."
+            other_said("halo", &other(0, 1)),
+            "halo's engine is perchd 0.8.0; restart it to run this app's, perchd 0.9.0 (1 other client would be disconnected)."
         );
         assert_eq!(
-            other_said("halo", &other(0, 0, true)),
-            format!(
-                "halo's engine is perchd 0.8.0, newer than this app's 0.9.0. Update Perch on {}.",
-                crate::host::HERE
-            )
+            other_said("halo", &other(0, 0)),
+            "halo's engine is perchd 0.8.0; restart it to run this app's, perchd 0.9.0."
         );
     }
 
-    /// The build the app's dials want, of its own version.
-    const WANTED: &str = concat!(env!("CARGO_PKG_VERSION"), "-0123456789ab");
+    /// The build the app's dials want: its own.
+    const WANTED: &str = "0123456789ab";
+
+    /// Another build's, of an older version and of a later one.
+    const OTHER: &str = "ba9876543210";
+
+    /// The app's build as the windows say it.
+    fn wanted_build() -> String {
+        wanted_said(&[WANTED.to_string()])
+    }
 
     fn installed_link() -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>, Pipes) {
         let (dial, pipes) = pipes_for(Some(WANTED));
@@ -2555,7 +2519,7 @@ mod tests {
             next_said(&events).await,
             EngineLink::Restarting {
                 host: "halo".into(),
-                build: WANTED.into()
+                build: wanted_build()
             }
         );
         // Kept, so the connection stays up.
@@ -2596,7 +2560,7 @@ mod tests {
             panic!("not up");
         };
         let other = other.expect("another build");
-        assert_eq!((other.runs, other.clients, other.newer), (2, 1, false));
+        assert_eq!((other.runs, other.clients), (2, 1));
         // Connected meanwhile, as to any engine.
         assert!(matches!(
             far.command().await,
@@ -2609,7 +2573,7 @@ mod tests {
             next_said(&events).await,
             EngineLink::Restarting {
                 host: "halo".into(),
-                build: WANTED.into()
+                build: wanted_build()
             }
         );
         // The old connection is let go.
@@ -2628,20 +2592,30 @@ mod tests {
         assert_eq!(pipes.dials(), 2);
     }
 
+    /// An engine of a later version than the app's is another build like
+    /// any other: with nothing running it makes way for the app's own.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_newer_engine_is_never_stopped() {
-        let (backend, events, mut pipes) = installed_link();
+    async fn an_engine_of_a_later_version_makes_way_too() {
+        let (_backend, events, mut pipes) = installed_link();
         let mut far = pipes.next().await;
-        far.welcome_as(1, &engine("99.0.0", "99.0.0", 0, 0)).await;
-        let EngineLink::Up { other, .. } = next_said(&events).await else {
-            panic!("not up");
-        };
-        assert!(other.unwrap().newer);
-        backend.restart_engine();
-        tokio::time::sleep(QUICK.last * 2).await;
-        assert_eq!(pipes.dials(), 1);
+        far.welcome_as(1, &engine("99.0.0", OTHER, 0, 0)).await;
+        assert_eq!(
+            next_said(&events).await,
+            EngineLink::Restarting {
+                host: "halo".into(),
+                build: wanted_build()
+            }
+        );
+        let mut kept = pipes.next().await;
+        kept.welcome_as(2, &engine(VERSION, WANTED, 0, 0)).await;
+        assert!(matches!(
+            next_said(&events).await,
+            EngineLink::Up { other: None, .. }
+        ));
+        assert_eq!(*pipes.asked.lock().unwrap(), [Replace::No, Replace::IfIdle]);
 
-        // Refusing the app's protocol, it is said newer, and left alone.
+        // Busy and refusing the app's protocol, it is left running, with
+        // the restart offered.
         let (backend, events, mut pipes) = installed_link();
         let mut far = pipes.next().await;
         far.hello().await;
@@ -2649,7 +2623,7 @@ mod tests {
             reason: "Update the app.".into(),
             about: About {
                 protocol: PROTOCOL + 1,
-                ..engine("99.0.0", "99.0.0", 0, 0)
+                ..engine("99.0.0", OTHER, 1, 0)
             },
         })
         .await;
@@ -2659,11 +2633,18 @@ mod tests {
         else {
             panic!("not down");
         };
-        assert!(other.unwrap().newer);
+        assert_eq!(other.unwrap().engine, format!("99.0.0 ({OTHER})"));
         assert_eq!(retry_in, None);
         backend.restart_engine();
-        tokio::time::sleep(QUICK.last * 2).await;
-        assert_eq!(pipes.dials(), 1);
+        assert_eq!(
+            next_said(&events).await,
+            EngineLink::Restarting {
+                host: "halo".into(),
+                build: wanted_build()
+            }
+        );
+        pipes.next().await;
+        assert_eq!(*pipes.asked.lock().unwrap(), [Replace::No, Replace::Always]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2836,6 +2817,51 @@ mod tests {
     /// A replace, or a restart the reader asked for, whose dial fails
     /// before the host's bridge runs, as when the host's own `perchd` is
     /// being rebuilt under it, is still a replace on the try after.
+    /// ssh starts whether or not it reaches the host, so a host that
+    /// can't be reached is a stream that ends with nothing said. A
+    /// replace, or the reader's restart, that ends so is still asked of
+    /// the next try: the engine it was for is still there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_try_that_ends_before_the_engine_answers_keeps_the_replace() {
+        for restart in [false, true] {
+            let (backend, events, mut pipes) = installed_link();
+            let runs = usize::from(restart);
+            let mut first = pipes.next().await;
+            first.welcome_as(1, &engine("0.0.1", OTHER, runs, 0)).await;
+            if restart {
+                assert!(matches!(next_said(&events).await, EngineLink::Up { .. }));
+                backend.restart_engine();
+            }
+            assert!(matches!(
+                next_said(&events).await,
+                EngineLink::Restarting { .. }
+            ));
+            // The try that was to replace it never reaches the host: its
+            // stream ends with nothing said.
+            drop(pipes.next().await);
+            assert!(matches!(
+                next_said(&events).await,
+                EngineLink::Down {
+                    retry_in: Some(_),
+                    ..
+                }
+            ));
+            let mut kept = pipes.next().await;
+            kept.welcome_as(2, &engine(VERSION, WANTED, 0, 0)).await;
+            assert!(matches!(
+                next_said(&events).await,
+                EngineLink::Up { other: None, .. }
+            ));
+            let asked = if restart {
+                Replace::Always
+            } else {
+                Replace::IfIdle
+            };
+            assert_eq!(*pipes.asked.lock().unwrap(), [Replace::No, asked, asked]);
+            drop(first);
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_dial_that_fails_on_the_way_to_a_replace_keeps_the_replace() {
         for restart in [false, true] {
@@ -2976,9 +3002,9 @@ mod tests {
 
     /// The connection script, run as ssh would have the login shell run
     /// it, by each shell there is here: bash and zsh on macOS, fish when
-    /// installed. It runs the bridge of the build named, under the Perch
-    /// home a login shell sees, and says what the host is when there is
-    /// none.
+    /// installed. It runs the bridge of the build named for what the host
+    /// is, under the Perch home a login shell sees, and says what the host
+    /// is when it has none.
     #[test]
     fn the_connection_script_runs_in_every_login_shell() {
         use std::os::unix::fs::PermissionsExt;
@@ -2988,13 +3014,17 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let bin = home.path().join(".perch/bin");
             std::fs::create_dir_all(&bin).unwrap();
-            let fake = bin.join("perchd-0.9.0-0123456789ab");
+            let fake = bin.join("perchd-0123456789ab");
             std::fs::write(&fake, "#!/bin/sh\necho \"ran $0 $*\"\n").unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let run_as = |build: &str, replace: Replace| {
+            let run_as = |builds: &[(&str, &str)], replace: Replace| {
+                let builds: Vec<(String, String)> = builds
+                    .iter()
+                    .map(|(platform, build)| (platform.to_string(), build.to_string()))
+                    .collect();
                 std::process::Command::new(&shell)
                     .arg("-c")
-                    .arg(provision::connect_command(build, replace))
+                    .arg(provision::connect_command(&builds, replace))
                     .env_clear()
                     .env("HOME", home.path())
                     .env("SHELL", &shell)
@@ -3002,8 +3032,8 @@ mod tests {
                     .output()
                     .unwrap()
             };
-            let run = |build: &str| run_as(build, Replace::No);
-            let ran = run("0.9.0-0123456789ab");
+            let run = |builds: &[(&str, &str)]| run_as(builds, Replace::No);
+            let ran = run(&[(provision::ANY, "0123456789ab")]);
             assert_eq!(
                 String::from_utf8_lossy(&ran.stdout).trim(),
                 format!("ran {} bridge", fake.display()),
@@ -3011,7 +3041,7 @@ mod tests {
                 String::from_utf8_lossy(&ran.stderr)
             );
             assert!(ran.status.success(), "{shell}");
-            let ran = run_as("0.9.0-0123456789ab", Replace::IfIdle);
+            let ran = run_as(&[(provision::ANY, "0123456789ab")], Replace::IfIdle);
             assert_eq!(
                 String::from_utf8_lossy(&ran.stdout).trim(),
                 format!("ran {} bridge --replace-if-idle", fake.display()),
@@ -3019,7 +3049,50 @@ mod tests {
                 String::from_utf8_lossy(&ran.stderr)
             );
 
-            let missing = run("0.9.0");
+            // Of an app's engines, the host runs the one for what it is.
+            let Some(here) = Platform::here() else {
+                continue;
+            };
+            let carried: Vec<(String, &str)> = Platform::ALL
+                .into_iter()
+                .map(|platform| {
+                    let build = if platform == here {
+                        "0123456789ab"
+                    } else {
+                        "ba9876543210"
+                    };
+                    (platform.key(), build)
+                })
+                .collect();
+            let carried: Vec<(&str, &str)> = carried
+                .iter()
+                .map(|(platform, build)| (platform.as_str(), *build))
+                .collect();
+            let ran = run_as(&carried, Replace::Always);
+            assert_eq!(
+                String::from_utf8_lossy(&ran.stdout).trim(),
+                format!("ran {} bridge --replace", fake.display()),
+                "{shell}: {}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
+            // With none for it, or none of that build there, it says so.
+            let others: Vec<(&str, &str)> = carried
+                .iter()
+                .copied()
+                .filter(|(platform, _)| *platform != here.key())
+                .collect();
+            assert_eq!(
+                run(&others).status.code(),
+                Some(provision::INSTALL_EXIT),
+                "{shell}"
+            );
+            assert_eq!(
+                run(&[]).status.code(),
+                Some(provision::INSTALL_EXIT),
+                "{shell}"
+            );
+
+            let missing = run(&[(provision::ANY, "ba9876543210")]);
             assert_eq!(
                 missing.status.code(),
                 Some(provision::INSTALL_EXIT),
