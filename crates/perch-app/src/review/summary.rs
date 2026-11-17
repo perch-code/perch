@@ -1183,6 +1183,54 @@ fn review_standing(state: ReviewState) -> Option<Standing> {
     })
 }
 
+/// Who has reviewed the pull request, under the pointer on how the
+/// review stands: those whose approval stands, then those asking for
+/// changes, as the Reviewers row marks them. Nothing until the
+/// discussion has come, or while nobody has done either.
+///
+/// The discussion is read apart from the overview that says how the
+/// review stands, and can be the older of the two: one that names nobody
+/// who approved an approved pull request, or nobody asking for the
+/// changes asked for, says nothing rather than name whoever it knew of.
+fn review_said(state: ReviewState) -> String {
+    use perch_github::ReviewDecision;
+
+    let decision = open_overview(state).and_then(|overview| overview.review_decision);
+    let author = state
+        .pull_request
+        .with(|pull| pull.as_ref().map(|pull| pull.author_login.clone()))
+        .unwrap_or_default();
+    state.discussion.with(|discussion| {
+        let Some(discussion) = discussion else {
+            return String::new();
+        };
+        let verdicts = verdicts(&discussion.reviews, &author);
+        // A review GitHub gives no login for names nobody.
+        let by = |verdict: &str| -> Vec<&str> {
+            verdicts
+                .iter()
+                .filter(|(user, theirs)| *theirs == verdict && !user.is_empty())
+                .map(|(user, _)| *user)
+                .collect()
+        };
+        let (approved, asking) = (by("APPROVED"), by("CHANGES_REQUESTED"));
+        let accounted = match decision {
+            Some(ReviewDecision::Approved) => !approved.is_empty(),
+            Some(ReviewDecision::ChangesRequested) => !asking.is_empty(),
+            Some(ReviewDecision::ReviewRequested) | None => true,
+        };
+        if !accounted {
+            return String::new();
+        }
+        [("Approved by", approved), ("Changes requested by", asking)]
+            .into_iter()
+            .filter(|(_, who)| !who.is_empty())
+            .map(|(said, who)| format!("{said} {}", crate::ui::widgets::listed(&who)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
+}
+
 /// Whether an open pull request merges cleanly into its base. None while
 /// GitHub is still working it out.
 fn merge_standing(state: ReviewState) -> Option<Standing> {
@@ -1335,7 +1383,8 @@ fn merge_word(tone: Tone) -> &'static str {
 /// conflicts, for a reader the item bar offers Merge, open the merge box.
 /// The checks' word is the short of it, `clippy failed`, and gives way to
 /// an ellipsis in a narrow column; the whole, with how many passed beside
-/// it, is under the pointer, as the merge's base is. The review and the
+/// it, is under the pointer, as the merge's base is, and as who approved
+/// or asked for changes is on the review. The review and the
 /// merge are an open pull request's, once the live overview has come; the
 /// checks are there as soon as something has been fetched, a worktree's
 /// own too. The group is gone while none of the three has anything to
@@ -1345,7 +1394,9 @@ fn status_group(state: ReviewState) -> impl IntoView {
     let checks = Memo::new(move |_| {
         checks_line_now(state).map(|line| (checks_standing(&line), line.text.clone()))
     });
-    let review = kept_while_reading(state, move || review_standing(state));
+    let review = kept_while_reading(state, move || {
+        review_standing(state).map(|standing| (standing, review_said(state)))
+    });
     let merge = kept_while_reading(state, move || {
         let resolves = crate::review::merge::may_merge(state)
             && !state
@@ -1383,20 +1434,29 @@ fn status_group(state: ReviewState) -> impl IntoView {
                     .into_any()
             },
         ),
-        status_slot(review, false, move |standing: Standing| {
-            // Its word is the whole of what it says.
-            property(
-                SidebarIcon::Unread,
-                standing.tone.ink(),
-                standing.says,
-                false,
-                false,
-                review_hot,
-                move || has_checks.get() && !checks_hot.get() && !review_hot.get(),
-            )
-            .debug_name("review status")
-            .into_any()
-        }),
+        status_slot(
+            review,
+            false,
+            move |(standing, said): (Standing, String)| {
+                // Its word is the whole of how it stands; who made it so is
+                // under the pointer, once anyone has.
+                let item = property(
+                    SidebarIcon::Unread,
+                    standing.tone.ink(),
+                    standing.says,
+                    false,
+                    false,
+                    review_hot,
+                    move || has_checks.get() && !checks_hot.get() && !review_hot.get(),
+                )
+                .debug_name("review status");
+                if said.is_empty() {
+                    item.into_any()
+                } else {
+                    tip(item, said).into_any()
+                }
+            },
+        ),
         status_slot(
             merge,
             false,
@@ -4465,7 +4525,9 @@ pub(crate) mod tests {
         harness.paint();
         assert!(gone(&harness, "review status"));
         assert!(gone(&harness, "merge status"));
-        state.pull_request_overview.set(Some(Arc::new(blocked)));
+        state
+            .pull_request_overview
+            .set(Some(Arc::new(blocked.clone())));
         harness.rebuild();
         harness.paint();
 
@@ -4503,6 +4565,36 @@ pub(crate) mod tests {
         };
         assert_eq!(verdict("ann").as_deref(), Some("APPROVED"), "{reviewers:?}");
         assert_eq!(verdict("bob").as_deref(), Some("APPROVED"), "{reviewers:?}");
+        // The overview says changes are asked for, and the discussion,
+        // read apart from it, names nobody asking: the review's status
+        // says nothing under the pointer rather than who approved.
+        assert_eq!(review_said(state), "");
+        // Approved, it names who approved.
+        state
+            .pull_request_overview
+            .set(Some(Arc::new(overview(checks_of(&[], 1)))));
+        assert_eq!(review_said(state), "Approved by ann and bob");
+        // Then whoever asks for changes after them, but not one who only
+        // commented, nor a review GitHub gives no login for.
+        state.discussion.update(|discussion| {
+            let mut next = perch_github::Discussion::clone(discussion.as_ref().unwrap());
+            for (id, user, verdict) in [
+                (5, "cat", "CHANGES_REQUESTED"),
+                (6, "dee", "COMMENTED"),
+                (7, "", "APPROVED"),
+            ] {
+                next.reviews
+                    .push(review(id, user, verdict, "2026-09-20T12:00:00Z"));
+            }
+            *discussion = Some(Arc::new(next));
+        });
+        state
+            .pull_request_overview
+            .set(Some(Arc::new(blocked.clone())));
+        assert_eq!(
+            review_said(state),
+            "Approved by ann and bob\nChanges requested by cat"
+        );
 
         // Read again: what was said stays meanwhile.
         state.pull_request_overview_loading.set(true);

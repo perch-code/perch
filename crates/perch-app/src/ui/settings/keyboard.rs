@@ -12,6 +12,7 @@ use perch_github::Setting;
 use super::controls;
 use super::{Group, Page, Row};
 use crate::keymap::{self, Action, Keymap};
+use crate::ui::widgets::listed;
 
 /// A `[keybindings]` table and the keymap made from it.
 type Read = (BTreeMap<String, toml::Value>, Rc<Keymap>);
@@ -53,15 +54,6 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
             Group::new(group.title(), rows)
         })
         .collect()
-}
-
-/// Titles as a sentence lists them: "A", "A and B", "A, B and C".
-fn listed(titles: &[&str]) -> String {
-    match titles {
-        [] => String::new(),
-        [one] => one.to_string(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
 }
 
 fn row(page: &Page, action: Action) -> Row {

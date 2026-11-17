@@ -521,6 +521,15 @@ pub fn clickable(style: floem::style::Style) -> floem::style::Style {
         .hover(|s| s.cursor(floem::style::CursorStyle::Pointer))
 }
 
+/// Names as a sentence lists them: "A", "A and B", "A, B and C".
+pub(crate) fn listed(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// A link in a line of words: the pointer over it, and an underline, the
 /// label's bottom border, that shows under the pointer. The pixel of
 /// padding on top balances the border, so the text sits level with the
