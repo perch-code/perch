@@ -48,6 +48,11 @@ split-debuginfo = "packed"
 [profile.dev.package."*"]
 opt-level = 2
 
+# The app embeds the perchd executables. Omit their symbol tables to keep
+# the debug app smaller; a deployed daemon's backtrace may show fewer names.
+[profile.dev.package.perchd]
+strip = "symbols"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
