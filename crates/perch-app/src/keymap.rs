@@ -371,6 +371,7 @@ impl Keymap {
     /// don't all read keeps the ones that do.
     pub fn from_config(table: &BTreeMap<String, toml::Value>) -> (Keymap, Vec<String>) {
         let mut keymap = Keymap::defaults();
+        let mut overrides = Vec::new();
         let mut warnings = Vec::new();
         let warn = |id: &str, value: &toml::Value, why: &str| {
             format!("config.toml: [keybindings] {id} = {value} was not read: {why}")
@@ -415,6 +416,15 @@ impl Keymap {
                     )),
                 }
             }
+            overrides.push((action, keys));
+        }
+        // The sidebar tabs gained defaults after these keys were available
+        // for custom shortcuts. Only take a default if the key is still free.
+        for tab in [Action::Inbox, Action::Worktrees, Action::Browse] {
+            keymap.bindings[tab.index()]
+                .retain(|key| !overrides.iter().any(|(_, keys)| keys.contains(key)));
+        }
+        for (action, keys) in overrides {
             keymap.bindings[action.index()] = keys;
         }
         (keymap, warnings)
@@ -731,6 +741,26 @@ mod tests {
         assert!(!keymap.matches(Action::FocusSearch, &press("/"), false));
         // The rest keep theirs.
         assert!(keymap.matches(Action::Close, &press("super+w"), false));
+    }
+
+    #[test]
+    fn sidebar_tab_defaults_yield_to_configured_window_and_composer_shortcuts() {
+        let keymap =
+            with_bindings("focus_search = ['/', 'super+2']\nbold = 'super+3'\ninbox = 'super+4'");
+        for (action, key) in [
+            (Action::FocusSearch, "super+2"),
+            (Action::Bold, "super+3"),
+            (Action::Inbox, "super+4"),
+        ] {
+            assert!(keymap.matches(action, &press(key), true));
+            assert!(keymap.conflicts(action).is_empty());
+        }
+        assert_eq!(keymap.label(Action::Worktrees), None);
+        assert_eq!(keymap.label(Action::Browse), None);
+
+        // Two explicitly assigned keys still get the usual conflict report.
+        let keymap = with_bindings("browse = 'super+4'\nfocus_search = 'super+4'");
+        assert_eq!(keymap.conflicts(Action::Browse), vec![Action::FocusSearch]);
     }
 
     #[test]

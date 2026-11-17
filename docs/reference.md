@@ -641,6 +641,8 @@ keys for one action are written in the file.
 
 Hold Command on macOS or Ctrl on Linux to see the current shortcuts under
 the sidebar tabs, sidebar toggle, New Work, and the Conversation and Code tabs.
+The Inbox, Worktrees, and Browse defaults yield to any shortcut you assign
+in Settings or in `[keybindings]`.
 
 Each action's id, its default keys and what it does, grouped as Settings
 groups them:

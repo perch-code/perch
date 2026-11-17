@@ -427,12 +427,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // not heard of on the way down.
                 match focused_descendant(cx, root_id.root()) {
                     Some(holder) => {
-                        // A menu overlay takes key-up outside this root.
-                        if !cx.window_state.is_focus_within(root_id)
-                            && state.shortcut_modifiers.get_untracked().contains(&true)
-                        {
-                            state.shortcut_modifiers.set([false; 2]);
-                        }
                         gone.set(Some(holder));
                         unheld.set(false);
                     }
@@ -481,6 +475,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             move |cx, _| {
+                // An overlay receives key-up outside this root. Clear the
+                // hints as focus leaves, even if the previous view still exists.
+                if !cx.window_state.is_focus_within(root_id)
+                    && state.shortcut_modifiers.get_untracked().contains(&true)
+                {
+                    state.shortcut_modifiers.set([false; 2]);
+                }
                 if lost.get() == focus_target(cx) {
                     lost.set(None);
                     // Looked at again after the next layout, by when a
@@ -2011,6 +2012,18 @@ mod tests {
         assert!(!hint.is_hidden());
         change(&mut harness, right, KeyState::Up);
         assert!(hint.is_hidden());
+
+        change(&mut harness, left, KeyState::Down);
+        let filter = named(harness.root_id(), "sidebar filter").unwrap();
+        let center = filter.get_visual_rect().center();
+        harness.click(center.x, center.y);
+        harness.rebuild();
+        assert!(menu::is_open());
+        assert!(hint.is_hidden(), "the menu took keyboard focus");
+        change(&mut harness, left, KeyState::Up);
+        menu::close();
+        harness.rebuild();
+        assert!(hint.is_hidden(), "release inside the menu left the hint up");
 
         change(&mut harness, left, KeyState::Down);
         harness.dispatch_event(floem::event::Event::Window(
