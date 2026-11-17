@@ -301,8 +301,7 @@ pub(crate) fn visible_hits(state: AppState) -> Vec<SearchHit> {
         .with(|q| crate::items::search_hits(&hits, q))
 }
 
-/// A result's menu: Move to Inbox while its notification is Done or
-/// snoozed, as that view's own row offers, and Open on GitHub.
+/// A Browse result offers the inbox action for its current notification state.
 fn search_menu(
     state: AppState,
     backend: Rc<Backend>,
@@ -312,7 +311,22 @@ fn search_menu(
     url: &str,
 ) -> Menu {
     let mut menu = Menu::new();
-    if let Some(id) = state.put_away_thread(repo, kind, number) {
+    let active = state.notifications.with_untracked(|threads| {
+        threads
+            .iter()
+            .find(|thread| thread.is_about(repo, kind, number))
+            .cloned()
+    });
+    if let Some(thread) = active {
+        menu = menu
+            .item("Done", move |item| {
+                let backend = backend.clone();
+                let thread = thread.clone();
+                item.icon(SidebarIcon::Check)
+                    .action(move || super::notifications::done(state, &backend, &thread))
+            })
+            .separator();
+    } else if let Some(id) = state.put_away_thread(repo, kind, number) {
         menu = menu
             .item("Move to Inbox", move |item| {
                 let backend = backend.clone();
@@ -476,8 +490,7 @@ mod tests {
         assert!(find(harness.root_id(), "Not a repository on GitHub").is_some());
     }
 
-    /// A result whose notification is Done, or snoozed, moves it back to
-    /// the inbox from its menu; one the inbox still has offers nothing.
+    /// Browse can mark active notifications Done and restore Done or snoozed ones.
     #[test]
     fn a_put_away_result_moves_back_to_the_inbox() {
         use perch_github::{Reason, Repository, Subject, SubjectKind, Thread};
@@ -521,7 +534,13 @@ mod tests {
             )
         };
 
-        assert_eq!(menu(1).outline(), ["Open on GitHub"], "still in the inbox");
+        assert_eq!(menu(1).outline(), ["Done", "—", "Open on GitHub"]);
+        menu(1).choose("Done");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::DoneNotification { thread_id, shown_at })
+                if thread_id == "10" && shown_at == thread("10", 1).updated_at
+        ));
         assert_eq!(menu(4).outline(), ["Open on GitHub"], "no notification");
         assert_eq!(menu(2).outline(), ["Move to Inbox", "—", "Open on GitHub"]);
         menu(2).choose("Move to Inbox");

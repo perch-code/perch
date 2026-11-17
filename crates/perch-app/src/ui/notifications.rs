@@ -670,7 +670,7 @@ fn snoozed_until_label(state: AppState, until: jiff::Timestamp) -> impl IntoView
 /// closes, as going back to the sidebar would. Not when the pill is
 /// holding back newer unread activity on it: the backend will leave the
 /// row for that, and the pane is where it shows.
-fn done(state: AppState, backend: &Backend, thread: &Thread) {
+pub(super) fn done(state: AppState, backend: &Backend, thread: &Thread) {
     // Asked before the command goes, whose answer clears what is held.
     let stays = state.held_back_unseen(thread);
     backend.done_notification(thread);
