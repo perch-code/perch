@@ -59,7 +59,7 @@ repository's `github` and `root`.
 | `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |
 | `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |
 | `clone_root` | `~` | The folder a repository added by its name is cloned into, such as `"~/Code"`; read by an engine on a host, which is where repositories are added by name |
-| `[remote] host` | none | An SSH host, Linux or a Mac, whose `perchd` the app uses instead of an engine of its own, as ssh is given it, with a port after it if it has one (`"chris@devbox:2222"`); applies after a restart |
+| `[remote] host` | none | SSH host to use when there is no saved window session (for example `"chris@devbox:2222"`). Perch subsequently reopens each window in its last environment. |
 | `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app sends the `perchd` it carries there, starts it, and replaces an engine of another build it finds running idle |
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |

@@ -13,6 +13,15 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Tab
 
 use crate::config::{toml_error_line, Appearance, Approvals, Config, RepoConfig};
 
+/// Remote windows write app preferences on the UI thread while the local
+/// engine can edit the same file from its worker thread.
+pub(crate) fn config_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// One of the coding agents, as far as its config table goes: Claude Code
 /// under `[agent]`, Codex under `[agent.codex]`, Gemini under
 /// `[agent.gemini]`. Its own small enum, since this crate doesn't depend on
@@ -159,6 +168,7 @@ pub fn write_settings(
     changes: &[Setting],
     known: &[RepoConfig],
 ) -> Result<Written, String> {
+    let _guard = config_write_guard();
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),

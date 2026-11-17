@@ -537,15 +537,15 @@ the original database in place.
 
 `Cmd-,` (`Ctrl-,` off macOS), **Settings…** in the Perch menu, or the gear
 at the foot of the sidebar opens Settings over the window: General,
-Appearance, Keyboard shortcuts, Agents, Work, Repositories and Language
+Environment, Appearance, Keyboard shortcuts, Agents, Work, Repositories and Language
 servers. The search box finds a setting in any section. `Escape` clears the
 search, then closes Settings, as do `Cmd-[` and `Cmd-W`, or the keys
 `back` and `close` are on. Keyboard shortcuts has a row for each action a
 key runs, where its keys can be changed: see
 [Keyboard shortcuts](#keyboard-shortcuts).
 
-Settings is a view of `config.toml`, which stays the one place settings
-live. Each control writes its own key and leaves the rest of the file as it
+The environment choice under **This window** lasts for that window.
+Preferences are saved in `config.toml`. Each preference writes its own key and leaves the rest of the file as it
 was, comments included. The arrow beside a setting's title shows the file
 sets it; clicking it takes the key out, back to the default. A text field
 writes on `Enter` or when you leave it, and `Escape` puts back what the file
@@ -1610,10 +1610,21 @@ put on it first. On it:
    (or `token` in its config.toml), and each agent CLI you run, `claude`,
    `codex` or `agy`. Nothing is copied from the Mac.
 
-Then where the app runs, set `[remote] host` in `~/.perch/config.toml` to
-the name you `ssh` to, or type it into Settings > General > Engine, and
-restart Perch. Once it connects, the app says what of the above the host
-still lacks.
+Click the environment name at the foot of the sidebar, or open
+**Settings > Environment** in the window you want to change. Enter
+the SSH host and select **Connect**. That window opens the host’s
+repositories and agent runs. **Use local environment** brings it back to
+this machine. Switching closes the current item. Other windows keep their
+environment and open items.
+
+Perch reopens the windows from your previous session, including each
+window’s environment, size and open item. A remote window reopens its item
+when its host connects. Closing one window removes it from the session.
+Closing the last window keeps it for the next launch.
+
+**New Window** inherits the environment of the window in front. On a first
+launch with no saved windows, Perch uses the existing `[remote] host` in
+the local config if one is set, or opens locally.
 
 The host is named as ssh is given it: a name from `~/.ssh/config`, or
 `user@host`. A port goes after it, `chris@devbox:2222`, or the whole can be
@@ -1637,11 +1648,11 @@ written on the host first.
 
 The engine on a host looks at the host as it starts, again whenever its
 config.toml changes or it takes up a new GitHub token, and tells every
-connected app what it found. Settings > General lists each check under
-Engine with what was found or, when something is missing, the command to
-run on the host and a Copy button. When something required is missing,
-the strip at the foot of every window says "<host> needs setup", with
-what is missing and an **Open Settings** button. `perch --connect` prints
+connected app what it found. **Settings > Environment > Host setup** shows
+required checks that need attention, with instructions you can copy.
+**Show details** lists passed checks and optional tools. A setup issue
+also appears at the foot of each window using that host, with an **Open
+Settings** button. `perch --connect` prints
 the same list. It checks:
 
 - **GitHub token** (required): one is found, as the engine finds it:
@@ -1849,9 +1860,9 @@ interrupts its runs, as quitting the app does.
 
 ### Connecting
 
-With `[remote] host` in the Mac's config.toml, or a host typed into
-Settings > General > Engine, the app starts no engine of its own and takes
-no lock on its Perch home. It runs
+Windows using the same SSH host share a connection. Perch starts the
+local engine when a window first uses the local environment. To reach a
+remote environment, Perch runs
 
 ```sh
 ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
@@ -1862,7 +1873,7 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
 and talks to the engine on the host over ssh's stdin and stdout. The
 command runs `~/.perch/bin/perchd-<build> bridge` (see [The app's own
 engine](#the-apps-own-engine)), or `[remote] command` when the Mac's
-config.toml sets one, in your login shell either way. ssh's own
+config.toml sets one for its default host, in your login shell either way. ssh's own
 config, keys and agent apply to logging in, but nothing is forwarded,
 whatever the config says: not the agent, not X11, no ports. Nothing is
 asked either, as there is no terminal: connect once with `ssh <host>` in a
@@ -1871,8 +1882,7 @@ agent or the macOS keychain. The command is run in your login shell on the
 host, bash, zsh or fish, so the engine has the `PATH` your profile sets and
 finds `git`, `gh` and the agents where you do. What ssh says on stderr goes
 to the log. `PERCH_SSH` in the app's environment names another ssh program
-to run, everywhere the app runs one. A change to
-the host takes effect when Perch restarts.
+to run, everywhere the app runs one.
 
 The host's engine keeps its items, runs and checkouts going with the app
 closed. Paths the app shows are the host's, and `~` in them is the host's
@@ -1888,7 +1898,7 @@ home. What would open a path on the Mac reaches the host instead:
   shell reads the line and fish or csh quote differently from sh.
 - Copy Path copies the host's path.
 
-While the host can't be reached, a strip along the foot of every window
+While the host can't be reached, a strip along the foot of each window using it
 says so: "Disconnected from <host>. Reconnecting…", or "Can't connect to
 <host>" before the first connection, with ssh's last line under it (an
 unknown host, a refused key) and a Reconnect button. Perch tries again after
@@ -1920,18 +1930,12 @@ With the app's own `perchd`, the strip offers to restart the engine
 (see [When the engine is another build](#when-the-engine-is-another-build)); with
 `[remote] command`, it says which one to update.
 
-Settings shows the host's config.toml, with the Mac's `[ui]`, `[display]`,
-`[keybindings]` and `[remote]` in place of the host's; the Config file
-group has both files. Keyboard shortcut warnings are about the Mac's file.
-Until the host's engine has sent its settings, the page shows the Mac's
-tables over the defaults, and only the engine, appearance, display and
-shortcuts can be changed, so a host named wrong can be put right. A Mac
-file that stops parsing keeps the Mac's settings read last, with the
-error among the warnings, as the engine does with its own. Each file
-turns off only its own rows: with the host's broken, the engine,
-appearance, display and shortcuts can still be changed, with the
-Mac's broken, only they can't, and with both broken, nothing can, as the
-banner at the top of the page says.
+In a remote window, repositories, agents and GitHub settings belong to the
+host. Appearance, display and keyboard shortcuts
+come from the app’s local configuration. **General > Configuration files**
+shows where each file lives. If a file cannot be read, Perch keeps its
+last settings and disables edits to that file. You can still switch the
+window’s environment.
 
 ### Adding a repository on a host
 
@@ -1959,8 +1963,6 @@ GitHub Enterprise host is cloned by hand and added by its path.
 
 ### Limits
 
-- The app uses one engine at a time, this Mac's or one host's; changing it
-  takes a restart, and items never move between engines.
 - With `[remote] command` set, nothing updates `perchd` on the host. When
   the app is updated and the wire changes, the strip says to update the
   engine; install the new release's `perchd` and restart it.

@@ -1,8 +1,10 @@
 //! Perch's windows. Cmd-Shift-N, New Window in the Perch menu, opens
 //! another, each with an item of its own open; Cmd-W closes one. They
-//! share the one backend: every window hears what is about the rows, the
-//! inbox and the agents, and a window alone hears the answers to what it
-//! asked (`Event::for_one_window`).
+//! share a backend and its broadcasts with other windows in the same
+//! environment. Window-specific replies use the ID assigned by that backend.
+
+mod session;
+use session::{SavedWindow, Session};
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -20,16 +22,14 @@ use crate::backend::{Backend, Event, WindowId};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 
+#[derive(Default)]
 struct App {
-    /// The handle windows are opened from. It sends nothing itself.
-    backend: Backend,
-    /// What the backend has said, heard as a window would. The backend
-    /// sends most of it once, at launch, and a new window starts from it.
-    model: AppState,
+    session: Option<Rc<Session>>,
+    environments: RefCell<std::collections::HashMap<Option<String>, Rc<Environment>>>,
     windows: RefCell<Vec<Window>>,
     /// The window that last had the keyboard, for New Window to take its
     /// layout.
-    focused: Cell<Option<WindowId>>,
+    focused: Cell<Option<floem::ViewId>>,
     /// Open… was asked for with no window open: the next one opens with
     /// the box up.
     open_box_on_open: Cell<bool>,
@@ -39,6 +39,18 @@ struct App {
     check_update_on_open: Cell<bool>,
     /// Settings… was, the same way: the next window opens on Settings.
     settings_on_open: Cell<bool>,
+}
+
+struct Environment {
+    scope: Scope,
+    pictures: Rc<crate::review::images::Store>,
+    profiles: Rc<crate::ui::profile_card::Profiles>,
+    host: Option<String>,
+    /// The handle windows are opened from. It sends nothing itself.
+    backend: Backend,
+    /// What the backend has said, heard as a window would. The backend
+    /// sends most of it once, at launch, and a new window starts from it.
+    model: AppState,
     /// The engine's Settings as it last sent them, before this machine's
     /// tables were put in: with the engine on a host, they are put in
     /// again after each write of the client's own.
@@ -52,12 +64,26 @@ struct App {
 #[derive(Clone)]
 struct Window {
     id: WindowId,
+    environment: Rc<Environment>,
+    destination: RwSignal<Option<String>>,
+    frame: Rc<Cell<Rect>>,
+    close_requested: Rc<Cell<bool>>,
     state: AppState,
     review: ReviewState,
     /// Brings the window to the front.
     raise: floem::ViewId,
     /// What the window asks the backend with, for a link followed in it.
     backend: Rc<Backend>,
+}
+
+impl Window {
+    fn session_item(&self) -> Option<String> {
+        self.state
+            .open_item
+            .get()
+            .or_else(|| self.review.item.with(|i| i.as_ref().map(|i| i.id.clone())))
+            .or_else(|| self.state.pending_restore.get())
+    }
 }
 
 thread_local! {
@@ -138,22 +164,71 @@ fn app() -> Option<Rc<App>> {
     APP.with_borrow(Clone::clone)
 }
 
-/// Take the backend and its events. From the first window's view function:
-/// floem wants a window about before a channel can feed it. What this makes
-/// outlives that window.
-pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Event)>) {
-    Scope::new().enter(move || {
-        let model = new_state();
-        let incoming = RwSignal::new(None::<(WindowId, Event)>);
-        update_signal_from_channel(incoming.write_only(), events);
-        // Folding an event is not a derivation. Untracked, so that a
-        // signal this happens to read on the way past cannot subscribe the
-        // effect to its own output and have the last event applied twice.
-        Effect::new(move |_| {
-            if let Some((window, event)) = incoming.get() {
-                Effect::untrack(|| deliver(window, event));
-            }
-        });
+/// Floem creates initial windows by popping its queue. Enqueue the
+/// frontmost window first so that it opens last and takes focus.
+pub fn restore(
+    mut application: floem::Application,
+    legacy_host: Option<&str>,
+) -> floem::Application {
+    let session = Rc::new(Session::load(
+        &perch_github::config::perch_home(),
+        legacy_host,
+    ));
+    let saved = session.last.borrow().clone();
+    let count = saved.len();
+    for (index, saved) in saved.into_iter().enumerate().rev() {
+        let (config, frame) = config(Some(&saved));
+        let session = session.clone();
+        application = application.window(
+            move |_| {
+                if app().is_none() {
+                    crate::app_icon::install();
+                    crate::app_menu::install();
+                    start(session.clone());
+                }
+                let root = view(None, frame, index + 1 == count, Some(saved.clone())).into_any();
+                session.opening.set(session.opening.get().saturating_sub(1));
+                save_windows();
+                root
+            },
+            Some(config),
+        );
+    }
+    application
+}
+
+fn save_windows() {
+    let Some(app) = app() else { return };
+    let Some(session) = &app.session else { return };
+    let mut windows = app.windows.borrow().clone();
+    windows.sort_by_key(|w| Some(w.raise) == app.focused.get());
+    let snapshot = windows
+        .iter()
+        .map(|w| SavedWindow {
+            host: w.environment.host.clone(),
+            item: Effect::untrack(|| w.session_item()),
+            frame: Some(format_frame(w.frame.get())),
+        })
+        .collect();
+    session.save(snapshot);
+}
+
+pub fn quit_app() {
+    quitting();
+    floem::quit_app();
+}
+
+pub fn quitting() {
+    save_windows();
+    if let Some(app) = app() {
+        if let Some(session) = &app.session {
+            session.quitting.set(true);
+        }
+    }
+}
+
+fn start(session: Rc<Session>) {
+    Scope::new().enter(|| {
         // A mouse's back and forward buttons as Logitech's Options+ sends
         // them, as swipes. They go to the window that has the keyboard,
         // which is the one under the pointer as a rule.
@@ -168,27 +243,90 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             });
         });
         floem::action::exec_after(STAR_ASK_AFTER, |_| star_due());
-        if crate::remote::host().is_some() {
-            watch_client_file(None);
-        }
+        watch_client_file(None);
         APP.set(Some(Rc::new(App {
+            session: Some(session),
+            ..Default::default()
+        })));
+    });
+}
+
+fn environment(host: Option<String>) -> Rc<Environment> {
+    let app = app().expect("window registry");
+    if let Some(existing) = app.environments.borrow().get(&host) {
+        return existing.clone();
+    }
+    let mut remote = perch_github::Config::load().remote;
+    if remote.host().is_some() && host.as_deref() != remote.host() {
+        remote.command = None;
+    }
+    remote.host = host.clone();
+    if host.is_some() {
+        static AWAKE: std::sync::Once = std::sync::Once::new();
+        AWAKE.call_once(crate::remote::stay_awake_for_the_host);
+    }
+    let (backend, events) = crate::start_engine(&remote);
+    register_environment(&app, host, backend, events)
+}
+
+fn register_environment(
+    app: &App,
+    host: Option<String>,
+    backend: Backend,
+    events: std::sync::mpsc::Receiver<(WindowId, Event)>,
+) -> Rc<Environment> {
+    let scope = Scope::new();
+    scope.enter(|| {
+        let model = new_state();
+        floem::reactive::Context::provide(model);
+        if let Some(host) = &host {
+            model.place.set(crate::remote::Place::Host {
+                host: host.clone(),
+                home: Default::default(),
+                data_root: Default::default(),
+            });
+            model.link.set(Some(crate::backend::EngineLink::Connecting {
+                host: host.clone(),
+            }));
+        }
+        let pictures = Rc::new(crate::review::images::Store::new(scope));
+        let profiles = Rc::new(crate::ui::profile_card::Profiles::default());
+        scope.provide_context(pictures.clone());
+        scope.provide_context(profiles.clone());
+        let env = Rc::new(Environment {
+            pictures,
+            profiles,
+            scope,
             backend,
             model,
-            windows: RefCell::new(Vec::new()),
-            focused: Cell::new(None),
-            open_box_on_open: Cell::new(false),
-            feedback_on_open: Cell::new(false),
-            check_update_on_open: Cell::new(false),
-            settings_on_open: Cell::new(false),
+            host: host.clone(),
             engine_settings: RefCell::new(None),
             client_file_broken: Cell::new(false),
-        })));
-        // The page shows this machine's settings until the host's engine
-        // sends its own, which it may never do: a host named wrong.
-        if crate::remote::host().is_some() {
-            client_settings_written();
+        });
+        app.environments.borrow_mut().insert(host, env.clone());
+        if env.host.is_some() {
+            refresh_client_settings(&env);
         }
-    });
+        let incoming = RwSignal::new(None::<(WindowId, Event)>);
+        update_signal_from_channel(incoming.write_only(), events);
+        let weak = Rc::downgrade(&env);
+        Effect::new(move |_| {
+            if let (Some(env), Some((window, event))) = (weak.upgrade(), incoming.get()) {
+                Effect::untrack(|| env.scope.enter(|| deliver(&env, window, event)));
+            }
+        });
+        env
+    })
+}
+
+fn for_state(state: AppState) -> Option<Rc<Environment>> {
+    let host = state.place.try_get_untracked()?.host();
+    app()?
+        .environments
+        .borrow()
+        .get(&host)
+        .filter(|env| env.model.place == state.place)
+        .cloned()
 }
 
 /// Back, or forward, in the window that last had the keyboard.
@@ -201,7 +339,7 @@ fn travel_in_focused(back: bool) {
         .windows
         .borrow()
         .iter()
-        .find(|w| Some(w.id) == focused)
+        .find(|w| Some(w.raise) == focused)
         .cloned();
     if let Some(to) = to {
         crate::ui::history::travel(to.state, to.review, &to.backend, back);
@@ -216,14 +354,11 @@ fn new_state() -> AppState {
     state
 }
 
-fn deliver(window: WindowId, mut event: Event) {
-    let Some(app) = app() else {
-        return;
-    };
+fn deliver(app: &Environment, window: WindowId, mut event: Event) {
     // With the engine on a host, its Settings have this machine's own
     // tables put in, which the client reads and writes here.
     if let Event::Settings(file) = &mut event {
-        if crate::remote::host().is_some() {
+        if app.host.is_some() {
             // A host file that doesn't parse leaves the engine on what it
             // read last, so the page keeps showing that.
             if file.config.is_none() {
@@ -239,11 +374,28 @@ fn deliver(window: WindowId, mut event: Event) {
             *file = crate::client_settings::merge(file.clone(), &local);
         }
     }
-    deliver_as_is(&app, window, event);
+    let local_settings = app.host.is_none() && matches!(event, Event::Settings(_));
+    deliver_as_is(app, window, event);
+    if local_settings {
+        client_settings_written();
+    }
+}
+
+fn environment_windows(env: &Environment) -> Vec<Window> {
+    app()
+        .map(|app| {
+            app.windows
+                .borrow()
+                .iter()
+                .filter(|w| std::ptr::eq(w.environment.as_ref(), env))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Hand `event` to the windows as it is.
-fn deliver_as_is(app: &App, window: WindowId, event: Event) {
+fn deliver_as_is(app: &Environment, window: WindowId, event: Event) {
     if let Event::Link(link) = &event {
         linked(app, link);
     }
@@ -257,7 +409,7 @@ fn deliver_as_is(app: &App, window: WindowId, event: Event) {
     }
     // A copy, so a window closing while the event is applied does not find
     // the list borrowed.
-    let windows = app.windows.borrow().clone();
+    let windows = environment_windows(app);
     // The worker's own, a poll's complaint say, is everybody's.
     if window != crate::backend::NO_WINDOW && event.for_one_window() {
         if let Some(to) = windows.iter().find(|w| w.id == window) {
@@ -276,7 +428,9 @@ fn deliver_as_is(app: &App, window: WindowId, event: Event) {
 /// Tell every window `text`: for what the app did itself, away from the
 /// engine, such as opening an editor on the engine's host.
 pub fn notice(text: String) {
-    deliver(crate::backend::NO_WINDOW, Event::Notice(text));
+    if let Some(state) = focused_state() {
+        state.complain(text);
+    }
 }
 
 /// The client's own settings were written to this machine's file: every
@@ -284,12 +438,24 @@ pub fn notice(text: String) {
 /// the engine on a host has sent its own, this machine's alone, so the
 /// host can be put right when it cannot be reached.
 pub fn client_settings_written() {
-    let Some(app) = app() else {
-        return;
-    };
+    if let Some(app) = app() {
+        let remote: Vec<_> = app
+            .environments
+            .borrow()
+            .values()
+            .filter(|env| env.host.is_some())
+            .cloned()
+            .collect();
+        for env in remote {
+            refresh_client_settings(&env);
+        }
+    }
+}
+
+fn refresh_client_settings(app: &Environment) {
     let engine = app.engine_settings.borrow().clone();
     match engine {
-        Some(engine) => deliver(crate::backend::NO_WINDOW, Event::Settings(engine)),
+        Some(engine) => deliver(app, crate::backend::NO_WINDOW, Event::Settings(engine)),
         None => {
             let Some(path) = perch_github::config::config_path() else {
                 return;
@@ -297,7 +463,7 @@ pub fn client_settings_written() {
             let local = crate::client_settings::Local::read_kept();
             app.client_file_broken.set(local.error.is_some());
             let file = crate::client_settings::alone(path, &local);
-            deliver_as_is(&app, crate::backend::NO_WINDOW, Event::Settings(file));
+            deliver_as_is(app, crate::backend::NO_WINDOW, Event::Settings(file));
         }
     }
 }
@@ -305,15 +471,15 @@ pub fn client_settings_written() {
 /// Whether the engine's settings are known: always in process, and with
 /// the engine on a host once it has sent them. Until then only the
 /// client's own can be changed.
-pub fn engine_settings_heard() -> bool {
-    crate::remote::host().is_none()
-        || app().is_none_or(|app| app.engine_settings.borrow().is_some())
+pub fn engine_settings_heard(state: AppState) -> bool {
+    state.settings_file.with(|_| {
+        for_state(state)
+            .is_none_or(|env| env.host.is_none() || env.engine_settings.borrow().is_some())
+    })
 }
 
-/// Whether this machine's config.toml did not parse when last read, with
-/// the engine on a host.
-pub fn client_file_broken() -> bool {
-    app().is_some_and(|app| app.client_file_broken.get())
+pub fn client_file_broken(state: AppState) -> bool {
+    for_state(state).is_some_and(|env| env.client_file_broken.get())
 }
 
 /// How often this machine's config.toml is looked at for edits made
@@ -327,10 +493,10 @@ fn watch_client_file(seen: Option<(Option<std::time::SystemTime>, u64)>) {
         let now = perch_github::config::config_path()
             .and_then(|path| std::fs::metadata(path).ok())
             .map(|meta| (meta.modified().ok(), meta.len()));
-        if seen.is_some() && now.is_some() && now != seen {
+        if now != seen {
             client_settings_written();
         }
-        watch_client_file(now.or(seen));
+        watch_client_file(now);
     });
 }
 
@@ -339,7 +505,7 @@ fn watch_client_file(seen: Option<(Option<std::time::SystemTime>, u64)>) {
 /// each window opens its item again, as the engine has forgotten what the
 /// windows had open, or never heard them ask. The engine has been told of
 /// the windows and asked for everything by then.
-fn linked(app: &App, link: &crate::backend::EngineLink) {
+fn linked(app: &Environment, link: &crate::backend::EngineLink) {
     let crate::backend::EngineLink::Up {
         host,
         welcome,
@@ -349,14 +515,26 @@ fn linked(app: &App, link: &crate::backend::EngineLink) {
     else {
         return;
     };
-    crate::remote::connected(welcome);
-    if !again {
-        return;
+    app.model.place.update(|place| place.connected(welcome));
+    for window in environment_windows(app) {
+        if !restore_item(&window) && *again {
+            reopen_item(window.state, window.review, &window.backend, host);
+        }
     }
-    for window in app.windows.borrow().iter() {
-        reopen_item(window.state, window.review, &window.backend, host);
+    if *again {
+        crate::review::images::ask_again();
     }
-    crate::review::images::ask_again();
+}
+
+fn restore_item(window: &Window) -> bool {
+    let Some(item) = window.state.pending_restore.get_untracked() else {
+        return false;
+    };
+    let navigation = window.backend.open_item(&item);
+    window
+        .state
+        .begin_item_review(window.review, "Reopening item", &item, navigation);
+    true
 }
 
 /// Open again the item a window had open, or was opening. One showing is
@@ -387,15 +565,16 @@ pub(crate) fn reopen_item(state: AppState, review: ReviewState, backend: &Backen
 
 /// A window's state and backend handle, from inside its view function.
 /// `settings` is the window it was opened from, whose layout it takes.
-pub fn window(settings: Option<AppState>) -> Option<(AppState, ReviewState, Rc<Backend>)> {
-    let app = app()?;
+fn window(env: &Environment, settings: Option<AppState>) -> (AppState, ReviewState, Rc<Backend>) {
+    let app = app().expect("window registry");
     let mut state = new_state();
     // Send Feedback's draft and the problems it reports are the app's,
     // not a window's.
-    state.feedback = app.model.feedback;
-    state.recent_problems = app.model.recent_problems;
-    state.seed_from(&app.model, settings.as_ref().unwrap_or(&app.model));
-    let review = state.review.get_untracked()?;
+    state.place = env.model.place;
+    state.feedback = env.model.feedback;
+    state.recent_problems = env.model.recent_problems;
+    state.seed_from(&env.model, settings.as_ref().unwrap_or(&env.model));
+    let review = state.review.get_untracked().unwrap();
     if app.open_box_on_open.replace(false) {
         crate::ui::open_box::show(state, None);
     }
@@ -405,49 +584,109 @@ pub fn window(settings: Option<AppState>) -> Option<(AppState, ReviewState, Rc<B
     if app.feedback_on_open.replace(false) {
         crate::ui::feedback::open(state, review, crate::feedback::FeedbackKind::Idea, None);
     }
-    let backend = Rc::new(app.backend.open_window());
+    let backend = Rc::new(env.backend.open_window());
     if app.check_update_on_open.replace(false) {
         backend.check_for_update();
     }
-    Some((state, review, backend))
+    (state, review, backend)
 }
 
 /// The window's whole view: the app's, and what makes it one of several.
 /// `frame` is where it was opened, from `config`.
-pub fn view(
-    state: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
+fn view(
+    from: Option<AppState>,
     frame: Rect,
+    run_launch_hooks: bool,
+    saved: Option<SavedWindow>,
 ) -> impl IntoView {
     let raise = Raise::new();
     let raise_id = raise.id;
-    if let Some(app) = app() {
-        app.windows.borrow_mut().push(Window {
-            id: backend.window(),
-            state,
-            review,
-            raise: raise_id,
-            backend: backend.clone(),
-        });
-    }
-    let id = backend.window();
-    let closing = backend.clone();
+    let host = saved
+        .as_ref()
+        .map(|s| s.host.clone())
+        .unwrap_or_else(|| from.and_then(|s| s.place.get_untracked().host()));
+    let restore_item_id = saved.and_then(|s| s.item);
+    let saved_frame = Rc::new(Cell::new(frame));
+    let window_frame = saved_frame.clone();
+    let close_requested = Rc::new(Cell::new(false));
+    let window_close = close_requested.clone();
+    let destination = RwSignal::new(host);
+    let initial = Cell::new(true);
+    let content = floem::views::dyn_container(
+        move || destination.get(),
+        move |host| {
+            let initial = initial.replace(false);
+            if !initial {
+                detach(raise_id);
+            }
+            let env = environment(host);
+            let (state, review, backend) = window(&env, if initial { from } else { None });
+            floem::reactive::Context::provide(state);
+            floem::reactive::Context::provide(env.pictures.clone());
+            floem::reactive::Context::provide(env.profiles.clone());
+            if let Some(app) = app() {
+                let window = Window {
+                    frame: window_frame.clone(),
+                    close_requested: window_close.clone(),
+                    id: backend.window(),
+                    state,
+                    review,
+                    raise: raise_id,
+                    backend: backend.clone(),
+                    environment: env,
+                    destination,
+                };
+                app.windows.borrow_mut().push(window.clone());
+                if initial {
+                    state.pending_restore.set(restore_item_id.clone());
+                    if run_launch_hooks {
+                        crate::launch_hooks(state, review, backend.clone());
+                    }
+                }
+                if window.environment.host.is_none()
+                    || matches!(
+                        state.link.get_untracked(),
+                        Some(crate::backend::EngineLink::Up { .. })
+                    )
+                {
+                    restore_item(&window);
+                }
+                let item = floem::reactive::Memo::new(move |_| window.session_item());
+                Effect::new(move |_| {
+                    item.track();
+                    Effect::untrack(save_windows);
+                });
+            }
+            if !initial {
+                state
+                    .settings
+                    .section
+                    .set(crate::ui::settings::Section::Environment);
+                crate::ui::settings::show(state, None);
+            }
+            crate::ui::app_view(state, review, backend).into_any()
+        },
+    )
+    .style(|s| s.size_full());
     // Where the window is, kept as it moves and resizes, and written once
     // it has stopped.
     let frame = Rc::new(Cell::new(frame));
     let timer = Rc::new(Cell::new(None::<TimerToken>));
+    let close_timer = timer.clone();
     let remember = {
         move |at: Rect| {
             if let Some(timer) = timer.take() {
                 timer.cancel();
             }
+            let saved_frame = saved_frame.clone();
             timer.set(Some(floem::action::exec_after(SAVE_AFTER, move |_| {
                 // A full-screen window is the screen's size; the next one
                 // should open at the size it came out of full screen to.
-                if key_window_full_screen() {
+                if !can_save_frame(raise_id) {
                     return;
                 }
+                saved_frame.set(at);
+                save_windows();
                 LEFT_AT.set(Some(at));
                 let home = perch_github::config::perch_home();
                 if let Err(error) = write_frame(&home, at) {
@@ -458,55 +697,130 @@ pub fn view(
     };
     let (resized, moved) = (frame.clone(), frame);
     let remember_size = remember.clone();
-    Stack::new((
-        crate::ui::app_view(state, review, backend),
-        raise.style(|s| s.absolute()),
-    ))
-    .style(|s| s.size_full())
-    .window_scale(crate::theme::zoom)
-    .on_event_cont(
-        floem::event::listener::WindowResized,
-        move |_, size: &Size| {
-            let at = Rect::from_origin_size(resized.get().origin(), *size);
-            resized.set(at);
-            remember_size(at);
-        },
-    )
-    .on_event_cont(floem::event::listener::WindowMoved, move |_, to: &Point| {
-        let at = Rect::from_origin_size(*to, moved.get().size());
-        moved.set(at);
-        remember(at);
-    })
-    // Sent as the window opens and whenever macOS switches between light
-    // and dark, which `[ui] appearance` can overrule.
-    .on_event_cont(
-        floem::event::listener::ThemeChanged,
-        |_, theme: &floem::window::Theme| {
-            crate::theme::system_appearance((*theme).into());
-        },
-    )
-    .on_event_cont(floem::event::listener::WindowGainedFocus, move |_, _| {
-        if let Some(app) = app() {
-            app.focused.set(Some(id));
+    Stack::new((content, raise.style(|s| s.absolute())))
+        .style(|s| s.size_full())
+        .window_title(move || {
+            destination
+                .get()
+                .map_or_else(|| "Perch".into(), |h| format!("Perch — {h}"))
+        })
+        .window_scale(crate::theme::zoom)
+        .on_event_cont(
+            floem::event::listener::WindowResized,
+            move |_, size: &Size| {
+                let at = Rect::from_origin_size(resized.get().origin(), *size);
+                resized.set(at);
+                remember_size(at);
+            },
+        )
+        .on_event_cont(floem::event::listener::WindowMoved, move |_, to: &Point| {
+            let at = Rect::from_origin_size(*to, moved.get().size());
+            moved.set(at);
+            remember(at);
+        })
+        // Sent as the window opens and whenever macOS switches between light
+        // and dark, which `[ui] appearance` can overrule.
+        .on_event_cont(
+            floem::event::listener::ThemeChanged,
+            |_, theme: &floem::window::Theme| {
+                crate::theme::system_appearance((*theme).into());
+            },
+        )
+        .on_event_cont(floem::event::listener::WindowGainedFocus, move |_, _| {
+            if let Some(app) = app() {
+                app.focused.set(Some(raise_id));
+                save_windows();
+            }
+        })
+        .on_event_cont(floem::event::listener::WindowCloseRequested, {
+            let requested = close_requested.clone();
+            move |_, _| requested.set(true)
+        })
+        .on_event_cont(floem::event::listener::WindowClosed, move |_, _| {
+            if let Some(timer) = close_timer.take() {
+                timer.cancel();
+            }
+            if close_requested.get() {
+                save_windows();
+            } else {
+                // AppKit destroys windows one by one during Quit, without asking
+                // them to close. Keep the snapshot from before the first one goes.
+                quitting();
+            }
+            detach(raise_id);
+            save_windows();
+        })
+}
+
+pub fn close_window(id: floem::window::WindowId) {
+    // Cmd-W directly closes the empty window, bypassing WindowCloseRequested.
+    if let Some(app) = app() {
+        if let Some(window) = app
+            .windows
+            .borrow()
+            .iter()
+            .find(|w| w.raise.window_id() == Some(id))
+        {
+            window.close_requested.set(true);
         }
-    })
-    .on_event_cont(floem::event::listener::WindowClosed, move |_, _| {
-        state.settings.window_closed();
-        if let Some(app) = app() {
-            app.windows.borrow_mut().retain(|w| w.id != id);
+    }
+    floem::close_window(id);
+}
+
+fn detach(raise: floem::ViewId) {
+    let Some(app) = app() else { return };
+    let mut windows = app.windows.borrow_mut();
+    let Some(index) = windows.iter().position(|w| w.raise == raise) else {
+        return;
+    };
+    let window = windows.remove(index);
+    drop(windows);
+    window.state.settings.window_closed();
+    window.backend.close_window();
+    let env = window.environment;
+    if env.host.is_some() && environment_windows(&env).is_empty() {
+        app.environments.borrow_mut().remove(&env.host);
+        env.backend.disconnect_remote();
+        // Floem builds the replacement before running the old view’s cleanup.
+        floem::action::exec_after(Duration::ZERO, move |_| env.scope.dispose());
+    }
+}
+
+pub fn switch_environment(state: AppState, host: Option<String>) {
+    if let Some(app) = app() {
+        let window = app
+            .windows
+            .borrow()
+            .iter()
+            .find(|w| w.state.settings.open == state.settings.open)
+            .cloned();
+        if let Some(w) = window.filter(|w| w.environment.host != host) {
+            w.destination.set(host);
         }
-        closing.close_window();
-    })
+    }
 }
 
 /// Open a new window, laid out as `from` is.
 pub fn open(from: Option<AppState>) {
-    let (config, frame) = config();
+    let saved = if from.is_none() {
+        last_window().map(|saved| SavedWindow {
+            item: None,
+            ..saved
+        })
+    } else {
+        None
+    };
+    open_window(from, saved);
+}
+
+fn last_window() -> Option<SavedWindow> {
+    app()?.session.as_ref()?.last.borrow().last().cloned()
+}
+
+fn open_window(from: Option<AppState>, saved: Option<SavedWindow>) {
+    let (config, frame) = config(saved.as_ref());
     floem::new_window(
-        move |_| match window(from) {
-            Some((state, review, backend)) => view(state, review, backend, frame).into_any(),
-            None => floem::views::Empty::new().into_any(),
-        },
+        move |_| view(from, frame, false, saved.clone()).into_any(),
         Some(config),
     );
 }
@@ -514,15 +828,7 @@ pub fn open(from: Option<AppState>) {
 /// New Window, from the Perch menu: laid out as the window in front, or
 /// as the first window was with none left.
 pub fn open_new() {
-    let from = app().and_then(|app| {
-        let focused = app.focused.get()?;
-        app.windows
-            .borrow()
-            .iter()
-            .find(|w| w.id == focused)
-            .map(|w| w.state)
-    });
-    open(from);
+    open(focused_state());
 }
 
 /// Open…, from the Perch menu: the box in the window that last had the
@@ -538,7 +844,7 @@ pub fn show_feedback() {
         let windows = app.windows.borrow();
         windows
             .iter()
-            .find(|w| Some(w.id) == focused)
+            .find(|w| Some(w.raise) == focused)
             .or(windows.first())
             .cloned()
     };
@@ -567,7 +873,7 @@ pub fn check_for_update() {
         let windows = app.windows.borrow();
         windows
             .iter()
-            .find(|w| Some(w.id) == focused)
+            .find(|w| Some(w.raise) == focused)
             .or(windows.first())
             .cloned()
     };
@@ -595,7 +901,7 @@ fn star_due() {
         let windows = app.windows.borrow();
         windows
             .iter()
-            .find(|w| Some(w.id) == focused)
+            .find(|w| Some(w.raise) == focused)
             .or(windows.first())
             .cloned()
     };
@@ -656,7 +962,7 @@ pub fn show_open_box() {
         let windows = app.windows.borrow();
         windows
             .iter()
-            .find(|w| Some(w.id) == focused)
+            .find(|w| Some(w.raise) == focused)
             .or(windows.first())
             .cloned()
     };
@@ -696,7 +1002,7 @@ pub fn open_link(url: &str) -> bool {
         let windows = app.windows.borrow();
         windows
             .iter()
-            .find(|w| Some(w.id) == focused)
+            .find(|w| Some(w.raise) == focused)
             .or(windows.first())
             .cloned()
     };
@@ -708,14 +1014,14 @@ pub fn open_link(url: &str) -> bool {
 
 /// Download a picture a comment shows, for every window.
 pub fn want_picture(url: &str) {
-    if let Some(app) = app() {
+    if let Some(app) = floem::reactive::Context::get::<AppState>().and_then(for_state) {
         app.backend.want_picture(url);
     }
 }
 
 /// Ask GitHub who a login is, for every window.
-pub fn want_profile(login: &str) {
-    if let Some(app) = app() {
+pub fn want_profile(state: Option<AppState>, login: &str) {
+    if let Some(app) = state.and_then(for_state) {
         app.backend.want_profile(login);
     }
 }
@@ -727,7 +1033,7 @@ pub fn focused_state() -> Option<AppState> {
     let windows = app.windows.borrow();
     windows
         .iter()
-        .find(|w| Some(w.id) == focused)
+        .find(|w| Some(w.raise) == focused)
         .or(windows.first())
         .map(|w| w.state)
 }
@@ -736,13 +1042,13 @@ pub fn focused_state() -> Option<AppState> {
 /// one macOS brings back itself.
 pub fn reopen() {
     if app().is_some_and(|app| app.windows.borrow().is_empty()) {
-        open(None);
+        open_window(None, last_window());
     }
 }
 
 /// Bring to the front the window, other than `asking`, that has `item_id`
 /// open. Whether there was one.
-pub fn raise_holding(item_id: &str, asking: WindowId) -> bool {
+pub fn raise_holding(state: AppState, item_id: &str, asking: WindowId) -> bool {
     let Some(app) = app() else {
         return false;
     };
@@ -750,7 +1056,7 @@ pub fn raise_holding(item_id: &str, asking: WindowId) -> bool {
         .windows
         .borrow()
         .iter()
-        .find(|w| w.id != asking && w.review.is_item(item_id))
+        .find(|w| w.state.place == state.place && w.id != asking && w.review.is_item(item_id))
         .cloned();
     match holding {
         Some(window) => {
@@ -764,8 +1070,23 @@ pub fn raise_holding(item_id: &str, asking: WindowId) -> bool {
 /// A new window's config, and the frame it opens at. Off macOS the frame's
 /// origin is no position: Perch can't see the screens there to check one
 /// against, so the window manager, which can, places the window.
-pub fn config() -> (WindowConfig, Rect) {
-    let frame = placement();
+fn config(saved: Option<&SavedWindow>) -> (WindowConfig, Rect) {
+    let frame = saved
+        .and_then(|s| parse_frame(s.frame.as_deref()?))
+        .map(|r| {
+            if cfg!(target_os = "macos") {
+                fit(r, &screens())
+            } else {
+                Rect::from_origin_size(
+                    Point::ZERO,
+                    Size::new(
+                        r.width().max(MIN_SIZE.width),
+                        r.height().max(MIN_SIZE.height),
+                    ),
+                )
+            }
+        })
+        .unwrap_or_else(placement);
     let config = WindowConfig::default();
     let config = match position(frame) {
         Some(at) => config.position(at),
@@ -874,14 +1195,25 @@ fn key_window_frame() -> Option<Rect> {
 }
 
 #[cfg(target_os = "macos")]
-fn key_window_full_screen() -> bool {
-    use objc2_app_kit::{NSApplication, NSWindowStyleMask};
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return false;
-    };
-    NSApplication::sharedApplication(mtm)
-        .keyWindow()
-        .is_some_and(|key| key.styleMask().contains(NSWindowStyleMask::FullScreen))
+fn can_save_frame(view: floem::ViewId) -> bool {
+    use floem::window::WindowIdExt;
+    use objc2_app_kit::{NSView, NSWindowStyleMask};
+    use raw_window_handle::RawWindowHandle;
+
+    view.window_id()
+        .and_then(|id| {
+            id.with_window_handle(|handle| {
+                let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+                    return false;
+                };
+                // The borrowed handle keeps its NSView valid for this callback on the UI thread.
+                let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+                view.window().is_some_and(|window| {
+                    !window.styleMask().contains(NSWindowStyleMask::FullScreen)
+                })
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Each screen's room for windows, less the menu bar and the Dock, top-left
@@ -926,8 +1258,8 @@ fn key_window_frame() -> Option<Rect> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn key_window_full_screen() -> bool {
-    false
+fn can_save_frame(_view: floem::ViewId) -> bool {
+    true
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -965,6 +1297,212 @@ mod tests {
     use super::*;
 
     const SCREEN: Rect = Rect::new(0.0, 24.0, 1920.0, 1080.0);
+
+    #[test]
+    fn switching_one_window_isolates_replies_and_broadcasts() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+
+        let app = Rc::new(App::default());
+        APP.set(Some(app.clone()));
+        let root = TestRoot::new();
+        let (_, local_events) = std::sync::mpsc::channel();
+        let local = register_environment(&app, None, Backend::detached(), local_events);
+        let (_, host_events) = std::sync::mpsc::channel();
+        let remote = register_environment(
+            &app,
+            Some("devbox".into()),
+            Backend::detached(),
+            host_events,
+        );
+        let frame = Rect::from_origin_size(Point::ZERO, DEFAULT_SIZE);
+        let _first = HeadlessHarness::new(root, view(Some(local.model), frame, false, None));
+        let first = app.windows.borrow()[0].clone();
+        let second_root = TestRoot::new();
+        let mut second_view =
+            HeadlessHarness::new(second_root, view(Some(first.state), frame, false, None));
+        let second = app.windows.borrow()[1].clone();
+        assert!(Rc::ptr_eq(&first.environment, &second.environment));
+
+        switch_environment(second.state, Some("devbox".into()));
+        second_view.rebuild();
+        let switched = app.windows.borrow()[1].clone();
+        assert_eq!(switched.raise, second.raise);
+        assert!(Rc::ptr_eq(&switched.environment, &remote));
+        assert_eq!(switched.id, first.id, "IDs belong to their engine");
+        assert_eq!(
+            switched.state.settings.section.get_untracked(),
+            crate::ui::settings::Section::Environment
+        );
+        deliver(&remote, switched.id, Event::Notice("remote only".into()));
+        assert_eq!(switched.state.notice().as_deref(), Some("remote only"));
+        assert_eq!(first.state.notice(), None);
+
+        deliver(
+            &local,
+            crate::backend::NO_WINDOW,
+            Event::Meta {
+                key: "viewer.login".into(),
+                value: Some("local-reader".into()),
+            },
+        );
+        assert!(first.state.viewer.get_untracked().is_some());
+        assert!(switched.state.viewer.get_untracked().is_none());
+
+        switch_environment(switched.state, None);
+        second_view.rebuild();
+        let returned = app.windows.borrow()[1].clone();
+        assert!(Rc::ptr_eq(&returned.environment, &local));
+        assert_eq!(
+            returned.state.viewer.get_untracked(),
+            first.state.viewer.get_untracked()
+        );
+        assert!(!app
+            .environments
+            .borrow()
+            .contains_key(&Some("devbox".into())));
+        APP.set(None);
+    }
+
+    fn session_with_host(home: &std::path::Path) -> (Rc<App>, Rc<Environment>) {
+        let _root = floem::headless::TestRoot::new();
+        let session = Rc::new(Session::load(home, None));
+        session.opening.set(0);
+        let app = Rc::new(App {
+            session: Some(session),
+            ..Default::default()
+        });
+        APP.set(Some(app.clone()));
+        let (_, local_events) = std::sync::mpsc::channel();
+        register_environment(&app, None, Backend::detached(), local_events);
+        let (_, events) = std::sync::mpsc::channel();
+        let remote = register_environment(&app, Some("devbox".into()), Backend::detached(), events);
+        (app, remote)
+    }
+
+    fn saved_view(host: Option<&str>, item: &str) -> (floem::headless::HeadlessHarness, Window) {
+        let root = floem::headless::TestRoot::new();
+        let frame = Rect::from_origin_size(Point::ZERO, DEFAULT_SIZE);
+        let saved = SavedWindow {
+            host: host.map(str::to_owned),
+            item: Some(item.into()),
+            frame: Some(format_frame(frame)),
+        };
+        let harness =
+            floem::headless::HeadlessHarness::new(root, view(None, frame, false, Some(saved)));
+        let window = app().unwrap().windows.borrow().last().unwrap().clone();
+        (harness, window)
+    }
+
+    fn connected(remote: &Environment) {
+        deliver(
+            remote,
+            crate::backend::NO_WINDOW,
+            Event::Link(crate::backend::EngineLink::Up {
+                host: "devbox".into(),
+                again: false,
+                other: None,
+                welcome: perch_engine::wire::Welcome {
+                    protocol: perch_engine::wire::PROTOCOL,
+                    engine_version: "test".into(),
+                    connection: 1,
+                    host: "devbox".into(),
+                    home: "/home/reader".into(),
+                    data_root: "/home/reader/.perch".into(),
+                    clients: 1,
+                    runs: 0,
+                    build: "test".into(),
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn restored_items_open_on_their_own_engines_unless_the_user_navigates_first() {
+        let home = tempfile::tempdir().unwrap();
+        let (_app, remote) = session_with_host(home.path());
+        let (_a, local) = saved_view(None, "local-item");
+        let (_b, waiting) = saved_view(Some("devbox"), "remote-item");
+        let (_c, opening) = saved_view(Some("devbox"), "old-issue");
+        let (_d, composing) = saved_view(Some("devbox"), "old-work");
+
+        assert_eq!(
+            local.state.open_item.get_untracked().as_deref(),
+            Some("local-item")
+        );
+        assert!(waiting.state.open_item.get_untracked().is_none());
+        let navigation = opening
+            .backend
+            .open_subject("a/b", perch_github::ItemKind::Issue, 7);
+        opening.state.begin_open("Reading the issue", navigation);
+        crate::ui::new_work::open(composing.state, &composing.backend);
+        composing.state.new_work.open.set(false);
+        save_windows();
+        let snapshot = Session::load(home.path(), None).last.into_inner();
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|w| w.item.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("local-item"), Some("remote-item"), None, None]
+        );
+
+        connected(&remote);
+        assert_eq!(
+            waiting.state.open_item.get_untracked().as_deref(),
+            Some("remote-item")
+        );
+        assert!(opening.state.accepts_navigation(navigation));
+        assert!(opening.state.open_item.get_untracked().is_none());
+        assert!(composing.state.open_item.get_untracked().is_none());
+        APP.set(None);
+    }
+
+    #[test]
+    fn closing_one_shared_window_then_quitting_restores_the_two_remaining_windows() {
+        use floem::event::{Event as UiEvent, WindowEvent};
+
+        let home = tempfile::tempdir().unwrap();
+        let (app, remote) = session_with_host(home.path());
+        let (mut local_view, local) = saved_view(None, "local-item");
+        let (mut first_view, first) = saved_view(Some("devbox"), "old-item");
+        let (mut second_view, second) = saved_view(Some("devbox"), "remote-item");
+        assert!(Rc::ptr_eq(&first.environment, &second.environment));
+        second_view.dispatch_event(UiEvent::Window(WindowEvent::FocusGained));
+        first_view.dispatch_event(UiEvent::Window(WindowEvent::CloseRequested));
+        first_view.dispatch_event(UiEvent::Window(WindowEvent::Closed));
+        assert_eq!(environment_windows(&remote).len(), 1);
+        assert!(Rc::ptr_eq(&environment(Some("devbox".into())), &remote));
+        connected(&remote);
+        assert_eq!(
+            second.state.open_item.get_untracked().as_deref(),
+            Some("remote-item")
+        );
+        assert_eq!(
+            local.state.open_item.get_untracked().as_deref(),
+            Some("local-item")
+        );
+
+        // AppKit Quit destroys the remaining windows without individual close requests.
+        second_view.dispatch_event(UiEvent::Window(WindowEvent::Closed));
+        local_view.dispatch_event(UiEvent::Window(WindowEvent::Closed));
+        assert!(app.windows.borrow().is_empty());
+        assert!(!app
+            .environments
+            .borrow()
+            .contains_key(&Some("devbox".into())));
+        let restored = Session::load(home.path(), None).last.into_inner();
+        assert_eq!(
+            restored
+                .iter()
+                .map(|w| (w.host.as_deref(), w.item.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (None, Some("local-item")),
+                (Some("devbox"), Some("remote-item"))
+            ]
+        );
+        APP.set(None);
+    }
 
     /// Off macOS a window opens at the last one's size, never under the
     /// minimum, and with no position, for the window manager to choose.

@@ -11,7 +11,7 @@ use std::path::Path;
 use floem::prelude::*;
 use perch_github::{AgentBackend, AgentConfig, Setting};
 
-use super::controls::{self, dropdown, list_line, select, setting_text, split_list};
+use super::controls::{dropdown, list_line, select, setting_text, split_list};
 use super::{Group, Page, Row};
 use crate::review::threads::{model_groups, model_label};
 use crate::ui::menu::Menu;
@@ -95,15 +95,17 @@ pub(super) fn found(page: &Page, backend: AgentBackend) -> String {
         // A full path typed is kept as it is, found or not. Whether it is
         // there is the engine's machine's to say: with the engine on a
         // host, by the version it got from running it.
-        let there = if crate::remote::host().is_some() {
+        let there = if page.state.place.get().host().is_some() {
             version.is_some()
         } else {
             path.is_file()
         };
         if path.is_absolute() && (binary != typed || there) {
             match version {
-                Some(version) => format!("Found {}, {version}.", controls::tilde(path)),
-                None => format!("Found {}.", controls::tilde(path)),
+                Some(version) => {
+                    format!("Found {}, {version}.", page.state.place.get().tilde(path))
+                }
+                None => format!("Found {}.", page.state.place.get().tilde(path)),
             }
         } else {
             format!("Not found as {binary}. Give its full path if it isn't on PATH.")
@@ -422,7 +424,7 @@ mod tests {
         // With the engine on a host, a full path is the host's: whether it
         // is there is what the engine got from running it, not this Mac's
         // files.
-        crate::remote::set_place(crate::remote::Place::Host {
+        state.place.set(crate::remote::Place::Host {
             host: "halo".into(),
             home: std::path::PathBuf::new(),
             data_root: std::path::PathBuf::new(),
@@ -437,7 +439,7 @@ mod tests {
         state
             .agent
             .update(|agent| agent.codex.binary_version = None);
-        crate::remote::set_place(crate::remote::Place::ThisMac);
+        state.place.set(crate::remote::Place::ThisMac);
 
         // The file's choices, with resets where it makes them.
         assert!(shown(&harness, "settings-reset:agent-model"));

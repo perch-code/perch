@@ -3014,6 +3014,14 @@ impl Backend {
         }
     }
 
+    /// Release the SSH client after every window using this connection has
+    /// closed. The engine on the host manages its own lifetime and runs.
+    pub fn disconnect_remote(&self) {
+        if let Some(link) = &self.link {
+            link.disconnect();
+        }
+    }
+
     /// The window is closing: its view goes, and its language server.
     pub fn close_window(&self) {
         let _ = self.commands.send(Command::WindowClosed);

@@ -16,6 +16,7 @@ use super::{Group, Page, Row};
 use crate::theme;
 
 pub(super) fn groups(page: &Page) -> Vec<Group> {
+    let place = page.state.place.get();
     let repos = page.with_config(|c| c.repo.clone());
     let mut groups: Vec<Group> = repos
         .iter()
@@ -32,8 +33,9 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
                 network(page, &identity),
                 remove(page, repo, &identity),
             ]);
-            let place = crate::remote::root_path(repo)
-                .map(|root| controls::tilde(&root))
+            let place = place
+                .root_path(repo)
+                .map(|root| place.tilde(&root))
                 .unwrap_or_default();
             // What the scan resolved, not just `github`: a root-only entry
             // whose checkout has a GitHub remote is that repository.
@@ -52,7 +54,7 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
         .collect();
     let mut adding = vec![add(page)];
     // Only a host clones: on this machine a folder is picked.
-    if let Some(host) = crate::remote::host() {
+    if let Some(host) = page.state.place.get().host() {
         adding.push(clone_root(page, host));
     }
     groups.push(Group::new("Add a repository", adding));
@@ -256,7 +258,7 @@ fn root(page: &Page, identity: &str) -> Row {
             let (page, identity) = (page.clone(), identity.clone());
             controls::button(
                 // A host's checkout opens in an editor that reaches it.
-                if crate::remote::host().is_some() {
+                if page.state.place.get().host().is_some() {
                     "Open in editor"
                 } else {
                     "Reveal"
@@ -264,10 +266,10 @@ fn root(page: &Page, identity: &str) -> Row {
                 format!("settings-{}", row_name(&identity, "reveal")),
                 || true,
                 move || {
-                    if let Some(root) =
-                        with_repo(&page, &identity, |r| r.and_then(crate::remote::root_path))
-                    {
-                        crate::ui::widgets::reveal_in_file_manager(&root);
+                    if let Some(root) = with_repo(&page, &identity, |r| {
+                        r.and_then(|repo| page.state.place.get().root_path(repo))
+                    }) {
+                        crate::ui::widgets::reveal_in_file_manager(page.state, &root);
                     }
                 },
             )
@@ -280,9 +282,10 @@ fn root(page: &Page, identity: &str) -> Row {
         "Checkout",
         move || {
             with_repo(&described, &identity_owned, |r| {
-                r.and_then(crate::remote::root_path)
-                    .map(|root| controls::tilde(&root))
-                    .unwrap_or_else(|| match crate::remote::host() {
+                let place = described.state.place.get();
+                r.and_then(|repo| place.root_path(repo))
+                    .map(|root| place.tilde(&root))
+                    .unwrap_or_else(|| match place.host() {
                         Some(host) => format!("No checkout on {host}."),
                         None => "No checkout on this machine.".to_string(),
                     })
@@ -543,8 +546,10 @@ fn add_on_host(page: &Page, host: String) -> Row {
         let page = page.clone();
         move || {
             let (state, backend, host) = (page.state, page.backend.clone(), host.clone());
+            let enabled = page.clone();
             controls::entry(
-                &page,
+                state.settings,
+                move || enabled.writable(),
                 state.settings.adding,
                 state.settings.adding_sent,
                 "owner/name, or a path",
@@ -586,7 +591,7 @@ fn add_on_host(page: &Page, host: String) -> Row {
 }
 
 fn add(page: &Page) -> Row {
-    if let Some(host) = crate::remote::host() {
+    if let Some(host) = page.state.place.get().host() {
         return add_on_host(page, host);
     }
     let control = {
@@ -655,12 +660,12 @@ mod tests {
     /// repository anywhere else in the app opens Settings here.
     #[test]
     fn on_a_host_a_repository_is_added_by_its_name_or_its_path() {
-        crate::remote::set_place(crate::remote::Place::Host {
+        let (mut harness, state, mut commands) = window(1400.0, 2600.0, FILE);
+        state.place.set(crate::remote::Place::Host {
             host: "devbox".into(),
             home: "/home/dev".into(),
             data_root: "/home/dev/.perch".into(),
         });
-        let (mut harness, state, mut commands) = window(1400.0, 2600.0, FILE);
         crate::ui::new_work::add_repository(state, Rc::new(Backend::detached()));
         assert_eq!(
             state.settings.section.get_untracked(),
@@ -712,7 +717,7 @@ mod tests {
         assert!(state
             .notice()
             .is_some_and(|said| said.contains("neither a repository on GitHub")));
-        crate::remote::set_place(crate::remote::Place::ThisMac);
+        state.place.set(crate::remote::Place::ThisMac);
     }
 
     #[test]

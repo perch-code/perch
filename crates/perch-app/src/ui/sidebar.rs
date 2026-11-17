@@ -193,14 +193,50 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 if updating {
                     crate::ui::update::button(state, backend.clone()).into_any()
                 } else {
-                    Label::derived(login)
+                    let environment = state
+                        .place
+                        .get_untracked()
+                        .host()
+                        .unwrap_or_else(|| perch_engine::host::HERE_FIRST.into());
+                    let switch = Button::new(
+                        Label::new(environment.clone())
+                            .style(|s| s.text_ellipsis().min_width(0.0).pointer_events_none()),
+                    );
+                    let id = switch.view_id();
+                    let switch = switch
+                        .action(move || {
+                            state
+                                .settings
+                                .section
+                                .set(crate::ui::settings::Section::Environment);
+                            crate::ui::settings::show(state, Some(id));
+                        })
+                        .debug_name("window-environment")
                         .style(|s| {
+                            crate::ui::widgets::clickable(s)
+                                .max_width_full()
+                                .min_width(0.0)
+                                .padding(0.0)
+                                .border(0.0)
+                                .font_size(theme::TEXT_BADGE)
+                                .color(theme::nav_muted())
+                                .background(theme::nav_canvas())
+                                .hover(|s| s.color(theme::nav_fg()).background(theme::nav_hover()))
+                        });
+                    Stack::vertical((
+                        Label::derived(login).style(|s| {
                             s.font_size(theme::TEXT_BODY)
                                 .color(theme::nav_fg())
                                 .text_ellipsis()
                                 .min_width(0.0)
-                        })
-                        .into_any()
+                        }),
+                        crate::review::cards::tip(
+                            switch,
+                            format!("Change environment · {environment}"),
+                        ),
+                    ))
+                    .style(|s| s.min_width(0.0).max_width_full())
+                    .into_any()
                 }
             },
         )

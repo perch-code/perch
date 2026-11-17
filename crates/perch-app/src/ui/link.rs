@@ -183,7 +183,7 @@ pub fn banner(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 state
                     .settings
                     .section
-                    .set(crate::ui::settings::Section::General);
+                    .set(crate::ui::settings::Section::Environment);
                 crate::ui::settings::show(state, None);
             },
         )

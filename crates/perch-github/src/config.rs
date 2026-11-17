@@ -649,6 +649,8 @@ fn normalize(path: &Path) -> PathBuf {
 pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
     use std::io::Write;
 
+    let _guard = crate::config_edit::config_write_guard();
+
     let home = home_dir();
     let shown = match root.strip_prefix(&home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),

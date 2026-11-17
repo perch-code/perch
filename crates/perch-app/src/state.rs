@@ -227,6 +227,7 @@ pub use perch_engine::feedback::Tone;
 
 #[derive(Clone, Copy)]
 pub struct AppState {
+    pub place: RwSignal<crate::remote::Place>,
     /// Each face as a PNG already cut to its circle (`backend::avatar`),
     /// shared so a clone is a refcount bump.
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
@@ -290,6 +291,8 @@ pub struct AppState {
     /// Whether a poll's notifications have arrived since launch. The first
     /// replaces the cached list outright rather than waiting to be asked.
     notifications_polled: RwSignal<bool>,
+    /// An item from the last session waiting for this window’s engine to connect.
+    pub pending_restore: RwSignal<Option<String>>,
     /// The item whose row is selected in the sidebar: the open one.
     pub open_item: RwSignal<Option<String>>,
     /// The agent section of config.toml: binary, defaults, and the models
@@ -498,6 +501,7 @@ impl AppState {
             github_hosts: RwSignal::new(vec!["github.com".to_string()]),
             settings_file: RwSignal::new(None),
             link: RwSignal::new(None),
+            place: RwSignal::new(Default::default()),
             open_box: crate::ui::open_box::OpenBox::new(),
             settings: crate::ui::settings::SettingsState::new(),
             browse: RwSignal::new(HashMap::new()),
@@ -512,6 +516,7 @@ impl AppState {
             pending_item_activity: RwSignal::new(None),
             notifications_polled: RwSignal::new(false),
             open_item: RwSignal::new(None),
+            pending_restore: RwSignal::new(None),
             review: RwSignal::new(None),
             viewer: RwSignal::new(None),
             reload: RwSignal::new(Vec::new()),
@@ -3526,7 +3531,7 @@ impl AppState {
             Event::RepositoryAdded(identity) => {
                 // With the engine on a host it may have been cloned
                 // first, long enough to have looked away.
-                if let Some(host) = crate::remote::host() {
+                if let Some(host) = self.place.get_untracked().host() {
                     self.notify(format!("Added {identity} on {host}."), Tone::Success);
                 }
                 // The Add box empties if it still holds what was added;
@@ -3610,7 +3615,7 @@ impl AppState {
             Event::UpdateChecked(found) => self.apply_update_checked(found),
             Event::StarAsk => self.ask_for_star(),
             Event::Starred { added } => self.apply_starred(added),
-            Event::UpdateInstalled => floem::quit_app(),
+            Event::UpdateInstalled => crate::windows::quit_app(),
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }
             | Event::AgentSteer { .. }
@@ -3740,6 +3745,7 @@ impl AppState {
     /// Put the progress card up with `message` until the backend says what
     /// it opened.
     pub fn begin_review(&self, review: crate::review::model::ReviewState, message: &str) {
+        self.pending_restore.set(None);
         self.drop_trust_offers(None);
         self.new_work.open.set(false);
         review.begin(message);
@@ -3754,12 +3760,7 @@ impl AppState {
         item_id: &str,
         navigation_id: u64,
     ) {
-        self.expected_navigation_id.set(Some(navigation_id));
-        // An offer to trust another item's code goes as this one opens: a
-        // click on it now would be read as about this one.
-        self.drop_trust_offers(Some(item_id));
-        self.open_expectation
-            .set(OpenExpectation::Item(item_id.to_string()));
+        self.expect_item_navigation(item_id, navigation_id);
         self.open_item.set(Some(item_id.to_string()));
         self.new_work.open.set(false);
         review.begin_item(item_id, message);
@@ -3768,6 +3769,7 @@ impl AppState {
     /// The progress card, over the open review or the empty main area, for
     /// an act that ends in another item being opened: Start work.
     pub fn begin_open(&self, message: &str, navigation_id: u64) {
+        self.pending_restore.set(None);
         self.expected_navigation_id.set(Some(navigation_id));
         self.drop_trust_offers(None);
         self.pending_agent_navigation.set(None);
@@ -3832,6 +3834,7 @@ impl AppState {
 
     /// Register a known item without changing its visible loading state.
     pub fn expect_item_navigation(&self, item_id: &str, navigation_id: u64) {
+        self.pending_restore.set(None);
         self.expected_navigation_id.set(Some(navigation_id));
         self.drop_trust_offers(Some(item_id));
         self.open_expectation
@@ -3857,6 +3860,7 @@ impl AppState {
 
     /// A user-initiated close has its own backend navigation identity.
     pub fn begin_close(&self, review: crate::review::model::ReviewState, navigation_id: u64) {
+        self.pending_restore.set(None);
         self.expected_navigation_id.set(Some(navigation_id));
         self.leave_review(review);
     }

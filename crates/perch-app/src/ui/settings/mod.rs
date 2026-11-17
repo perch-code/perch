@@ -12,6 +12,7 @@
 mod agents;
 mod appearance;
 pub(crate) mod controls;
+mod environment;
 mod general;
 mod keyboard;
 mod language_servers;
@@ -51,6 +52,8 @@ const PANE_PADDING: f64 = 32.0;
 #[derive(Clone, Copy)]
 pub struct SettingsState {
     pub open: RwSignal<bool>,
+    show_checks: RwSignal<bool>,
+    ssh_draft: RwSignal<String>,
     /// The section on show; kept from one opening to the next.
     pub section: RwSignal<Section>,
     /// What the search box holds. While it holds anything, the pane lists
@@ -96,6 +99,8 @@ impl SettingsState {
     pub fn new() -> Self {
         Self {
             open: RwSignal::new(false),
+            show_checks: RwSignal::new(false),
+            ssh_draft: RwSignal::new(String::new()),
             section: RwSignal::new(Section::General),
             query: RwSignal::new(String::new()),
             opener: RwSignal::new(None),
@@ -145,6 +150,7 @@ impl SettingsState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     General,
+    Environment,
     Appearance,
     KeyboardShortcuts,
     Agents,
@@ -154,8 +160,9 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Section::General,
+        Section::Environment,
         Section::Appearance,
         Section::KeyboardShortcuts,
         Section::Agents,
@@ -167,6 +174,7 @@ impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Section::General => "General",
+            Section::Environment => "Environment",
             Section::Appearance => "Appearance",
             Section::KeyboardShortcuts => "Keyboard shortcuts",
             Section::Agents => "Agents",
@@ -179,6 +187,7 @@ impl Section {
     pub fn icon(self) -> SidebarIcon {
         match self {
             Section::General => SidebarIcon::Gear,
+            Section::Environment => SidebarIcon::Terminal,
             Section::Appearance => SidebarIcon::Palette,
             Section::KeyboardShortcuts => SidebarIcon::Keyboard,
             Section::Agents => SidebarIcon::Agents,
@@ -194,6 +203,7 @@ impl Section {
     fn groups(self, page: &Page) -> Vec<Group> {
         match self {
             Section::General => general::groups(page),
+            Section::Environment => environment::groups(page),
             Section::Appearance => appearance::groups(page),
             Section::KeyboardShortcuts => keyboard::groups(page),
             Section::Agents => agents::groups(page),
@@ -282,9 +292,9 @@ impl Page {
             writable(
                 file.as_ref(),
                 self.client,
-                crate::remote::host().is_some(),
-                crate::windows::client_file_broken(),
-                crate::windows::engine_settings_heard(),
+                self.state.place.get().host().is_some(),
+                crate::windows::client_file_broken(self.state),
+                crate::windows::engine_settings_heard(self.state),
             )
         })
     }
@@ -303,7 +313,7 @@ impl Page {
     /// `client_settings`).
     pub(crate) fn write(&self, setting: Setting) {
         let (here, engine) =
-            crate::client_settings::route(vec![setting], crate::remote::host().is_some());
+            crate::client_settings::route(vec![setting], self.state.place.get().host().is_some());
         if !here.is_empty() {
             match crate::client_settings::write_here(&here) {
                 Ok(()) => crate::windows::client_settings_written(),
@@ -1050,12 +1060,13 @@ fn error_banner(page: Page) -> impl IntoView {
     };
     // With the engine on a host, once it has sent its settings the error
     // is its file's.
-    let host_s = || crate::remote::host().is_some() && crate::windows::engine_settings_heard();
+    let host_s =
+        move || state.place.get().host().is_some() && crate::windows::engine_settings_heard(state);
     let text = move || {
         banner_text(
             error(),
             host_s(),
-            host_s() && crate::windows::client_file_broken(),
+            host_s() && crate::windows::client_file_broken(state),
         )
     };
     Stack::horizontal((
@@ -1223,7 +1234,7 @@ fn restart() {
         return;
     };
     match crate::update::relaunch_after_exit(&bundle) {
-        Ok(()) => floem::quit_app(),
+        Ok(()) => crate::windows::quit_app(),
         Err(e) => tracing::warn!(error = %e, "couldn't restart Perch"),
     }
 }

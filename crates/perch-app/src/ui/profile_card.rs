@@ -46,11 +46,18 @@ enum Known {
     NoAccount,
 }
 
+#[derive(Default)]
+pub(crate) struct Profiles {
+    profiles: RefCell<HashMap<String, Known>>,
+    asked: RefCell<HashSet<String>>,
+}
+
+fn profiles() -> Rc<Profiles> {
+    thread_local! { static STANDALONE: Rc<Profiles> = Rc::default(); }
+    floem::reactive::Context::get().unwrap_or_else(|| STANDALONE.with(Clone::clone))
+}
+
 thread_local! {
-    /// Who each login is, as far as GitHub has said.
-    static PROFILES: RefCell<HashMap<String, Known>> = RefCell::default();
-    /// Every login asked after, so each is asked after once.
-    static ASKED: RefCell<HashSet<String>> = RefCell::default();
     /// The login the pointer rested on last, while its card is open or
     /// waiting on GitHub.
     static RESTED: RefCell<Option<Rc<Hover>>> = const { RefCell::new(None) };
@@ -62,11 +69,11 @@ fn carded(login: &str) -> bool {
 }
 
 /// Ask GitHub who `login` is, unless it has been asked.
-fn want(login: &str) {
-    if ASKED.with(|asked| asked.borrow_mut().insert(login.to_string())) {
+fn want(hover: &Hover, login: &str) {
+    if hover.profiles.asked.borrow_mut().insert(login.to_string()) {
         #[cfg(test)]
         tests::WANTED.with(|wanted| wanted.borrow_mut().push(login.to_string()));
-        crate::windows::want_profile(login);
+        crate::windows::want_profile(hover.state, login);
     }
 }
 
@@ -74,23 +81,26 @@ fn want(login: &str) {
 /// puts it in place and opens the card that was waiting on it. One that
 /// could not be asked is forgotten, to be asked again on the next rest.
 pub fn arrived(login: String, answer: ProfileAnswer) {
+    let cache = profiles();
     let known = match answer {
         ProfileAnswer::Found(profile) => Known::Found(Rc::new(profile)),
         ProfileAnswer::NoAccount => Known::NoAccount,
         ProfileAnswer::Failed => {
-            ASKED.with(|asked| asked.borrow_mut().remove(&login));
+            cache.asked.borrow_mut().remove(&login);
             return;
         }
     };
-    let first = PROFILES.with(|profiles| {
-        let mut profiles = profiles.borrow_mut();
+    let first = {
+        let mut profiles = cache.profiles.borrow_mut();
         let first = !profiles.contains_key(&login);
         profiles.insert(login.clone(), known.clone());
         first
-    });
+    };
     let waiting = RESTED.with(|rested| rested.borrow().clone());
     if let (true, Known::Found(profile), Some(hover)) = (first, known, waiting) {
-        if hover.rested.borrow().as_deref() == Some(login.as_str()) {
+        if Rc::ptr_eq(&hover.profiles, &cache)
+            && hover.rested.borrow().as_deref() == Some(login.as_str())
+        {
             hover.show_profile(profile);
         }
     }
@@ -106,6 +116,8 @@ enum Subject {
 
 /// One login or face, and its card.
 struct Hover {
+    profiles: Rc<Profiles>,
+    state: Option<crate::state::AppState>,
     /// What the pointer rests on, which the card hangs under.
     trigger: ViewId,
     subject: Subject,
@@ -162,15 +174,17 @@ impl Hover {
             self.show("hover-card", body);
             return;
         }
-        match PROFILES.with(|profiles| profiles.borrow().get(&login).cloned()) {
+        let known = self.profiles.profiles.borrow().get(&login).cloned();
+        match known {
             Some(Known::Found(profile)) => self.show_profile(profile),
             Some(Known::NoAccount) => {}
-            None => want(&login),
+            None => want(self, &login),
         }
     }
 
     fn show_profile(self: &Rc<Self>, profile: Rc<Profile>) {
-        self.show("profile-card", move || profile_body(&profile));
+        let state = self.state;
+        self.show("profile-card", move || profile_body(state, &profile));
     }
 
     /// Open the card, `name`d for tests, with `body` in it, unless it is
@@ -248,6 +262,8 @@ fn hovered<V: IntoView + 'static>(view: V, subject: Subject) -> impl IntoView {
     let view = view.into_intermediate();
     let id = view.view_id();
     let hover = Rc::new(Hover {
+        profiles: profiles(),
+        state: floem::reactive::Context::get(),
         trigger: id,
         subject,
         over_trigger: Cell::new(false),
@@ -322,10 +338,10 @@ pub fn card_line(icon: SidebarIcon, said: impl IntoView + 'static, name: &'stati
 
 /// A login's card: the face, the name beside the login, then a line each
 /// for where they work and where they are, when they say.
-fn profile_body(profile: &Profile) -> AnyView {
+fn profile_body(state: Option<crate::state::AppState>, profile: &Profile) -> AnyView {
     let face = {
         let (url, seed) = (profile.avatar_url.clone(), profile.login.clone());
-        match crate::windows::focused_state() {
+        match state {
             Some(app) => avatar(app, move || url.clone(), FACE, seed).into_any(),
             None => Empty::new().into_any(),
         }

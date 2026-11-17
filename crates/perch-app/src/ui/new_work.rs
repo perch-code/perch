@@ -109,6 +109,7 @@ impl Default for NewWorkState {
 /// Show the view, on the open item's repository when there is one, else
 /// on the last one chosen, else the first declared.
 pub fn open(state: AppState, backend: &Backend) {
+    state.pending_restore.set(None);
     let nw = state.new_work;
     nw.error.set(None);
     let open_repo = state.review.get_untracked().and_then(|review| {
@@ -578,7 +579,7 @@ fn repo_chip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 pub(crate) fn add_repository(state: AppState, backend: Rc<Backend>) {
     use floem::platform::file::FileDialogOptions;
 
-    if crate::remote::host().is_some() {
+    if state.place.get().host().is_some() {
         state
             .settings
             .section

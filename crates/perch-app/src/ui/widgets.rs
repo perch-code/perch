@@ -177,16 +177,16 @@ pub fn name_label(
 
 /// What a menu calls showing one of the engine's paths: the file manager
 /// for this machine's, an editor that reaches the host for a host's.
-pub fn reveal_label() -> String {
-    match crate::remote::host() {
+pub fn reveal_label(state: AppState) -> String {
+    match state.place.get_untracked().host() {
         Some(_) => "Open in Editor".to_string(),
         None => format!("Reveal in {FILE_MANAGER}"),
     }
 }
 
 /// [`reveal_label`] in a list headed Open in: the app alone.
-pub fn reveal_app_label() -> &'static str {
-    match crate::remote::host() {
+pub fn reveal_app_label(state: AppState) -> &'static str {
+    match state.place.get_untracked().host() {
         Some(_) => "Editor",
         None => FILE_MANAGER,
     }
@@ -194,8 +194,8 @@ pub fn reveal_app_label() -> &'static str {
 
 /// Show one of the engine's paths: on this machine, in the file manager;
 /// on a host, in an editor that reaches it (see `remote::open_editor_on`).
-pub fn reveal_in_file_manager(path: &std::path::Path) {
-    match crate::remote::host() {
+pub fn reveal_in_file_manager(state: AppState, path: &std::path::Path) {
+    match state.place.get_untracked().host() {
         Some(host) => crate::remote::open_editor_on(&host, path),
         None => reveal_here(path),
     }
@@ -216,8 +216,8 @@ pub fn reveal_here(path: &std::path::Path) {
 
 /// Open one of the engine's text files in the reader's editor: on a host,
 /// one that reaches it.
-pub fn open_in_editor(path: &std::path::Path) {
-    match crate::remote::host() {
+pub fn open_in_editor(state: AppState, path: &std::path::Path) {
+    match state.place.get_untracked().host() {
         Some(host) => crate::remote::open_editor_on(&host, path),
         None => open_in_editor_here(path),
     }
@@ -244,8 +244,8 @@ pub fn open_in_editor_here(path: &std::path::Path) {
 
 /// Open a terminal window in one of the engine's directories: on a host,
 /// a shell there by ssh.
-pub fn open_in_terminal(path: &std::path::Path) {
-    match crate::remote::host() {
+pub fn open_in_terminal(state: AppState, path: &std::path::Path) {
+    match state.place.get_untracked().host() {
         Some(host) => crate::remote::open_terminal_on(&host, path),
         None => open_terminal_here(path),
     }
@@ -327,6 +327,7 @@ pub type TrustRow = (String, SidebarIcon, std::rc::Rc<dyn Fn()>);
 /// trust the code: they are still there once the toast that asked has
 /// gone.
 pub fn worktree_menu(
+    state: AppState,
     path: std::path::PathBuf,
     on_archive: Option<std::rc::Rc<dyn Fn()>>,
     trust: Vec<TrustRow>,
@@ -340,13 +341,13 @@ pub fn worktree_menu(
     }
     menu = menu
         .separator()
-        .item(reveal_label(), move |item| {
+        .item(reveal_label(state), move |item| {
             item.icon(SidebarIcon::Folder)
-                .action(move || reveal_in_file_manager(&reveal))
+                .action(move || reveal_in_file_manager(state, &reveal))
         })
         .item("Open in Terminal", move |item| {
             item.icon(SidebarIcon::Terminal)
-                .action(move || open_in_terminal(&terminal))
+                .action(move || open_in_terminal(state, &terminal))
         })
         .item("Copy Path", move |item| {
             item.icon(SidebarIcon::Copy)

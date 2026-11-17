@@ -95,6 +95,7 @@ pub(crate) fn row(page: &Page, row: &Row) -> AnyView {
                 s.font_size(theme::TEXT_BODY)
                     .font_weight(theme::weight_emphasis())
                     .color(theme::fg())
+                    .text_wrap()
                     .min_width(0.0)
             }),
             reset,
@@ -145,6 +146,11 @@ pub(crate) fn row(page: &Page, row: &Row) -> AnyView {
 /// The arrow beside a title that takes the key out of the file, so the
 /// setting is back at its default. There while the file sets the key.
 fn reset_button(page: Page, reset: super::Reset, name: &str) -> impl IntoView {
+    let page = if reset.setting.is_client_s() {
+        page.here()
+    } else {
+        page
+    };
     let key = reset.key.clone();
     let shown = {
         let page = page.clone();
@@ -510,7 +516,8 @@ pub(crate) fn setting_text(
 /// to empty: the box may be built again while something is being added.
 /// `submit` says whether it sent.
 pub(crate) fn entry(
-    page: &Page,
+    settings: super::SettingsState,
+    enabled: impl Fn() -> bool + Clone + 'static,
     draft: RwSignal<String>,
     sent: RwSignal<Option<String>>,
     placeholder: &str,
@@ -518,16 +525,16 @@ pub(crate) fn entry(
     submit: impl Fn(String) -> bool + 'static,
     debug: &'static str,
 ) -> impl View {
-    let editing = page.state.settings.editing;
+    let editing = settings.editing;
     let send: Rc<dyn Fn()> = {
-        let page = page.clone();
+        let enabled = enabled.clone();
         Rc::new(move || {
             let Some(typed) = draft.try_get_untracked() else {
                 return;
             };
             let typed = typed.trim();
             let waiting = sent.with_untracked(|sent| sent.as_deref() == Some(typed));
-            if typed.is_empty() || waiting || !page.writable() {
+            if typed.is_empty() || waiting || !enabled() {
                 return;
             }
             if submit(typed.to_string()) {
@@ -539,7 +546,7 @@ pub(crate) fn entry(
         .placeholder(placeholder.to_string())
         .debug_name(debug);
     let id = input.view_id();
-    let (writable, enabled) = (page.clone(), page.clone());
+    let writable = enabled.clone();
     let (send_key, send_button) = (send.clone(), send);
     let input = input
         .on_event_cont(el::FocusGained, move |_, _| editing.set(Some(id)))
@@ -583,14 +590,14 @@ pub(crate) fn entry(
                 .focus(|s| s.border_color(theme::accent()))
                 .set(SelectionColor, Brush::Solid(theme::selection_bg()))
                 .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
-                .set_disabled(!writable.writable())
+                .set_disabled(!writable())
         });
     Stack::horizontal((
         input,
         button(
             label,
             format!("{debug}-go"),
-            move || enabled.writable(),
+            move || enabled() && draft.with(|s| !s.trim().is_empty()),
             move || send_button(),
         ),
     ))
@@ -916,14 +923,12 @@ pub(crate) fn open_in_editor_button(page: Page, debug: &'static str) -> impl Vie
         || true,
         move || {
             if let Some(path) = page.path() {
-                crate::ui::widgets::open_in_editor(&path);
+                if crate::windows::engine_settings_heard(page.state) {
+                    crate::ui::widgets::open_in_editor(page.state, &path);
+                } else {
+                    crate::ui::widgets::open_in_editor_here(&path);
+                }
             }
         },
     )
-}
-
-/// One of the engine's paths as the reader would type it, with the
-/// engine's home as `~`: a host's, with the engine on one.
-pub(crate) fn tilde(path: &std::path::Path) -> String {
-    crate::remote::tilde(path)
 }

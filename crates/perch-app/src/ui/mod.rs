@@ -53,7 +53,7 @@ pub(crate) fn open_item(
     item: &perch_github::Item,
 ) {
     // An item open in another window is looked at there.
-    if crate::windows::raise_holding(&item.id, backend.window()) {
+    if crate::windows::raise_holding(state, &item.id, backend.window()) {
         return;
     }
     state.pending_agent_navigation.set(None);
@@ -1277,7 +1277,7 @@ fn close_item_or_window(
         let navigation_id = backend.close_review();
         state.begin_close(review, navigation_id);
     } else if let Some(window) = root_id.window_id() {
-        floem::close_window(window);
+        crate::windows::close_window(window);
     }
 }
 

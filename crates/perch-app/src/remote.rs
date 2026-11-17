@@ -4,7 +4,6 @@
 //! and `~` in a path shown is the host's home, as its engine said
 //! (`Welcome.home`).
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use perch_engine::wire::remote::{bad_host, shell_quote};
@@ -22,20 +21,6 @@ pub enum Place {
         home: PathBuf,
         data_root: PathBuf,
     },
-}
-
-thread_local! {
-    /// The UI thread's: set once at launch, and given the engine's home
-    /// when it connects.
-    static PLACE: RefCell<Place> = const { RefCell::new(Place::ThisMac) };
-}
-
-pub fn place() -> Place {
-    PLACE.with_borrow(Clone::clone)
-}
-
-pub fn set_place(place: Place) {
-    PLACE.set(place);
 }
 
 /// Keep macOS from napping the app for as long as it runs. A hidden,
@@ -56,53 +41,56 @@ pub fn stay_awake_for_the_host() {
     }
 }
 
-/// The host the engine is on, with one.
-pub fn host() -> Option<String> {
-    match place() {
-        Place::ThisMac => None,
-        Place::Host { host, .. } => Some(host),
+impl Place {
+    /// The SSH destination for a remote environment.
+    pub fn host(&self) -> Option<String> {
+        match self {
+            Place::ThisMac => None,
+            Place::Host { host, .. } => Some(host.clone()),
+        }
     }
-}
 
-/// The engine said where it is: its home is what `~` means in its paths.
-pub fn connected(welcome: &perch_engine::wire::Welcome) {
-    PLACE.with_borrow_mut(|place| {
+    /// The engine said where it is: its home is what `~` means in its paths.
+    pub fn connected(&mut self, welcome: &perch_engine::wire::Welcome) {
         if let Place::Host {
             home, data_root, ..
-        } = place
+        } = self
         {
             *home = welcome.home.clone();
             *data_root = welcome.data_root.clone();
         }
-    });
-}
-
-/// The engine's home: this machine's in process, the host's once it has
-/// said, and none before.
-pub fn home() -> Option<PathBuf> {
-    match place() {
-        Place::ThisMac => Some(perch_github::config::home_dir()),
-        Place::Host { home, .. } => (!home.as_os_str().is_empty()).then_some(home),
     }
-}
 
-/// A path as the reader would type it, with the engine's home as `~`.
-pub fn tilde(path: &Path) -> String {
-    match home().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
+    /// The engine's home: this machine's in process, the host's once it has
+    /// said, and none before.
+    pub fn home(&self) -> Option<PathBuf> {
+        match self {
+            Place::ThisMac => Some(perch_github::config::home_dir()),
+            Place::Host { home, .. } => (!home.as_os_str().is_empty()).then(|| home.clone()),
+        }
     }
-}
 
-/// A repository's checkout as the engine's machine has it: a `~` in the
-/// file is that machine's home.
-pub fn root_path(repo: &perch_github::RepoConfig) -> Option<PathBuf> {
-    let root = repo.root.as_deref()?;
-    Some(match home() {
-        Some(home) => perch_github::config::expand_home_in(root, &home),
-        None => PathBuf::from(root),
-    })
+    /// A path as the reader would type it, with the engine's home as `~`.
+    pub fn tilde(&self, path: &Path) -> String {
+        match self
+            .home()
+            .and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf))
+        {
+            Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+            Some(rest) => format!("~/{}", rest.display()),
+            None => path.display().to_string(),
+        }
+    }
+
+    /// A repository's checkout as the engine's machine has it: a `~` in the
+    /// file is that machine's home.
+    pub fn root_path(&self, repo: &perch_github::RepoConfig) -> Option<PathBuf> {
+        let root = repo.root.as_deref()?;
+        Some(match self.home() {
+            Some(home) => perch_github::config::expand_home_in(root, &home),
+            None => PathBuf::from(root),
+        })
+    }
 }
 
 /// Why `path`, from the engine on a host, is not one to open there, or
@@ -205,7 +193,7 @@ pub fn vs_code_cannot(host: &str) -> Option<String> {
     let (name, port) = perch_engine::wire::remote::host_and_port(host);
     (port.is_some() || name.contains(':')).then(|| {
         format!(
-            "VS Code can't be given a port or an IPv6 address for {host}. Give the host a name in ~/.ssh/config and use that name in Settings > General > Engine, or install Zed."
+            "VS Code can't be given a port or an IPv6 address for {host}. Give the host a name in ~/.ssh/config and use that name in Settings > Environment, or install Zed."
         )
     })
 }
@@ -456,16 +444,16 @@ mod tests {
 
     #[test]
     fn a_host_s_paths_are_shortened_with_its_home_once_it_has_said() {
-        set_place(Place::Host {
+        let mut place = Place::Host {
             host: "halo".into(),
             home: PathBuf::new(),
             data_root: PathBuf::new(),
-        });
+        };
         // Before the engine has said where its home is, nothing is taken
         // for it: least of all this machine's.
-        assert_eq!(home(), None);
-        assert_eq!(tilde(Path::new("/home/chris/x")), "/home/chris/x");
-        connected(&perch_engine::wire::Welcome {
+        assert_eq!(place.home(), None);
+        assert_eq!(place.tilde(Path::new("/home/chris/x")), "/home/chris/x");
+        place.connected(&perch_engine::wire::Welcome {
             protocol: perch_engine::wire::PROTOCOL,
             engine_version: "0".into(),
             connection: 1,
@@ -476,16 +464,19 @@ mod tests {
             runs: 0,
             build: "0".into(),
         });
-        assert_eq!(host().as_deref(), Some("halo"));
-        assert_eq!(tilde(Path::new("/home/chris/Code/perch")), "~/Code/perch");
-        assert_eq!(tilde(Path::new("/home/chris")), "~");
+        assert_eq!(place.host().as_deref(), Some("halo"));
+        assert_eq!(
+            place.tilde(Path::new("/home/chris/Code/perch")),
+            "~/Code/perch"
+        );
+        assert_eq!(place.tilde(Path::new("/home/chris")), "~");
         let mut repo = perch_github::RepoConfig::default();
         repo.root = Some("~/Code/perch".into());
         assert_eq!(
-            root_path(&repo),
+            place.root_path(&repo),
             Some(PathBuf::from("/home/chris/Code/perch"))
         );
-        set_place(Place::ThisMac);
-        assert_eq!(home(), Some(perch_github::config::home_dir()));
+        place = Place::ThisMac;
+        assert_eq!(place.home(), Some(perch_github::config::home_dir()));
     }
 }

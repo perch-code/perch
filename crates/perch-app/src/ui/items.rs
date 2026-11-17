@@ -492,13 +492,13 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                             })
                     }
                 })
-                .item(crate::ui::widgets::reveal_app_label(), move |i| {
+                .item(crate::ui::widgets::reveal_app_label(state), move |i| {
                     let p = reveal.clone();
                     i.icon(SidebarIcon::Folder)
                         .enabled(on_disk)
                         .action(move || {
                             if let Some(p) = &p {
-                                reveal_in_file_manager(p)
+                                reveal_in_file_manager(state, p)
                             }
                         })
                 })
@@ -508,7 +508,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                         .enabled(on_disk)
                         .action(move || {
                             if let Some(p) = &p {
-                                open_in_terminal(p)
+                                open_in_terminal(state, p)
                             }
                         })
                 })

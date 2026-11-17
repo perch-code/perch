@@ -315,7 +315,7 @@ fn prepare(app: AppState, review: ReviewState, backend: &Backend) {
         choice,
         facts: window_facts(app, review),
     };
-    if let Some(host) = crate::remote::host() {
+    if let Some(host) = app.place.get().host() {
         let user = std::env::var("USER").ok().filter(|u| !u.is_empty());
         redact_here(&mut request, &perch_github::config::home_dir(), user, &host);
     }

@@ -1771,7 +1771,7 @@ fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
                         .pointer_events_none()
                 }),
             ))
-            .dropdown(move || worktree_menu(path.clone(), archive.clone(), trust()))
+            .dropdown(move || worktree_menu(app, path.clone(), archive.clone(), trust()))
             .debug_name("worktree menu")
             .style(|s| {
                 s.items_center()
@@ -3572,6 +3572,7 @@ pub(crate) mod tests {
         let rust = perch_lsp::ServerKind::RustAnalyzer;
         let menu = |held: &[perch_lsp::ServerKind]| {
             crate::ui::widgets::worktree_menu(
+                app,
                 "/w".into(),
                 None,
                 trust_rows(app, &backend, &item, held),

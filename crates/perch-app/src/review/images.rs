@@ -95,6 +95,7 @@ pub fn decode(bytes: &[u8], url: &str) -> Option<Decoded> {
     let (width, height) = pixels.dimensions();
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
+    bytes.hash(&mut hasher);
     let brush = ImageBrush::new(ImageData {
         data: Blob::new(Arc::new(pixels.into_raw())),
         format: ImageFormat::Rgba8,
@@ -116,7 +117,7 @@ pub fn fetchable(src: &str) -> bool {
     src.starts_with("https://") || src.starts_with("http://")
 }
 
-struct Store {
+pub(crate) struct Store {
     /// What the store's signal, and each decode's way back to the main
     /// thread, are made under.
     scope: Scope,
@@ -130,19 +131,25 @@ struct Store {
     kept: RefCell<VecDeque<(String, usize)>>,
 }
 
-thread_local! {
-    /// The pictures of every window. Its signal outlives any view that
-    /// first asked for it.
-    static STORE: Store = {
-        let scope = Scope::new();
-        scope.enter(|| Store {
+impl Store {
+    pub(crate) fn new(scope: Scope) -> Self {
+        Self {
             scope,
-            pictures: RwSignal::new(HashMap::new()),
+            pictures: scope.create_rw_signal(HashMap::new()),
             asked: RefCell::default(),
             decoding: RefCell::default(),
             kept: RefCell::default(),
-        })
-    };
+        }
+    }
+}
+
+fn with_store<T>(read: impl FnOnce(&Store) -> T) -> T {
+    if let Some(store) = floem::reactive::Context::get::<std::rc::Rc<Store>>() {
+        return read(&store);
+    }
+    // Standalone views (including headless renders) have no engine session.
+    thread_local! { static STANDALONE: Store = Store::new(Scope::new()); }
+    STANDALONE.with(read)
 }
 
 /// Have the picture at `src` downloaded, unless it has been asked for or
@@ -151,7 +158,7 @@ pub fn want(src: &str) {
     if !fetchable(src) {
         return;
     }
-    let first = STORE.with(|store| store.asked.borrow_mut().insert(src.to_string()));
+    let first = with_store(|store| store.asked.borrow_mut().insert(src.to_string()));
     if first {
         ask(src);
     }
@@ -162,7 +169,7 @@ pub fn want(src: &str) {
 /// refused, and one being downloaded as it dropped never arrives. Each is
 /// asked for once in [`want`], so the views showing them would not.
 pub fn ask_again() {
-    let waiting: Vec<String> = STORE.with(|store| {
+    let waiting: Vec<String> = with_store(|store| {
         let decoding = store.decoding.borrow();
         store.pictures.with_untracked(|pictures| {
             store
@@ -224,7 +231,7 @@ pub fn received(url: String, downloaded: Option<Downloaded>) {
 /// `url` is this window's to decode: none is drawn yet and no other window
 /// has started on it.
 fn claim(url: &str) -> Option<Scope> {
-    STORE.with(|store| {
+    with_store(|store| {
         let have = store
             .pictures
             .with_untracked(|pictures| pictures.contains_key(url));
@@ -235,7 +242,7 @@ fn claim(url: &str) -> Option<Scope> {
 /// A decode [`claim`]ed for `url` is done, `None` when the bytes were not
 /// a picture.
 fn decoded_from(url: String, decoded: Option<Decoded>) {
-    STORE.with(|store| store.decoding.borrow_mut().remove(&url));
+    with_store(|store| store.decoding.borrow_mut().remove(&url));
     arrived(url, decoded.map(Arc::new));
 }
 
@@ -243,7 +250,7 @@ fn decoded_from(url: String, decoded: Option<Decoded>) {
 /// or decoded. One that failed is forgotten, to be asked for again the
 /// next time a view shows it.
 pub fn arrived(url: String, decoded: Option<Arc<Decoded>>) {
-    STORE.with(|store| {
+    with_store(|store| {
         let Some(decoded) = decoded else {
             store.asked.borrow_mut().remove(&url);
             return;
@@ -290,7 +297,7 @@ fn trim(kept: &mut VecDeque<(String, usize)>, budget: usize) -> Vec<String> {
 /// The picture at `src`, `None` until it has come. Once shown it stays
 /// shown here, though the session lets it go.
 pub fn watch(src: String) -> Memo<Option<Arc<Decoded>>> {
-    let pictures = STORE.with(|store| store.pictures);
+    let pictures = with_store(|store| store.pictures);
     Memo::new(move |before: Option<&Option<Arc<Decoded>>>| {
         pictures
             .with(|pictures| pictures.get(&src).cloned())
@@ -425,7 +432,7 @@ pub(crate) mod tests {
         assert!(Arc::ptr_eq(&seen.get_untracked().unwrap(), &decoded));
 
         // Let go by the session, it is still what this view shows.
-        STORE.with(|store| {
+        with_store(|store| {
             store.pictures.update(|pictures| {
                 pictures.remove(&url);
             })
@@ -472,7 +479,7 @@ pub(crate) mod tests {
 
         decoded_from(url.clone(), decode(&png(4, 4), &url));
         assert!(watch(url.clone()).get_untracked().is_some());
-        STORE.with(|store| assert!(!store.decoding.borrow().contains(&url)));
+        with_store(|store| assert!(!store.decoding.borrow().contains(&url)));
         assert!(claim(&url).is_none(), "decoded again once drawn");
     }
 
@@ -486,7 +493,7 @@ pub(crate) mod tests {
         want(&url);
         assert!(claim(&url).is_some());
         decoded_from(url.clone(), decode(b"<html>Not Found</html>", &url));
-        STORE.with(|store| assert!(!store.decoding.borrow().contains(&url)));
+        with_store(|store| assert!(!store.decoding.borrow().contains(&url)));
         assert!(watch(url.clone()).get_untracked().is_none());
         want(&url);
 

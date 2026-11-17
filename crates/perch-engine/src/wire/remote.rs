@@ -171,6 +171,8 @@ pub struct Link {
     state: Mutex<Linked>,
     /// Told to try now rather than when the wait is up.
     retry: tokio::sync::Notify,
+    /// Ends this client connection and its periodic work when its last window leaves.
+    closed: tokio::sync::watch::Sender<bool>,
     /// Told when the reader asks for the restart offered.
     restart: tokio::sync::Notify,
     /// What the app's own updates run on, and ask GitHub through.
@@ -212,6 +214,14 @@ impl Default for Linked {
 }
 
 impl Link {
+    pub(crate) fn disconnect(&self) {
+        self.closed.send_replace(true);
+    }
+
+    async fn disconnected(&self) {
+        let _ = self.closed.subscribe().wait_for(|closed| *closed).await;
+    }
+
     fn linked(&self) -> std::sync::MutexGuard<'_, Linked> {
         self.state
             .lock()
@@ -427,10 +437,10 @@ impl Link {
             return false;
         }
         tokio::select! {
-            () = self.retry.notified() => {}
-            () = self.restart.notified() => {}
+            () = self.disconnected() => false,
+            () = self.retry.notified() => true,
+            () = self.restart.notified() => true,
         }
-        true
     }
 }
 
@@ -462,7 +472,9 @@ fn start(
     runtime: &tokio::runtime::Handle,
 ) -> (Arc<Link>, std::sync::mpsc::Receiver<(WindowId, Event)>) {
     let (events, received) = std::sync::mpsc::channel();
+    let (closed, _) = tokio::sync::watch::channel(false);
     let link = Arc::new(Link {
+        closed,
         host: host.to_string(),
         navigations: Arc::default(),
         events,
@@ -472,7 +484,11 @@ fn start(
         runtime: runtime.clone(),
         releases: Releases::anonymous(),
     });
-    runtime.spawn(keep_connected(link.clone(), dial, install, backoff));
+    let connection = link.clone();
+    runtime.spawn(async move {
+        keep_connected(connection.clone(), dial, install, backoff).await;
+        connection.down();
+    });
     (link, received)
 }
 
@@ -506,13 +522,14 @@ async fn keep_connected(
     // The engine an automatic replace was for, which a busy line from
     // that dial is about.
     let mut replacing: Option<Replacing> = None;
-    loop {
+    while !*link.closed.borrow() {
         let just_installed = installed.take();
         let asked = std::mem::take(&mut replace);
         // A dial can take a while by itself, when it has the host ready
         // its own `perchd` first, so the reader's try now gives it up
         // too: left waiting, the ask would end the connection it made.
         let dialed = tokio::select! {
+            () = link.disconnected() => return,
             dialed = dial(asked) => Some(dialed),
             () = link.retry.notified() => None,
         };
@@ -541,6 +558,10 @@ async fn keep_connected(
                 // engine is too long answering.
                 let within = answer_wait(backoff.answer, asked);
                 let answered = tokio::select! {
+                    () = link.disconnected() => {
+                        let _ = hang_up().await;
+                        return;
+                    }
                     answered = tokio::time::timeout(within, handshake(stream)) => Some(answered),
                     () = link.retry.notified() => None,
                 };
@@ -608,6 +629,8 @@ async fn keep_connected(
                         let mut ended =
                             session.carry(outgoing, link.navigations(), link.events.clone());
                         if !link.up(&welcome, to, other) {
+                            link.down();
+                            let _ = hang_up().await;
                             return;
                         }
                         ever = true;
@@ -616,6 +639,14 @@ async fn keep_connected(
                         // restart offered.
                         let restart = loop {
                             tokio::select! {
+                                () = link.disconnected() => {
+                                    // Closing the sender lets the writer flush WindowClosed.
+                                    // An unresponsive bridge still gets a bounded hang-up.
+                                    link.down();
+                                    let _ = tokio::time::timeout(Duration::from_secs(2), &mut ended).await;
+                                    let _ = hang_up().await;
+                                    return;
+                                }
                                 _ = &mut ended => break false,
                                 () = link.restart.notified() => {
                                     if link.linked().restart.is_some() {
@@ -730,9 +761,11 @@ async fn keep_connected(
                 progress,
             });
         };
-        let why = match install_if_asked(install.as_mut(), &host, &why, just_installed, installing)
-            .await
-        {
+        let result = tokio::select! {
+            () = link.disconnected() => return,
+            result = install_if_asked(install.as_mut(), &host, &why, just_installed, installing) => result,
+        };
+        let why = match result {
             None => why,
             Some(Ok(build)) => {
                 // Tried again at once: nothing failed. A replace or restart
@@ -767,6 +800,7 @@ async fn keep_connected(
             return;
         }
         let asked_now = tokio::select! {
+            () = link.disconnected() => return,
             () = tokio::time::sleep(wait) => false,
             () = link.retry.notified() => true,
             () = link.restart.notified() => true,
@@ -1192,7 +1226,8 @@ async fn dial_ssh(host: &str, remote: &str, build: Option<Wanted>) -> Result<Dia
         return Err("ssh started with no pipes to it".to_string());
     };
     let last = Arc::new(Mutex::new(None::<String>));
-    let said = tokio::spawn({
+    let mut said = tokio::task::JoinSet::new();
+    said.spawn({
         let (last, host) = (last.clone(), host.to_string());
         async move {
             use tokio::io::AsyncBufReadExt;
@@ -1231,13 +1266,8 @@ async fn dial_ssh(host: &str, remote: &str, build: Option<Wanted>) -> Result<Dia
                 // A master connection ssh shares (ControlPersist) keeps its
                 // stderr open past it: the reader is stopped rather than
                 // left with the pipe.
-                let mut said = said;
-                if tokio::time::timeout(Duration::from_secs(1), &mut said)
-                    .await
-                    .is_err()
-                {
-                    said.abort();
-                }
+                let _ = tokio::time::timeout(Duration::from_secs(1), said.join_next()).await;
+                // Dropping the set aborts the reader, including on cancellation.
                 last.lock().ok().and_then(|last| last.clone())
             })
         }),
@@ -1394,10 +1424,17 @@ pub fn over_ssh(
     let (link, received) = start(host, dial, install, Backoff::default(), runtime.handle());
     // This app's own updates, looked for here: the engine on the host
     // looks for none.
-    runtime.spawn(update::clock(
+    let clock_link = link.clone();
+    let clock = update::clock(
         link.releases.clone(),
         EventSender::routed(link.events.clone()),
-    ));
+    );
+    runtime.spawn(async move {
+        tokio::select! {
+            () = clock_link.disconnected() => {},
+            _ = clock => {},
+        }
+    });
     (Backend::linked(link), received)
 }
 
@@ -1582,6 +1619,7 @@ mod tests {
     struct Pipes {
         far: tokio::sync::mpsc::UnboundedReceiver<Far>,
         dials: Arc<std::sync::atomic::AtomicUsize>,
+        hangups: Arc<std::sync::atomic::AtomicUsize>,
         failing: Arc<Mutex<Option<String>>>,
         /// What a dial says last as it is hung up, ssh's last line.
         last: Arc<Mutex<Option<String>>>,
@@ -1602,11 +1640,13 @@ mod tests {
         let build = build.map(|build| vec![build.to_string()]);
         let (to_test, far) = tokio::sync::mpsc::unbounded_channel();
         let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hangups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let failing = Arc::new(Mutex::new(None::<String>));
         let last = Arc::new(Mutex::new(None::<String>));
         let asked = Arc::new(Mutex::new(Vec::new()));
         let stall = Arc::new(Mutex::new(Duration::ZERO));
         let dial: Dial = Box::new({
+            let hangups = hangups.clone();
             let (dials, failing, last, asked, stall) = (
                 dials.clone(),
                 failing.clone(),
@@ -1619,6 +1659,7 @@ mod tests {
                 asked.lock().unwrap().push(replace);
                 let failing = failing.lock().unwrap().clone();
                 let said = last.lock().unwrap().clone();
+                let hangups = hangups.clone();
                 let to_test = to_test.clone();
                 let build = build.clone();
                 let stall = *stall.lock().unwrap();
@@ -1637,7 +1678,12 @@ mod tests {
                     Ok(Dialed {
                         stream: Box::new(near),
                         build,
-                        hang_up: Box::new(move || Box::pin(async move { said })),
+                        hang_up: Box::new(move || {
+                            Box::pin(async move {
+                                hangups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                said
+                            })
+                        }),
                     })
                 })
             }
@@ -1647,6 +1693,7 @@ mod tests {
             Pipes {
                 far,
                 dials,
+                hangups,
                 failing,
                 last,
                 asked,
@@ -1694,6 +1741,39 @@ mod tests {
                 return link;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn disconnect_releases_the_connection_and_stops_redialing() {
+        let (dial, mut pipes) = pipes();
+        let (backend, events) = link(
+            "devbox",
+            dial,
+            None,
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        let mut far = pipes.next().await;
+        far.welcome(1).await;
+        while !matches!(next_link(&events).await, EngineLink::Up { .. }) {}
+        let window = backend.open_window();
+        window.close_window();
+        backend.disconnect_remote();
+        let mut closed = Vec::new();
+        while let Some((id, command)) = far.command().await {
+            if matches!(command, Command::WindowClosed) {
+                closed.push(id);
+            }
+        }
+        assert_eq!(closed, [window.window()]);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), pipes.far.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(pipes.hangups.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(pipes.dials(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2207,6 +2287,40 @@ mod tests {
             next_link(&events).await,
             EngineLink::Connecting { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_an_install_in_progress() {
+        let (dial, mut pipes) = pipes();
+        *pipes.failing.lock().unwrap() = Some(MISSING.into());
+        let (install_alive, mut ended) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let install: Install = Box::new(move |_, progress| {
+            let alive = install_alive.clone();
+            (
+                "test".into(),
+                Box::pin(async move {
+                    let _alive = (alive, progress);
+                    std::future::pending().await
+                }),
+            )
+        });
+        let (backend, events) = link(
+            "devbox",
+            dial,
+            Some(install),
+            QUICK,
+            &tokio::runtime::Handle::current(),
+        );
+        while !matches!(next_link(&events).await, EngineLink::Installing { .. }) {}
+        backend.disconnect_remote();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), ended.recv())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(pipes.far.recv().await.is_none());
+        assert_eq!(pipes.dials(), 1);
     }
 
     const MISSING: &str = "perch-install: Linux aarch64";
