@@ -15895,7 +15895,7 @@ async fn refresh_items(ctx: &Ctx) {
 }
 
 /// Every worktree under a declared repository's root is an item, and one
-/// whose directory has gone is deleted, or archived when it has threads.
+/// whose directory has gone is archived if it has history to keep.
 /// Returns whether anything changed.
 async fn scan_roots(ctx: &Ctx) -> bool {
     let _cuts = ctx.root_cuts.lock().await;
@@ -16075,8 +16075,8 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         if seen.contains(&(path, c.branch.clone())) {
             continue;
         }
-        let still_there = c.path.join(".git").exists();
         let _lifecycle = ctx.lock_item(&item.id).await;
+        let still_there = c.path.join(".git").exists();
         let result = ctx.with_cache(|cache| {
             let Some(mut current) = cache.load_item(&item.id)? else {
                 return Ok(false);
@@ -16396,9 +16396,9 @@ async fn attach_pull_request(
 /// opened in Perch before the branch was checked out in a root: that row
 /// keeps it, and the branch stays a branch. A row with the subject and
 /// nothing else came from an earlier on-demand open; the branch row is the
-/// reader's local work, so it takes the subject and the other row goes, its
-/// marks carried across. The subject index allows one row per pull request,
-/// so the other row goes first.
+/// reader's local work, so it takes the subject, marks and history in one
+/// transaction. The subject index allows one row per pull request, so the
+/// old row is deleted before the branch is assigned the subject.
 fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<bool, CacheError> {
     let holder = cache
         .find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)?
