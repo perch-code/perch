@@ -11,7 +11,9 @@ use perch_github::RunRecord;
 
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::review::threads::{agent_avatar, live_permission, model_name, RunPermission};
+use crate::review::threads::{
+    agent_avatar, live_permission, model_name, reported_or_requested, RunPermission,
+};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::profile_card::{card_line, card_names, card_text, with_card};
@@ -31,11 +33,13 @@ pub fn with_agent_card<V: IntoView + 'static>(
 
 fn body(run: Memo<RunRecord>, permission: Memo<Option<RunPermission>>) -> AnyView {
     let (name, model, effort) = run.with_untracked(|run| {
-        let model = used(&run.model, &run.requested_model).trim().to_string();
+        let model = reported_or_requested(&run.model, &run.requested_model)
+            .trim()
+            .to_string();
         (
             model_name(&run.backend, &model),
             model,
-            effort_label(used(&run.effort, &run.requested_effort)),
+            effort_label(reported_or_requested(&run.effort, &run.requested_effort)),
         )
     });
     // The model's own id beside its name, unless the name is all it is.
@@ -91,15 +95,6 @@ fn body(run: Memo<RunRecord>, permission: Memo<Option<RunPermission>>) -> AnyVie
         usage_line,
     ))
     .into_any()
-}
-
-/// What the CLI said it used, else, until it says, what was asked for.
-fn used<'a>(used: &'a str, requested: &'a str) -> &'a str {
-    if used.trim().is_empty() {
-        requested
-    } else {
-        used
-    }
 }
 
 /// "High effort"; nothing for a run that names none.

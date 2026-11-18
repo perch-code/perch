@@ -40,7 +40,7 @@ use crate::ui::widgets::{
     sidebar_glyph, text_button, Name,
 };
 
-/// What an agent run may do past reading, as its byline says.
+/// What an agent run may do past reading, as its hover card says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunPermission {
     /// An Ask run: it reads the worktree and writes nowhere.
@@ -2410,10 +2410,8 @@ pub(crate) fn collapsed_card_row(
     })
 }
 
-/// Who wrote a message, as a collapsed card names them: the reader by
-/// their login once GitHub has said it, the agent by its model and the
-/// effort of the `run` that wrote it. A login is a link to its page; a
-/// model and "You" lead nowhere.
+/// The author's display name. In a collapsed card, passing the agent's
+/// `run` includes its model and effort. A login links to its profile.
 fn author_name(app: AppState, author: &Author, run: Option<&RunRecord>) -> Name {
     match author {
         Author::User => app
@@ -2428,6 +2426,19 @@ fn author_name(app: AppState, author: &Author, run: Option<&RunRecord>) -> Name 
             None => model_name(backend, model),
         }),
         Author::GitHubUser(login) => Name::Login(login.clone()),
+    }
+}
+
+fn run_model_name(run: &RunRecord) -> Name {
+    let model = reported_or_requested(&run.model, &run.requested_model);
+    Name::Plain(model_name(&run.backend, model))
+}
+
+pub(super) fn reported_or_requested<'a>(reported: &'a str, requested: &'a str) -> &'a str {
+    if reported.trim().is_empty() {
+        requested
+    } else {
+        reported
     }
 }
 
@@ -3296,44 +3307,6 @@ pub(crate) fn perch_only_label() -> impl IntoView {
     )
 }
 
-/// The [`RunPermission`] of the run that wrote an agent's message, after
-/// its name: Allow all in the approvals picker's red. Nothing for a Work
-/// run from before runs kept their approvals.
-fn permission_label(app: AppState, state: ReviewState, run: Memo<RunRecord>) -> impl IntoView {
-    let permission = live_permission(app, state, run);
-    let allow_all =
-        move || permission.get() == Some(RunPermission::Work(perch_github::Approvals::Never));
-    cards::tip_with(
-        badge(
-            move || {
-                permission
-                    .get()
-                    .map(|p| p.label().to_string())
-                    .unwrap_or_default()
-            },
-            move || {
-                if allow_all() {
-                    theme::alert_caution()
-                } else {
-                    theme::fg_muted()
-                }
-            },
-            || floem::peniko::Color::TRANSPARENT,
-            Some(theme::border),
-        )
-        .debug_name("run-permission")
-        .style(move |s| {
-            s.margin_left(6.0)
-                .apply_if(permission.get().is_none(), |s| s.hide())
-        }),
-        move || match permission.get_untracked() {
-            Some(RunPermission::ReadOnly) => "Reads and answers; changes nothing".to_string(),
-            Some(RunPermission::Work(approvals)) => approvals_note(approvals, None),
-            None => String::new(),
-        },
-    )
-}
-
 /// The [`run_permission`] of `run` as it changes, under the approvals the
 /// reader has picked for the item.
 pub(crate) fn live_permission(
@@ -3454,23 +3427,22 @@ fn local_message_view(
         None => (text, None),
     };
     let author = message.author.clone();
-    let author_run = message.run.clone();
     // The run that wrote an agent's message, as it goes.
-    let agent_run = match (&author, &author_run) {
+    let agent_run = match (&author, &message.run) {
         (Author::Agent { .. }, Some(run)) => Some(live_run(state, run.clone())),
         _ => None,
     };
     let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
-    if let Some(run) = agent_run {
-        after.push(permission_label(app, state, run).into_any());
-    }
     if private {
         after.push(perch_only_label().into_any());
     }
     after.push(after_review_label(state, message.created_at).into_any());
     let avatar = author_avatar(app, state, &author, face.avatar());
     let name = name_label(
-        move || author_name(app, &author, author_run.as_ref()),
+        move || match agent_run {
+            Some(run) => run.with(run_model_name),
+            None => author_name(app, &author, None),
+        },
         move |s| name_style(s, face),
     )
     .into_any();
@@ -3516,11 +3488,8 @@ fn pending_answer_view(
     let at = run.started_at.unwrap_or(run.queued_at);
     // The model the CLI reports can land after the run starts.
     let live = live_run(state, run.clone());
-    let model = move || live.with(|run| Name::Plain(run_agent_name(run)));
-    let mut after = vec![
-        when_label(app, at, face, "comment-when").into_any(),
-        permission_label(app, state, live).into_any(),
-    ];
+    let model = move || live.with(run_model_name);
+    let mut after = vec![when_label(app, at, face, "comment-when").into_any()];
     if private {
         after.push(perch_only_label().into_any());
     }
@@ -5186,6 +5155,8 @@ mod tests {
             backend: "claude-code".into(),
             requested_model: "opus".into(),
             requested_effort: "high".into(),
+            mode: perch_github::RunMode::Work,
+            approvals: Some(perch_github::Approvals::Auto),
             ..RunRecord::default()
         });
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
@@ -5203,9 +5174,10 @@ mod tests {
         harness.paint();
         assert_eq!(find_all(harness.root_id(), "agent-avatar").len(), 1);
         assert!(
-            find(harness.root_id(), "Label: \"Claude Opus (high)\"").is_some(),
+            find(harness.root_id(), "Label: \"Claude Opus\"").is_some(),
             "the requested model"
         );
+        assert!(find(harness.root_id(), "Label: \"Auto-review\"").is_none());
         assert_eq!(
             find_all(harness.root_id(), "perch-only").len(),
             2,
@@ -5224,7 +5196,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(
-            find(harness.root_id(), "Label: \"Claude Opus 5.5 (high)\"").is_some(),
+            find(harness.root_id(), "Label: \"Claude Opus 5.5\"").is_some(),
             "the model the CLI reported"
         );
     }
@@ -7137,6 +7109,8 @@ mod tests {
             model: "sonnet".into(),
             effort: "medium".into(),
             status: perch_github::RunStatus::Completed,
+            mode: perch_github::RunMode::Work,
+            approvals: Some(perch_github::Approvals::Auto),
             ..Default::default()
         });
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
@@ -7155,6 +7129,8 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
+        assert!(find(root_id, "Label: \"Claude Sonnet\"").is_some());
+        assert!(find(root_id, "Label: \"Auto-review\"").is_none());
         let more = find(root_id, "comment-more").expect("the answer has a \u{22ef}");
         assert_eq!(
             harness.get_layout_rect(more).width(),
