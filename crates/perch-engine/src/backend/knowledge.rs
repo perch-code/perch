@@ -682,7 +682,7 @@ pub(super) mod tests {
             .transition_review_group(id, ReviewGroupStatus::Reconciling, now)
             .unwrap();
         cache
-            .finish_review_group(id, ReviewGroupStatus::Empty, now)
+            .finish_review_group(id, ReviewGroupStatus::Completed, now)
             .unwrap();
     }
 
@@ -854,7 +854,7 @@ pub(super) mod tests {
         assert!(!pull_path.join("private/removed.md").exists());
         assert!(fs::read_to_string(pull_path.join("findings.md"))
             .unwrap()
-            .contains("empty"));
+            .contains("### Review #1 · `head` · completed"));
 
         let mut merged = pull_request(7);
         merged.merged = true;

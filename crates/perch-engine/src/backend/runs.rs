@@ -326,6 +326,7 @@ impl RunManager {
             pending_terminal: Mutex::new(None),
         });
         entries.insert(run.id.clone(), entry.clone());
+        guard.publish_item_changes();
         drop(guard);
         drop(entries);
         drop(gate);
