@@ -346,8 +346,8 @@ pub struct AppState {
     /// its minimum.
     pub drawer_width: RwSignal<f64>,
     pub drawer_resizing: RwSignal<bool>,
-    /// Left and right Command (Ctrl off macOS), for this window's shortcut hints.
-    pub shortcut_modifiers: RwSignal<[bool; 2]>,
+    /// Reveal the active bindings on this window's toolbar controls.
+    pub show_shortcut_hints: RwSignal<bool>,
     /// The window's width, from its last layout. The drawer takes room
     /// from the main pane while there is enough, and lies over it when
     /// there is not.
@@ -532,7 +532,7 @@ impl AppState {
             tree_slide_run: RwSignal::new(0),
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
-            shortcut_modifiers: RwSignal::new([false; 2]),
+            show_shortcut_hints: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
             window_height: RwSignal::new(0.0),
             main_pane: RwSignal::new((0.0, 0.0)),

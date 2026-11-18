@@ -21,7 +21,7 @@ pub(crate) fn with_shortcut_hint(
     content: impl IntoView + 'static,
 ) -> impl IntoView {
     let binding = move || {
-        if app.shortcut_modifiers.get().contains(&true) {
+        if app.show_shortcut_hints.get() {
             crate::keymap::label(action)
         } else {
             None
@@ -32,13 +32,20 @@ pub(crate) fn with_shortcut_hint(
         .style(move |s| {
             s.position(floem::style::Position::Absolute)
                 .inset_top_pct(100.0)
+                // The arrows are adjacent. Let their keycaps grow away from
+                // each other, including longer user-defined bindings.
+                .apply_if(action == crate::keymap::Action::HistoryBack, |s| {
+                    s.inset_right(0.0)
+                })
+                .apply_if(action == crate::keymap::Action::HistoryForward, |s| {
+                    s.inset_left(0.0)
+                })
                 .margin_top(2.0)
                 .padding_horiz(4.0)
-                .border(1.0)
-                .border_color(theme::border())
+                .padding_vert(1.0)
                 .border_radius(4.0)
-                .background(theme::canvas())
-                .color(theme::fg())
+                .background(theme::badge_bg())
+                .color(theme::fg_muted())
                 .font_size(10.0)
                 .selectable(false)
                 .apply_if(binding().is_none(), |s| s.hide())

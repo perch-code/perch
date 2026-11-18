@@ -641,7 +641,8 @@ takes them all away, and the reset arrow puts the defaults back. Several
 keys for one action are written in the file.
 
 Hold Command on macOS or Ctrl on Linux to see the current shortcuts under
-the sidebar tabs, sidebar toggle, New Work, and the Conversation and Code tabs.
+the sidebar tabs, sidebar toggle, New Work, Back and Forward arrows, and the
+Conversation and Code tabs.
 The Inbox, Worktrees, and Browse defaults yield to any shortcut you assign
 in Settings or in `[keybindings]`.
 

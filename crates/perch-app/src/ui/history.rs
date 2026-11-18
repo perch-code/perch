@@ -12,6 +12,7 @@ use floem::views::{Container, Decorators, Stack};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
+use crate::keymap::{self, Action};
 use crate::review::model::{ReviewState, HISTORY_CAP};
 use crate::state::AppState;
 use crate::theme;
@@ -52,10 +53,10 @@ fn arrow(state: AppState, review: ReviewState, backend: Rc<Backend>, back: bool)
             }
         })
     };
-    let glyph = if back {
-        SidebarIcon::Back
+    let (glyph, action) = if back {
+        (SidebarIcon::Back, Action::HistoryBack)
     } else {
-        SidebarIcon::Forward
+        (SidebarIcon::Forward, Action::HistoryForward)
     };
     let color = move || {
         if can() {
@@ -64,38 +65,29 @@ fn arrow(state: AppState, review: ReviewState, backend: Rc<Backend>, back: bool)
             theme::fg_subtle()
         }
     };
-    let button = Container::new(crate::ui::widgets::icon_in(
-        move || icons::sidebar_icon(glyph, color()),
-        color,
-    ))
-    .on_event_stop(floem::event::listener::Click, move |_, _| {
-        travel(state, review, &backend, back)
-    })
-    .debug_name(if back { "back" } else { "forward" })
-    .style(move |s| {
-        let s = s
-            .size(26.0, 26.0)
-            .items_center()
-            .justify_center()
-            .border_radius(8.0)
-            .pointer_events_auto();
-        if can() {
-            crate::ui::widgets::clickable(s).hover(|s| s.background(theme::nav_hover()))
-        } else {
-            s.selectable(false)
-        }
-    });
+    let icon = crate::ui::widgets::icon_in(move || icons::sidebar_icon(glyph, color()), color);
+    let button = Container::new(crate::ui::widgets::with_shortcut_hint(state, action, icon))
+        .on_event_stop(floem::event::listener::Click, move |_, _| {
+            travel(state, review, &backend, back)
+        })
+        .debug_name(if back { "back" } else { "forward" })
+        .style(move |s| {
+            let s = s
+                .size(26.0, 26.0)
+                .items_center()
+                .justify_center()
+                .border_radius(8.0)
+                .pointer_events_auto();
+            if can() {
+                crate::ui::widgets::clickable(s).hover(|s| s.background(theme::nav_hover()))
+            } else {
+                s.selectable(false)
+            }
+        });
     // The tip takes the pointer as the button does: the arrows sit in a
     // bar that lets the pointer through, floem passes pointer events by
     // a view that inherits that, and a deaf tip never opens.
-    crate::review::cards::tip(
-        button,
-        if back {
-            "Go Back (⌃-)".to_string()
-        } else {
-            "Go Forward (⌃⇧-)".to_string()
-        },
-    )
-    .debug_name(if back { "back tip" } else { "forward tip" })
-    .style(|s| s.pointer_events_auto())
+    crate::review::cards::tip_with(button, move || keymap::tip(action.title(), action))
+        .debug_name(if back { "back tip" } else { "forward tip" })
+        .style(|s| s.pointer_events_auto())
 }
