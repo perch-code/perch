@@ -12,6 +12,8 @@
 //!   `--replace` and `--replace-if-idle` first stop an engine of another
 //!   build.
 //! - `perchd status` says whether an engine is running, and what it has.
+//! - `perchd context` prints what Perch knows about the item a worktree is
+//!   for, from the cache alone, for an agent working in it on the host.
 //! - `perchd --version` prints `perchd <version> (protocol <n>)`.
 
 mod bridge;
@@ -34,6 +36,8 @@ commands:
              --replace-if-idle  the same, only if it has no runs or clients;
                                 else say perch-busy and exit 98
   status     say whether an engine is running, and what it has
+  context    print what Perch knows about this worktree's item, for an
+             agent; perchd context --help says more
   --version  print perchd's version and wire protocol";
 
 /// Where this `perchd` is, as it can be run again or looked for beside
@@ -72,6 +76,7 @@ fn main() -> ExitCode {
             }
         },
         Some("status") if args.len() == 1 => status::run(),
+        Some("context") => ExitCode::from(perch_engine::context_cli::main(&args[1..])),
         Some("--version" | "-V" | "version") => {
             println!(
                 "perchd {} (protocol {})",

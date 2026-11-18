@@ -3,7 +3,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/perch-code/perch/main/install.sh | sh
 #
 # On a Mac this puts Perch.app in /Applications. On Linux it unpacks Perch
-# into ~/.local/share/perch and links ~/.local/bin/perch to it.
+# into ~/.local/share/perch. Either way it links ~/.local/bin/perch to the
+# app, so `perch context` runs from a terminal or an agent's shell.
 # PERCH_INSTALL_DIR overrides where Perch.app or the perch folder goes.
 
 set -eu
@@ -55,6 +56,8 @@ fi
 
 mkdir -p "$dest" 2>/dev/null || true
 [ -w "$dest" ] || fail "can't write to $dest; set PERCH_INSTALL_DIR to a folder you own"
+# Absolute, so the link to it from ~/.local/bin resolves.
+dest=$(CDPATH= cd -- "$dest" && pwd)
 
 # Unpack beside the old copy, then swap, so a failed download leaves it be.
 tmp=$(mktemp -d "$dest/.perch-install.XXXXXX")
@@ -70,16 +73,18 @@ rm -rf "${dest:?}/$bundle"
 mv "$tmp/$bundle" "$dest/$bundle"
 echo "Installed $dest/$bundle"
 
-if [ "$os" = linux ]; then
-	bin=$HOME/.local/bin
-	mkdir -p "$bin"
+bin=$HOME/.local/bin
+mkdir -p "$bin"
+if [ "$os" = macos ]; then
+	ln -sf "$dest/$bundle/Contents/MacOS/perch" "$bin/perch"
+else
 	ln -sf "$dest/perch/perch" "$bin/perch"
-	echo "Linked $bin/perch"
-	case ":$PATH:" in
-	*":$bin:"*) ;;
-	*) echo "Add $bin to your PATH to run perch" ;;
-	esac
 fi
+echo "Linked $bin/perch"
+case ":$PATH:" in
+*":$bin:"*) ;;
+*) echo "Add $bin to your PATH to run perch" ;;
+esac
 
 if ! command -v gh >/dev/null 2>&1; then
 	echo "Perch needs the GitHub CLI: install it from https://cli.github.com, then run gh auth login"

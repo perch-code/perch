@@ -1003,6 +1003,84 @@ launching an agent. `perch --ask owner/repo#N path:start-end "question"`
 runs the same question flow from a terminal; omit the path to ask about the
 whole item, and add `--print-prompt` to see the prompt without running it.
 
+### Context for agents outside Perch
+
+`perch context` gives an agent working in a terminal, outside Perch, what
+Perch knows about the item it is working on. Run it in the item's worktree,
+or in a subdirectory of it:
+
+```sh
+perch context                       # the index: everything, a line an entry
+perch context --entry threads/r123.md
+perch context src/manifest.rs:40-60 # only what is on those lines, or within 20 of them
+perch context --out ctx             # every file, written into a new directory
+perch context slatedb/slatedb#12    # another item, by name or by its link
+```
+
+It finds the item by the worktree's directory and branch, then by its
+repository and branch, then by a pull request Perch knows from that branch,
+going by what git's config says of the branch:
+
+- it was checked out from the pull request's ref, `refs/pull/<n>/head`, in
+  the repository the pull request is in, which makes it that pull request's
+  and no other's;
+- it tracks the pull request's head branch in the head's repository and is
+  named for it, or `<owner>/<head>`, as `gh pr checkout` names a fork's
+  `main`: a branch only started from that branch is not its;
+- it has the head branch's name and pushes to the head's repository
+  (`branch.<name>.pushRemote` or `remote.pushDefault`); or
+- it has the head branch's name, tracks no branch of that name, and one of
+  the clone's remotes is the head's repository: a branch started from
+  `upstream/main` and pushed to your fork.
+
+Someone else's pull request from a branch that only shares the name is not
+this one, nor is a pull request whose fork has been deleted. Of several, the
+open one wins. `-C <dir>` looks from another directory, and `owner/repo#N`,
+or a pull request's or issue's link, names an item.
+
+What it prints is the index, `INDEX.md`, of the files an Ask run is given
+(see [above](#what-the-agent-is-told-about-the-discussion)), with Perch's
+own beside them:
+
+- A header with the pull request or issue, its state and checks, the
+  worktree's branch and head as git has them now and how that head stands
+  against the pull request's, and when Perch last fetched the discussion.
+- What was said on GitHub: reviews, the threads on the diff, and the
+  conversation, a file per thread and `conversation.md` for the rest.
+- Perch's review findings: the open ones a line each, and every finding with
+  the reviews that found it in `findings.md`.
+- Your drafts, the comments that post when you submit the review, in
+  `drafts.md`.
+- Your questions to agents and their answers, only with `--private`,
+  in their own threads and in findings' threads; without it they are
+  counted.
+
+`--entry <file>` prints one of the files, and `--out <dir>` writes them all
+into a directory that must not exist yet. A path, of a file or a directory,
+keeps only the threads, findings, drafts and private threads anchored on it,
+and with `:a` or `:a-b`, only those within 20 lines; one on lines of the
+base, a removed line, is kept by its path alone, as its numbers are the old
+file's. A path is taken from where the command runs, or `-C`'s directory,
+in the item's worktree or the one it runs in, the inner one when one is
+inside the other, or from the worktree's top when nothing is there. A symlink is taken by its own name, as git has it.
+
+Everything from GitHub and everything an agent wrote is cleaned and marked
+untrusted, as an Ask run's files are. The discussion is as Perch last fetched
+it, which the header dates. `--fetch` reads GitHub's current copy instead,
+with your GitHub token, and keeps nothing; it also reads a pull request or
+issue Perch has no item for, without the findings and drafts. Without it,
+nothing goes over the network.
+
+It reads Perch's database, in one snapshot, without taking the engine's lock
+or writing anything, so it runs beside the app (see
+[One engine to a Perch home](#one-engine-to-a-perch-home)). A database of
+another schema, from a newer or older Perch, is refused rather than migrated:
+use the `perch` that came with the Perch that is running. On a host,
+`~/.perch/bin/perchd context` reads the host's engine's database the same
+way: `perchd serve` points `$PERCH_HOME/bin/perchd` at its own build as it
+starts. The installer links `~/.local/bin/perch` on a Mac as on Linux, so an
+agent's shell finds it.
+
 ### What the agent can and cannot do
 
 An agent reads text nobody vetted: the pull request, its comments, and the
@@ -1503,8 +1581,8 @@ window and says "Perch could not start its engine: another Perch engine
 with the process however it ends. On a file system that has no locks, some
 network ones, the engine runs anyway, warns in the log, and nothing stops a
 second one. The commands that only read the cache,
-`perch --items`, `--agents`, `--timeline`, `--scope` and `--scan`, need no
-lock and run beside an engine.
+`perch context`, `perch --items`, `--agents`, `--timeline`, `--scope` and
+`--scan`, need no lock and run beside an engine.
 
 ## perchd
 
@@ -1580,6 +1658,13 @@ Releases publish them too, with the SHA-256 of every asset in the release's
   an engine is running, its version, protocol and build, its Perch home, how many
   other clients are connected and how many agent runs are queued or under
   way. It exits 0 when one answers and 3 when none does.
+- `perchd context` prints what Perch knows about the item a worktree on
+  the host is for, from the host's database, for an agent working there.
+  It takes what `perch context` takes (see
+  [Context for agents outside Perch](#context-for-agents-outside-perch)).
+  The engine, as it starts, links `$PERCH_HOME/bin/perchd` to its own
+  build, so `~/.perch/bin/perchd context` reads the database with the
+  build that has it; a file there that is not a link is left alone.
 - `perchd --version` prints the version and the wire protocol, as
   `perchd 0.9.0 (protocol 6)`.
 

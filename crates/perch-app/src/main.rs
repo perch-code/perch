@@ -61,6 +61,11 @@ fn main() {
     // a window. The screen has to be unlocked to look at the real thing, and
     // this checks everything up to the pixels.
     let args: Vec<String> = std::env::args().collect();
+    // What Perch knows about the item a worktree is for, for an agent
+    // working in it: read from the cache alone, beside a running engine.
+    if args.get(1).map(String::as_str) == Some("context") {
+        std::process::exit(i32::from(perch_engine::context_cli::main(&args[2..])));
+    }
     if args.get(1).map(String::as_str) == Some("--dump-file") {
         dump::run(&args[2..]);
         return;

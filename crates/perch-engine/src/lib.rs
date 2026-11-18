@@ -8,6 +8,7 @@ pub mod approvals;
 pub mod ask;
 pub mod backend;
 pub mod context;
+pub mod context_cli;
 pub mod feedback;
 pub mod host;
 pub mod inbox;

@@ -82,6 +82,8 @@ pub enum CacheError {
     UnsupportedSchema { found: u32 },
     #[error("database schema {found} is newer than this build's schema {current}; its contents were left unchanged")]
     NewerSchema { found: u32, current: u32 },
+    #[error("database schema {found} is not this build's schema {current}, and a read-only open does not migrate it; use the perch that came with the running Perch")]
+    OtherSchema { found: u32, current: u32 },
     #[error("invalid run transition from {from:?} to {to:?}")]
     InvalidRunTransition { from: RunStatus, to: RunStatus },
     #[error("run {0} is already terminal")]
@@ -2729,6 +2731,49 @@ impl Cache {
     ) -> Result<(Self, CacheOpen), CacheError> {
         let conn = Connection::open(db_path)?;
         Self::from_conn(conn, avatar_dir)
+    }
+
+    /// The cache for reading beside whatever engine has it open: nothing
+    /// is made, migrated or written. A database of another schema is
+    /// refused rather than read wrong, since only the engine migrates it,
+    /// and one that is not there is an error rather than a new file.
+    pub fn open_read_only(db_path: &Path) -> Result<Self, CacheError> {
+        let conn = Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // The engine may be in the middle of a write.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let found = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or(CacheError::MissingSchemaVersion)?;
+        if found != SCHEMA_VERSION {
+            return Err(CacheError::OtherSchema {
+                found,
+                current: SCHEMA_VERSION,
+            });
+        }
+        Ok(Self {
+            conn,
+            avatar_dir: None,
+        })
+    }
+
+    /// `read` on one snapshot of the database: everything it reads is as
+    /// one moment left it, whatever an engine writes meanwhile. It takes
+    /// no write lock, so it works on [`Self::open_read_only`]'s too; it is
+    /// for a reader, not for anything that writes.
+    pub fn read_snapshot<T>(&self, read: impl FnOnce(&Self) -> T) -> Result<T, CacheError> {
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        let out = read(self);
+        self.conn.execute_batch("COMMIT")?;
+        Ok(out)
     }
 
     /// In-memory cache, used by tests.
@@ -6694,6 +6739,63 @@ mod tests {
         cache
             .dismiss_notification(&notification_thread("19", "2026-09-19T12:00:00Z"))
             .unwrap();
+    }
+
+    #[test]
+    fn a_read_only_open_reads_and_never_migrates_or_makes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let missing = Cache::open_read_only(&path);
+        assert!(missing.is_err());
+        assert!(!path.exists(), "a read-only open made the file");
+
+        let item = pr_item(9);
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+        }
+        let reader = Cache::open_read_only(&path).unwrap();
+        assert_eq!(reader.load_item(&item.id).unwrap(), Some(item.clone()));
+        assert!(reader.insert_item(&pr_item(10)).is_err(), "it wrote");
+        drop(reader);
+
+        // Another build's schema, older or newer, is left as it is.
+        for other in [SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+            Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "UPDATE meta SET value=?1 WHERE key='schema_version'",
+                    params![other.to_string()],
+                )
+                .unwrap();
+            assert!(matches!(
+                Cache::open_read_only(&path),
+                Err(CacheError::OtherSchema { found, current })
+                    if found == other && current == SCHEMA_VERSION
+            ));
+            assert_eq!(
+                Cache::peek_meta(&path, "schema_version"),
+                Some(other.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn a_snapshot_reads_as_one_moment_left_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let writer = Cache::open(&path, None).unwrap();
+        writer.insert_item(&pr_item(1)).unwrap();
+        let reader = Cache::open_read_only(&path).unwrap();
+        let (before, after) = reader
+            .read_snapshot(|cache| {
+                let before = cache.load_items().unwrap().len();
+                writer.insert_item(&pr_item(2)).unwrap();
+                (before, cache.load_items().unwrap().len())
+            })
+            .unwrap();
+        assert_eq!((before, after), (1, 1));
+        assert_eq!(reader.load_items().unwrap().len(), 2);
     }
 
     #[test]

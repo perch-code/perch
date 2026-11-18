@@ -80,12 +80,15 @@ impl Host {
     }
 
     /// The engines the host keeps, by name.
+    /// The builds kept in the home's `bin`, leaving out the link to the
+    /// running one.
     fn kept(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(self.perch().join("bin"))
             .into_iter()
             .flatten()
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "perchd")
             .collect();
         names.sort();
         names
@@ -158,6 +161,12 @@ async fn an_app_brings_its_engine_to_a_host_and_starts_it() {
     );
     assert_eq!(host.kept(), [format!("perchd-{build}")]);
     let pid = host.engine_pid().expect("an engine holds the home");
+    // `perchd context` on the host is the running engine's build.
+    let linked = std::fs::read_link(host.perch().join("bin/perchd")).unwrap();
+    assert_eq!(
+        linked.file_name().unwrap().to_string_lossy(),
+        format!("perchd-{build}")
+    );
 
     // Again: the host has it and it is running, so nothing is sent and
     // nothing is started.

@@ -3527,12 +3527,18 @@ fn list_all_review_groups(
     ctx: &Ctx,
     item_id: &str,
 ) -> Result<Vec<perch_github::ReviewGroup>, String> {
+    cache(ctx, |cache| all_review_groups(cache, item_id))
+}
+
+/// Every review group of an item, newest first, a page at a time.
+fn all_review_groups(
+    cache: &perch_github::Cache,
+    item_id: &str,
+) -> Result<Vec<perch_github::ReviewGroup>, perch_github::CacheError> {
     let mut groups = Vec::new();
     let mut before = None;
     loop {
-        let page = cache(ctx, |cache| {
-            cache.list_review_groups(item_id, before, REVIEW_HISTORY_PAGE)
-        })?;
+        let page = cache.list_review_groups(item_id, before, REVIEW_HISTORY_PAGE)?;
         let page_len = page.len();
         let next = page.last().map(|group| group.number);
         groups.extend(page);
@@ -3820,15 +3826,24 @@ fn build_archive(
     ctx: &Ctx,
     item: &perch_github::Item,
 ) -> Result<perch_knowledge::ReviewArchive, String> {
-    let groups = list_all_review_groups(ctx, &item.id)?;
+    cache(ctx, |cache| review_archive(cache, item))
+}
+
+/// An item's review history, every review and finding with what was said
+/// in its thread, as the knowledge export and `perch context` write it.
+/// Reads `cache` alone, so a reader with no engine builds the same thing.
+pub fn review_archive(
+    cache: &perch_github::Cache,
+    item: &perch_github::Item,
+) -> Result<perch_knowledge::ReviewArchive, perch_github::CacheError> {
+    let groups = all_review_groups(cache, &item.id)?;
     let mut attempts_by_id = HashMap::new();
     let mut group_archives = Vec::with_capacity(groups.len());
     for group in groups.into_iter().rev() {
-        let Some(snapshot) = cache(ctx, |cache| cache.load_review_snapshot(&group.snapshot_id))?
-        else {
+        let Some(snapshot) = cache.load_review_snapshot(&group.snapshot_id)? else {
             continue;
         };
-        let attempts = cache(ctx, |cache| cache.list_reviewer_attempts(&group.id))?;
+        let attempts = cache.list_reviewer_attempts(&group.id)?;
         for attempt in &attempts {
             attempts_by_id.insert(attempt.id.clone(), attempt.clone());
         }
@@ -3867,15 +3882,16 @@ fn build_archive(
         });
     }
 
-    let threads = cache(ctx, |cache| cache.load_comment_threads(&item.id))?
+    let threads = cache
+        .load_comment_threads(&item.id)?
         .into_iter()
         .map(|thread| (thread.id.clone(), thread))
         .collect::<HashMap<_, _>>();
-    let findings = cache(ctx, |cache| cache.list_findings(&item.id, None))?;
+    let findings = cache.list_findings(&item.id, None)?;
     let mut finding_archives = Vec::with_capacity(findings.len());
     for finding in findings {
-        let observations = cache(ctx, |cache| cache.list_finding_observations(&finding.id))?;
-        let audits = cache(ctx, |cache| cache.list_finding_audit(&finding.id))?;
+        let observations = cache.list_finding_observations(&finding.id)?;
+        let audits = cache.list_finding_audit(&finding.id)?;
         let latest = observations.last();
         let mut entries = Vec::new();
         let mut represented_messages = HashSet::new();

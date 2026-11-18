@@ -364,8 +364,7 @@ pub fn write(dir: &Path, files: &BTreeMap<String, String>) -> std::io::Result<()
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "discussion".into());
-    let staging = parent.join(format!(".{name}.tmp-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&staging);
+    let staging = make_staging(parent, &name)?;
     let result = (|| {
         for (relative, contents) in files {
             let path = staging.join(relative);
@@ -380,6 +379,32 @@ pub fn write(dir: &Path, files: &BTreeMap<String, String>) -> std::io::Result<()
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// A new directory beside the one being written, only its owner's, under
+/// a name nobody can guess and made only if nothing is there: `parent`
+/// may be a directory others write to, such as `/tmp`, where one planted
+/// under a known name, or a link in it, would take the files elsewhere.
+fn make_staging(parent: &Path, name: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut tries = 0;
+    loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let staging = parent.join(format!(
+            ".{name}.tmp-{}-{nanos:x}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&staging) {
+            Ok(()) => return Ok(staging),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 => tries += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// One line for the index: where, who, what state, which file, and how it
@@ -723,6 +748,41 @@ fn render_checks(checks: &[CheckEntry]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_are_written_through_a_staging_directory_only_this_writer_made() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        // What an older writer's staging name was: planted, it is not used.
+        let planted = parent
+            .path()
+            .join(format!(".ctx.tmp-{}", std::process::id()));
+        std::fs::create_dir(&planted).unwrap();
+        std::os::unix::fs::symlink("/nonexistent", planted.join("INDEX.md")).unwrap();
+
+        let dir = parent.path().join("ctx");
+        let files = BTreeMap::from([
+            ("INDEX.md".to_string(), "index".to_string()),
+            ("threads/r1.md".to_string(), "thread".to_string()),
+        ]);
+        write(&dir, &files).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("INDEX.md")).unwrap(),
+            "index"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("threads/r1.md")).unwrap(),
+            "thread"
+        );
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let left: Vec<_> = std::fs::read_dir(parent.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert!(write(&dir, &files).is_err(), "it wrote over a directory");
+    }
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()

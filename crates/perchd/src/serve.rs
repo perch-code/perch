@@ -162,6 +162,40 @@ fn newer_database(path: &std::path::Path, found: Option<&str>) -> Result<(), Str
     }
 }
 
+/// Point `$PERCH_HOME/bin/perchd` at this build, for an agent on the
+/// host: `~/.perch/bin/perchd context` is then the build of the engine
+/// that has the database, which another build may not read. A failure
+/// is a line in the log; the engine runs without it.
+fn link_for_agents() {
+    let Ok(exe) = crate::own_exe() else {
+        return;
+    };
+    let bin = perch_github::config::perch_home().join("bin");
+    if let Err(error) = link_in(&bin, &exe) {
+        tracing::warn!(%error, bin = %bin.display(), "could not link perchd for agents");
+    }
+}
+
+/// `bin/perchd` as a link to `exe`, replaced whole. Something there that
+/// is not a link is someone's own, and stays.
+fn link_in(bin: &std::path::Path, exe: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(bin)?;
+    let link = bin.join("perchd");
+    match std::fs::symlink_metadata(&link) {
+        Ok(found) if !found.file_type().is_symlink() => return Ok(()),
+        Ok(_) if std::fs::read_link(&link).is_ok_and(|to| to == exe) => return Ok(()),
+        _ => {}
+    }
+    // A dot name the bridge's sweep leaves alone for an hour, which is
+    // ample for a rename.
+    let temp = bin.join(format!(".perchd-link-{}", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+    std::os::unix::fs::symlink(exe, &temp)?;
+    std::fs::rename(&temp, &link).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })
+}
+
 /// Where an engine that could not start says why.
 pub fn failed_path() -> std::path::PathBuf {
     socket::path().with_file_name("serve-failed")
@@ -257,6 +291,7 @@ fn serve(idle: Option<Duration>) -> Result<(), Failed> {
             }
         }
     };
+    link_for_agents();
     // perchd keeps no settings of its own beyond the engine's.
     unstarted.start(|_| {});
     tracing::info!(socket = %socket.display(), "listening");
@@ -452,6 +487,27 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_link_for_agents_follows_the_build_and_leaves_a_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let (one, two) = (dir.path().join("perchd-1"), dir.path().join("perchd-2"));
+        link_in(&bin, &one).unwrap();
+        assert_eq!(std::fs::read_link(bin.join("perchd")).unwrap(), one);
+        link_in(&bin, &two).unwrap();
+        assert_eq!(std::fs::read_link(bin.join("perchd")).unwrap(), two);
+        assert_eq!(
+            std::fs::read_dir(&bin).unwrap().count(),
+            1,
+            "a temporary link stayed"
+        );
+
+        std::fs::remove_file(bin.join("perchd")).unwrap();
+        std::fs::write(bin.join("perchd"), "mine").unwrap();
+        link_in(&bin, &one).unwrap();
+        assert_eq!(std::fs::read_to_string(bin.join("perchd")).unwrap(), "mine");
+    }
 
     /// A forwarded agent comes with an ssh session's own variables; a
     /// host's own agent, from a desktop login, comes alone and is kept.
