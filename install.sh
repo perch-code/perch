@@ -5,6 +5,8 @@
 # On a Mac this puts Perch.app in /Applications. On Linux it unpacks Perch
 # into ~/.local/share/perch. Either way it links ~/.local/bin/perch to the
 # app, so `perch context` runs from a terminal or an agent's shell.
+# It adds ~/.local/bin to PATH in your shell's startup file unless it is on
+# PATH already or PERCH_NO_MODIFY_PATH is set to something other than 0.
 # PERCH_INSTALL_DIR overrides where Perch.app or the perch folder goes.
 
 set -eu
@@ -81,10 +83,56 @@ else
 	ln -sf "$dest/perch/perch" "$bin/perch"
 fi
 echo "Linked $bin/perch"
-case ":$PATH:" in
-*":$bin:"*) ;;
-*) echo "Add $bin to your PATH to run perch" ;;
-esac
+
+# Put ~/.local/bin on PATH in the shell's startup file, as rustup and uv do:
+# a Mac has no ~/.local/bin on PATH, and some Linux shells don't either.
+# The line checks PATH first, so a startup file read twice adds it once.
+on_path() {
+	case ":$PATH:" in
+	*":$bin:"*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+add_to_path() {
+	line='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+	case "$(basename "${SHELL:-sh}")" in
+	# .zshenv, not .zshrc: every zsh reads it, including the non-interactive
+	# `zsh -c` and `zsh -lc` an agent started from the Dock runs commands in.
+	zsh) rc=${ZDOTDIR:-$HOME}/.zshenv ;;
+	bash)
+		rc=$HOME/.bashrc
+		# Terminal.app starts login shells, which read the first of these
+		# there is, not .bashrc: a new .bash_profile would hide a .profile.
+		if [ "$os" = macos ]; then
+			rc=$HOME/.bash_profile
+			for f in .bash_profile .bash_login .profile; do
+				if [ -e "$HOME/$f" ]; then
+					rc=$HOME/$f
+					break
+				fi
+			done
+		fi
+		;;
+	fish)
+		rc=${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/perch.fish
+		line='contains $HOME/.local/bin $PATH; or set -gx PATH $HOME/.local/bin $PATH'
+		;;
+	*) rc=$HOME/.profile ;;
+	esac
+	if grep -qsF "$line" "$rc"; then
+		echo "$rc puts $bin on PATH; open a new terminal to run perch"
+		return
+	fi
+	mkdir -p "$(dirname "$rc")" || return 1
+	printf '\n# Added by the Perch installer\n%s\n' "$line" >>"$rc" || return 1
+	echo "Added $bin to PATH in $rc; open a new terminal to run perch"
+}
+if ! on_path; then
+	case ${PERCH_NO_MODIFY_PATH:-0} in
+	0) add_to_path || echo "Add $bin to your PATH to run perch" ;;
+	*) echo "Add $bin to your PATH to run perch" ;;
+	esac
+fi
 
 if ! command -v gh >/dev/null 2>&1; then
 	echo "Perch needs the GitHub CLI: install it from https://cli.github.com, then run gh auth login"

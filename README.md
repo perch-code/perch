@@ -34,10 +34,24 @@ curl -fsSL https://raw.githubusercontent.com/perch-code/perch/main/install.sh | 
 ```
 
 On a Mac, install.sh puts Perch.app in `/Applications`. On Linux, it unpacks Perch
-into `~/.local/share/perch` and links `~/.local/bin/perch` to it.
+into `~/.local/share/perch`. Either way it links `~/.local/bin/perch` to it and,
+if `~/.local/bin` isn't on your `PATH`, adds it in your shell's startup file
+(`~/.zshenv`, `~/.bashrc` or similar). Set `PERCH_NO_MODIFY_PATH=1` to skip that.
+
+The macOS app is signed and notarized by Apple, so you can instead download
+`Perch-macos-arm64.tar.gz` (or `-x86_64`) from
+[Releases](https://github.com/perch-code/perch/releases/latest), unpack it, and
+drag Perch.app to `/Applications`. To run `perch context` from a terminal, link
+the CLI yourself and put `~/.local/bin` on your `PATH`:
+
+```bash
+mkdir -p ~/.local/bin
+ln -sf /Applications/Perch.app/Contents/MacOS/perch ~/.local/bin/perch
+```
 
 After that, Perch checks for new releases. Click "Restart to update" to
-upgrade when one is detected.
+upgrade when one is detected. On a Mac, permissions you've granted Perch carry
+over to new versions.
 
 ## Setup
 

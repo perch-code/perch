@@ -1093,8 +1093,9 @@ another schema, from a newer or older Perch, is refused rather than migrated:
 use the `perch` that came with the Perch that is running. On a host,
 `~/.perch/bin/perchd context` reads the host's engine's database the same
 way: `perchd serve` points `$PERCH_HOME/bin/perchd` at its own build as it
-starts. The installer links `~/.local/bin/perch` on a Mac as on Linux, so an
-agent's shell finds it.
+starts. The installer links `~/.local/bin/perch` on a Mac as on Linux and puts
+`~/.local/bin` on `PATH` in the shell's startup file, so an agent's shell
+finds it.
 
 ### Repository history for agents
 
