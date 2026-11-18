@@ -442,11 +442,10 @@ mod tests {
     fn eval_effect<'a>(rules: &'a [Value], action: &str, resource: &str) -> &'a str {
         rules
             .iter()
-            .filter(|r| {
+            .rfind(|r| {
                 wildcard_match(r["action"].as_str().unwrap(), action)
                     && wildcard_match(r["resource"].as_str().unwrap(), resource)
             })
-            .next_back()
             .and_then(|r| r["effect"].as_str())
             .unwrap_or("deny")
     }
@@ -593,9 +592,13 @@ mod tests {
         }
         let existing = [discussion];
         let limit = 3;
-        assert!(can_add_read_dir_with_budget(&checkout, &existing, &archive, limit));
+        assert!(can_add_read_dir_with_budget(
+            &checkout, &existing, &archive, limit
+        ));
         std::fs::write(archive.join("conversation.md"), "").unwrap();
-        assert!(!can_add_read_dir_with_budget(&checkout, &existing, &archive, limit));
+        assert!(!can_add_read_dir_with_budget(
+            &checkout, &existing, &archive, limit
+        ));
         assert!(refusal_with_budget(&checkout, &existing, limit).is_none());
     }
 
@@ -610,11 +613,32 @@ mod tests {
         std::fs::write(&outside, "").unwrap();
         std::os::unix::fs::symlink(&outside, checkout.join("AGENTS.md")).unwrap();
         let ask = crate::Mode::Ask;
-        let work = crate::Mode::Work(crate::WorkGrant { trust: true, ..Default::default() });
-        assert!(!crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &ask));
-        assert!(crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &work));
+        let work = crate::Mode::Work(crate::WorkGrant {
+            trust: true,
+            ..Default::default()
+        });
+        assert!(!crate::can_add_read_dir(
+            Backend::OpenCode,
+            &checkout,
+            &[],
+            &archive,
+            &ask
+        ));
+        assert!(crate::can_add_read_dir(
+            Backend::OpenCode,
+            &checkout,
+            &[],
+            &archive,
+            &work
+        ));
         std::os::unix::fs::symlink(&outside, archive.join("AGENTS.md")).unwrap();
-        assert!(!crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &work));
+        assert!(!crate::can_add_read_dir(
+            Backend::OpenCode,
+            &checkout,
+            &[],
+            &archive,
+            &work
+        ));
     }
 
     #[test]

@@ -169,7 +169,7 @@ mod tests {
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
                 let mut request = [0; 4096];
-                stream.read(&mut request).unwrap();
+                assert!(stream.read(&mut request).unwrap() > 0);
                 let length = if known { "Content-Length: 6\r\n" } else { "" };
                 write!(
                     stream,

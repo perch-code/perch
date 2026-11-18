@@ -723,18 +723,18 @@ fn set_key(
     let Some(mut value) = value else {
         let index = table.iter().position(|(k, _)| *k == place.key);
         let comment = table
-            .key(&*place.key)
+            .key(&place.key)
             .and_then(|key| key.leaf_decor().prefix())
             .and_then(|prefix| prefix.as_str())
             .filter(|prefix| prefix.contains('#'))
             .map(str::to_string);
-        table.remove(&*place.key);
+        table.remove(&place.key);
         return Ok(match (comment, index) {
             (Some(comment), Some(index)) if !inline => put_above_first(table, index, comment),
             _ => None,
         });
     };
-    match table.get_mut(&*place.key) {
+    match table.get_mut(&place.key) {
         // In place, keeping what sat around the old value, such as a
         // comment after it.
         Some(Item::Value(old)) => {

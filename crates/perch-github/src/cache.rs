@@ -2793,7 +2793,11 @@ impl Cache {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
         Ok((
-            Self { conn, avatar_dir, item_changes: None },
+            Self {
+                conn,
+                avatar_dir,
+                item_changes: None,
+            },
             outcome,
         ))
     }

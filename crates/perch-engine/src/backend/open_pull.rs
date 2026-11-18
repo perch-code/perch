@@ -14,8 +14,8 @@ use perch_git::{PushError, RepoId};
 use perch_github::{Item, ItemCheckout, PullLookup, PullRequest};
 
 use super::{
-    configured_base, count_divergence, head_repo_of, install_pull_request_snapshot,
-    attach_pull_request, refresh_open_item, refresh_scope, root_of, Ctx, Event,
+    attach_pull_request, configured_base, count_divergence, head_repo_of,
+    install_pull_request_snapshot, refresh_open_item, refresh_scope, root_of, Ctx, Event,
 };
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1089,9 +1089,9 @@ async fn remote_for(ctx: &Ctx, checkout: &ItemCheckout, head_repo: &str) -> Stri
 /// Give the branch's row its pull request, and the open view with it.
 async fn attach(ctx: &Ctx, item_id: &str, pr: PullRequest) -> Result<(), String> {
     let number = pr.number;
-    let item = attach_pull_request(ctx, item_id, pr).await?.ok_or_else(|| {
-        format!("#{number} is open, and another row with a worktree has it.")
-    })?;
+    let item = attach_pull_request(ctx, item_id, pr)
+        .await?
+        .ok_or_else(|| format!("#{number} is open, and another row with a worktree has it."))?;
     let Some(pull_request) = item.pull_request().cloned() else {
         return Err("The pull request was not stored".into());
     };

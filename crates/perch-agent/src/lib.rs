@@ -3555,7 +3555,7 @@ mod tests {
                 let Conversation::Acp(client) = spec.conversation() else {
                     panic!("Gemini Work uses ACP");
                 };
-                assert_eq!(client.read_only_dirs(), [archive.clone()]);
+                assert_eq!(client.read_only_dirs(), std::slice::from_ref(&archive));
             } else {
                 let args = spec.args();
                 assert!(args.windows(2).any(|w| w == ["--add-dir", &path]));
@@ -3592,7 +3592,7 @@ mod tests {
             let Conversation::Acp(client) = spec.conversation() else {
                 panic!("OpenCode uses ACP");
             };
-            assert_eq!(client.read_only_dirs(), [archive.clone()]);
+            assert_eq!(client.read_only_dirs(), std::slice::from_ref(&archive));
         }
     }
 

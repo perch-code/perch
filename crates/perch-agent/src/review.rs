@@ -2594,7 +2594,7 @@ mod tests {
         for backend in Backend::ALL {
             let mut spec = review_spec(backend, archive.clone());
             spec.knowledge_dir = Some(archive.clone());
-            assert_eq!(spec.read_dirs(), [archive.clone()]);
+            assert_eq!(spec.read_dirs(), std::slice::from_ref(&archive));
             let args = spec.args();
             if matches!(backend, Backend::ClaudeCode | Backend::Gemini) {
                 assert!(args.windows(2).any(|w| w == ["--add-dir", &path]));
@@ -2619,7 +2619,7 @@ mod tests {
         for backend in Backend::ALL {
             let mut spec = review_spec(backend, checkout.path().into());
             spec.external_knowledge_dirs = vec![source.clone()];
-            assert_eq!(spec.read_dirs(), [source.clone()]);
+            assert_eq!(spec.read_dirs(), std::slice::from_ref(&source));
             let args = spec.args();
             if matches!(backend, Backend::ClaudeCode | Backend::Gemini) {
                 assert!(args
