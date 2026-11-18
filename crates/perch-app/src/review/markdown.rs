@@ -62,7 +62,7 @@ use floem::reactive::Memo;
 use floem::taffy::prelude::auto;
 use floem::taffy::GridTemplateComponent;
 use floem::text::{
-    Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight, InlineBox, LineHeightValue, TextLayout,
+    Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight, InlineBox, LineHeightValue,
 };
 use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
@@ -2567,9 +2567,8 @@ fn list_view(start: Option<u64>, items: Vec<Item>, ctx: Ctx) -> AnyView {
     // last number, so the text lines up down the list and the numbers
     // line up on their dots.
     let column = match start {
-        Some(n) => {
-            (text_width(&format!("{}.", n + items.len() as u64 - 1), ctx.size) + 4.0).max(18.0)
-        }
+        Some(n) => (theme::text_width(&format!("{}.", n + items.len() as u64 - 1), ctx.size) + 4.0)
+            .max(18.0),
         None => 18.0,
     };
     let rows: Vec<AnyView> = items
@@ -2618,13 +2617,6 @@ fn list_view(start: Option<u64>, items: Vec<Item>, ctx: Ctx) -> AnyView {
     Stack::vertical_from_iter(rows)
         .style(move |s| s.flex_col().width_full())
         .into_any()
-}
-
-/// How wide `text` is in the body font at `size`.
-fn text_width(text: &str, size: f32) -> f64 {
-    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
-    let attrs = AttrsList::new(Attrs::new().font_size(size).family(&family));
-    TextLayout::new_with_text(text, attrs, None).size().width
 }
 
 /// A task item's box, drawn as the sidebar draws a checkbox but smaller

@@ -26,7 +26,7 @@ use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::titlebar::title_bar;
-use crate::ui::widgets::{sidebar_glyph, with_shortcut_hint};
+use crate::ui::widgets::{shortcut_width, sidebar_glyph, with_shortcut_hint, ShortcutHint};
 use crate::update::UpdateStatus;
 use perch_github::Item;
 
@@ -49,18 +49,48 @@ pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl
     })
 }
 
+const TAB_PADDING: f64 = 5.0;
+
 /// The strip the traffic lights sit over, followed by the drawer control,
 /// the three tabs, and `+` for new work.
 fn lights_strip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+    // Measure only when the keymap changes. As the strip narrows, keep the
+    // tab names and controls in place, giving their hints the spare room.
+    let widths = floem::reactive::Memo::new(move |_| {
+        let mut tabs = 0.0;
+        let mut tab_keys = 0.0;
+        for tab in SidebarTab::ALL {
+            tabs += theme::text_width(tab.label(), theme::TEXT_META).ceil() + 2.0 * TAB_PADDING;
+            tab_keys += shortcut_width(tab_action(tab));
+        }
+        // Two 26pt icon buttons, two 2pt tab gaps, the tab inset, right
+        // padding, and the drawer border.
+        let base = tabs + 52.0 + 4.0 + 4.0 + 6.0 + 1.0;
+        let with_tabs = base + tab_keys;
+        (
+            with_tabs,
+            with_tabs + shortcut_width(Action::ToggleSidebar) + shortcut_width(Action::NewWork),
+        )
+    });
+    let room = move || state.sidebar_width.get() - theme::lights_lane_width();
+    let icon_style = move |s: floem::style::Style| {
+        s.apply_if(room() < widths.get().1, |s| {
+            s.class(ShortcutHint, |s| s.hide())
+        })
+    };
     title_bar(
         Stack::horizontal((
-            lights_lane(state, 0.0),
-            scope_tabs(state).style(|s| s.margin_left(8.0)),
+            lights_lane(state, 0.0).style(icon_style),
+            scope_tabs(state).style(move |s| {
+                s.margin_left(4.0).apply_if(room() < widths.get().0, |s| {
+                    s.class(ShortcutHint, |s| s.hide())
+                })
+            }),
             Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
-            new_work_button(state, backend),
+            new_work_button(state, backend).style(icon_style),
         ))
         .debug_name("drawer strip")
-        .style(|s| s.items_center().width_full().padding_right(12.0)),
+        .style(|s| s.items_center().width_full().padding_right(6.0)),
     )
     .style(|s| {
         s.height(theme::TITLEBAR_HEIGHT)
@@ -117,7 +147,6 @@ pub fn pane_lights_lane(state: AppState) -> impl IntoView {
 /// `+`: the new-work view, as `Cmd-N` opens it.
 fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     Container::new(with_shortcut_hint(
-        state,
         Action::NewWork,
         sidebar_glyph(SidebarIcon::Plus, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
     ))
@@ -128,7 +157,8 @@ fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     .style(move |s| {
         let open = state.new_work.open.get();
         crate::ui::widgets::clickable(s)
-            .size(26.0, 26.0)
+            .height(26.0)
+            .padding_horiz(5.0)
             .items_center()
             .justify_center()
             .border_radius(8.0)
@@ -142,7 +172,6 @@ fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 /// sidebar toggle is: it names the drawer, not the direction.
 fn toggle_button(state: AppState) -> impl IntoView {
     Container::new(with_shortcut_hint(
-        state,
         Action::ToggleSidebar,
         sidebar_glyph(SidebarIcon::Drawer, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
     ))
@@ -150,7 +179,8 @@ fn toggle_button(state: AppState) -> impl IntoView {
     .debug_name("drawer toggle")
     .style(|s| {
         crate::ui::widgets::clickable(s)
-            .size(26.0, 26.0)
+            .height(26.0)
+            .padding_horiz(5.0)
             .items_center()
             .justify_center()
             .border_radius(8.0)
@@ -427,36 +457,34 @@ fn scope_tabs(state: AppState) -> impl IntoView {
         || SidebarTab::ALL,
         |tab| tab.label(),
         move |tab| {
-            Button::new(with_shortcut_hint(
-                state,
-                tab_action(tab),
-                Label::new(tab.label()),
-            ))
-            .action(move || set_filters(state, move |f| f.tab = tab))
-            .debug_name(format!("tab:{}", tab.label()))
-            .style(move |s| {
-                let selected = state.item_filters.with(|f| f.tab == tab);
-                crate::ui::widgets::clickable(s)
-                    .height(31.0)
-                    .padding_horiz(9.0)
-                    .padding_vert(0.0)
-                    .border(0.0)
-                    .border_radius(10.0)
-                    .font_size(theme::TEXT_META)
-                    .color(if selected {
-                        theme::nav_fg()
-                    } else {
-                        theme::nav_muted()
-                    })
-                    .background(if selected {
-                        theme::nav_selected()
-                    } else {
-                        theme::nav_canvas()
-                    })
-                    .flex_shrink(0.0_f32)
-                    .hover(|s| s.background(theme::nav_hover()))
-                    .focus_visible(|s| s.outline(2.0).outline_color(theme::nav_control_border()))
-            })
+            Button::new(with_shortcut_hint(tab_action(tab), Label::new(tab.label())))
+                .action(move || set_filters(state, move |f| f.tab = tab))
+                .debug_name(format!("tab:{}", tab.label()))
+                .style(move |s| {
+                    let selected = state.item_filters.with(|f| f.tab == tab);
+                    crate::ui::widgets::clickable(s)
+                        .height(31.0)
+                        .padding_horiz(TAB_PADDING)
+                        .padding_vert(0.0)
+                        .border(0.0)
+                        .border_radius(10.0)
+                        .font_size(theme::TEXT_META)
+                        .color(if selected {
+                            theme::nav_fg()
+                        } else {
+                            theme::nav_muted()
+                        })
+                        .background(if selected {
+                            theme::nav_selected()
+                        } else {
+                            theme::nav_canvas()
+                        })
+                        .flex_shrink(0.0_f32)
+                        .hover(|s| s.background(theme::nav_hover()))
+                        .focus_visible(|s| {
+                            s.outline(2.0).outline_color(theme::nav_control_border())
+                        })
+                })
         },
     )
     .style(|s| s.flex_row().items_center().gap(2.0).flex_shrink(0.0_f32))

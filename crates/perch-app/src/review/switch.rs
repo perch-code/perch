@@ -13,14 +13,13 @@ use floem::views::{Container, Decorators, Label, Stack};
 
 use crate::keymap::Action;
 use crate::review::model::{ItemTab, ReviewState};
-use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::with_shortcut_hint;
 
-pub fn switch(app: AppState, state: ReviewState) -> impl IntoView {
+pub fn switch(state: ReviewState) -> impl IntoView {
     Stack::horizontal((
-        segment(app, state, ItemTab::Conversation, "Conversation"),
-        segment(app, state, ItemTab::Code, "Code"),
+        segment(state, ItemTab::Conversation, "Conversation"),
+        segment(state, ItemTab::Code, "Code"),
     ))
     .debug_name("item switch")
     // The bar it sits in is the window's title bar, and lets the pointer
@@ -36,7 +35,7 @@ pub fn switch(app: AppState, state: ReviewState) -> impl IntoView {
 
 /// One segment of the switch. Selection is a soft neutral fill, not an
 /// accent line, so the control stays out of the document's way.
-fn segment(app: AppState, state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoView {
+fn segment(state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoView {
     let active = move || state.tab.get() == which;
     let label = Label::derived(move || name.to_string()).style(move |s| {
         s.font_size(theme::TEXT_META)
@@ -56,7 +55,7 @@ fn segment(app: AppState, state: ReviewState, which: ItemTab, name: &'static str
         ItemTab::Conversation => Action::ShowConversation,
         ItemTab::Code => Action::ShowCode,
     };
-    Container::new(with_shortcut_hint(app, action, label))
+    Container::new(with_shortcut_hint(action, label))
         .debug_name(format!("{name} pill"))
         .on_event_stop(el::Click, move |_, _| state.show_tab(which))
         .style(move |s| {

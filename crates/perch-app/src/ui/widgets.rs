@@ -13,44 +13,38 @@ use floem::style::ObjectFit;
 
 use crate::theme::{self, Ink};
 
-/// Float the active binding just below a toolbar control's content. Absolute
-/// positioning keeps the control and its click target still when hints appear.
+floem::style_class!(
+    /// Inline shortcut text can yield its space to the control on a narrow toolbar.
+    pub ShortcutHint
+);
+
+const SHORTCUT_SIZE: f32 = 11.0;
+const SHORTCUT_GAP: f64 = 6.0;
+
+/// The extra room an inline binding needs, including its leading space.
+pub(crate) fn shortcut_width(action: crate::keymap::Action) -> f64 {
+    crate::keymap::label(action).map_or(0.0, |text| {
+        theme::text_width(&text, SHORTCUT_SIZE).ceil() + SHORTCUT_GAP
+    })
+}
+
+/// Show the current binding as secondary text beside the toolbar label or icon.
 pub(crate) fn with_shortcut_hint(
-    app: AppState,
     action: crate::keymap::Action,
     content: impl IntoView + 'static,
 ) -> impl IntoView {
-    let binding = move || {
-        if app.show_shortcut_hints.get() {
-            crate::keymap::label(action)
-        } else {
-            None
-        }
-    };
+    let binding = move || crate::keymap::label(action);
     let hint = Label::derived(move || binding().unwrap_or_default())
         .debug_name("shortcut hint")
+        .class(ShortcutHint)
         .style(move |s| {
-            s.position(floem::style::Position::Absolute)
-                .inset_top_pct(100.0)
-                // The arrows are adjacent. Let their keycaps grow away from
-                // each other, including longer user-defined bindings.
-                .apply_if(action == crate::keymap::Action::HistoryBack, |s| {
-                    s.inset_right(0.0)
-                })
-                .apply_if(action == crate::keymap::Action::HistoryForward, |s| {
-                    s.inset_left(0.0)
-                })
-                .margin_top(2.0)
-                .padding_horiz(4.0)
-                .padding_vert(1.0)
-                .border_radius(4.0)
-                .background(theme::badge_bg())
+            s.margin_left(SHORTCUT_GAP)
                 .color(theme::fg_muted())
-                .font_size(10.0)
+                .font_size(SHORTCUT_SIZE)
                 .selectable(false)
                 .apply_if(binding().is_none(), |s| s.hide())
         });
-    Stack::vertical((content, hint)).style(|s| s.items_center().pointer_events_none())
+    Stack::horizontal((content, hint)).style(|s| s.items_center().pointer_events_none())
 }
 
 /// Open an HTTP(S) link supplied by GitHub in the user's default browser.

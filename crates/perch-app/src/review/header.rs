@@ -28,7 +28,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::github_url;
 use crate::ui::titlebar::{part_of_bar, title_bar};
-use crate::ui::widgets::{icon_button, sidebar_glyph};
+use crate::ui::widgets::{icon_button, shortcut_width, sidebar_glyph, ShortcutHint};
 
 /// The bar, the same for every kind of item: a pull request, an issue, or
 /// a worktree of the reader's own.
@@ -36,10 +36,26 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
     // The bar is the window's title bar, so a press on anything in it that
     // is not a control drags the window. Its three parts let the pointer
     // through, and each control in them takes it back.
+    let key_widths = floem::reactive::Memo::new(move |_| {
+        let tabs = shortcut_width(Action::ShowConversation) + shortcut_width(Action::ShowCode);
+        let arrows = shortcut_width(Action::HistoryBack) + shortcut_width(Action::HistoryForward);
+        (tabs, arrows, shortcut_width(Action::ToggleSidebar))
+    });
+    let spare = move || app.window_width.get() - app.sidebar_shown_width() - theme::MAIN_MIN_WIDTH;
     title_bar(
         Stack::horizontal((
-            leading(app, state, backend.clone()),
-            crate::review::switch::switch(app, state),
+            leading(app, state, backend.clone()).style(move |s| {
+                let (tabs, arrows, toggle) = key_widths.get();
+                let lane = if app.sidebar_present() { 0.0 } else { toggle };
+                s.apply_if(spare() < arrows + lane + tabs, |s| {
+                    s.class(ShortcutHint, |s| s.hide())
+                })
+            }),
+            crate::review::switch::switch(state).style(move |s| {
+                s.apply_if(spare() < key_widths.get().0, |s| {
+                    s.class(ShortcutHint, |s| s.hide())
+                })
+            }),
             trailing(app, state, backend),
         ))
         .debug_name("item bar"),
@@ -532,7 +548,10 @@ pub(crate) mod tests {
         // and Forward, the state glyph and their gaps are all that is.
         let arrows = rect(&harness, "history arrows");
         assert_eq!(arrows.x0, bar.x0 + theme::REVIEW_HEADER_PADDING);
-        assert_eq!(arrows.width(), 2.0 * 26.0);
+        assert!(
+            arrows.width() > 2.0 * 26.0,
+            "room for both inline shortcuts"
+        );
         assert_eq!(title.x0, arrows.x1 + 8.0 + 16.0 + 8.0);
         // The switch is at the bar's centre, with the drawer open and
         // with it shut.

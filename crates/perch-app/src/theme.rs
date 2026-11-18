@@ -498,6 +498,15 @@ pub fn weight_strong() -> FontWeight {
     FontWeight::SEMI_BOLD
 }
 
+/// How wide `text` is in the body font at `size`.
+pub fn text_width(text: &str, size: f32) -> f64 {
+    use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
+
+    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(FONT_STACK).collect();
+    let attrs = AttrsList::new(Attrs::new().font_size(size).family(&family));
+    TextLayout::new_with_text(text, attrs, None).size().width
+}
+
 /// Line heights, as a multiple of the size. Prose runs at 1.625, Codex's
 /// relaxed leading, which is what its description and comments read at.
 pub const PROSE_LINE_HEIGHT: f32 = 1.625;

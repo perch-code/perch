@@ -27,8 +27,6 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
-#[cfg(not(target_os = "macos"))]
-use floem::ui_events::keyboard::Location;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::{Backend, Status};
@@ -397,13 +395,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         drawer::resize_cursor_sheet(state),
     ));
     let root_id = root.view_id();
-    #[cfg(not(target_os = "macos"))]
-    let ctrl_sides = RwSignal::new([false; 2]);
-    let hide_shortcuts = move || {
-        #[cfg(not(target_os = "macos"))]
-        ctrl_sides.set([false; 2]);
-        state.show_shortcut_hints.set(false);
-    };
     let focus_backend = backend.clone();
     let blur_backend = backend.clone();
     // macOS's scroll bar setting, read again whenever it changes.
@@ -484,13 +475,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             move |cx, _| {
-                // An overlay receives key-up outside this root. Clear the
-                // hints as focus leaves, even if the previous view still exists.
-                if !cx.window_state.is_focus_within(root_id)
-                    && state.show_shortcut_hints.get_untracked()
-                {
-                    hide_shortcuts();
-                }
                 if lost.get() == focus_target(cx) {
                     lost.set(None);
                     // Looked at again after the next layout, by when a
@@ -503,13 +487,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Whether the reader can see the window: a run that ends on the
         // open item isn't news while they can.
         .on_event_cont(el::WindowGainedFocus, move |_, _| {
-            #[cfg(target_os = "macos")]
-            crate::windows::sync_command_hints(state);
             focus_backend.set_window_key(true)
         })
         .on_event_cont(el::WindowLostFocus, move |_, _| {
             // A key given to a shortcut, still down, comes up elsewhere.
-            hide_shortcuts();
             state.settings.let_go();
             blur_backend.set_window_key(false)
         })
@@ -521,8 +502,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             move |_, key: &KeyboardEvent| {
-                #[cfg(not(target_os = "macos"))]
-                track_ctrl(state, ctrl_sides, key);
                 if state.settings.held.get_untracked() == Some(key.code) {
                     state.settings.let_go();
                 }
@@ -574,8 +553,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             alone(move |cx, key: &KeyboardEvent| {
-                #[cfg(not(target_os = "macos"))]
-                track_ctrl(state, ctrl_sides, key);
                 let key_backend = &capture_backend;
                 // Cmd-P's palette is modal: while it is up, its keys are
                 // its own, whatever has the keyboard, and the rest are its
@@ -1370,22 +1347,6 @@ fn focus_target(cx: &floem::context::EventCx<'_>) -> Option<floem::ViewId> {
         .map(|step| step.owning_id)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn track_ctrl(state: AppState, sides: RwSignal<[bool; 2]>, event: &KeyboardEvent) {
-    if event.key != Key::Named(NamedKey::Control) {
-        return;
-    }
-    let side = match event.location {
-        Location::Left => 0,
-        Location::Right => 1,
-        _ => return,
-    };
-    sides.update(|held| held[side] = event.state == KeyState::Down);
-    state
-        .show_shortcut_hints
-        .set(sides.get_untracked().contains(&true));
-}
-
 /// A window key handler that, once it stops a key, stops it for the
 /// root's other handlers too. With nothing focused the root is the key's
 /// target, and every handler on it hears the key even once one has
@@ -1980,18 +1941,11 @@ mod tests {
     }
 
     #[test]
-    fn holding_the_shortcut_modifier_reveals_the_current_bindings() {
+    fn toolbar_shows_current_bindings_inline() {
         let _keymap = keymap::install(keymap::with_bindings("worktrees = 'alt+x'\nbrowse = []"));
-        let (mut harness, state, _) = window_and_state_with_a_file_open();
+        let (mut harness, _, _) = window_and_state_with_a_file_open();
         let root = harness.root_id();
-        let badge = |control| named(named(root, control).unwrap(), "shortcut hint").unwrap();
-        let tab = named(root, "tab:Worktrees").unwrap();
-        let tab_rect = tab.get_visual_rect();
-        let hint = badge("tab:Worktrees");
-        assert!(hint.is_hidden());
-
-        state.show_shortcut_hints.set(true);
-        harness.rebuild();
+        let shortcut = |control| named(named(root, control).unwrap(), "shortcut hint").unwrap();
         let painted = harness.paint_and_get_order();
         for (control, action) in [
             ("tab:Inbox", Action::Inbox),
@@ -2003,8 +1957,11 @@ mod tests {
             ("back tip", Action::HistoryBack),
             ("forward tip", Action::HistoryForward),
         ] {
-            let hint = badge(control);
-            assert!(painted.contains(&hint), "{control} badge was not painted");
+            let hint = shortcut(control);
+            assert!(
+                painted.contains(&hint),
+                "{control} shortcut was not painted"
+            );
             assert!(hint.debug_name().contains(&keymap::label(action).unwrap()));
             let rect = hint.get_visual_rect();
             assert!(
@@ -2012,55 +1969,19 @@ mod tests {
                 "{control} {rect:?}"
             );
             assert_eq!(rect, hint.get_visual_rect_no_clip(), "{control}");
+            let content = hint.parent().unwrap().children()[0].get_visual_rect();
+            assert!(
+                rect.x0 >= content.x1 && rect.y0 < content.y1 && content.y0 < rect.y1,
+                "{control}: hint {rect:?} should sit beside {content:?}"
+            );
         }
-        let back = badge("back tip").get_visual_rect();
-        let forward = badge("forward tip").get_visual_rect();
+        let back = shortcut("back tip").get_visual_rect();
+        let forward = shortcut("forward tip").get_visual_rect();
         assert!(
             back.x1 < forward.x0,
-            "history keycaps overlap: {back:?} {forward:?}"
+            "history shortcuts overlap: {back:?} {forward:?}"
         );
-        assert!(badge("tab:Browse").is_hidden());
-        assert_eq!(tab.get_visual_rect(), tab_rect);
-
-        let filter = named(harness.root_id(), "sidebar filter").unwrap();
-        let center = filter.get_visual_rect().center();
-        harness.click(center.x, center.y);
-        harness.rebuild();
-        assert!(menu::is_open());
-        assert!(hint.is_hidden(), "the menu took keyboard focus");
-        state.show_shortcut_hints.set(false);
-        menu::close();
-        harness.rebuild();
-        assert!(hint.is_hidden(), "release inside the menu left the hint up");
-
-        state.show_shortcut_hints.set(true);
-        harness.dispatch_event(floem::event::Event::Window(
-            floem::event::WindowEvent::FocusLost,
-        ));
-        harness.rebuild();
-        assert!(hint.is_hidden());
-    }
-
-    #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn either_ctrl_key_keeps_shortcut_hints_visible() {
-        let (mut harness, app, _) = window_and_state_with_a_file_open();
-        for (location, state, held) in [
-            (Location::Left, KeyState::Down, true),
-            (Location::Right, KeyState::Down, true),
-            (Location::Left, KeyState::Up, true),
-            (Location::Right, KeyState::Up, false),
-        ] {
-            let floem::event::Event::Key(mut event) =
-                key(Code::Unidentified, Key::Named(NamedKey::Control), OS_MOD)
-            else {
-                unreachable!()
-            };
-            event.location = location;
-            event.state = state;
-            harness.dispatch_event(floem::event::Event::Key(event));
-            assert_eq!(app.show_shortcut_hints.get_untracked(), held);
-        }
+        assert!(shortcut("tab:Browse").is_hidden());
     }
 
     /// Open…'s box comes up over the window with the keyboard in it, says
