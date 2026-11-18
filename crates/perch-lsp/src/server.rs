@@ -1307,13 +1307,40 @@ mod tests {
             }
         }
 
-        /// An executable at `bin/name` that runs `script`.
+        /// An executable at `bin/name` that runs `script`, returned once
+        /// it can be run.
+        ///
+        /// On Linux a file open for writing can't be executed ("Text file
+        /// busy"), and a process another test forks while the script is
+        /// being written holds the write handle until it execs. `find`
+        /// takes a tool that won't start for one that isn't there, so a
+        /// test now and then saw no rustup. So the script is run once
+        /// with `PERCH_FAKE_PROBE` set, which ends it at once, until that
+        /// works.
         fn tool(&self, name: &str, script: &str) -> PathBuf {
             let path = self.path("bin").join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\n[ -n \"$PERCH_FAKE_PROBE\" ] && exit 0\n{script}\n"),
+            )
+            .unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path
+            for _ in 0..200 {
+                match std::process::Command::new(&path)
+                    .env("PERCH_FAKE_PROBE", "1")
+                    .status()
+                {
+                    Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    result => {
+                        result.unwrap();
+                        return path;
+                    }
+                }
+            }
+            panic!("{} stayed busy", path.display());
         }
 
         /// A JDK of `version` at `sub`, saying so in its `release` file.
