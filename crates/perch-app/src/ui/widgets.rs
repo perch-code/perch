@@ -1385,4 +1385,108 @@ mod tests {
         );
         assert!(room > 0.0 && wide <= room, "lines {wide} wide in {room}");
     }
+
+    /// A key ends a drag. A trackpad's tap-drag and three-finger drag
+    /// hold the button for a moment after the fingers lift, so Delete
+    /// comes before the release, and the pointer's next move must not
+    /// select from the caret the key left.
+    #[test]
+    fn a_key_pressed_during_a_drag_ends_the_drag() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::reactive::SignalWith;
+        use floem::ui_events::keyboard::{Code, Key, KeyState, KeyboardEvent, Modifiers, NamedKey};
+        use floem::ui_events::pointer::{
+            PointerButton, PointerButtonEvent, PointerEvent, PointerId, PointerInfo, PointerState,
+            PointerType,
+        };
+        use floem::views::Decorators;
+
+        fn button(x: f64, y: f64, down: bool) -> floem::event::Event {
+            let mut state = PointerState::default();
+            state.position.x = x;
+            state.position.y = y;
+            state.count = 1;
+            let event = PointerButtonEvent {
+                state,
+                button: Some(PointerButton::Primary),
+                pointer: PointerInfo {
+                    pointer_id: Some(PointerId::PRIMARY),
+                    persistent_device_id: None,
+                    pointer_type: PointerType::Mouse,
+                },
+            };
+            floem::event::Event::Pointer(if down {
+                PointerEvent::Down(event)
+            } else {
+                PointerEvent::Up(event)
+            })
+        }
+        fn key(code: Code, key: Key) -> floem::event::Event {
+            floem::event::Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key,
+                code,
+                location: Default::default(),
+                modifiers: Modifiers::empty(),
+                repeat: false,
+                is_composing: false,
+            })
+        }
+
+        let root = TestRoot::new();
+        let text = "one two three\nfour five six\nseven eight nine";
+        let editor = super::prose_editor(text, "", None)
+            .style(|s| s.size_full().font_size(crate::theme::TEXT_BODY));
+        let ed = editor.editor().clone();
+        let view = super::editor_box(editor, || (120.0, 120.0), true);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 300.0, 400.0);
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+        let selection = || {
+            let (anchor, head) = ed.cursor.with_untracked(|c| (c.start_offset(), c.offset()));
+            (anchor.min(head), anchor.max(head))
+        };
+        let line_height = f64::from(ed.line_height(0));
+        let pad = crate::theme::EDITOR_BOX_PADDING;
+        let y = |line: f64| pad + (line + 0.5) * line_height;
+
+        // A drag along the last line selects in it.
+        harness.dispatch_event(button(pad + 10.0, y(2.0), true));
+        harness.pointer_move(120.0, y(2.0));
+        let (start, end) = selection();
+        assert!(start < end, "the drag selected nothing: {start}..{end}");
+        assert!(start >= text.find("seven").unwrap(), "{start}..{end}");
+
+        // Backspace, the button still held as far as the system says.
+        harness.dispatch_event(key(Code::Backspace, Key::Named(NamedKey::Backspace)));
+        assert_eq!(selection(), (start, start));
+        let left = ed.doc().text().to_string();
+        assert_eq!(left.len(), text.len() - (end - start));
+
+        // The pointer goes up the box and the caret stays where it is.
+        harness.pointer_move(60.0, y(0.0));
+        assert_eq!(selection(), (start, start), "the drag went on");
+        harness.dispatch_event(button(60.0, y(0.0), false));
+        assert_eq!(selection(), (start, start));
+
+        // A typed letter ends a drag as Backspace does.
+        harness.dispatch_event(button(pad + 10.0, y(1.0), true));
+        harness.pointer_move(80.0, y(1.0));
+        let (start, end) = selection();
+        assert!(start < end, "the drag selected nothing: {start}..{end}");
+        harness.dispatch_event(key(Code::KeyX, Key::Character("x".into())));
+        assert_eq!(selection(), (start + 1, start + 1));
+        harness.pointer_move(60.0, y(0.0));
+        assert_eq!(selection(), (start + 1, start + 1), "the drag went on");
+        harness.dispatch_event(button(60.0, y(0.0), false));
+
+        // And the next press drags as ever.
+        harness.dispatch_event(button(pad + 10.0, y(0.0), true));
+        harness.pointer_move(80.0, y(0.0));
+        let (start, end) = selection();
+        assert!(start < end, "the next drag selected nothing");
+        harness.dispatch_event(button(80.0, y(0.0), false));
+    }
 }
