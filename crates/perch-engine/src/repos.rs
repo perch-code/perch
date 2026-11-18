@@ -90,6 +90,15 @@ pub fn repo_source(typed: &str) -> Result<RepoSource, String> {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || more.contains(&b))
     };
     match perch_git::RepoId::parse(&slug) {
+        // Cloned to its name in `clone_root`, the home directory with
+        // none, where a name that starts with a dot is a folder something
+        // else reads: `.ssh`, `.cargo`, `.config`.
+        Some(id) if plain(&id.owner, b"") && id.repo.starts_with('.') && plain(&id.repo, b"._") => {
+            Err(format!(
+                "Perch won't clone {}: its name starts with a dot, and it would go where a folder of settings does. Clone it yourself and add it by its path.",
+                id.full_name()
+            ))
+        }
         Some(id) if plain(&id.owner, b"") && plain(&id.repo, b"._") => Ok(RepoSource::GitHub(id)),
         _ => Err(format!(
             "\"{typed}\" is neither a repository on GitHub, as owner/name, nor a path starting with / or ~/."
@@ -139,6 +148,9 @@ mod tests {
             "widgets",
             "acme/widgets/extra",
             "acme/..",
+            "acme/.ssh",
+            "acme/.github",
+            "https://github.com/acme/.cargo.git",
             "-x/widgets",
             "acme/wid gets",
             "acme/$(id)",
