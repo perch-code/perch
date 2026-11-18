@@ -1183,6 +1183,19 @@ async fn execute_attempt(
     } else {
         None
     };
+    let discussion_dir = cache(ctx, |cache| cache.run_context(&run.id))
+        .ok()
+        .flatten()
+        .and_then(|context| context.dir)
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir());
+    let read_dirs: Vec<_> = discussion_dir.iter().cloned().collect();
+    let knowledge_dir = match run.owner.item_id().and_then(|id| ctx.item(id)) {
+        Some(item) => {
+            super::run_knowledge_dir(ctx, &item, backend, &checkout, &read_dirs, false).await
+        }
+        None => None,
+    };
     let spec = perch_agent::ReviewSpec {
         backend,
         binary: attempt
@@ -1199,12 +1212,8 @@ async fn execute_attempt(
         head_sha: captured.manifest.range.head.clone(),
         output_schema: schema,
         instructions,
-        discussion_dir: cache(ctx, |cache| cache.run_context(&run.id))
-            .ok()
-            .flatten()
-            .and_then(|context| context.dir)
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_dir()),
+        discussion_dir,
+        knowledge_dir,
         transcript: Some(transcript(captured.root(), &attempt.id, "review")),
     };
 

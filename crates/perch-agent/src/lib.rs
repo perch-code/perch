@@ -1793,7 +1793,7 @@ impl Run {
         let transcript = spec.transcript.clone();
         let external_reads = if spec.backend == Backend::OpenCode {
             std::iter::once(spec.diff_path.clone())
-                .chain(spec.discussion_dir.clone())
+                .chain(spec.read_dirs())
                 .collect()
         } else {
             Vec::new()
