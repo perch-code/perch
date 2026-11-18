@@ -13,7 +13,13 @@
 //! is pointed at, and keeps the manifest of what a run was shown.
 
 pub mod discussion;
+mod files;
 pub mod sanitize;
+
+pub use files::{
+    child_dirs, encode_component, ensure_dir, prune_temporary_files, remove_dir, remove_empty_dir,
+    remove_file, safe_component, sync, write_file,
+};
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

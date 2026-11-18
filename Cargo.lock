@@ -3799,6 +3799,7 @@ dependencies = [
  "jiff",
  "pulldown-cmark",
  "pulldown-cmark-to-cmark",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "tempfile",
