@@ -919,6 +919,13 @@ pub fn environments(state: AppState) -> Vec<EnvironmentChoice> {
         .collect()
 }
 
+/// The badge uses the machine alone when it identifies the connection.
+pub fn host_tag(host: &str) -> String {
+    app()
+        .and_then(|app| app.hosts.as_ref().map(|hosts| hosts.tag(host)))
+        .unwrap_or_else(|| hosts::machine(host))
+}
+
 /// Take `host` out of the environments the menu lists, unless a window
 /// has it open. A menu can have been up since before another window
 /// opened the host, and still offer to: it is put away then, having

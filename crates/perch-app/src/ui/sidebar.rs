@@ -265,7 +265,7 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 const SWITCH_PADDING: f64 = 4.0;
 
 /// Who is signed in to GitHub in the window's environment, with the
-/// environment under the login: the face and login are the environment's,
+/// host tag beside the login: the face and login are the environment's,
 /// so the three are one button, and its menu moves the window to another
 /// environment. While an update waits, only the face is left of it.
 fn environment_switch(state: AppState, updating: floem::reactive::Memo<bool>) -> impl IntoView {
@@ -289,37 +289,47 @@ fn environment_switch(state: AppState, updating: floem::reactive::Memo<bool>) ->
         state
             .place
             .with(|place| place.host())
+            .map(|host| crate::windows::host_tag(&host))
             .unwrap_or_else(|| perch_engine::host::HERE_FIRST.into())
     };
-    let names = Stack::vertical((
-        Label::derived(login).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::nav_fg())
-                .text_ellipsis()
-                .min_width(0.0)
-                .max_width_full()
-                // Nobody signed in yet: the environment has the line.
-                .apply_if(login().is_empty(), |s| s.hide())
-        }),
+    let names = Stack::horizontal((
+        Label::derived(login)
+            .debug_name("window-login")
+            .style(move |s| {
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::nav_fg())
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .max_width_full()
+                    // Nobody signed in yet: the environment has the line.
+                    .apply_if(login().is_empty(), |s| s.hide())
+            }),
         Label::derived(environment)
             .debug_name("window-environment-name")
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::nav_muted())
+                    .font_family(theme::CODE_FONT_STACK.to_string())
+                    .color(theme::nav_fg())
+                    .background(theme::badge_bg())
+                    .padding_horiz(5.0)
+                    .padding_vert(2.0)
+                    .border_radius(4.0)
                     .text_ellipsis()
                     .min_width(0.0)
                     .max_width_full()
             }),
     ))
     .style(move |s| {
-        s.min_width(0.0)
+        s.items_center()
+            .gap(6.0)
+            .min_width(0.0)
             .flex_shrink(1.0_f32)
             .apply_if(updating.get(), |s| s.hide())
     });
     let switch = Stack::horizontal((
         face,
         names,
-        sidebar_glyph(SidebarIcon::ChevronUpDown, theme::nav_muted)
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::nav_muted)
             .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32)),
     ));
     let id = switch.view_id();
@@ -2892,7 +2902,7 @@ mod tests {
         }
     }
 
-    /// The face, the login and the environment under it are one button
+    /// The face, the login and the inline host tag are one button
     /// in the footer, whose menu lists the environments with the window's
     /// own checked, who is signed in there beside it, and the way to
     /// Settings for a host not yet connected to.
@@ -2915,6 +2925,8 @@ mod tests {
             "{switch:?} in {footer:?}"
         );
         let name = rect(&harness, "window-environment-name");
+        let login = rect(&harness, "window-login");
+        assert!(name.x0 > login.x1 && (name.center().y - login.center().y).abs() < 1.0);
         assert!(
             name.x0 > switch.x0 && name.x1 < switch.x1,
             "{name:?} in {switch:?}"
@@ -2927,14 +2939,16 @@ mod tests {
             [&format!("✓ {here}"), "—", "Connect to SSH host…"]
         );
         state.place.set(crate::remote::Place::Host {
-            host: "devbox".into(),
+            host: "me@devbox:2222".into(),
             home: Default::default(),
             data_root: Default::default(),
         });
+        harness.rebuild();
+        assert!(find(opener, "devbox").is_some());
         let menu = environment_menu(state, opener);
         assert_eq!(
             menu.outline(),
-            [here, "✓ devbox", "—", "Connect to SSH host…"]
+            [here, "✓ me@devbox:2222", "—", "Connect to SSH host…"]
         );
         menu.choose("Connect to SSH host…");
         assert!(state.settings.open.get_untracked());
