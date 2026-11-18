@@ -3803,6 +3803,7 @@ fn launch_failed(ctx: &Ctx, item_id: &str, message: String) {
 pub fn review_archive(
     cache: &perch_github::Cache,
     item: &perch_github::Item,
+    threads: &[perch_github::CommentThread],
 ) -> Result<perch_knowledge::ReviewArchive, perch_github::CacheError> {
     let groups = all_review_groups(cache, &item.id)?;
     let mut attempts_by_id = HashMap::new();
@@ -3850,10 +3851,9 @@ pub fn review_archive(
         });
     }
 
-    let threads = cache
-        .load_comment_threads(&item.id)?
-        .into_iter()
-        .map(|thread| (thread.id.clone(), thread))
+    let threads = threads
+        .iter()
+        .map(|thread| (thread.id.as_str(), thread))
         .collect::<HashMap<_, _>>();
     let findings = cache.list_findings(&item.id, None)?;
     let mut finding_archives = Vec::with_capacity(findings.len());
@@ -3918,9 +3918,9 @@ pub fn review_archive(
                 location: None,
             });
         }
-        if let Some(thread) = threads.get(&finding.thread_id) {
+        if let Some(thread) = threads.get(finding.thread_id.as_str()) {
             for message in &thread.messages {
-                if represented_messages.contains(&message.id) {
+                if message.is_draft() || represented_messages.contains(&message.id) {
                     continue;
                 }
                 let (backend, model) = match &message.author {
@@ -3945,6 +3945,7 @@ pub fn review_archive(
         finding_archives.push(perch_knowledge::FindingArchive {
             id: finding.id,
             thread_id: Some(finding.thread_id),
+            private_thread_file: None,
             severity: latest
                 .map(|observation| observation.severity.name().to_string())
                 .unwrap_or_else(|| "unknown".into()),

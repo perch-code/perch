@@ -113,37 +113,36 @@ pub fn archive(
         })
         .collect();
     let events = discussion.events.iter().filter_map(event_line).collect();
-    let checks = checks
-        .map(|checks| {
-            checks
-                .runs
-                .iter()
-                .map(|run| CheckEntry {
-                    name: run.name.clone(),
-                    workflow: run.workflow.clone(),
-                    outcome: if run.state.is_failing() {
-                        CheckOutcome::Failing
-                    } else if run.state.is_pending() {
-                        CheckOutcome::Running
-                    } else if run.state.is_passing() {
-                        CheckOutcome::Passing
-                    } else {
-                        CheckOutcome::Other
-                    },
-                    description: run.description.clone(),
-                    url: run.url.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     DiscussionArchive {
         description,
         reviews,
         comments,
         threads,
         events,
-        checks,
+        checks: checks.map(check_entries).unwrap_or_default(),
     }
+}
+
+pub(crate) fn check_entries(checks: &Checks) -> Vec<CheckEntry> {
+    checks
+        .runs
+        .iter()
+        .map(|run| CheckEntry {
+            name: run.name.clone(),
+            workflow: run.workflow.clone(),
+            outcome: if run.state.is_failing() {
+                CheckOutcome::Failing
+            } else if run.state.is_pending() {
+                CheckOutcome::Running
+            } else if run.state.is_passing() {
+                CheckOutcome::Passing
+            } else {
+                CheckOutcome::Other
+            },
+            description: run.description.clone(),
+            url: run.url.clone(),
+        })
+        .collect()
 }
 
 /// A timeline event in words, for the conversation file. The opening is

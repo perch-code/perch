@@ -73,6 +73,9 @@ pub struct AttemptArchive {
 pub struct FindingArchive {
     pub id: String,
     pub thread_id: Option<String>,
+    /// Where the reader's own messages are kept when rendering the live archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_thread_file: Option<String>,
     pub severity: String,
     pub status: String,
     pub title: String,
@@ -225,6 +228,14 @@ pub fn render_review(review: &ReviewArchive) -> String {
         if let Some(thread_id) = &finding.thread_id {
             writeln!(output, "- Thread ID: `{}`", inline_code(thread_id)).unwrap();
         }
+        if let Some(file) = &finding.private_thread_file {
+            writeln!(
+                output,
+                "- [Private questions and answers]({})",
+                markdown_link(file)
+            )
+            .unwrap();
+        }
         if let Some(candidate) = &finding.possible_duplicate_of {
             writeln!(
                 output,
@@ -347,6 +358,7 @@ mod tests {
             findings: vec![FindingArchive {
                 id: "finding-1".into(),
                 thread_id: Some("thread-1".into()),
+                private_thread_file: None,
                 severity: "high".into(),
                 status: "open".into(),
                 title: "Bounds panic".into(),
