@@ -507,6 +507,15 @@ fn claude_work_settings_where(
     grant: &WorkGrant,
     globs_hold: bool,
 ) -> String {
+    claude_work_settings_with_dirs(cwd, grant, &[], globs_hold)
+}
+
+fn claude_work_settings_with_dirs(
+    cwd: &std::path::Path,
+    grant: &WorkGrant,
+    read_dirs: &[PathBuf],
+    globs_hold: bool,
+) -> String {
     let real = real_path(cwd);
     let mut allow_write = vec![real.clone(), real_path(&std::env::temp_dir())];
     allow_write.extend(grant.write.iter().map(|p| real_path(p)));
@@ -520,6 +529,7 @@ fn claude_work_settings_where(
         .map(|name| real.join(name))
         .collect();
     deny_write.push(nested_git(&real));
+    deny_write.extend(read_dirs.iter().map(|path| real_path(path)));
     if grant.commit {
         let (dirs, guarded) = commit_paths(&real, globs_hold);
         allow_write.extend(dirs);
@@ -677,6 +687,30 @@ fn real_path(path: &std::path::Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Whether an optional directory can be advertised and granted together.
+/// The checkout and already shared paths retain their normal validation.
+pub fn can_add_read_dir(
+    backend: Backend,
+    cwd: &std::path::Path,
+    read_dirs: &[PathBuf],
+    extra: &std::path::Path,
+    work: bool,
+) -> bool {
+    if !extra.is_dir() {
+        return false;
+    }
+    match (backend, work) {
+        (Backend::OpenCode, _) => opencode::can_add_read_dir(cwd, read_dirs, extra),
+        (Backend::Gemini, true) => gemini::can_share_with_work(cwd, extra),
+        (Backend::Gemini, false) => {
+            let mut dirs = read_dirs.to_vec();
+            dirs.push(extra.to_path_buf());
+            gemini::refusal(cwd, &dirs, false).is_none()
+        }
+        _ => true,
+    }
+}
+
 /// Whether an environment variable is kept from the agent. GitHub's
 /// tokens, the one Perch's own git commands carry, and anything named
 /// like a secret: the process runs a model on text nobody vetted, and
@@ -773,9 +807,7 @@ pub struct RunSpec {
     /// Ask or Work. For Claude Code it picks the tool lists and the
     /// sandbox settings; Codex has no tool list, and it picks the sandbox.
     pub mode: Mode,
-    /// Directories outside `cwd` a question may read. Only agy needs
-    /// telling: its sandbox reads nowhere else, where Claude Code's and
-    /// Codex's read anywhere.
+    /// Directories outside `cwd` the run is given to read.
     pub read_dirs: Vec<PathBuf>,
 }
 
@@ -807,6 +839,8 @@ impl RunSpec {
                 }
                 args
             }
+            // agy can write to an ACP workspace without asking. Perch
+            // instead answers individual read requests for shared paths.
             Mode::Work(_) => vec!["acp".into()],
         }
     }
@@ -874,14 +908,18 @@ impl RunSpec {
         ]);
         let (allowed, denied): (Vec<String>, Vec<String>) = match &self.mode {
             Mode::Ask => {
-                args.extend(claude_isolation_args(&self.cwd));
+                args.extend(isolation_args_with(claude_settings_with_dirs(
+                    &self.cwd,
+                    &self.read_dirs,
+                )));
                 (
                     READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
                     denied_tools().collect(),
                 )
             }
             Mode::Work(grant) => {
-                let settings = claude_work_settings(&self.cwd, grant);
+                let settings =
+                    claude_work_settings_with_dirs(&self.cwd, grant, &self.read_dirs, GLOBS_HOLD);
                 if grant.trust {
                     args.extend(trusted_args_with(&self.cwd, settings));
                 } else {
@@ -898,10 +936,25 @@ impl RunSpec {
                         .iter()
                         .map(|t| t.to_string())
                         .chain(protected)
+                        .chain(self.read_dirs.iter().flat_map(|path| {
+                            let real = real_path(path);
+                            EDIT_TOOLS.iter().flat_map(move |tool| {
+                                [
+                                    format!("{tool}(/{})", real.display()),
+                                    format!("{tool}(/{}/**)", real.display()),
+                                ]
+                            })
+                        }))
                         .collect(),
                 )
             }
         };
+        for dir in &self.read_dirs {
+            args.extend([
+                "--add-dir".into(),
+                real_path(dir).to_string_lossy().into_owned(),
+            ]);
+        }
         if let Some(system) = &self.system {
             args.push("--append-system-prompt".into());
             args.push(system.clone());
@@ -939,6 +992,7 @@ impl RunSpec {
                     self.framed_prompt(),
                     self.resume.clone(),
                     writable,
+                    self.read_dirs.iter().map(|path| real_path(path)).collect(),
                 )
             }
             Backend::Gemini => match &self.mode {
@@ -956,6 +1010,7 @@ impl RunSpec {
                         prompt: self.framed_prompt(),
                         resume: self.resume.clone(),
                         writable,
+                        read_only: self.read_dirs.iter().map(|path| real_path(path)).collect(),
                     })))
                 }
             },
@@ -998,6 +1053,9 @@ impl RunSpec {
             let filesystem: serde_json::Map<String, serde_json::Value> =
                 codex_work_entries(&self.cwd, grant)
                     .into_iter()
+                    .chain(self.read_dirs.iter().map(|path| {
+                        (real_path(path).to_string_lossy().into_owned(), "read")
+                    }))
                     .map(|(path, access)| (path, serde_json::json!(access)))
                     .collect();
             config["default_permissions"] = serde_json::json!(CODEX_WORK_PROFILE);
@@ -1748,6 +1806,7 @@ impl Run {
                 spec.opencode_prompt(),
                 None,
                 Vec::new(),
+                Vec::new(),
             )
         });
         let mut run = Self::spawn_process(
@@ -1786,6 +1845,7 @@ impl Run {
                 spec.effort.name(),
                 spec.opencode_prompt(),
                 None,
+                Vec::new(),
                 Vec::new(),
             )
         });
@@ -1831,9 +1891,14 @@ impl Run {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         scrub_env(&mut command);
-        if backend == Backend::OpenCode {
-            let work = matches!(conversation.as_ref(), Some(Conversation::Acp(client)) if client.opencode_work());
-            opencode::configure(&mut command, work, &external_reads).map_err(Error::Refused)?;
+        if let (Backend::OpenCode, Some(Conversation::Acp(client))) = (backend, &conversation) {
+            opencode::configure(
+                &mut command,
+                client.opencode_work(),
+                &external_reads,
+                client.read_only_dirs(),
+            )
+            .map_err(Error::Refused)?;
         }
         // Put every CLI invocation in its own process group. Claude and
         // Codex may launch commands and subagents of their own; signalling
@@ -3436,6 +3501,68 @@ mod tests {
             system: Some("You are in Perch.".into()),
             resume: None,
             mode,
+        }
+    }
+
+    #[test]
+    fn ask_and_work_apply_the_archive_read_grant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let cwd = root.join("repo");
+        let archive = root.join("archive");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&archive).unwrap();
+        for mode in [Mode::Ask, Mode::Work(WorkGrant::default())] {
+            let mut spec = gemini(mode.clone(), &cwd);
+            spec.read_dirs.push(archive.clone());
+            let path = archive.to_string_lossy();
+            let settings = |args: &[String]| {
+                serde_json::from_str::<serde_json::Value>(
+                    &args[args.iter().position(|arg| arg == "--settings").unwrap() + 1],
+                )
+                .unwrap()
+            };
+            let work = matches!(mode, Mode::Work(_));
+            if work {
+                assert_eq!(spec.args(), ["acp"]);
+                let Conversation::Acp(client) = spec.conversation() else {
+                    panic!("Gemini Work uses ACP");
+                };
+                assert_eq!(client.read_only_dirs(), [archive.clone()]);
+            } else {
+                let args = spec.args();
+                assert!(args.windows(2).any(|w| w == ["--add-dir", &path]));
+                assert!(settings(&args)["permissions"]["deny"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(format!("write_file({path})"))));
+            }
+
+            spec.backend = Backend::ClaudeCode;
+            let args = spec.args();
+            assert!(args.windows(2).any(|w| w == ["--add-dir", &path]));
+            assert!(settings(&args)["sandbox"]["filesystem"]["denyWrite"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(path)));
+            if work {
+                assert!(args.contains(&format!("Write(/{path}/**)")));
+            }
+
+            spec.backend = Backend::Codex;
+            let thread = spec.codex_thread();
+            if work {
+                assert_eq!(thread.config["permissions"][CODEX_WORK_PROFILE]["filesystem"][path.as_ref()], "read");
+            } else {
+                assert_eq!(thread.sandbox.as_deref(), Some("read-only"));
+            }
+
+            spec.backend = Backend::OpenCode;
+            assert_eq!(spec.args(), ["acp"]);
+            let Conversation::Acp(client) = spec.conversation() else {
+                panic!("OpenCode uses ACP");
+            };
+            assert_eq!(client.read_only_dirs(), [archive.clone()]);
         }
     }
 

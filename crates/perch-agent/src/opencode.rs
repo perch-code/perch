@@ -28,6 +28,7 @@ pub(crate) fn conversation(
     prompt: String,
     resume: Option<String>,
     writable: Vec<PathBuf>,
+    read_only: Vec<PathBuf>,
 ) -> Conversation {
     Conversation::Acp(Box::new(AcpClient::new(AcpSession {
         backend: Backend::OpenCode,
@@ -37,6 +38,7 @@ pub(crate) fn conversation(
         prompt,
         resume,
         writable,
+        read_only,
     })))
 }
 
@@ -95,7 +97,7 @@ fn slash_path(path: &Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn config_value(work: bool, external_reads: &[PathBuf]) -> Value {
+fn config_value(work: bool, external_reads: &[PathBuf], read_only: &[PathBuf]) -> Value {
     let rule = |action: &str, resource: &str, effect: &str| json!({"action": action, "resource": resource, "effect": effect});
     let gate = if work { "ask" } else { "deny" };
     let mut rules = vec![
@@ -142,6 +144,12 @@ fn config_value(work: bool, external_reads: &[PathBuf]) -> Value {
         for tool in ["edit", "shell", "webfetch", "websearch"] {
             rules.push(rule(tool, "*", "ask"));
         }
+        for path in read_only {
+            if let Some(slash) = slash_path(path) {
+                rules.push(rule("edit", &slash, "deny"));
+                rules.push(rule("edit", &format!("{slash}/*"), "deny"));
+            }
+        }
     }
     json!({
         "agents": { (mode(work)): {"mode": "primary", "permissions": rules} },
@@ -159,9 +167,10 @@ pub(crate) fn configure(
     command: &mut Command,
     work: bool,
     external_reads: &[PathBuf],
+    read_only: &[PathBuf],
 ) -> Result<(), String> {
     let home = perch_home()?;
-    configure_in(command, &home, work, external_reads)
+    configure_in(command, &home, work, external_reads, read_only)
 }
 
 fn configure_in(
@@ -169,6 +178,7 @@ fn configure_in(
     home: &Path,
     work: bool,
     external_reads: &[PathBuf],
+    read_only: &[PathBuf],
 ) -> Result<(), String> {
     // OpenCode applies previously saved "always allow" decisions after
     // agent-level "ask" rules. Keep Perch sessions in their own database
@@ -179,7 +189,7 @@ fn configure_in(
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("could not create {}: {e}", config_dir.display()))?;
 
-    let config = config_value(work, external_reads);
+    let config = config_value(work, external_reads, read_only);
     if let Some(key) = std::env::var_os("OPENCODE_API_KEY") {
         command.env("OPENCODE_API_KEY", key);
     }
@@ -211,6 +221,15 @@ pub(crate) fn refusal(cwd: &Path, added: &[PathBuf], trusted: bool) -> Option<St
         }
     }
     None
+}
+
+pub(crate) fn can_add_read_dir(cwd: &Path, added: &[PathBuf], dir: &Path) -> bool {
+    if slash_path(&real_path(dir)).is_none() {
+        return false;
+    }
+    let mut dirs = added.to_vec();
+    dirs.push(dir.to_path_buf());
+    refusal(cwd, &dirs, false).is_none()
 }
 
 fn refusal_text(cwd: &Path, finding: &Finding, own: bool) -> String {
@@ -351,7 +370,7 @@ fn vet_dir_instructions(
 pub async fn opencode_catalog(binary: &Path) -> Result<Vec<String>, String> {
     let mut cmd = Command::new(binary);
     crate::scrub_env(&mut cmd);
-    configure(&mut cmd, false, &[])?;
+    configure(&mut cmd, false, &[], &[])?;
     cmd.args(["models", "--standalone"])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
@@ -430,6 +449,7 @@ mod tests {
             "Follow up".into(),
             Some("s1".into()),
             vec![],
+            vec![],
         );
         let resume =
             request(client.after_line(&json!({"id":1,"result":{"agentInfo":{"version":"2.3.0"}}})));
@@ -459,6 +479,7 @@ mod tests {
             "Edit".into(),
             None,
             vec![PathBuf::from("/work")],
+            vec![],
         );
         let mode = request(client.after_line(&json!({"id":3,"result":{"configOptions":[]}})));
         assert_eq!(mode["params"]["value"], "perch-work");
@@ -525,7 +546,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut cmd = Command::new("opencode");
-        configure_in(&mut cmd, dir.path(), false, &[]).unwrap();
+        configure_in(&mut cmd, dir.path(), false, &[], &[]).unwrap();
         assert!(dir.path().join("opencode/config").is_dir());
         let envs: Vec<_> = cmd.as_std().get_envs().collect();
         let env_of = |key: &str| {
@@ -572,7 +593,7 @@ mod tests {
 
         for work in [false, true] {
             let gate = if work { "ask" } else { "deny" };
-            let cfg = config_value(work, &external);
+            let cfg = config_value(work, &external, &[]);
             let rules = cfg["agents"][mode(work)]["permissions"].as_array().unwrap();
 
             assert!(

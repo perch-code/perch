@@ -113,6 +113,15 @@ pub(crate) fn print_dirs(cwd: &Path, dirs: &[PathBuf]) -> Vec<PathBuf> {
     dirs
 }
 
+pub(crate) fn can_share_with_work(cwd: &Path, dir: &Path) -> bool {
+    let dir = crate::real_path(dir);
+    // agy can write here directly even in ACP's default mode, without
+    // a permission request Perch could refuse.
+    !dir.starts_with(crate::real_path(cwd))
+        && !dir.starts_with(crate::real_path(&std::env::temp_dir()))
+        && !dir.starts_with(crate::real_path(Path::new("/tmp")))
+}
+
 /// Why a Gemini run in `cwd`, adding `added` to its workspace, will not
 /// start, or `None` when it may.
 ///
@@ -985,6 +994,8 @@ pub(crate) struct AcpSession {
     /// Where an edit may go without asking: the worktree and the grant's
     /// directories, symlinks resolved.
     pub writable: Vec<PathBuf>,
+    /// Explicitly shared read-only directories, symlinks resolved.
+    pub read_only: Vec<PathBuf>,
 }
 
 const INITIALIZE: u64 = 1;
@@ -1051,6 +1062,10 @@ impl AcpClient {
 
     pub fn opencode_work(&self) -> bool {
         self.session.backend == crate::Backend::OpenCode && !self.session.writable.is_empty()
+    }
+
+    pub fn read_only_dirs(&self) -> &[PathBuf] {
+        &self.session.read_only
     }
 
     pub fn opening(&mut self) -> Vec<String> {
@@ -1605,7 +1620,10 @@ impl AcpClient {
         if let Some(paths) = edit_paths(&call, &self.session.cwd) {
             if paths
                 .iter()
-                .any(|path| is_protected(path, &self.session.cwd, &self.session.writable))
+                .any(|path| {
+                    self.session.read_only.iter().any(|dir| path.starts_with(dir))
+                        || is_protected(path, &self.session.cwd, &self.session.writable)
+                })
             {
                 self.refused = true;
                 events.push(RunEvent::PermissionDenied {
@@ -1629,6 +1647,15 @@ impl AcpClient {
                     ..Reply::default()
                 };
             }
+        }
+        if self.session.backend == crate::Backend::Gemini
+            && may_read(&call, &self.session.cwd, &self.session.read_only)
+        {
+            return Reply {
+                writes: answer_line(&id, &options, true).into_iter().collect(),
+                events,
+                ..Reply::default()
+            };
         }
         let key = match &id {
             Value::String(s) => s.clone(),
@@ -1747,6 +1774,32 @@ const EDIT_PATH_KEYS: &[&str] = &[
     "file_path",
     "target_file",
 ];
+
+/// Auto-allow only named file reads and searches with explicit paths in
+/// the granted directories. The CLI still asks about other tool calls.
+fn may_read(call: &Value, cwd: &Path, dirs: &[PathBuf]) -> bool {
+    if dirs.is_empty()
+        || !matches!(
+            tool_name(call).as_str(),
+            "read" | "read_file" | "view_file" | "view_file_outline" | "view_code_item"
+                | "list_dir" | "find_by_name" | "glob" | "grep" | "grep_search"
+        )
+    {
+        return false;
+    }
+    let args = tool_args(call);
+    let locations = call["locations"].as_array().into_iter().flatten()
+        .filter_map(|location| location["path"].as_str());
+    let arguments = EDIT_PATH_KEYS.iter()
+        .copied()
+        .chain(["DirectoryPath", "SearchPath", "SearchDirectory", "directory"])
+        .filter_map(|key| args[key].as_str());
+    let mut paths = locations.chain(arguments).filter(|path| !path.is_empty()).peekable();
+    paths.peek().is_some() && paths.all(|path| {
+        std::fs::canonicalize(cwd.join(path))
+            .is_ok_and(|real| dirs.iter().any(|dir| real.starts_with(dir)))
+    })
+}
 
 fn is_edit_call(call: &Value) -> bool {
     str_of(call, "kind") == "edit"
@@ -2418,6 +2471,7 @@ mod tests {
             prompt: "Fix it".into(),
             resume: None,
             writable: vec![crate::real_path(dir)],
+            read_only: Vec::new(),
         }
     }
 
@@ -2508,6 +2562,50 @@ mod tests {
         assert!(
             matches!(&opened.events[0], RunEvent::Started { session_id, .. } if session_id == "s-0")
         );
+    }
+
+    #[test]
+    fn acp_approves_archive_reads_and_searches_and_refuses_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let archive = root.join("archive");
+        let file = archive.join("probe.md");
+        std::fs::create_dir(&archive).unwrap();
+        std::fs::write(&file, "marker\n").unwrap();
+        let mut acp = AcpClient::new(AcpSession {
+            read_only: vec![archive.clone()],
+            ..session(&root)
+        });
+        let permission = |id, name, kind, input| json!({
+            "id": id,
+            "method": "session/request_permission",
+            "params": {
+                "toolCall": {"name": name, "kind": kind, "rawInput": input},
+                "options": [
+                    {"optionId": "allow", "kind": "allow_once"},
+                    {"optionId": "deny", "kind": "reject_once"}
+                ]
+            }
+        });
+        for call in [
+            permission("read", "read_file", "read", json!({"Path": file})),
+            permission("search", "grep_search", "search", json!({"SearchPath": archive})),
+        ] {
+            let reply = acp.after_line(&call);
+            assert!(reply.events.is_empty());
+            assert_eq!(written(&reply)["result"]["outcome"]["optionId"], "allow");
+        }
+        let new_file = archive.join("new.md");
+        let edit = acp.after_line(&permission(
+            "edit", "write_file", "edit", json!({"Path": new_file}),
+        ));
+        assert!(matches!(edit.events.as_slice(), [RunEvent::PermissionDenied { .. }]));
+        assert_eq!(written(&edit)["result"]["outcome"]["optionId"], "deny");
+        let outside = acp.after_line(&permission(
+            "outside", "grep_search", "search", json!({"SearchPath": root}),
+        ));
+        assert!(outside.writes.is_empty());
+        assert!(matches!(outside.events.as_slice(), [RunEvent::Approval { .. }]));
     }
 
     #[test]
@@ -2924,6 +3022,7 @@ mod tests {
             prompt: "Fix it".into(),
             resume: None,
             writable,
+            read_only: Vec::new(),
         });
         acp.opening();
         acp.after_line(&json!({"id": 1, "result": {"agentInfo": {"version": "2.3.0"}}}));
