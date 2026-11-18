@@ -376,9 +376,19 @@ Perch calls GitHub's API directly. It resolves credentials in this order:
 2. `GH_TOKEN`
 3. `gh auth token`
 4. `token` in `~/.perch/config.toml`
+5. `GITHUB_TOKEN`, then `GH_TOKEN`, as your login shell exports them
 
 Using `gh auth login` is the simplest setup for the desktop app because a GUI
-launch does not normally inherit shell environment variables. The credential
+launch does not normally inherit shell environment variables: opened from
+Finder or the Dock, Perch never sees an `export` in `~/.zprofile` or
+`~/.zshrc`. The last step is for that. With no token from the first four,
+Perch starts `$SHELL` as a terminal does, as a login and interactive shell,
+and reads the two variables from the environment it ends up with. It does
+this once, the first time it finds no token, and gives the shell five seconds;
+so an export added while Perch runs is found the next time Perch starts,
+while a `gh auth login` or a `token` in the config is found on the next poll.
+
+The credential
 must be allowed to read and update notifications and to read the repositories
 you open. Merging a pull request also requires `Contents: write` permission on
 its repository, as does pushing a branch from Perch's own clone; opening a pull
@@ -1763,8 +1773,9 @@ Settings** button. `perch --connect` prints
 the same list. It checks:
 
 - **GitHub token** (required): one is found, as the engine finds it:
-  `GITHUB_TOKEN`, `GH_TOKEN`, `gh auth token`, then `token` in its
-  config.toml. Only whether there is one, and where it came from, is
+  `GITHUB_TOKEN`, `GH_TOKEN`, `gh auth token`, `token` in its
+  config.toml, then the two variables as the login shell there exports
+  them. Only whether there is one, and where it came from, is
   said; the token never leaves the host. Fix: `gh auth login`.
 - **git** (required): `git --version` runs. Fix: the install command for
   the host's package manager (apt-get, dnf, yum, pacman, zypper or apk).

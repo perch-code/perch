@@ -49,7 +49,9 @@ it runs. See [docs/configuration.md](docs/configuration.md) for all settings.
 
 Perch looks for a GitHub token in this order: `GITHUB_TOKEN`, `GH_TOKEN`,
 `gh auth token`, then `token` in the config. Apps launched from Finder don't
-see your shell's environment, so `gh auth login` is the simplest route.
+see your shell's environment, so `gh auth login` is the simplest route. With
+none of those, Perch asks your login shell as it starts, so a token exported
+in a startup file such as `~/.zprofile` or `~/.zshrc` is found too.
 
 GitHub rate-limits each account to 5,000 REST requests an hour, plus a
 separate GraphQL budget. Run `gh api rate_limit` to see what's left, and

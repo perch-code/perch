@@ -231,7 +231,7 @@ pub(crate) fn checks(found: &Found) -> Vec<HostCheck> {
             what: "GitHub token".into(),
             ok: false,
             required: true,
-            detail: "No GitHub token: GITHUB_TOKEN and GH_TOKEN are unset, `gh auth token` gives none and config.toml sets no token.".into(),
+            detail: "No GitHub token: GITHUB_TOKEN and GH_TOKEN are unset, in the engine's environment and the login shell's, `gh auth token` gives none and config.toml sets no token.".into(),
             fix: Some("gh auth login".into()),
         },
     });

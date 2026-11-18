@@ -1486,7 +1486,9 @@ fn nothing_open(state: AppState, backend: Rc<Backend>, no_repos: bool) -> impl I
 
 /// What to do when no token resolved, in the main area's empty state. Built
 /// the way `centered_message` is, so it reads as the same screen as
-/// "Nothing open", with the two ways of signing in under the words.
+/// "Nothing open", with the ways of signing in under the words. Each says
+/// where its line goes: an `export` typed into a terminal reaches nothing
+/// an app opened from the Finder or the Dock can see.
 fn token_help(state: AppState) -> impl IntoView {
     let detail = move || match state.status.get() {
         Status::NoToken { detail } => detail,
@@ -1516,10 +1518,16 @@ fn token_help(state: AppState) -> impl IntoView {
                     .margin_bottom(16.0)
             }),
             Stack::vertical((
-                code_line("export GITHUB_TOKEN=ghp_..."),
-                code_line("gh auth login"),
+                sign_in_way("In a terminal", "gh auth login"),
+                // A key under a `[table]` heading would be that table's.
+                sign_in_way("At the top of ~/.perch/config.toml", "token = \"ghp_...\""),
+                sign_in_way(
+                    "In your shell's startup file, then restart Perch",
+                    "export GITHUB_TOKEN=ghp_...",
+                ),
             ))
-            .style(|s| s.gap(6.0)),
+            .style(|s| s.gap(12.0).items_center())
+            .debug_name("sign-in ways"),
             Label::derived(|| "The token needs the notifications scope.".to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::fg_subtle())
@@ -1529,6 +1537,19 @@ fn token_help(state: AppState) -> impl IntoView {
         .style(|s| s.items_center()),
     )
     .style(|s| s.size_full().items_center().justify_center().padding(40.0))
+}
+
+/// One way of giving Perch a token: where the line goes, over the line.
+/// The first two are taken up while Perch runs, on its next poll. The
+/// engine asks the login shell once, as it starts, so the third waits for
+/// a restart.
+fn sign_in_way(place: &'static str, line: &'static str) -> impl IntoView {
+    Stack::vertical((
+        Label::derived(move || place.to_string())
+            .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle())),
+        code_line(line),
+    ))
+    .style(|s| s.gap(4.0).items_center())
 }
 
 /// One command to copy, in the code font.
@@ -1591,6 +1612,27 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(!offered(&harness), "one in the config");
+    }
+
+    /// Without a token the pane says how to give Perch one: three ways,
+    /// each under where its line goes.
+    #[test]
+    fn with_no_token_the_pane_lists_the_ways_of_signing_in() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        assert!(named(harness.root_id(), "sign-in ways").is_none());
+
+        state.status.set(Status::NoToken {
+            detail: "Sign in with the GitHub CLI, or set a token.".into(),
+        });
+        harness.rebuild();
+        harness.paint();
+        let ways = named(harness.root_id(), "sign-in ways").expect("no ways of signing in");
+        assert_eq!(ways.children().len(), 3);
     }
 
     #[test]

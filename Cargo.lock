@@ -3778,6 +3778,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "jiff",
+ "libc",
  "octocrab",
  "percent-encoding",
  "reqwest",

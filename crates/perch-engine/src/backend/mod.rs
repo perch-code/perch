@@ -2001,6 +2001,14 @@ impl EngineLink {
     }
 }
 
+/// What goes under "No GitHub token found" in the app's empty state,
+/// which lists the ways of giving Perch one beneath it, each with where
+/// it goes. "Set GITHUB_TOKEN" alone is not one: typed into a terminal
+/// it reaches nothing already running, and an app opened from the Finder
+/// or the Dock sees only what a shell startup file exports, at its next
+/// start.
+const NO_TOKEN: &str = "Sign in with the GitHub CLI, or set a token.";
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     /// No usable token. The app shows setup instructions instead of a list.
@@ -4652,8 +4660,15 @@ async fn run(
 
     // GitHub is optional. The cache, local checkouts and agent history stay
     // useful without a token, so only polling and remote actions are gated
-    // on a client below.
-    let token = resolve_token(&config);
+    // on a client below. Finding the token may run `gh` and the login
+    // shell, so it is looked for off the runtime's threads.
+    let token = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || resolve_token(&config))
+            .await
+            .ok()
+            .flatten()
+    };
     let mut startup_status = None;
     let session = match token.as_ref() {
         Some(token) => match GitHub::new(&token.value) {
@@ -4675,7 +4690,7 @@ async fn run(
         None => {
             tracing::warn!("no token resolved");
             startup_status = Some(Status::NoToken {
-                detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
+                detail: NO_TOKEN.into(),
             });
             None
         }
@@ -15119,7 +15134,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
     }
     let Some(mut session) = session else {
         ctx.send_status(Status::NoToken {
-            detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
+            detail: NO_TOKEN.into(),
         });
         return no_poll;
     };
@@ -16387,7 +16402,10 @@ pub const BROWSE_PAGE: u32 = 50;
 /// One page of a Browse view's search, the faces on it asked for.
 async fn browse(ctx: &Ctx, query: &str, page: u32) -> Result<perch_github::SearchPage, String> {
     let Some(github) = ctx.github() else {
-        return Err("Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into());
+        return Err(
+            "No GitHub token: run `gh auth login` in a terminal, or set token in config.toml."
+                .into(),
+        );
     };
     match github.search_issues(query, page, BROWSE_PAGE).await {
         Ok(found) => {
