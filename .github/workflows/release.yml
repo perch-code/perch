@@ -43,8 +43,9 @@ jobs:
             exit 1
           fi
 
-  # The engine alone, for a Mac that is a host. Signed ad hoc as the app
-  # is: Apple Silicon runs nothing unsigned.
+  # The engine alone, for a Mac that is a host. Signed with Developer ID when
+  # the repository has a certificate configured, or ad hoc otherwise: Apple
+  # Silicon runs nothing unsigned.
   perchd-macos:
     needs: check
     runs-on: macos-15
@@ -53,18 +54,68 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Import Apple signing certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_P12" ] && [ -z "$APPLE_CERTIFICATE_PASSWORD" ] && [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "No Apple signing secrets configured; falling back to ad-hoc signing."
+            exit 0
+          fi
+          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "::error::Both APPLE_CERTIFICATE_P12 and APPLE_CERTIFICATE_PASSWORD must be set to sign with Developer ID"
+            exit 1
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/perch-signing.keychain-db"
+          KEYCHAIN_PASS="$(uuidgen)"
+          CERT_PATH="$RUNNER_TEMP/perch-signing.p12"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          EXISTING_KEYCHAINS=()
+          while IFS= read -r kc; do
+            [ -n "$kc" ] && EXISTING_KEYCHAINS+=("$kc")
+          done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${EXISTING_KEYCHAINS[@]}"
+          rm -f "$CERT_PATH"
+
+          IDENTITY="$APPLE_SIGNING_IDENTITY"
+          if [ -z "$IDENTITY" ]; then
+            IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk '/"Developer ID Application:/ { print $2; exit }')"
+          fi
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found; set APPLE_SIGNING_IDENTITY or check APPLE_CERTIFICATE_P12"
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
       - name: Build and package perchd
         run: |
           rustup target add x86_64-apple-darwin
+          IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
           for pair in aarch64-apple-darwin:arm64 x86_64-apple-darwin:x86_64; do
             triple="${pair%%:*}" arch="${pair##*:}"
             cargo build --release --locked -p perchd --target "$triple"
             bin="target/$triple/release/perchd"
-            codesign --force --sign - "$bin"
+            if [ "$IDENTITY" = "-" ]; then
+              codesign --force --sign - "$bin"
+            else
+              codesign --force --options runtime --timestamp --identifier com.perch.perchd --sign "$IDENTITY" "$bin"
+            fi
+            codesign --verify --strict "$bin"
             lipo -archs "$bin"
             COPYFILE_DISABLE=1 tar -czf "perchd-macos-$arch.tar.gz" -C "target/$triple/release" perchd
           done
           target/aarch64-apple-darwin/release/perchd --version
+
+      - name: Clean up signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/perch-signing.keychain-db" 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -142,6 +193,72 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Import Apple signing and notarization credentials
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_P12" ] && [ -z "$APPLE_CERTIFICATE_PASSWORD" ] && [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            if [ -n "$APPLE_API_KEY_P8" ] || [ -n "$APPLE_API_KEY_ID" ] || [ -n "$APPLE_API_ISSUER_ID" ]; then
+              echo "::error::Notarization secrets are set, but APPLE_CERTIFICATE_P12 / APPLE_CERTIFICATE_PASSWORD are missing"
+              exit 1
+            fi
+            echo "No Apple signing secrets configured; falling back to ad-hoc signing."
+            exit 0
+          fi
+          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "::error::Both APPLE_CERTIFICATE_P12 and APPLE_CERTIFICATE_PASSWORD must be set to sign with Developer ID"
+            exit 1
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/perch-signing.keychain-db"
+          KEYCHAIN_PASS="$(uuidgen)"
+          CERT_PATH="$RUNNER_TEMP/perch-signing.p12"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          EXISTING_KEYCHAINS=()
+          while IFS= read -r kc; do
+            [ -n "$kc" ] && EXISTING_KEYCHAINS+=("$kc")
+          done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${EXISTING_KEYCHAINS[@]}"
+          rm -f "$CERT_PATH"
+
+          IDENTITY="$APPLE_SIGNING_IDENTITY"
+          if [ -z "$IDENTITY" ]; then
+            IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk '/"Developer ID Application:/ { print $2; exit }')"
+          fi
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found; set APPLE_SIGNING_IDENTITY or check APPLE_CERTIFICATE_P12"
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+          if [ -n "$APPLE_API_KEY_P8" ] || [ -n "$APPLE_API_KEY_ID" ] || [ -n "$APPLE_API_ISSUER_ID" ]; then
+            if [ -z "$APPLE_API_KEY_P8" ] || [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER_ID" ]; then
+              echo "::error::APPLE_API_KEY_P8, APPLE_API_KEY_ID, and APPLE_API_ISSUER_ID must all be set to notarize"
+              exit 1
+            fi
+            KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+            if grep -q "BEGIN PRIVATE KEY" <<<"$APPLE_API_KEY_P8"; then
+              printf '%s\n' "$APPLE_API_KEY_P8" > "$KEY_PATH"
+            else
+              base64 --decode <<<"$APPLE_API_KEY_P8" > "$KEY_PATH"
+            fi
+            chmod 600 "$KEY_PATH"
+            {
+              echo "APPLE_NOTARY_KEY=$KEY_PATH"
+              echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID"
+              echo "APPLE_API_ISSUER_ID=$APPLE_API_ISSUER_ID"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: Build Perch.app for Apple Silicon
         run: ./scripts/bundle.sh
 
@@ -156,6 +273,12 @@ jobs:
 
       - name: Package for Intel
         run: COPYFILE_DISABLE=1 tar -czf Perch-macos-x86_64.tar.gz -C target Perch.app
+
+      - name: Clean up signing credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/perch-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
 
       - uses: actions/upload-artifact@v4
         with:

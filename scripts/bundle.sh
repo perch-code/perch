@@ -37,5 +37,52 @@ cp assets/Info.plist "$APP/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
 cp assets/Perch.icns "$APP/Contents/Resources/Perch.icns"
-codesign --force --sign - "$APP"
+# APPLE_SIGNING_IDENTITY signs with a Developer ID certificate and the
+# hardened runtime; unset or "-", the bundle is ad-hoc signed for local use.
+# With APPLE_NOTARY_KEY, APPLE_API_KEY_ID and APPLE_API_ISSUER_ID also set,
+# the signed bundle is notarized and stapled.
+IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+if [ "$IDENTITY" = "-" ]; then
+  codesign --force --sign - "$APP"
+else
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+fi
+codesign --verify --strict "$APP"
+
+if [ -n "${APPLE_NOTARY_KEY:-}" ]; then
+  if [ "$IDENTITY" = "-" ]; then
+    echo "bundle.sh: APPLE_NOTARY_KEY requires APPLE_SIGNING_IDENTITY" >&2
+    exit 1
+  fi
+  : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID is required with APPLE_NOTARY_KEY}"
+  : "${APPLE_API_ISSUER_ID:?APPLE_API_ISSUER_ID is required with APPLE_NOTARY_KEY}"
+  TMP_NOTARIZE="$(mktemp -d "${TMPDIR:-/tmp}/perch-notarize.XXXXXX")"
+  ZIP="$TMP_NOTARIZE/Perch.zip"
+  trap 'rm -rf "$TMP_NOTARIZE"' EXIT
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  SUBMISSION="$(xcrun notarytool submit "$ZIP" \
+    --key "$APPLE_NOTARY_KEY" \
+    --key-id "$APPLE_API_KEY_ID" \
+    --issuer "$APPLE_API_ISSUER_ID" \
+    --output-format json \
+    --wait)" || true
+  echo "$SUBMISSION"
+  STATUS="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<<"$SUBMISSION" 2>/dev/null || true)"
+  if [ "$STATUS" != "Accepted" ]; then
+    SUB_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' <<<"$SUBMISSION" 2>/dev/null || true)"
+    if [ -n "$SUB_ID" ]; then
+      xcrun notarytool log "$SUB_ID" \
+        --key "$APPLE_NOTARY_KEY" \
+        --key-id "$APPLE_API_KEY_ID" \
+        --issuer "$APPLE_API_ISSUER_ID" || true
+    fi
+    echo "bundle.sh: Apple notarization failed (status: ${STATUS:-unknown})" >&2
+    exit 1
+  fi
+  rm -rf "$TMP_NOTARIZE"
+  trap - EXIT
+  xcrun stapler staple "$APP"
+  spctl -a -t exec -vv "$APP"
+fi
+
 echo "Built $APP ($VERSION, $(lipo -archs "$APP/Contents/MacOS/perch"))"

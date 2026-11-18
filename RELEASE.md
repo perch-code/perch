@@ -22,3 +22,17 @@ gh workflow run release.yml
 ```
 
 It builds the engines and the apps as a tag would and stops there.
+
+## macOS Signing and Notarization
+
+When the repository has Apple signing secrets configured under **Settings › Secrets and variables › Actions**, the release workflow signs `perchd` and `Perch.app` with Developer ID and the hardened runtime (so macOS TCC permissions persist across updates) instead of signing ad hoc:
+
+- `APPLE_CERTIFICATE_P12` — base64-encoded `.p12` export of the `Developer ID Application` certificate and private key (`base64 -i cert.p12`)
+- `APPLE_CERTIFICATE_PASSWORD` — export password for that `.p12`
+- `APPLE_SIGNING_IDENTITY` *(optional)* — explicit identity name or SHA-1 fingerprint (auto-detected from the imported `.p12` when omitted)
+
+To also notarize and staple `Perch.app` for Gatekeeper on browser downloads, add an App Store Connect API key:
+
+- `APPLE_API_KEY_P8` — contents of `AuthKey_<KEY_ID>.p8` (raw PEM or base64-encoded)
+- `APPLE_API_KEY_ID` — Key ID
+- `APPLE_API_ISSUER_ID` — Issuer ID
