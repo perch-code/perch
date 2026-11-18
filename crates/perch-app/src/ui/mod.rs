@@ -2118,6 +2118,15 @@ mod tests {
             "nothing to show for it"
         );
 
+        app.sidebar_width.set(theme::lights_lane_width() + 310.0);
+        harness.rebuild();
+        assert!(glyph("tab:Inbox").0.is_hidden());
+        let (hint, icon) = glyph("drawer toggle");
+        assert!(
+            !hint.is_hidden() && icon.is_hidden(),
+            "the toggle still fits"
+        );
+
         app.sidebar_width.set(theme::lights_lane_width() + 100.0);
         harness.rebuild();
         let (hint, icon) = glyph("drawer toggle");

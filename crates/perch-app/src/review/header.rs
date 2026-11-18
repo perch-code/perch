@@ -50,7 +50,9 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
             leading(app, state, backend.clone()).style(move |s| {
                 let (tabs, arrows, toggle) = key_widths.get();
                 let lane = if app.sidebar_present() { 0.0 } else { toggle };
-                s.apply_if(spare() < arrows + lane + tabs, without_shortcuts)
+                let available = spare();
+                let tab_space = if available >= tabs { tabs } else { 0.0 };
+                s.apply_if(available - tab_space < arrows + lane, without_shortcuts)
             }),
             crate::review::switch::switch(state).style(move |s| {
                 s.apply_if(spare() < key_widths.get().0, |s| {

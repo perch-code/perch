@@ -70,27 +70,40 @@ fn lights_strip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         // padding, and the drawer border. A binding takes its icon's place,
         // so it adds only what it outgrows the icon by.
         let base = tabs + 52.0 + 4.0 + 4.0 + 6.0 + 1.0;
-        let with_tabs = base + tab_keys;
         (
-            with_tabs,
-            with_tabs
-                + shortcut_overhang(Action::ToggleSidebar)
-                + shortcut_overhang(Action::NewWork),
+            base,
+            tab_keys,
+            shortcut_overhang(Action::ToggleSidebar),
+            shortcut_overhang(Action::NewWork),
         )
     });
     let room = move || state.sidebar_width.get() - theme::lights_lane_width();
-    let icon_style =
-        move |s: floem::style::Style| s.apply_if(room() < widths.get().1, without_shortcuts);
+    let tabs_fit = move || {
+        let (base, tabs, _, _) = widths.get();
+        room() >= base + tabs
+    };
+    let icons_fit = move || {
+        let (base, tabs, toggle, new_work) = widths.get();
+        let available = room() - base - if tabs_fit() { tabs } else { 0.0 };
+        // If only one binding fits, prefer the smaller one, then the toggle.
+        if toggle + new_work <= available {
+            (true, true)
+        } else if toggle <= new_work {
+            (toggle <= available, false)
+        } else {
+            (false, new_work <= available)
+        }
+    };
     title_bar(
         Stack::horizontal((
-            lights_lane(state, 0.0).style(icon_style),
+            lights_lane(state, 0.0).style(move |s| s.apply_if(!icons_fit().0, without_shortcuts)),
             scope_tabs(state).style(move |s| {
-                s.margin_left(4.0).apply_if(room() < widths.get().0, |s| {
-                    s.class(ShortcutHint, |s| s.hide())
-                })
+                s.margin_left(4.0)
+                    .apply_if(!tabs_fit(), |s| s.class(ShortcutHint, |s| s.hide()))
             }),
             Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
-            new_work_button(state, backend).style(icon_style),
+            new_work_button(state, backend)
+                .style(move |s| s.apply_if(!icons_fit().1, without_shortcuts)),
         ))
         .debug_name("drawer strip")
         .style(|s| s.items_center().width_full().padding_right(6.0)),
