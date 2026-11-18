@@ -27,6 +27,8 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
+#[cfg(not(target_os = "macos"))]
+use floem::ui_events::keyboard::Location;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::{Backend, Status};
@@ -395,6 +397,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         drawer::resize_cursor_sheet(state),
     ));
     let root_id = root.view_id();
+    #[cfg(not(target_os = "macos"))]
+    let ctrl_sides = RwSignal::new([false; 2]);
+    let hide_shortcuts = move || {
+        #[cfg(not(target_os = "macos"))]
+        ctrl_sides.set([false; 2]);
+        state.shortcut_modifier_changed(false);
+    };
     let focus_backend = backend.clone();
     let blur_backend = backend.clone();
     // macOS's scroll bar setting, read again whenever it changes.
@@ -475,6 +484,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             move |cx, _| {
+                // A menu overlay can receive the release outside this root.
+                if !cx.window_state.is_focus_within(root_id) {
+                    hide_shortcuts();
+                }
                 if lost.get() == focus_target(cx) {
                     lost.set(None);
                     // Looked at again after the next layout, by when a
@@ -487,10 +500,16 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Whether the reader can see the window: a run that ends on the
         // open item isn't news while they can.
         .on_event_cont(el::WindowGainedFocus, move |_, _| {
+            #[cfg(target_os = "macos")]
+            crate::windows::sync_command_hints(
+                state,
+                objc2_app_kit::NSEvent::modifierFlags_class(),
+            );
             focus_backend.set_window_key(true)
         })
         .on_event_cont(el::WindowLostFocus, move |_, _| {
             // A key given to a shortcut, still down, comes up elsewhere.
+            hide_shortcuts();
             state.settings.let_go();
             blur_backend.set_window_key(false)
         })
@@ -502,6 +521,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             move |_, key: &KeyboardEvent| {
+                #[cfg(not(target_os = "macos"))]
+                track_ctrl(state, ctrl_sides, key);
                 if state.settings.held.get_untracked() == Some(key.code) {
                     state.settings.let_go();
                 }
@@ -553,6 +574,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 phases: floem::context::Phases::CAPTURE_AND_TARGET,
             },
             alone(move |cx, key: &KeyboardEvent| {
+                #[cfg(not(target_os = "macos"))]
+                track_ctrl(state, ctrl_sides, key);
                 let key_backend = &capture_backend;
                 // Cmd-P's palette is modal: while it is up, its keys are
                 // its own, whatever has the keyboard, and the rest are its
@@ -1163,6 +1186,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         .style(move |s| {
             scroller_style.track();
             s.size_full()
+                .apply_if(
+                    state.shortcut_hints.get() != crate::state::ShortcutHints::Visible,
+                    |s| s.class(widgets::ShortcutHint, |s| s.hide()),
+                )
                 // A press on anything that takes no keyboard of its own,
                 // a sidebar row or the page, gives the window the
                 // keyboard, so a key that types, `j` or `e`, reaches the
@@ -1345,6 +1372,20 @@ fn focus_target(cx: &floem::context::EventCx<'_>) -> Option<floem::ViewId> {
         .iter()
         .find(|step| step.phase == floem::event::Phase::Target)
         .map(|step| step.owning_id)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn track_ctrl(state: AppState, sides: RwSignal<[bool; 2]>, event: &KeyboardEvent) {
+    if event.key != Key::Named(NamedKey::Control) {
+        return;
+    }
+    let side = match event.location {
+        Location::Left => 0,
+        Location::Right => 1,
+        _ => return,
+    };
+    sides.update(|held| held[side] = event.state == KeyState::Down);
+    state.shortcut_modifier_changed(sides.get_untracked().contains(&true));
 }
 
 /// A window key handler that, once it stops a key, stops it for the
@@ -1941,11 +1982,31 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_shows_current_bindings_inline() {
+    fn toolbar_shows_current_bindings_inline_after_a_modifier_hold() {
         let _keymap = keymap::install(keymap::with_bindings("worktrees = 'alt+x'\nbrowse = []"));
-        let (mut harness, _, _) = window_and_state_with_a_file_open();
+        let (mut harness, app, _) = window_and_state_with_a_file_open();
         let root = harness.root_id();
         let shortcut = |control| named(named(root, control).unwrap(), "shortcut hint").unwrap();
+        let hint = shortcut("tab:Worktrees");
+        assert!(hint.is_hidden());
+        let press = || {
+            app.shortcut_modifier_changed(true);
+            let crate::state::ShortcutHints::Waiting(timer) = app.shortcut_hints.get_untracked()
+            else {
+                panic!("expected a pending shortcut reveal");
+            };
+            timer
+        };
+        let tap = press();
+        harness.rebuild();
+        assert!(hint.is_hidden());
+        app.shortcut_modifier_changed(false);
+        let hold = press();
+        app.reveal_shortcut_hints(tap);
+        harness.rebuild();
+        assert!(hint.is_hidden(), "the previous tap revealed a later hold");
+        app.reveal_shortcut_hints(hold);
+        harness.rebuild();
         let painted = harness.paint_and_get_order();
         for (control, action) in [
             ("tab:Inbox", Action::Inbox),
@@ -1982,6 +2043,50 @@ mod tests {
             "history shortcuts overlap: {back:?} {forward:?}"
         );
         assert!(shortcut("tab:Browse").is_hidden());
+        app.shortcut_modifier_changed(false);
+        harness.rebuild();
+        assert!(hint.is_hidden());
+
+        let pending = press();
+        harness.dispatch_event(floem::event::Event::Window(
+            floem::event::WindowEvent::FocusLost,
+        ));
+        app.reveal_shortcut_hints(pending);
+        harness.rebuild();
+        assert!(hint.is_hidden(), "window blur must cancel a pending reveal");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn either_ctrl_key_keeps_the_same_shortcut_hold() {
+        use crate::state::ShortcutHints;
+        let (mut harness, app, _) = window_and_state_with_a_file_open();
+        let mut ctrl = |location, state| {
+            let floem::event::Event::Key(mut event) =
+                key(Code::Unidentified, Key::Named(NamedKey::Control), OS_MOD)
+            else {
+                unreachable!()
+            };
+            event.location = location;
+            event.state = state;
+            harness.dispatch_event(floem::event::Event::Key(event));
+        };
+        ctrl(Location::Left, KeyState::Down);
+        let ShortcutHints::Waiting(timer) = app.shortcut_hints.get_untracked() else {
+            panic!("pressing Ctrl must start the hold timer");
+        };
+        ctrl(Location::Right, KeyState::Down);
+        ctrl(Location::Left, KeyState::Up);
+        app.reveal_shortcut_hints(timer);
+        assert!(matches!(
+            app.shortcut_hints.get_untracked(),
+            ShortcutHints::Visible
+        ));
+        ctrl(Location::Right, KeyState::Up);
+        assert!(matches!(
+            app.shortcut_hints.get_untracked(),
+            ShortcutHints::Hidden
+        ));
     }
 
     /// Open…'s box comes up over the window with the keyboard in it, says

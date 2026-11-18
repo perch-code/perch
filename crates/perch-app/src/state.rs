@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use floem::action::TimerToken;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use jiff::Timestamp;
 use perch_github::{AgentConfig, DeclaredRepo, Item, ItemSubject, Thread};
@@ -15,6 +16,14 @@ use perch_github::{AgentConfig, DeclaredRepo, Item, ItemSubject, Thread};
 use crate::backend::{Event, Status};
 use crate::items::{InboxView, SidebarTab};
 use crate::ui::agents::model::AgentRunSummary;
+
+/// Each window reveals its toolbar hints after one continuous modifier hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShortcutHints {
+    Hidden,
+    Waiting(TimerToken),
+    Visible,
+}
 
 /// Whether a box is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +355,7 @@ pub struct AppState {
     /// its minimum.
     pub drawer_width: RwSignal<f64>,
     pub drawer_resizing: RwSignal<bool>,
+    pub(crate) shortcut_hints: RwSignal<ShortcutHints>,
     /// The window's width, from its last layout. The drawer takes room
     /// from the main pane while there is enough, and lies over it when
     /// there is not.
@@ -492,6 +502,29 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub(crate) fn shortcut_modifier_changed(self, held: bool) {
+        match (held, self.shortcut_hints.get_untracked()) {
+            (true, ShortcutHints::Hidden) => {
+                let timer = floem::action::exec_after(Duration::from_millis(400), move |timer| {
+                    self.reveal_shortcut_hints(timer);
+                });
+                self.shortcut_hints.set(ShortcutHints::Waiting(timer));
+            }
+            (false, ShortcutHints::Waiting(timer)) => {
+                timer.cancel();
+                self.shortcut_hints.set(ShortcutHints::Hidden);
+            }
+            (false, ShortcutHints::Visible) => self.shortcut_hints.set(ShortcutHints::Hidden),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn reveal_shortcut_hints(self, timer: TimerToken) {
+        if self.shortcut_hints.try_get_untracked() == Some(ShortcutHints::Waiting(timer)) {
+            self.shortcut_hints.set(ShortcutHints::Visible);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             avatars: RwSignal::new(HashMap::new()),
@@ -530,6 +563,7 @@ impl AppState {
             tree_slide_run: RwSignal::new(0),
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
+            shortcut_hints: RwSignal::new(ShortcutHints::Hidden),
             window_width: RwSignal::new(0.0),
             window_height: RwSignal::new(0.0),
             main_pane: RwSignal::new((0.0, 0.0)),

@@ -640,7 +640,8 @@ there does what it always does. The × beside the keys
 takes them all away, and the reset arrow puts the defaults back. Several
 keys for one action are written in the file.
 
-The toolbar shows the current shortcuts inline beside the sidebar tabs,
+Hold Command on macOS or Ctrl on Linux for a moment to see the current
+shortcuts inline beside the sidebar tabs,
 sidebar toggle, New Work, Back and Forward arrows, and the Conversation
 and Code tabs. Narrow toolbars hide hints to keep the controls in reach.
 The Inbox, Worktrees, and Browse defaults yield to any shortcut you assign

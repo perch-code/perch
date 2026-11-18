@@ -238,6 +238,8 @@ fn start(session: Rc<Session>) {
         // which is the one under the pointer as a rule.
         let swiped = floem::ext_event::create_trigger();
         crate::swipes::watch(swiped);
+        #[cfg(target_os = "macos")]
+        watch_command_key();
         Effect::new(move |_| {
             swiped.track();
             Effect::untrack(|| {
@@ -254,6 +256,43 @@ fn start(session: Rc<Session>) {
             ..Default::default()
         })));
     });
+}
+
+/// AppKit reports a lone Command press as flagsChanged. It can arrive
+/// without a keyboard event directed to a Floem view.
+#[cfg(target_os = "macos")]
+fn watch_command_key() {
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2_app_kit::{NSEvent, NSEventMask};
+
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| {
+        if let Some(state) = focused_state() {
+            // SAFETY: AppKit supplies a live event on the main thread. Read
+            // this event's flags so a quick release and re-press stay distinct.
+            sync_command_hints(state, unsafe { event.as_ref() }.modifierFlags());
+        }
+        event.as_ptr()
+    });
+    // SAFETY: the monitor returns AppKit's event unchanged and lives for the app's lifetime.
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::FlagsChanged, &block)
+    };
+    std::mem::forget(monitor);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_command_hints(state: AppState, flags: objc2_app_kit::NSEventModifierFlags) {
+    use objc2_app_kit::{NSApplication, NSEventModifierFlags};
+
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    let held = flags.contains(NSEventModifierFlags::Command)
+        && NSApplication::sharedApplication(mtm).keyWindow().is_some()
+        && !crate::ui::menu::is_open();
+    state.shortcut_modifier_changed(held);
 }
 
 fn environment(host: Option<String>) -> Rc<Environment> {
