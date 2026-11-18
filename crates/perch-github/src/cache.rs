@@ -4032,6 +4032,23 @@ impl Cache {
         Ok(())
     }
 
+    /// Move a thread's anchor to where its lines are at `commit_sha`: the
+    /// same lines of the same file, under other numbers.
+    pub fn set_thread_lines(
+        &self,
+        id: &str,
+        start_line: u32,
+        line: u32,
+        commit_sha: &str,
+    ) -> Result<(), CacheError> {
+        self.conn.execute(
+            "UPDATE comment_threads SET start_line = ?2, line = ?3, commit_sha = ?4
+             WHERE id = ?1",
+            params![id, start_line as i64, line as i64, commit_sha],
+        )?;
+        Ok(())
+    }
+
     /// Keep what GitHub answered when the reader resolved a thread or
     /// unresolved it, until the next fetch says the same.
     pub fn set_thread_resolved(&self, id: &str, resolved: bool) -> Result<(), CacheError> {
@@ -6322,6 +6339,29 @@ mod tests {
         assert!(c.load_comment_threads(&id).unwrap().is_empty());
         assert!(c.load_run("t1-r1").unwrap().is_none());
         assert_eq!(c.load_comment_threads("elsewhere").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_threads_lines_move_with_their_commit() {
+        let c = Cache::open_in_memory().unwrap();
+        let thread = comment_thread("t1", "w");
+        let before = thread.anchor.clone().unwrap();
+        c.insert_comment_thread(&thread).unwrap();
+        c.set_thread_lines("t1", before.start_line + 4, before.line + 4, "later")
+            .unwrap();
+        let after = c.load_comment_threads("w").unwrap()[0]
+            .anchor
+            .clone()
+            .unwrap();
+        assert_eq!(
+            after,
+            Anchor {
+                start_line: before.start_line + 4,
+                line: before.line + 4,
+                commit_sha: "later".into(),
+                ..before
+            }
+        );
     }
 
     #[test]

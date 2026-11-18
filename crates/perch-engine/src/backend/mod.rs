@@ -10454,14 +10454,14 @@ async fn finish_open(
     // away.
     send_viewed(ctx, &item.id, true);
 
-    // The outdated check is a git call per moved thread; the log and the
+    // Following the threads is a git call or three per moved one; the log and the
     // status are two more. Off the open, on their own tasks.
     {
         let ctx = ctx.clone();
         let item_id = item.id.clone();
         let (head, worktree) = (head.clone(), worktree.clone());
         tokio::spawn(async move {
-            mark_outdated_threads(&ctx, &item_id, &head, &worktree).await;
+            follow_moved_threads(&ctx, &item_id, &head, &worktree).await;
             ctx.send_threads(&item_id);
         });
     }
@@ -11031,6 +11031,10 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
                 ctx.with_cache(|c| c.update_item(&item));
                 ctx.send_items();
             }
+            // The threads follow their lines to the new head, so a card
+            // stays under them when a commit added lines above.
+            follow_moved_threads(ctx, item_id, &head, &checkout.worktree).await;
+            ctx.send_threads(item_id);
         }
     }
     send_commits(
@@ -18112,16 +18116,29 @@ fn discussion_avatars(discussion: &perch_github::Discussion) -> Vec<String> {
         .collect()
 }
 
-/// A thread whose file changed since its anchor was made may have moved.
+/// Follow the threads whose file changed since their anchor was made.
 ///
 /// `git diff --quiet <sha> <head> -- <path>` per thread whose sha differs
-/// from the head; the common case, same sha, costs nothing. Threads that
-/// are on GitHub are left alone: GitHub says when those are outdated. One
+/// from the head; the common case, same sha, costs nothing. A thread on
+/// lines of a changed file that are the same lines at the head, under
+/// other numbers, is moved to them, so its card stays under what it was
+/// about. One whose lines changed or went is outdated, as is one on the
+/// base's lines, which the head's file does not number, and a review
+/// finding's, whose place is its snapshot's to say. Threads that are on
+/// GitHub are left alone: GitHub says when those are outdated. One
 /// merely on its way there, a draft's, is Perch's to check like its own.
-async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &Path) {
-    let Some(Ok(threads)) = ctx.with_cache(|c| c.load_comment_threads(item_id)) else {
+async fn follow_moved_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &Path) {
+    let Some(Ok((threads, findings))) = ctx.with_cache(|c| -> Result<_, CacheError> {
+        let findings: std::collections::HashSet<String> = c
+            .list_findings(item_id, None)?
+            .into_iter()
+            .map(|finding| finding.thread_id)
+            .collect();
+        Ok((c.load_comment_threads(item_id)?, findings))
+    }) else {
         return;
     };
+    let git = ctx.preparer.git();
     for thread in threads {
         if thread.github_id.is_some() {
             continue;
@@ -18132,9 +18149,7 @@ async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &
         if anchor.commit_sha == head || thread.outdated {
             continue;
         }
-        let changed = ctx
-            .preparer
-            .git()
+        let changed = git
             .run(
                 Some(worktree),
                 [
@@ -18149,9 +18164,40 @@ async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &
             )
             .await
             .is_err();
-        if changed {
-            tracing::info!(thread = %thread.id, path = %anchor.path, "thread is outdated");
-            ctx.with_cache(|c| c.set_thread_outdated(&thread.id, true));
+        if !changed {
+            continue;
+        }
+        let moved = if anchor.side == perch_github::Side::Right && !findings.contains(&thread.id) {
+            let read = |sha: &str| {
+                let rev = perch_git::Rev::Sha(sha.to_string());
+                async move {
+                    perch_git::read_side(git, worktree, &rev, &anchor.path)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+            };
+            let (source, target) = (read(&anchor.commit_sha).await, read(head).await);
+            source.zip(target).and_then(|(source, target)| {
+                perch_git::diff_map_range(
+                    &source,
+                    &target,
+                    anchor.start_line.min(anchor.line),
+                    anchor.start_line.max(anchor.line),
+                )
+            })
+        } else {
+            None
+        };
+        match moved {
+            Some((start_line, line)) => {
+                tracing::info!(thread = %thread.id, path = %anchor.path, line, "thread moved");
+                ctx.with_cache(|c| c.set_thread_lines(&thread.id, start_line, line, head));
+            }
+            None => {
+                tracing::info!(thread = %thread.id, path = %anchor.path, "thread is outdated");
+                ctx.with_cache(|c| c.set_thread_outdated(&thread.id, true));
+            }
         }
     }
 }
@@ -27835,6 +27881,90 @@ while True:
         assert_eq!(
             ctx.slot.lock().unwrap().as_ref().unwrap().scope,
             perch_git::Scope::Branch
+        );
+    }
+
+    /// A commit that adds lines above a thread leaves its card under the
+    /// lines it was about: the look that finds the head moved gives the
+    /// thread their new numbers. One whose own lines the commit changed
+    /// is outdated, as any thread on a changed file was before.
+    #[tokio::test]
+    async fn a_look_that_finds_a_commit_moves_the_threads_to_their_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        std::fs::write(worktree.join("poem.txt"), "a\nb\nc\nd\ne\n").unwrap();
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-q", "-m", "poem"]);
+        let before = git(&worktree, &["rev-parse", "HEAD"]);
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry.clone()]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
+        open_in_slot(&ctx, &item);
+        let navigation_id = ctx.navigation_requests.begin_item(&item.id);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.checkout.head_sha = before.clone();
+            open.checkout.merge_base = git(&worktree, &["merge-base", "main", "HEAD"]);
+            open.navigation_id = navigation_id;
+        }
+        let thread = |id: &str, start: u32, line: u32| CommentThread {
+            id: id.into(),
+            worktree_id: item.id.clone(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: Some(Anchor {
+                path: "poem.txt".into(),
+                commit_sha: before.clone(),
+                ..lines(start, line)
+            }),
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+            messages: Vec::new(),
+        };
+        for thread in [thread("kept", 4, 5), thread("rewritten", 2, 2)] {
+            ctx.with_cache(|c| c.insert_comment_thread(&thread).unwrap());
+        }
+
+        // Two lines above both, and the second thread's own line rewritten.
+        std::fs::write(worktree.join("poem.txt"), "x\ny\na\nB\nc\nd\ne\n").unwrap();
+        git(&worktree, &["commit", "-q", "-am", "more"]);
+        let after = git(&worktree, &["rev-parse", "HEAD"]);
+        let revision = ctx.scope_requests.stable_revision().unwrap();
+        refresh_scope(&ctx, &item.id, navigation_id, revision).await;
+
+        let threads = ctx
+            .with_cache(|c| c.load_comment_threads(&item.id).unwrap())
+            .unwrap();
+        let of = |id: &str| threads.iter().find(|t| t.id == id).unwrap();
+        let kept = of("kept");
+        let anchor = kept.anchor.as_ref().unwrap();
+        assert!(!kept.outdated);
+        assert_eq!(
+            (anchor.start_line, anchor.line, anchor.commit_sha.as_str()),
+            (6, 7, after.as_str())
+        );
+        let rewritten = of("rewritten");
+        let anchor = rewritten.anchor.as_ref().unwrap();
+        assert!(rewritten.outdated);
+        assert_eq!(
+            (anchor.start_line, anchor.line, anchor.commit_sha.as_str()),
+            (2, 2, before.as_str()),
+            "where it was written, for the original lines"
+        );
+        assert!(
+            !threads_sent(&received).is_empty(),
+            "the window is told where they are now"
         );
     }
 
