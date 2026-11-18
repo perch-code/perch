@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 jiff.workspace = true
-thiserror.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
 pulldown-cmark-to-cmark = "22"
 unicode-general-category = "1"

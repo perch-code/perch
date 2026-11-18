@@ -4706,13 +4706,6 @@ async fn run(
         detect_review_capabilities(&config.agent).await,
     )));
     let review_snapshots = Arc::new(ReviewSnapshotStore::new(data_root.clone()));
-    let knowledge = match perch_knowledge::Knowledge::open(data_root.join("knowledge")) {
-        Ok(knowledge) => Some(Arc::new(knowledge)),
-        Err(error) => {
-            tracing::warn!(%error, "review knowledge export is unavailable");
-            None
-        }
-    };
     let config = Arc::new(config);
     let run_manager = runs::RunManager::new(
         config.agent.max_concurrent_runs,
@@ -4750,7 +4743,6 @@ async fn run(
         review_navigation: Arc::new(tokio::sync::Mutex::new(())),
         review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
-        knowledge,
         item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
         root_cuts: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
@@ -7051,8 +7043,6 @@ struct Ctx {
     /// Reconciliation reloads durable findings under this short lock. The
     /// database transaction remains the ultimate replay fence.
     review_reconcile: Arc<tokio::sync::Mutex<()>>,
-    /// Plain Markdown export is best-effort and never gates durable review.
-    knowledge: Option<Arc<perch_knowledge::Knowledge>>,
     /// Serializes an item's open, archive, restore, and delete so deferred
     /// agent cleanup cannot remove a worktree while it is being restored or
     /// deleted. One lock per item, and one per subject for the opens that
@@ -20085,15 +20075,6 @@ async fn execute_question(
     if final_run.status == RunStatus::Completed && !unread.is_empty() {
         follow_up_run(ctx, &final_run, unread.join("\n\n"));
     }
-    // Finding threads start with the reviewer's report, then use the ordinary
-    // discussion flow for follow-ups. Keep the review archive in step with
-    // those later replies without creating archives for ordinary questions.
-    if matches!(
-        thread.messages.first().map(|message| &message.author),
-        Some(Author::Agent { .. })
-    ) {
-        reviews::export_item(ctx, &item_id);
-    }
     send_agent_runs(ctx, 50);
 }
 
@@ -20766,15 +20747,13 @@ fn save_draft(
     ctx.send_threads(item_id);
 }
 
-/// Put the reader's words in place of a reviewer's, and in the review
-/// archive, which keeps the finding threads.
+/// Put the reader's words in place of a reviewer's.
 fn edit_reviewer_message(ctx: &Ctx, item_id: &str, message_id: &str, body: &str) {
     if let Some(Err(e)) = ctx.with_cache(|c| c.update_reviewer_message_body(message_id, body)) {
         ctx.notice(format!("Could not save the edit: {e}"));
         return;
     }
     ctx.send_threads(item_id);
-    reviews::export_item(ctx, item_id);
 }
 
 /// Throw a draft away. A thread that was only on its way to GitHub for
@@ -22923,7 +22902,6 @@ mod tests {
             review_navigation: Arc::new(tokio::sync::Mutex::new(())),
             review_admissions: Default::default(),
             review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
-            knowledge: None,
             item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
             root_cuts: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),

@@ -1123,8 +1123,7 @@ Perch does not try to detect them; it limits what following one could do.
   `[BEGIN untrusted text: …]` and `[END untrusted text]` lines, a line
   inside it that imitates a marker is spoiled, and your question comes
   last. The discussion files under `context/`, which the prompt says are
-  untrusted like a marked block, and the review history export under
-  `knowledge/reviews/` are cleaned the same way.
+  untrusted like a marked block, are cleaned the same way.
 - **Inert links.** A link in an answer or a comment does nothing until it
   is clicked. Hovering it shows the full destination; a click opens `http`
   and `https` links in the browser and a file of the worktree in Code
@@ -1400,12 +1399,7 @@ request.
 
 Follow-ups stay local to Perch unless you post one yourself. Reviews do not
 resolve threads on GitHub, modify code, run automatically after a push, or use
-a hosted review service. Perch also exports each item's review history as
-deterministic Markdown at
-`$PERCH_HOME/knowledge/reviews/<owner>/<repo>/<item-id>.md` (under
-`~/.perch` when `PERCH_HOME` is unset). Re-exporting replaces that stable
-document rather than duplicating unchanged entries; unrelated legacy files in
-the knowledge directory are not imported.
+a hosted review service.
 
 ## The file tree
 

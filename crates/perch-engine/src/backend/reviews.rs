@@ -172,7 +172,6 @@ pub(super) fn publish_dismissed(ctx: &Ctx, item_id: &str, finding_ids: &[String]
             )),
         }
     }
-    export_item(ctx, item_id);
 }
 
 fn publish_finding(ctx: &Ctx, finding: Finding) {
@@ -183,7 +182,6 @@ fn publish_finding(ctx: &Ctx, finding: Finding) {
                 item_id: item_id.clone(),
                 summary,
             });
-            export_item(ctx, &item_id);
         }
         Err(error) => ctx.notice(format!(
             "Review finding changed, but could not refresh it: {error}"
@@ -484,7 +482,6 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
             "No committed changes to review against that base"
         });
         send_group(ctx, &group_id);
-        export_item(ctx, &request.item_id);
         return Ok(());
     }
 
@@ -1503,7 +1500,6 @@ async fn execute_attempt(
             if let Some(item_id) = snapshot_item_id(ctx, &snapshot_id) {
                 ctx.send_threads(&item_id);
                 send_findings(ctx, &item_id);
-                export_item(ctx, &item_id);
             }
             send_group(ctx, &group_id);
             send_agent_runs(ctx, 50);
@@ -2784,7 +2780,6 @@ async fn ingest_saved_attempt(ctx: &Ctx, attempt: &ReviewerAttempt) -> Result<()
     send_group(ctx, &group.id);
     ctx.send_threads(&group.item_id);
     send_findings(ctx, &group.item_id);
-    export_item(ctx, &group.item_id);
     Ok(())
 }
 
@@ -3700,7 +3695,6 @@ pub(super) fn settle_group(ctx: &Ctx, group_id: &str) {
         tracing::warn!(group = group_id, %error, "could not finish review group");
         return;
     }
-    export_item(ctx, &group.item_id);
     // Once for the review, however many reviewers it had. One the reader
     // stopped, or that Perch's quitting cut off, isn't news.
     let activity = match outcome {
@@ -3803,34 +3797,8 @@ fn launch_failed(ctx: &Ctx, item_id: &str, message: String) {
     });
 }
 
-pub(super) fn export_item(ctx: &Ctx, item_id: &str) {
-    let Some(knowledge) = ctx.knowledge.as_ref() else {
-        return;
-    };
-    let Some(item) = ctx.item(item_id) else {
-        return;
-    };
-    let archive = match build_archive(ctx, &item) {
-        Ok(archive) => archive,
-        Err(error) => {
-            tracing::warn!(item = item_id, %error, "could not build review knowledge export");
-            return;
-        }
-    };
-    if let Err(error) = knowledge.export_review(&archive) {
-        tracing::warn!(item = item_id, %error, "could not write review knowledge export");
-    }
-}
-
-fn build_archive(
-    ctx: &Ctx,
-    item: &perch_github::Item,
-) -> Result<perch_knowledge::ReviewArchive, String> {
-    cache(ctx, |cache| review_archive(cache, item))
-}
-
 /// An item's review history, every review and finding with what was said
-/// in its thread, as the knowledge export and `perch context` write it.
+/// in its thread, as `perch context` writes it.
 /// Reads `cache` alone, so a reader with no engine builds the same thing.
 pub fn review_archive(
     cache: &perch_github::Cache,
