@@ -26,7 +26,10 @@ use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::titlebar::title_bar;
-use crate::ui::widgets::{shortcut_width, sidebar_glyph, with_shortcut_hint, ShortcutHint};
+use crate::ui::widgets::{
+    shortcut_overhang, shortcut_width, sidebar_glyph, with_shortcut_hint, with_shortcut_in_place,
+    without_shortcuts, ShortcutHint,
+};
 use crate::update::UpdateStatus;
 use perch_github::Item;
 
@@ -49,7 +52,7 @@ pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl
     })
 }
 
-const TAB_PADDING: f64 = 5.0;
+const TAB_PADDING: f64 = 9.0;
 
 /// The strip the traffic lights sit over, followed by the drawer control,
 /// the three tabs, and `+` for new work.
@@ -64,20 +67,20 @@ fn lights_strip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             tab_keys += shortcut_width(tab_action(tab));
         }
         // Two 26pt icon buttons, two 2pt tab gaps, the tab inset, right
-        // padding, and the drawer border.
+        // padding, and the drawer border. A binding takes its icon's place,
+        // so it adds only what it outgrows the icon by.
         let base = tabs + 52.0 + 4.0 + 4.0 + 6.0 + 1.0;
         let with_tabs = base + tab_keys;
         (
             with_tabs,
-            with_tabs + shortcut_width(Action::ToggleSidebar) + shortcut_width(Action::NewWork),
+            with_tabs
+                + shortcut_overhang(Action::ToggleSidebar)
+                + shortcut_overhang(Action::NewWork),
         )
     });
     let room = move || state.sidebar_width.get() - theme::lights_lane_width();
-    let icon_style = move |s: floem::style::Style| {
-        s.apply_if(room() < widths.get().1, |s| {
-            s.class(ShortcutHint, |s| s.hide())
-        })
-    };
+    let icon_style =
+        move |s: floem::style::Style| s.apply_if(room() < widths.get().1, without_shortcuts);
     title_bar(
         Stack::horizontal((
             lights_lane(state, 0.0).style(icon_style),
@@ -146,7 +149,7 @@ pub fn pane_lights_lane(state: AppState) -> impl IntoView {
 
 /// `+`: the new-work view, as `Cmd-N` opens it.
 fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    Container::new(with_shortcut_hint(
+    Container::new(with_shortcut_in_place(
         Action::NewWork,
         sidebar_glyph(SidebarIcon::Plus, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
     ))
@@ -159,6 +162,7 @@ fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         crate::ui::widgets::clickable(s)
             .height(26.0)
             .padding_horiz(5.0)
+            .min_width(26.0)
             .items_center()
             .justify_center()
             .border_radius(8.0)
@@ -171,7 +175,7 @@ fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 /// Show or hide the drawer. The same glyph either way, as the system's
 /// sidebar toggle is: it names the drawer, not the direction.
 fn toggle_button(state: AppState) -> impl IntoView {
-    Container::new(with_shortcut_hint(
+    Container::new(with_shortcut_in_place(
         Action::ToggleSidebar,
         sidebar_glyph(SidebarIcon::Drawer, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
     ))
@@ -181,6 +185,7 @@ fn toggle_button(state: AppState) -> impl IntoView {
         crate::ui::widgets::clickable(s)
             .height(26.0)
             .padding_horiz(5.0)
+            .min_width(26.0)
             .items_center()
             .justify_center()
             .border_radius(8.0)

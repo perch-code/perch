@@ -28,7 +28,9 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::github_url;
 use crate::ui::titlebar::{part_of_bar, title_bar};
-use crate::ui::widgets::{icon_button, shortcut_width, sidebar_glyph, ShortcutHint};
+use crate::ui::widgets::{
+    icon_button, shortcut_overhang, shortcut_width, sidebar_glyph, without_shortcuts, ShortcutHint,
+};
 
 /// The bar, the same for every kind of item: a pull request, an issue, or
 /// a worktree of the reader's own.
@@ -38,8 +40,9 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
     // through, and each control in them takes it back.
     let key_widths = floem::reactive::Memo::new(move |_| {
         let tabs = shortcut_width(Action::ShowConversation) + shortcut_width(Action::ShowCode);
-        let arrows = shortcut_width(Action::HistoryBack) + shortcut_width(Action::HistoryForward);
-        (tabs, arrows, shortcut_width(Action::ToggleSidebar))
+        let arrows =
+            shortcut_overhang(Action::HistoryBack) + shortcut_overhang(Action::HistoryForward);
+        (tabs, arrows, shortcut_overhang(Action::ToggleSidebar))
     });
     let spare = move || app.window_width.get() - app.sidebar_shown_width() - theme::MAIN_MIN_WIDTH;
     title_bar(
@@ -47,9 +50,7 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
             leading(app, state, backend.clone()).style(move |s| {
                 let (tabs, arrows, toggle) = key_widths.get();
                 let lane = if app.sidebar_present() { 0.0 } else { toggle };
-                s.apply_if(spare() < arrows + lane + tabs, |s| {
-                    s.class(ShortcutHint, |s| s.hide())
-                })
+                s.apply_if(spare() < arrows + lane + tabs, without_shortcuts)
             }),
             crate::review::switch::switch(state).style(move |s| {
                 s.apply_if(spare() < key_widths.get().0, |s| {
@@ -549,8 +550,8 @@ pub(crate) mod tests {
         let arrows = rect(&harness, "history arrows");
         assert_eq!(arrows.x0, bar.x0 + theme::REVIEW_HEADER_PADDING);
         assert!(
-            arrows.width() > 2.0 * 26.0,
-            "room for both inline shortcuts"
+            (arrows.width() - 2.0 * 26.0).abs() < 0.5,
+            "the arrows keep their size until the keys take the icons' place"
         );
         assert_eq!(title.x0, arrows.x1 + 8.0 + 16.0 + 8.0);
         // The switch is at the bar's centre, with the drawer open and

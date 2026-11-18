@@ -66,7 +66,7 @@ fn arrow(state: AppState, review: ReviewState, backend: Rc<Backend>, back: bool)
         }
     };
     let icon = crate::ui::widgets::icon_in(move || icons::sidebar_icon(glyph, color()), color);
-    let button = Container::new(crate::ui::widgets::with_shortcut_hint(action, icon))
+    let button = Container::new(crate::ui::widgets::with_shortcut_in_place(action, icon))
         .on_event_stop(floem::event::listener::Click, move |_, _| {
             travel(state, review, &backend, back)
         })
@@ -75,6 +75,7 @@ fn arrow(state: AppState, review: ReviewState, backend: Rc<Backend>, back: bool)
             let s = s
                 .height(26.0)
                 .padding_horiz(5.0)
+                .min_width(26.0)
                 .items_center()
                 .justify_center()
                 .border_radius(8.0)

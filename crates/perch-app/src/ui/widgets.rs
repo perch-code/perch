@@ -18,8 +18,15 @@ floem::style_class!(
     pub ShortcutHint
 );
 
+floem::style_class!(
+    /// The glyph of an icon-only control. Its binding takes the glyph's
+    /// place while the hints show.
+    pub ShortcutIcon
+);
+
 const SHORTCUT_SIZE: f32 = 11.0;
 const SHORTCUT_GAP: f64 = 6.0;
+const GLYPH_SIZE: f32 = 16.0;
 
 /// The extra room an inline binding needs, including its leading space.
 pub(crate) fn shortcut_width(action: crate::keymap::Action) -> f64 {
@@ -28,23 +35,55 @@ pub(crate) fn shortcut_width(action: crate::keymap::Action) -> f64 {
     })
 }
 
-/// Show the current binding as secondary text beside the toolbar label or icon.
-pub(crate) fn with_shortcut_hint(
-    action: crate::keymap::Action,
-    content: impl IntoView + 'static,
-) -> impl IntoView {
+/// How far a binding stands out of the glyph whose place it takes.
+pub(crate) fn shortcut_overhang(action: crate::keymap::Action) -> f64 {
+    crate::keymap::label(action).map_or(0.0, |text| {
+        (theme::text_width(&text, SHORTCUT_SIZE).ceil() - f64::from(GLYPH_SIZE)).max(0.0)
+    })
+}
+
+/// Give a narrow toolbar's hints up: the text beside a label goes, and a
+/// glyph keeps its place rather than yielding it to its binding.
+pub(crate) fn without_shortcuts(s: Style) -> Style {
+    s.class(ShortcutHint, |s| s.hide())
+        .class(ShortcutIcon, |s| s.flex())
+}
+
+fn shortcut_label(action: crate::keymap::Action, gap: f64) -> Label {
     let binding = move || crate::keymap::label(action);
-    let hint = Label::derived(move || binding().unwrap_or_default())
+    Label::derived(move || binding().unwrap_or_default())
         .debug_name("shortcut hint")
         .class(ShortcutHint)
         .style(move |s| {
-            s.margin_left(SHORTCUT_GAP)
+            s.margin_left(gap)
                 .color(theme::fg_muted())
                 .font_size(SHORTCUT_SIZE)
                 .selectable(false)
                 .apply_if(binding().is_none(), |s| s.hide())
-        });
-    Stack::horizontal((content, hint)).style(|s| s.items_center().pointer_events_none())
+        })
+}
+
+/// Show the current binding as secondary text beside the toolbar label.
+pub(crate) fn with_shortcut_hint(
+    action: crate::keymap::Action,
+    content: impl IntoView + 'static,
+) -> impl IntoView {
+    Stack::horizontal((content, shortcut_label(action, SHORTCUT_GAP)))
+        .style(|s| s.items_center().pointer_events_none())
+}
+
+/// Show the current binding in the place of an icon-only control's glyph
+/// while the hints show. A control with no binding keeps its glyph.
+pub(crate) fn with_shortcut_in_place(
+    action: crate::keymap::Action,
+    glyph: impl IntoView + 'static,
+) -> impl IntoView {
+    let glyph = glyph
+        .into_view()
+        .class(ShortcutIcon)
+        .style(move |s| s.apply_if(crate::keymap::label(action).is_none(), |s| s.flex()));
+    Stack::horizontal((glyph, shortcut_label(action, 0.0)))
+        .style(|s| s.items_center().pointer_events_none())
 }
 
 /// Open an HTTP(S) link supplied by GitHub in the user's default browser.

@@ -1190,6 +1190,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     state.shortcut_hints.get() != crate::state::ShortcutHints::Visible,
                     |s| s.class(widgets::ShortcutHint, |s| s.hide()),
                 )
+                // The binding of an icon-only control takes its glyph's place.
+                .apply_if(
+                    state.shortcut_hints.get() == crate::state::ShortcutHints::Visible,
+                    |s| s.class(widgets::ShortcutIcon, |s| s.hide()),
+                )
                 // A press on anything that takes no keyboard of its own,
                 // a sidebar row or the page, gives the window the
                 // keyboard, so a key that types, `j` or `e`, reaches the
@@ -1988,7 +1993,9 @@ mod tests {
         let root = harness.root_id();
         let shortcut = |control| named(named(root, control).unwrap(), "shortcut hint").unwrap();
         let hint = shortcut("tab:Worktrees");
+        let toggle_glyph = shortcut("drawer toggle").parent().unwrap().children()[0];
         assert!(hint.is_hidden());
+        assert!(!toggle_glyph.is_hidden());
         let press = || {
             app.shortcut_modifier_changed(true);
             let crate::state::ShortcutHints::Waiting(timer) = app.shortcut_hints.get_untracked()
@@ -2011,12 +2018,8 @@ mod tests {
         for (control, action) in [
             ("tab:Inbox", Action::Inbox),
             ("tab:Worktrees", Action::Worktrees),
-            ("drawer toggle", Action::ToggleSidebar),
-            ("new work", Action::NewWork),
             ("Conversation pill", Action::ShowConversation),
             ("Code pill", Action::ShowCode),
-            ("back tip", Action::HistoryBack),
-            ("forward tip", Action::HistoryForward),
         ] {
             let hint = shortcut(control);
             assert!(
@@ -2036,6 +2039,35 @@ mod tests {
                 "{control}: hint {rect:?} should sit beside {content:?}"
             );
         }
+        // An icon-only control shows its binding where the icon was.
+        for (control, action) in [
+            ("drawer toggle", Action::ToggleSidebar),
+            ("new work", Action::NewWork),
+            ("back tip", Action::HistoryBack),
+            ("forward tip", Action::HistoryForward),
+        ] {
+            let hint = shortcut(control);
+            assert!(
+                painted.contains(&hint),
+                "{control} shortcut was not painted"
+            );
+            assert!(hint.debug_name().contains(&keymap::label(action).unwrap()));
+            let glyph = hint.parent().unwrap().children()[0];
+            assert!(
+                glyph.is_hidden(),
+                "{control} keeps its icon beside its keys"
+            );
+            let rect = hint.get_visual_rect();
+            let control_rect = named(root, control).unwrap().get_visual_rect();
+            assert!(
+                rect.width() > 8.0
+                    && rect.x0 >= control_rect.x0
+                    && rect.x1 <= control_rect.x1
+                    && rect.y0 >= control_rect.y0
+                    && rect.y1 <= control_rect.y1,
+                "{control}: {rect:?} should sit inside {control_rect:?}"
+            );
+        }
         let back = shortcut("back tip").get_visual_rect();
         let forward = shortcut("forward tip").get_visual_rect();
         assert!(
@@ -2046,6 +2078,7 @@ mod tests {
         app.shortcut_modifier_changed(false);
         harness.rebuild();
         assert!(hint.is_hidden());
+        assert!(!toggle_glyph.is_hidden(), "the icon comes back");
 
         let pending = press();
         harness.dispatch_event(floem::event::Event::Window(
@@ -2054,6 +2087,44 @@ mod tests {
         app.reveal_shortcut_hints(pending);
         harness.rebuild();
         assert!(hint.is_hidden(), "window blur must cancel a pending reveal");
+    }
+
+    /// A toolbar too narrow for its hints keeps its icons, and so does a
+    /// control whose binding was taken away.
+    #[test]
+    fn an_icon_gives_way_to_its_binding_only_where_there_is_one_and_room() {
+        let _keymap = keymap::install(keymap::with_bindings("new_work = []"));
+        let (mut harness, app, _) = window_and_state_with_a_file_open();
+        let root = harness.root_id();
+        let glyph = |control| {
+            let hint = named(named(root, control).unwrap(), "shortcut hint").unwrap();
+            (hint, hint.parent().unwrap().children()[0])
+        };
+        let hold = || {
+            app.shortcut_modifier_changed(true);
+            let crate::state::ShortcutHints::Waiting(timer) = app.shortcut_hints.get_untracked()
+            else {
+                panic!("expected a pending shortcut reveal");
+            };
+            app.reveal_shortcut_hints(timer);
+        };
+        hold();
+        harness.rebuild();
+        let (hint, icon) = glyph("drawer toggle");
+        assert!(!hint.is_hidden() && icon.is_hidden());
+        let (hint, icon) = glyph("new work");
+        assert!(
+            hint.is_hidden() && !icon.is_hidden(),
+            "nothing to show for it"
+        );
+
+        app.sidebar_width.set(theme::lights_lane_width() + 100.0);
+        harness.rebuild();
+        let (hint, icon) = glyph("drawer toggle");
+        assert!(
+            hint.is_hidden() && !icon.is_hidden(),
+            "no room for the keys"
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
