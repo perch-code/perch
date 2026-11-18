@@ -14,9 +14,14 @@
 
 name: Release
 
+# Run by hand (Actions > Release > Run workflow, or `gh workflow run
+# release.yml`), it builds everything a release does and publishes nothing:
+# a rehearsal, for a change to this file or to how the app takes its
+# engines, which no other workflow runs.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -27,7 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # A rehearsal has no tag to match.
       - name: Check the tag matches Cargo.toml
+        if: github.event_name == 'push'
         run: |
           version="$(cargo metadata --no-deps --format-version 1 \
             | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "perch-app"))')"
@@ -197,7 +204,9 @@ jobs:
           name: linux-${{ matrix.arch }}
           path: Perch-linux-*.tar.gz
 
+  # Only for a tag: a rehearsal stops with the apps built.
   publish:
+    if: github.event_name == 'push'
     needs: [macos, linux]
     runs-on: ubuntu-latest
     steps:

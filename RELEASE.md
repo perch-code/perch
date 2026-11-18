@@ -13,3 +13,12 @@ each with all four engines built into it, and publishes the
 apps' tarballs and the engines' to a GitHub release. A tag with a hyphen, like
 `v0.2.0-beta.1`, becomes a prerelease, which neither the updater nor
 `install.sh` picks up.
+
+To rehearse a release without publishing one, after a change to the
+workflow or to how the app takes its engines, run it by hand:
+
+```bash
+gh workflow run release.yml
+```
+
+It builds the engines and the apps as a tag would and stops there.
