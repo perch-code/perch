@@ -19759,6 +19759,28 @@ fn recorded_knowledge_dir(ctx: &Ctx, run_id: &str) -> Option<PathBuf> {
     value.get("knowledge_dir")?.as_str().map(PathBuf::from)
 }
 
+fn forget_run_knowledge_dir(ctx: &Ctx, run_id: &str) {
+    let result = ctx.with_cache(|cache| {
+        let Some(context) = cache.run_context(run_id)? else {
+            return Ok(());
+        };
+        let Some(mut manifest) = context.manifest.as_deref().and_then(|json| {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json).ok()
+        }) else {
+            return Ok(());
+        };
+        if manifest.remove("knowledge_dir").is_some() {
+            let manifest =
+                (!manifest.is_empty()).then(|| serde_json::Value::Object(manifest).to_string());
+            cache.set_run_context(run_id, context.dir.as_deref(), manifest.as_deref())?;
+        }
+        Ok::<_, CacheError>(())
+    });
+    if let Some(Err(error)) = result {
+        tracing::warn!(run = run_id, %error, "could not update the run's archive grant");
+    }
+}
+
 /// An optional archive only appears in the prompt when its backend can
 /// use the corresponding read grant. OpenCode's scan runs off the engine.
 async fn run_knowledge_dir(
@@ -19833,7 +19855,30 @@ async fn execute_question(
     };
     let spawned = match crate::ask::host_refusal(spec.backend) {
         Some(why) => Err(perch_agent::Error::Refused(why)),
-        None => perch_agent::Run::spawn(spec, tx),
+        None => {
+            let archive = (spec.backend == perch_agent::Backend::OpenCode)
+                .then(|| recorded_knowledge_dir(ctx, &run.id))
+                .flatten()
+                .filter(|dir| spec.read_dirs.contains(dir));
+            match archive {
+                Some(dir) => match perch_agent::Run::spawn(spec.clone(), tx.clone()) {
+                    Err(perch_agent::Error::Refused(_)) => {
+                        // The live archive may have grown while this run waited.
+                        let mut spec = spec;
+                        spec.read_dirs.retain(|path| path != &dir);
+                        if let Some(system) = &mut spec.system {
+                            crate::ask::omit_knowledge_framing(system, &dir);
+                        }
+                        if spec.resume.is_none() {
+                            forget_run_knowledge_dir(ctx, &run.id);
+                        }
+                        perch_agent::Run::spawn(spec, tx)
+                    }
+                    spawned => spawned,
+                },
+                None => perch_agent::Run::spawn(spec, tx),
+            }
+        }
     };
     let handle = match spawned {
         Ok(handle) => handle,

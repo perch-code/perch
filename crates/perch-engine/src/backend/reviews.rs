@@ -1220,7 +1220,19 @@ async fn execute_attempt(
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Reviewing);
     send_group(ctx, &group_id);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = match perch_agent::Run::spawn_review(spec, tx) {
+    let spawned = if backend == perch_agent::Backend::OpenCode && spec.knowledge_dir.is_some() {
+        match perch_agent::Run::spawn_review(spec.clone(), tx.clone()) {
+            Err(perch_agent::Error::InvalidReview(_)) => {
+                let mut spec = spec;
+                spec.knowledge_dir = None;
+                perch_agent::Run::spawn_review(spec, tx)
+            }
+            spawned => spawned,
+        }
+    } else {
+        perch_agent::Run::spawn_review(spec, tx)
+    };
+    let handle = match spawned {
         Ok(handle) => handle,
         Err(error) => {
             finish_failed_attempt(
