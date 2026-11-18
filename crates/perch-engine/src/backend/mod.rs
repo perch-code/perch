@@ -28,6 +28,7 @@ use tokio::sync::Semaphore;
 pub use avatar::APP_AVATAR_CORNER;
 pub use connections::{Connection, Engine, Lifetime};
 pub use issue_draft::with_found_in;
+pub use knowledge::cached_knowledge_dir;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 pub use settings::{CheckConfig, SettingsFile};
 use windows::{CommandSender, Fencing, View, Views};
@@ -40,6 +41,7 @@ mod connections;
 mod feedback;
 mod issue_draft;
 mod kept_servers;
+mod knowledge;
 pub(crate) mod open_pull;
 pub mod reviews;
 pub(crate) mod runs;
@@ -4645,6 +4647,10 @@ async fn run(
     // interrupted by a crash before entering the command loop.
     let data_root =
         perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let knowledge = knowledge::Archive::new(data_root.clone(), data_root.join("perch.db"));
+    if let Some(mut writer) = cache.as_ref().and_then(|cache| cache.lock().ok()) {
+        knowledge.watch(&mut writer);
+    }
     let local_preparer = Preparer::new(Store::new(data_root.clone()), None);
     retire_archived_checkouts_from_cache(&cache, &local_preparer, &events).await;
     // Nothing runs from Perch's servers yet: tidy them.
@@ -4744,6 +4750,7 @@ async fn run(
         review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
         item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
+        knowledge,
         root_cuts: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
         assignments: Arc::default(),
@@ -4890,6 +4897,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
     snooze_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let base = ctx;
+    let mut archive_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let (window, command, fenced) = tokio::select! {
             _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh, Fenced::default()),
@@ -4907,6 +4915,9 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 // Told to stop: the app quit, or the host's service did.
                 Some(connections::Inbound::Shutdown) | None => {
                     tracing::info!("backend shutting down");
+                    if let Some(task) = archive_task.take() {
+                        task.abort();
+                    }
                     base.runs.shutdown().await;
                     // Deferred archive waiters are detached tasks. Complete
                     // their local work synchronously before this runtime can
@@ -4941,6 +4952,9 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                     NotificationPollMode::Conditional
                 };
                 let poll_after = refresh(&ctx, mode).await;
+                if archive_task.is_none() && ctx.cache.is_some() {
+                    archive_task = Some(ctx.knowledge.start(ctx.item_lifecycle.clone()));
+                }
                 let now = tokio::time::Instant::now();
                 next_auto_poll = now + poll_after.wait;
                 last_poll = Some(now);
@@ -7049,6 +7063,7 @@ struct Ctx {
     /// find or make its item, so a slow open (a large clone) holds up only
     /// its own item: see `lock_item` and `lock_subject`.
     item_lifecycle: Arc<perch_git::KeyedMutex>,
+    knowledge: knowledge::Archive,
     /// Held by a root scan, and by a cut in a root from `git worktree add`
     /// until its row is in, so the scan cannot find the new worktree first
     /// and take it for the reader's own.
@@ -7601,7 +7616,9 @@ impl Ctx {
     fn with_cache<T>(&self, f: impl FnOnce(&Cache) -> T) -> Option<T> {
         let cache = self.cache.as_ref()?;
         let guard = cache.lock().ok()?;
-        Some(f(&guard))
+        let value = f(&guard);
+        guard.publish_item_changes();
+        Some(value)
     }
 
     fn item(&self, id: &str) -> Option<Item> {
@@ -9893,7 +9910,9 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
 
     ctx.with_cache(|c| c.delete_item(id))
         .transpose()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "the local database is unavailable".to_string())?;
+    ctx.knowledge.delete(item).await;
     drop_context_dirs(ctx, &context_before);
     ctx.send_items();
     Ok(())
@@ -22862,7 +22881,9 @@ mod tests {
         repos: Vec<perch_github::RepoConfig>,
     ) -> (Ctx, Receiver<Event>) {
         let (events, received) = std::sync::mpsc::channel();
-        let cache = Cache::open(&dir.join("perch.db"), None).unwrap();
+        let mut cache = Cache::open(&dir.join("perch.db"), None).unwrap();
+        let knowledge = knowledge::Archive::new(dir.join("store"), dir.join("perch.db"));
+        knowledge.watch(&mut cache);
         let mut config = Config::default();
         config.repo = repos;
         let cache = Some(Arc::new(std::sync::Mutex::new(cache)));
@@ -22903,6 +22924,7 @@ mod tests {
             review_admissions: Default::default(),
             review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
             item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
+            knowledge,
             root_cuts: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
             assignments: Arc::default(),

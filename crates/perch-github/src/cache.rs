@@ -23,6 +23,7 @@ use crate::model::Thread;
 use crate::reactions::Reactions;
 use crate::workflow_runs::Checks;
 
+mod item_changes;
 mod review_store;
 
 /// The shape of the tables. Version 18 adds durable worktree-review history
@@ -195,6 +196,7 @@ CREATE TABLE IF NOT EXISTS repo_lsp_trust (
 pub struct Cache {
     conn: Connection,
     avatar_dir: Option<PathBuf>,
+    item_changes: Option<item_changes::ItemChanges>,
 }
 
 /// A Done mark or a snooze: the revision of a thread it was taken on, and
@@ -2762,6 +2764,7 @@ impl Cache {
         Ok(Self {
             conn,
             avatar_dir: None,
+            item_changes: None,
         })
     }
 
@@ -2789,7 +2792,10 @@ impl Cache {
         let outcome = initialize_schema(&mut conn)?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        Ok((Self { conn, avatar_dir }, outcome))
+        Ok((
+            Self { conn, avatar_dir, item_changes: None },
+            outcome,
+        ))
     }
 
     // -----------------------------------------------------------------
