@@ -783,6 +783,7 @@ fn view(
                 app.focused.set(Some(raise_id));
                 save_windows();
             }
+            retrack_traffic_lights(raise_id);
         })
         .on_event_cont(floem::event::listener::WindowCloseRequested, {
             let requested = close_requested.clone();
@@ -1421,6 +1422,50 @@ fn key_window_frame() -> Option<Rect> {
 fn can_save_frame(_view: floem::ViewId) -> bool {
     true
 }
+
+/// Have AppKit work out again where the pointer is over the traffic lights.
+///
+/// floem moves the lights with layout constraints, which take effect at the
+/// title bar's next layout. The rectangle that shows their glyphs under the
+/// pointer is taken from where the lights are when AppKit last asked, and
+/// moving a button does not make it ask again. A window opened while Perch
+/// is already in front, as a click on the Dock icon opens one, is asked
+/// before that layout, so its glyphs showed up and to the left of the
+/// lights, where macOS would have put them.
+#[cfg(target_os = "macos")]
+fn retrack_traffic_lights(view: floem::ViewId) {
+    use floem::window::WindowIdExt;
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use raw_window_handle::RawWindowHandle;
+
+    let Some(id) = view.window_id() else { return };
+    id.with_window_handle(|handle| {
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return;
+        };
+        // The borrowed handle keeps its NSView valid for this callback on the UI thread.
+        let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        let Some(close) = view
+            .window()
+            .and_then(|window| window.standardWindowButton(NSWindowButton::CloseButton))
+        else {
+            return;
+        };
+        // The title bar, then what holds it, up to the window's frame view:
+        // which of them keeps the rectangle is AppKit's own business.
+        let mut above = unsafe { close.superview() };
+        if let Some(bar) = &above {
+            bar.layoutSubtreeIfNeeded();
+        }
+        while let Some(holder) = above {
+            holder.updateTrackingAreas();
+            above = unsafe { holder.superview() };
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn retrack_traffic_lights(_view: floem::ViewId) {}
 
 #[cfg(not(target_os = "macos"))]
 fn screens() -> Vec<Rect> {

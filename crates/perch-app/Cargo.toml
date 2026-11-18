@@ -77,7 +77,7 @@ unicode-width = "0.1"
 raw-window-handle = "0.6"
 block2 = "0.6"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSScroller", "NSControl", "NSResponder", "NSView", "NSWindow", "NSScreen"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSScroller", "NSControl", "NSButton", "NSResponder", "NSView", "NSWindow", "NSScreen"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSNotification", "NSString", "NSOperation", "NSGeometry", "NSArray", "NSProcessInfo", "block2"] }
 
 [dev-dependencies]
