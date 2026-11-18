@@ -18804,14 +18804,14 @@ async fn ask_as(
     // Finding follow-ups always carry explicit durable history and mapping
     // context. CLI session state is supplemental and may belong to an older
     // checkout, so do not make it the only source of truth.
-    let resume = finding_followup
+    let resumed_run = finding_followup
         .is_none()
-        .then(|| {
-            thread
-                .resumable_run_in(backend.name(), mode)
-                .and_then(|run| run.session_id.clone())
-        })
+        .then(|| thread.resumable_run_in(backend.name(), mode))
         .flatten();
+    let resume = resumed_run.and_then(|run| run.session_id.clone());
+    let resumed_knowledge = resumed_run.and_then(|run| recorded_knowledge_dir(ctx, &run.id));
+    let context_root = crate::context::root(ctx.preparer.store().root());
+    let read_dirs = vec![context_root];
     // The discussion on GitHub: all of it as files in a directory of the
     // run's own, and what fits of it in the prompt. A follow-up that
     // resumes a session is told only what changed since the run it
@@ -18847,6 +18847,13 @@ async fn ask_as(
             (Some(text), None, Some(manifest))
         }
     };
+    let knowledge_dir = if resume.is_none() || resumed_knowledge.is_some() {
+        run_knowledge_dir(ctx, &item, backend, &checkout.worktree, &read_dirs, work.is_some())
+            .await
+            .filter(|dir| resumed_knowledge.as_ref().is_none_or(|old_dir| old_dir == dir))
+    } else {
+        None
+    };
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
         issue: issue.as_ref().map(|i| (&i.0, i.1.as_slice())),
@@ -18862,15 +18869,16 @@ async fn ask_as(
             &history
         },
         discussion: discussion_text.as_deref(),
+        knowledge_dir: knowledge_dir.as_deref(),
         since: since_text.as_deref(),
     };
-    let mut prompt = if is_new {
+    let mut prompt = if resume.is_none() {
         crate::ask::first_prompt(&input)
     } else {
         crate::ask::follow_up_prompt(&input)
     };
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
-        *system = framing.clone();
+        *system = crate::ask::framing_with_knowledge(framing, knowledge_dir.as_deref());
     }
     // A resumed session keeps the framing it began with, and the reader
     // may have let Work commit since.
@@ -18891,7 +18899,7 @@ async fn ask_as(
     // constructed user prompt captures the source and conversation context
     // which this exact attempt was admitted with.
     run.prompt_snapshot = Some(prompt.user.clone());
-    let spec = crate::ask::run_spec(
+    let mut spec = crate::ask::run_spec(
         &ctx.config().agent,
         backend,
         &model,
@@ -18901,6 +18909,7 @@ async fn ask_as(
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
+    spec.read_dirs = read_dirs.into_iter().chain(knowledge_dir.clone()).collect();
     // Queue time begins at admission, after local prompt preparation. This
     // keeps the displayed FIFO order aligned with the scheduler's order.
     run.queued_at = Timestamp::now();
@@ -18921,7 +18930,13 @@ async fn ask_as(
             return;
         }
     };
-    record_run_context(ctx, &run.id, context_dir.as_deref(), manifest.as_ref());
+    record_run_context(
+        ctx,
+        &run.id,
+        context_dir.as_deref(),
+        manifest.as_ref(),
+        resumed_knowledge.as_deref().or(knowledge_dir.as_deref()),
+    );
     // Admission atomically links this request to the queued run before the
     // manager publishes it. There is no detached-run crash window here.
     ctx.send_threads(&item_id);
@@ -19719,17 +19734,50 @@ fn record_run_context(
     run_id: &str,
     dir: Option<&Path>,
     manifest: Option<&perch_knowledge::discussion::Manifest>,
+    knowledge_dir: Option<&Path>,
 ) {
-    if dir.is_none() && manifest.is_none() {
+    if dir.is_none() && manifest.is_none() && knowledge_dir.is_none() {
         return;
     }
     let dir = dir.map(|d| d.to_string_lossy().into_owned());
-    let manifest = manifest.and_then(|m| serde_json::to_string(m).ok());
+    let mut context = manifest.and_then(|manifest| serde_json::to_value(manifest).ok());
+    if let Some(knowledge_dir) = knowledge_dir {
+        let context = context.get_or_insert_with(|| serde_json::json!({}));
+        context["knowledge_dir"] = serde_json::json!(knowledge_dir.to_string_lossy());
+    }
+    let manifest = context.map(|value| value.to_string());
     if let Some(Err(error)) =
         ctx.with_cache(|c| c.set_run_context(run_id, dir.as_deref(), manifest.as_deref()))
     {
         tracing::warn!(run = run_id, %error, "could not record the run's discussion");
     }
+}
+
+fn recorded_knowledge_dir(ctx: &Ctx, run_id: &str) -> Option<PathBuf> {
+    let context = ctx.with_cache(|cache| cache.run_context(run_id).ok().flatten())??;
+    let value: serde_json::Value = serde_json::from_str(context.manifest.as_deref()?).ok()?;
+    value.get("knowledge_dir")?.as_str().map(PathBuf::from)
+}
+
+/// An optional archive only appears in the prompt when its backend can
+/// use the corresponding read grant. OpenCode's scan runs off the engine.
+async fn run_knowledge_dir(
+    ctx: &Ctx,
+    item: &Item,
+    backend: perch_agent::Backend,
+    cwd: &Path,
+    read_dirs: &[PathBuf],
+    work: bool,
+) -> Option<PathBuf> {
+    let dir = ctx.knowledge_dir(item).await?;
+    let cwd = cwd.to_owned();
+    let read_dirs = read_dirs.to_vec();
+    tokio::task::spawn_blocking(move || {
+        perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, work).then_some(dir)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Every discussion directory a run points at.
@@ -20400,6 +20448,14 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         ctx.notice("The original request is gone");
         return;
     };
+    let mut read_dirs = vec![crate::context::root(ctx.preparer.store().root())];
+    let recorded_knowledge = recorded_knowledge_dir(ctx, &old.id);
+    let knowledge_dir = match recorded_knowledge {
+        Some(recorded) => run_knowledge_dir(ctx, &item, backend, directory, &read_dirs, work.is_some())
+            .await
+            .filter(|dir| dir == &recorded),
+        None => None,
+    };
     let input = crate::ask::PromptInput {
         pull_request: item.pull_request(),
         issue: None,
@@ -20413,18 +20469,19 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         // The captured prompt replaces the text below; it already carries
         // the discussion the first attempt was given.
         discussion: None,
+        knowledge_dir: knowledge_dir.as_deref(),
         since: None,
     };
-    let reconstructed_prompt = if old.purpose == RunPurpose::Question {
+    let reconstructed_prompt = if resume.is_none() {
         crate::ask::first_prompt(&input)
     } else {
         crate::ask::follow_up_prompt(&input)
     };
     let mut prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
-        *system = framing.clone();
+        *system = crate::ask::framing_with_knowledge(framing, knowledge_dir.as_deref());
     }
-    let spec = crate::ask::run_spec(
+    let mut spec = crate::ask::run_spec(
         &ctx.config().agent,
         backend,
         &model,
@@ -20434,6 +20491,8 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
+    read_dirs.extend(knowledge_dir);
+    spec.read_dirs = read_dirs;
     let now = Timestamp::now();
     let run = RunRecord {
         id: perch_github::comments::new_id(),
@@ -28845,6 +28904,84 @@ read eof || true
                 ("It landed last week.", true),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn only_sessions_started_with_archive_framing_keep_the_archive_on_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut ctx, _events) = ctx(&root, &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = recording_claude(dir.path());
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let item = store_pull(&ctx, 7);
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        open_in_slot_at(&ctx, &item, "h7");
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree;
+
+        let ask_it = |thread: Option<String>, question: &str| {
+            ask(
+                &ctx,
+                item.id.clone(),
+                thread,
+                None,
+                question.to_string(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+                RunMode::Ask,
+            )
+        };
+        let thread_for = |question: &str| {
+            ctx.with_cache(|cache| cache.load_comment_threads(&item.id).unwrap())
+                .unwrap()
+                .into_iter()
+                .find(|thread| thread.messages.iter().any(|message| message.body == question))
+                .unwrap()
+        };
+
+        ask_it(None, "Before the archive").await;
+        store_pull(&ctx, 8);
+        let exporter = ctx.knowledge.start(ctx.item_lifecycle.clone());
+        let archive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(archive) = ctx.knowledge_dir(&item).await {
+                    break archive;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        exporter.abort();
+        assert!(exporter.await.unwrap_err().is_cancelled());
+
+        let old_thread = thread_for("Before the archive");
+        ask_it(Some(old_thread.id), "Resume the old session").await;
+        ask_it(None, "With the archive").await;
+        let new_thread = thread_for("With the archive");
+        ask_it(Some(new_thread.id.clone()), "Resume the new session").await;
+
+        let args = |n| std::fs::read_to_string(dir.path().join(format!("args-{n}"))).unwrap();
+        let shown = perch_agent::prompt_path(&archive);
+        let grant = archive.canonicalize().unwrap();
+        let no_grant = args(2);
+        assert!(no_grant.contains("--resume\ns1\n"));
+        assert!(!no_grant.contains(grant.to_str().unwrap()));
+        let fresh = args(3);
+        assert!(fresh.contains(&format!("`{shown}/`")));
+        assert!(fresh.contains(&format!("--add-dir\n{}\n", grant.display())));
+        let resumed = args(4);
+        assert!(resumed.contains("--resume\ns1\n"));
+        assert!(resumed.contains(&format!("--add-dir\n{}\n", grant.display())));
+        assert!(!resumed.contains("--append-system-prompt"));
+        let resumed = ctx
+            .with_cache(|cache| cache.runs_for_discussion(&new_thread.id).unwrap())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(recorded_knowledge_dir(&ctx, &resumed.id), Some(archive));
     }
 
     #[tokio::test]

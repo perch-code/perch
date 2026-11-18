@@ -213,7 +213,10 @@ pub(crate) fn refusal(cwd: &Path, added: &[PathBuf], trusted: bool) -> Option<St
     if trusted {
         return None;
     }
-    let mut budget = SCAN_LIMIT;
+    refusal_with_budget(cwd, added, SCAN_LIMIT)
+}
+
+fn refusal_with_budget(cwd: &Path, added: &[PathBuf], mut budget: usize) -> Option<String> {
     let starts = std::iter::once((cwd, true)).chain(added.iter().map(|d| (d.as_path(), false)));
     for (start, own) in starts {
         if let Some(finding) = vet_tree(start, &mut budget) {
@@ -224,12 +227,16 @@ pub(crate) fn refusal(cwd: &Path, added: &[PathBuf], trusted: bool) -> Option<St
 }
 
 pub(crate) fn can_add_read_dir(cwd: &Path, added: &[PathBuf], dir: &Path) -> bool {
+    can_add_read_dir_with_budget(cwd, added, dir, SCAN_LIMIT)
+}
+
+fn can_add_read_dir_with_budget(cwd: &Path, added: &[PathBuf], dir: &Path, budget: usize) -> bool {
     if slash_path(&real_path(dir)).is_none() {
         return false;
     }
     let mut dirs = added.to_vec();
     dirs.push(dir.to_path_buf());
-    refusal(cwd, &dirs, false).is_none()
+    refusal_with_budget(cwd, &dirs, budget).is_none()
 }
 
 fn refusal_text(cwd: &Path, finding: &Finding, own: bool) -> String {
@@ -568,6 +575,24 @@ mod tests {
             None,
             "XDG_DATA_HOME must not be overridden for child shell commands"
         );
+    }
+
+    #[test]
+    fn an_archive_over_budget_does_not_disqualify_the_checkout_or_discussion() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("checkout");
+        let discussion = temp.path().join("context");
+        let archive = temp.path().join("archive");
+        for dir in [&checkout, &discussion, &archive] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("INDEX.md"), "").unwrap();
+        }
+        let existing = [discussion];
+        let limit = 3;
+        assert!(can_add_read_dir_with_budget(&checkout, &existing, &archive, limit));
+        std::fs::write(archive.join("conversation.md"), "").unwrap();
+        assert!(!can_add_read_dir_with_budget(&checkout, &existing, &archive, limit));
+        assert!(refusal_with_budget(&checkout, &existing, limit).is_none());
     }
 
     #[test]

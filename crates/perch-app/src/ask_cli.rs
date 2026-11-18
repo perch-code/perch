@@ -203,6 +203,25 @@ async fn ask(
         .as_ref()
         .map(|a| perch_engine::context::for_first(a, anchor.as_ref(), None, dir.as_deref()).0);
 
+    let backend = backend_for(&config.agent, &config.agent.model);
+    let mut read_dirs = vec![perch_engine::context::root(&root)];
+    let knowledge_dir = {
+        let repo = full_name.to_string();
+        let kind = if pr.is_some() {
+            perch_github::ItemKind::PullRequest
+        } else {
+            perch_github::ItemKind::Issue
+        };
+        let cwd = checkout.worktree.clone();
+        let read_dirs = read_dirs.clone();
+        tokio::task::spawn_blocking(move || {
+            let dir = perch_engine::backend::cached_knowledge_dir(&root, &repo, kind, number)?;
+            perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, false).then_some(dir)
+        })
+        .await
+        .ok()
+        .flatten()
+    };
     let prompt = first_prompt(&PromptInput {
         pull_request: pr.as_ref(),
         issue: issue.as_ref().map(|(i, c)| (i, c.as_slice())),
@@ -214,6 +233,7 @@ async fn ask(
         question,
         history: &[],
         discussion: section.as_deref(),
+        knowledge_dir: knowledge_dir.as_deref(),
         since: None,
     });
     println!(
@@ -233,8 +253,7 @@ async fn ask(
     println!("--- run ---");
 
     let effort = perch_agent::Effort::parse(&config.agent.effort).unwrap_or_default();
-    let backend = backend_for(&config.agent, &config.agent.model);
-    let spec = run_spec(
+    let mut spec = run_spec(
         &config.agent,
         backend,
         &config.agent.model,
@@ -244,6 +263,8 @@ async fn ask(
         None,
         perch_agent::Mode::Ask,
     );
+    read_dirs.extend(knowledge_dir);
+    spec.read_dirs = read_dirs;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let run = perch_agent::Run::spawn(spec, tx).map_err(|e| e.to_string())?;
 

@@ -1021,7 +1021,7 @@ async fn queue_attempt(
             return;
         }
     };
-    super::record_run_context(ctx, &run_id, discussion_dir, None);
+    super::record_run_context(ctx, &run_id, discussion_dir, None, None);
     if let Err(message) = cache(ctx, |cache| cache.attach_reviewer_run(&attempt.id, &run_id)) {
         ctx.runs.cancel(&run_id);
         fail_attempt(ctx, &attempt.id, &message);
