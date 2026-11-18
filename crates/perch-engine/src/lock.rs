@@ -31,9 +31,16 @@ pub struct EngineLock {
 /// The pid is taken out before the lock goes, so an engine refused
 /// between the next one taking the lock and writing its own pid names
 /// nobody rather than this process.
+///
+/// The lock is let go by name, not left to the file closing: it belongs
+/// to the open file, which a child the engine has forked and not yet
+/// exec'd still has a copy of, close-on-exec or not. Closing this copy
+/// alone would leave the home held until that child execs.
 impl Drop for EngineLock {
     fn drop(&mut self) {
         let _ = self.file.set_len(0);
+        // SAFETY: the descriptor is the open file's, alive for the call.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -192,6 +199,19 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path(home.path())).unwrap(), "");
         assert_eq!(EngineLock::holder(home.path()), None);
         EngineLock::take(home.path()).unwrap();
+    }
+
+    /// A child forked as the engine stops has the lock's file open until
+    /// it execs, as a copy of the descriptor does here.
+    #[test]
+    fn the_home_is_let_go_while_a_copy_of_the_lock_s_file_is_still_open() {
+        let home = tempfile::tempdir().unwrap();
+        let held = EngineLock::take(home.path()).unwrap();
+        let copy = held.file.try_clone().unwrap();
+        drop(held);
+        assert_eq!(EngineLock::holder(home.path()), None);
+        EngineLock::take(home.path()).unwrap();
+        drop(copy);
     }
 
     #[test]
