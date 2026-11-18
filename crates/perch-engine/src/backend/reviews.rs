@@ -172,7 +172,6 @@ pub(super) fn publish_dismissed(ctx: &Ctx, item_id: &str, finding_ids: &[String]
             )),
         }
     }
-    export_item(ctx, item_id);
 }
 
 fn publish_finding(ctx: &Ctx, finding: Finding) {
@@ -183,7 +182,6 @@ fn publish_finding(ctx: &Ctx, finding: Finding) {
                 item_id: item_id.clone(),
                 summary,
             });
-            export_item(ctx, &item_id);
         }
         Err(error) => ctx.notice(format!(
             "Review finding changed, but could not refresh it: {error}"
@@ -484,7 +482,6 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
             "No committed changes to review against that base"
         });
         send_group(ctx, &group_id);
-        export_item(ctx, &request.item_id);
         return Ok(());
     }
 
@@ -1024,7 +1021,7 @@ async fn queue_attempt(
             return;
         }
     };
-    super::record_run_context(ctx, &run_id, discussion_dir, None);
+    super::record_run_context(ctx, &run_id, discussion_dir, None, None);
     if let Err(message) = cache(ctx, |cache| cache.attach_reviewer_run(&attempt.id, &run_id)) {
         ctx.runs.cancel(&run_id);
         fail_attempt(ctx, &attempt.id, &message);
@@ -1186,6 +1183,19 @@ async fn execute_attempt(
     } else {
         None
     };
+    let discussion_dir = cache(ctx, |cache| cache.run_context(&run.id))
+        .ok()
+        .flatten()
+        .and_then(|context| context.dir)
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir());
+    let read_dirs: Vec<_> = discussion_dir.iter().cloned().collect();
+    let knowledge_dir = match run.owner.item_id().and_then(|id| ctx.item(id)) {
+        Some(item) => {
+            super::run_knowledge_dir(ctx, &item, backend, &checkout, &read_dirs, None).await
+        }
+        None => None,
+    };
     let spec = perch_agent::ReviewSpec {
         backend,
         binary: attempt
@@ -1202,19 +1212,27 @@ async fn execute_attempt(
         head_sha: captured.manifest.range.head.clone(),
         output_schema: schema,
         instructions,
-        discussion_dir: cache(ctx, |cache| cache.run_context(&run.id))
-            .ok()
-            .flatten()
-            .and_then(|context| context.dir)
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_dir()),
+        discussion_dir,
+        knowledge_dir,
         transcript: Some(transcript(captured.root(), &attempt.id, "review")),
     };
 
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Reviewing);
     send_group(ctx, &group_id);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = match perch_agent::Run::spawn_review(spec, tx) {
+    let spawned = if backend == perch_agent::Backend::OpenCode && spec.knowledge_dir.is_some() {
+        match perch_agent::Run::spawn_review(spec.clone(), tx.clone()) {
+            Err(perch_agent::Error::InvalidReview(_)) => {
+                let mut spec = spec;
+                spec.knowledge_dir = None;
+                perch_agent::Run::spawn_review(spec, tx)
+            }
+            spawned => spawned,
+        }
+    } else {
+        perch_agent::Run::spawn_review(spec, tx)
+    };
+    let handle = match spawned {
         Ok(handle) => handle,
         Err(error) => {
             finish_failed_attempt(
@@ -1503,7 +1521,6 @@ async fn execute_attempt(
             if let Some(item_id) = snapshot_item_id(ctx, &snapshot_id) {
                 ctx.send_threads(&item_id);
                 send_findings(ctx, &item_id);
-                export_item(ctx, &item_id);
             }
             send_group(ctx, &group_id);
             send_agent_runs(ctx, 50);
@@ -2784,7 +2801,6 @@ async fn ingest_saved_attempt(ctx: &Ctx, attempt: &ReviewerAttempt) -> Result<()
     send_group(ctx, &group.id);
     ctx.send_threads(&group.item_id);
     send_findings(ctx, &group.item_id);
-    export_item(ctx, &group.item_id);
     Ok(())
 }
 
@@ -3700,7 +3716,6 @@ pub(super) fn settle_group(ctx: &Ctx, group_id: &str) {
         tracing::warn!(group = group_id, %error, "could not finish review group");
         return;
     }
-    export_item(ctx, &group.item_id);
     // Once for the review, however many reviewers it had. One the reader
     // stopped, or that Perch's quitting cut off, isn't news.
     let activity = match outcome {
@@ -3803,38 +3818,13 @@ fn launch_failed(ctx: &Ctx, item_id: &str, message: String) {
     });
 }
 
-pub(super) fn export_item(ctx: &Ctx, item_id: &str) {
-    let Some(knowledge) = ctx.knowledge.as_ref() else {
-        return;
-    };
-    let Some(item) = ctx.item(item_id) else {
-        return;
-    };
-    let archive = match build_archive(ctx, &item) {
-        Ok(archive) => archive,
-        Err(error) => {
-            tracing::warn!(item = item_id, %error, "could not build review knowledge export");
-            return;
-        }
-    };
-    if let Err(error) = knowledge.export_review(&archive) {
-        tracing::warn!(item = item_id, %error, "could not write review knowledge export");
-    }
-}
-
-fn build_archive(
-    ctx: &Ctx,
-    item: &perch_github::Item,
-) -> Result<perch_knowledge::ReviewArchive, String> {
-    cache(ctx, |cache| review_archive(cache, item))
-}
-
 /// An item's review history, every review and finding with what was said
-/// in its thread, as the knowledge export and `perch context` write it.
+/// in its thread, as `perch context` writes it.
 /// Reads `cache` alone, so a reader with no engine builds the same thing.
 pub fn review_archive(
     cache: &perch_github::Cache,
     item: &perch_github::Item,
+    threads: &[perch_github::CommentThread],
 ) -> Result<perch_knowledge::ReviewArchive, perch_github::CacheError> {
     let groups = all_review_groups(cache, &item.id)?;
     let mut attempts_by_id = HashMap::new();
@@ -3882,10 +3872,9 @@ pub fn review_archive(
         });
     }
 
-    let threads = cache
-        .load_comment_threads(&item.id)?
-        .into_iter()
-        .map(|thread| (thread.id.clone(), thread))
+    let threads = threads
+        .iter()
+        .map(|thread| (thread.id.as_str(), thread))
         .collect::<HashMap<_, _>>();
     let findings = cache.list_findings(&item.id, None)?;
     let mut finding_archives = Vec::with_capacity(findings.len());
@@ -3950,9 +3939,9 @@ pub fn review_archive(
                 location: None,
             });
         }
-        if let Some(thread) = threads.get(&finding.thread_id) {
+        if let Some(thread) = threads.get(finding.thread_id.as_str()) {
             for message in &thread.messages {
-                if represented_messages.contains(&message.id) {
+                if message.is_draft() || represented_messages.contains(&message.id) {
                     continue;
                 }
                 let (backend, model) = match &message.author {
@@ -3977,6 +3966,7 @@ pub fn review_archive(
         finding_archives.push(perch_knowledge::FindingArchive {
             id: finding.id,
             thread_id: Some(finding.thread_id),
+            private_thread_file: None,
             severity: latest
                 .map(|observation| observation.severity.name().to_string())
                 .unwrap_or_else(|| "unknown".into()),

@@ -712,7 +712,8 @@ fn render_thread(thread: &ThreadEntry) -> String {
     out
 }
 
-fn render_checks(checks: &[CheckEntry]) -> String {
+/// Render the stored check runs, independently of the discussion.
+pub fn render_checks(checks: &[CheckEntry]) -> String {
     let mut out = String::new();
     writeln!(out, "# Checks\n").unwrap();
     writeln!(out, "{}\n", checks_summary(checks)).unwrap();

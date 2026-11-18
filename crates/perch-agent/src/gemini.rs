@@ -113,6 +113,15 @@ pub(crate) fn print_dirs(cwd: &Path, dirs: &[PathBuf]) -> Vec<PathBuf> {
     dirs
 }
 
+pub(crate) fn can_share_with_work(cwd: &Path, dir: &Path) -> bool {
+    let dir = crate::real_path(dir);
+    // agy can write here directly even in ACP's default mode, without
+    // a permission request Perch could refuse.
+    !dir.starts_with(crate::real_path(cwd))
+        && !dir.starts_with(crate::real_path(&std::env::temp_dir()))
+        && !dir.starts_with(crate::real_path(Path::new("/tmp")))
+}
+
 /// Why a Gemini run in `cwd`, adding `added` to its workspace, will not
 /// start, or `None` when it may.
 ///
@@ -985,6 +994,8 @@ pub(crate) struct AcpSession {
     /// Where an edit may go without asking: the worktree and the grant's
     /// directories, symlinks resolved.
     pub writable: Vec<PathBuf>,
+    /// Explicitly shared read-only directories, symlinks resolved.
+    pub read_only: Vec<PathBuf>,
 }
 
 const INITIALIZE: u64 = 1;
@@ -1051,6 +1062,10 @@ impl AcpClient {
 
     pub fn opencode_work(&self) -> bool {
         self.session.backend == crate::Backend::OpenCode && !self.session.writable.is_empty()
+    }
+
+    pub fn read_only_dirs(&self) -> &[PathBuf] {
+        &self.session.read_only
     }
 
     pub fn opening(&mut self) -> Vec<String> {
@@ -1603,10 +1618,12 @@ impl AcpClient {
             };
         }
         if let Some(paths) = edit_paths(&call, &self.session.cwd) {
-            if paths
-                .iter()
-                .any(|path| is_protected(path, &self.session.cwd, &self.session.writable))
-            {
+            if paths.as_ref().map_or(true, |paths| {
+                paths.iter().any(|path| {
+                    self.session.read_only.iter().any(|dir| path.starts_with(dir))
+                        || is_protected(path, &self.session.cwd, &self.session.writable)
+                })
+            }) {
                 self.refused = true;
                 events.push(RunEvent::PermissionDenied {
                     tool: Some(tool_name(&call)).filter(|n| !n.is_empty()),
@@ -1618,10 +1635,8 @@ impl AcpClient {
                     ..Reply::default()
                 };
             }
-            if !paths.is_empty()
-                && paths
-                    .iter()
-                    .all(|path| may_edit(path, &self.session.writable))
+            if paths.is_ok_and(|paths| !paths.is_empty()
+                && paths.iter().all(|path| may_edit(path, &self.session.writable)))
             {
                 return Reply {
                     writes: answer_line(&id, &options, true).into_iter().collect(),
@@ -1629,6 +1644,15 @@ impl AcpClient {
                     ..Reply::default()
                 };
             }
+        }
+        if self.session.backend == crate::Backend::Gemini
+            && may_read(&call, &self.session.cwd, &self.session.read_only)
+        {
+            return Reply {
+                writes: answer_line(&id, &options, true).into_iter().collect(),
+                events,
+                ..Reply::default()
+            };
         }
         let key = match &id {
             Value::String(s) => s.clone(),
@@ -1748,6 +1772,33 @@ const EDIT_PATH_KEYS: &[&str] = &[
     "target_file",
 ];
 
+/// Auto-allow only named file reads and searches with explicit paths in
+/// the granted directories. The CLI still asks about other tool calls.
+fn may_read(call: &Value, cwd: &Path, dirs: &[PathBuf]) -> bool {
+    if dirs.is_empty()
+        || is_edit_call(call)
+        || !matches!(
+            tool_name(call).as_str(),
+            "read" | "read_file" | "view_file" | "view_file_outline" | "view_code_item"
+                | "list_dir" | "find_by_name" | "glob" | "grep" | "grep_search"
+        )
+    {
+        return false;
+    }
+    let args = tool_args(call);
+    let locations = call["locations"].as_array().into_iter().flatten()
+        .filter_map(|location| location["path"].as_str());
+    let arguments = EDIT_PATH_KEYS.iter()
+        .copied()
+        .chain(["DirectoryPath", "SearchPath", "SearchDirectory", "directory"])
+        .filter_map(|key| args[key].as_str());
+    let mut paths = locations.chain(arguments).filter(|path| !path.is_empty()).peekable();
+    paths.peek().is_some() && paths.all(|path| {
+        resolve_tool_path(cwd, path)
+            .is_some_and(|real| dirs.iter().any(|dir| real.starts_with(dir)))
+    })
+}
+
 fn is_edit_call(call: &Value) -> bool {
     str_of(call, "kind") == "edit"
         || matches!(
@@ -1770,18 +1821,20 @@ fn is_edit_call(call: &Value) -> bool {
 /// The files an edit request writes, when it is one: ACP's `edit` kind,
 /// with its locations, the paths in its input, or an `apply_patch` body,
 /// each resolved against `cwd`.
-fn edit_paths(call: &Value, cwd: &Path) -> Option<Vec<PathBuf>> {
+fn edit_paths(call: &Value, cwd: &Path) -> Option<Result<Vec<PathBuf>, ()>> {
     if !is_edit_call(call) {
         return None;
     }
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut unresolved = false;
     let mut push = |raw: &str| {
         if raw.is_empty() {
             return;
         }
-        let p = PathBuf::from(raw);
-        let joined = if p.is_relative() { cwd.join(p) } else { p };
-        let norm = resolve(&joined).unwrap_or(joined);
+        let Some(norm) = resolve_tool_path(cwd, raw) else {
+            unresolved = true;
+            return;
+        };
         if !paths.contains(&norm) {
             paths.push(norm);
         }
@@ -1831,41 +1884,57 @@ fn edit_paths(call: &Value, cwd: &Path) -> Option<Vec<PathBuf>> {
             }
         }
     }
-    Some(paths)
+    Some(if unresolved { Err(()) } else { Ok(paths) })
 }
 
-/// `path` with `..` and `.` resolved and the longest part that exists
-/// taken through its symlinks: a file the edit creates does not exist
-/// yet. `None` for a relative path, or one that climbs above the root.
+fn resolve_tool_path(cwd: &Path, raw: &str) -> Option<PathBuf> {
+    let path = if raw == "~" || raw.starts_with("~/") {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        if !home.is_absolute() {
+            return None;
+        }
+        home.join(raw[1..].trim_start_matches('/'))
+    } else if raw.starts_with('~') {
+        // A named user's home is ambiguous across tools.
+        return None;
+    } else {
+        cwd.join(raw)
+    };
+    resolve(&path)
+}
+
+/// Resolve existing components through symlinks before appending any
+/// missing file or directory names. Reject ambiguous paths.
 fn resolve(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
-    let mut lexical = PathBuf::new();
+    match path.canonicalize() {
+        Ok(real) => return Some(real),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let mut resolved = PathBuf::new();
     for component in path.components() {
         match component {
             Component::ParentDir => {
-                if !lexical.pop() {
+                if !resolved.pop() {
                     return None;
                 }
             }
             Component::CurDir => {}
-            other => lexical.push(other),
-        }
-    }
-    let mut existing = lexical.as_path();
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(existing) {
-            let mut out = real;
-            for part in rest.iter().rev() {
-                out.push(part);
+            other => {
+                resolved.push(other);
+                match resolved.symlink_metadata() {
+                    Ok(meta) if meta.is_symlink() => resolved = resolved.canonicalize().ok()?,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
             }
-            return Some(out);
         }
-        rest.push(existing.file_name()?.to_os_string());
-        existing = existing.parent()?;
     }
+    Some(resolved)
 }
 
 fn has_protected_name(path: &Path) -> bool {
@@ -1945,6 +2014,7 @@ fn approval(call: &Value, cwd: &Path, writable: &[PathBuf]) -> ApprovalRequest {
             // Every path that needs asking, so none hides behind one that
             // would have gone anyway, and "Always" keeps exactly that set.
             let asked: Vec<PathBuf> = edit_paths(call, cwd)
+                .and_then(Result::ok)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|p| !may_edit(p, writable))
@@ -2418,6 +2488,7 @@ mod tests {
             prompt: "Fix it".into(),
             resume: None,
             writable: vec![crate::real_path(dir)],
+            read_only: Vec::new(),
         }
     }
 
@@ -2508,6 +2579,59 @@ mod tests {
         assert!(
             matches!(&opened.events[0], RunEvent::Started { session_id, .. } if session_id == "s-0")
         );
+    }
+
+    #[test]
+    fn acp_approves_archive_reads_and_searches_and_refuses_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let archive = root.join("archive");
+        let file = archive.join("probe.md");
+        std::fs::create_dir(&archive).unwrap();
+        std::fs::write(&file, "marker\n").unwrap();
+        let mut acp = AcpClient::new(AcpSession {
+            read_only: vec![archive.clone()],
+            ..session(&root)
+        });
+        let permission = |id, name, kind, input| json!({
+            "id": id,
+            "method": "session/request_permission",
+            "params": {
+                "toolCall": {"name": name, "kind": kind, "rawInput": input},
+                "options": [
+                    {"optionId": "allow", "kind": "allow_once"},
+                    {"optionId": "deny", "kind": "reject_once"}
+                ]
+            }
+        });
+        for call in [
+            permission("read", "read_file", "read", json!({"Path": file})),
+            permission("search", "grep_search", "search", json!({"SearchPath": archive})),
+        ] {
+            let reply = acp.after_line(&call);
+            assert!(reply.events.is_empty());
+            assert_eq!(written(&reply)["result"]["outcome"]["optionId"], "allow");
+        }
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap()).canonicalize().unwrap();
+        let relative_to_home = "../".repeat(home.components().count() - 1);
+        let tilde = |path: &Path| format!("~/{relative_to_home}{}", path.strip_prefix("/").unwrap().display());
+        let missing_file = archive.join("missing/checks.md");
+        let mut read = permission("missing", "read_file", "read", json!({"Path": tilde(&missing_file)}));
+        read["params"]["toolCall"]["locations"] = json!([{"path": missing_file}]);
+        let reply = acp.after_line(&read);
+        assert!(reply.events.is_empty());
+        assert_eq!(written(&reply)["result"]["outcome"]["optionId"], "allow");
+
+        let edit = acp.after_line(&permission(
+            "edit", "write_file", "edit", json!({"Path": tilde(&missing_file)}),
+        ));
+        assert!(matches!(edit.events.as_slice(), [RunEvent::PermissionDenied { .. }]));
+        assert_eq!(written(&edit)["result"]["outcome"]["optionId"], "deny");
+        let outside = acp.after_line(&permission(
+            "outside", "grep_search", "search", json!({"SearchPath": root}),
+        ));
+        assert!(outside.writes.is_empty());
+        assert!(matches!(outside.events.as_slice(), [RunEvent::Approval { .. }]));
     }
 
     #[test]
@@ -2924,6 +3048,7 @@ mod tests {
             prompt: "Fix it".into(),
             resume: None,
             writable,
+            read_only: Vec::new(),
         });
         acp.opening();
         acp.after_line(&json!({"id": 1, "result": {"agentInfo": {"version": "2.3.0"}}}));

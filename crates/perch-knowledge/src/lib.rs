@@ -1,11 +1,11 @@
-//! Deterministic, local Markdown exports of Perch review history.
+//! Perch review history as deterministic Markdown, for `perch context`.
 //!
 //! This crate intentionally knows nothing about SQLite or GitHub. The app
-//! converts its durable records into these plain data structures, and this
-//! writer atomically replaces one item document. Stable entry IDs make a
-//! repeated export idempotent without hiding later observations.
+//! converts its durable records into these plain data structures, and
+//! [`render_review`] renders them. Stable entry IDs make an entry given
+//! twice render once.
 //!
-//! [`sanitize`] is here too: the export quotes text that came from a
+//! [`sanitize`] is here too: the history quotes text that came from a
 //! repository through an agent, and the app quotes GitHub to an agent, so
 //! both clean it the same way.
 //!
@@ -13,81 +13,20 @@
 //! is pointed at, and keeps the manifest of what a run was shown.
 
 pub mod discussion;
+mod files;
 pub mod sanitize;
+
+pub use files::{
+    child_dirs, encode_component, ensure_dir, prune_temporary_files, remove_dir, remove_empty_dir,
+    remove_file, safe_component, sync, write_file,
+};
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use sanitize::{clean, fence_around, one_line};
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("could not create the knowledge directory {path}: {source}")]
-    CreateDirectory {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("could not write the knowledge export {path}: {source}")]
-    Write {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct Knowledge {
-    root: PathBuf,
-}
-
-impl Knowledge {
-    pub fn open(root: impl Into<PathBuf>) -> Result<Self, Error> {
-        let root = root.into();
-        fs::create_dir_all(&root).map_err(|source| Error::CreateDirectory {
-            path: root.clone(),
-            source,
-        })?;
-        Ok(Self { root })
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    /// Export the complete known history for one item. The destination is
-    /// stable and the content is rebuilt from stable IDs, so replaying an
-    /// unchanged export cannot duplicate a message.
-    pub fn export_review(&self, review: &ReviewArchive) -> Result<PathBuf, Error> {
-        let path = self.review_path(&review.repository, &review.item_id);
-        let parent = path.parent().expect("a review path always has a parent");
-        fs::create_dir_all(parent).map_err(|source| Error::CreateDirectory {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-        atomic_write(&path, render_review(review).as_bytes())?;
-        Ok(path)
-    }
-
-    pub fn review_path(&self, repository: &str, item_id: &str) -> PathBuf {
-        let mut path = self.root.join("reviews");
-        let mut wrote_repository = false;
-        for component in repository.split(['/', '\\']) {
-            if component.trim().is_empty() {
-                continue;
-            }
-            path.push(safe_component(component));
-            wrote_repository = true;
-        }
-        if !wrote_repository {
-            path.push("local");
-        }
-        path.join(format!("{}.md", safe_component(item_id)))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewArchive {
@@ -134,6 +73,9 @@ pub struct AttemptArchive {
 pub struct FindingArchive {
     pub id: String,
     pub thread_id: Option<String>,
+    /// Where the reader's own messages are kept when rendering the live archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_thread_file: Option<String>,
     pub severity: String,
     pub status: String,
     pub title: String,
@@ -286,6 +228,14 @@ pub fn render_review(review: &ReviewArchive) -> String {
         if let Some(thread_id) = &finding.thread_id {
             writeln!(output, "- Thread ID: `{}`", inline_code(thread_id)).unwrap();
         }
+        if let Some(file) = &finding.private_thread_file {
+            writeln!(
+                output,
+                "- [Private questions and answers]({})",
+                markdown_link(file)
+            )
+            .unwrap();
+        }
         if let Some(candidate) = &finding.possible_duplicate_of {
             writeln!(
                 output,
@@ -354,59 +304,6 @@ fn unique_by_id<'a, T>(values: &'a [T], id: impl Fn(&'a T) -> &'a str) -> BTreeM
     values.iter().map(|value| (id(value), value)).collect()
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), Error> {
-    let mut attempt = 0_u32;
-    let (temp, mut file) = loop {
-        let candidate = path.with_extension(format!("md.tmp-{}-{attempt}", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => break (candidate, file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => {
-                attempt += 1;
-            }
-            Err(source) => {
-                return Err(Error::Write {
-                    path: candidate,
-                    source,
-                });
-            }
-        }
-    };
-    let result = (|| {
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result.map_err(|source| Error::Write {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn safe_component(value: &str) -> String {
-    let value = value.trim();
-    let cleaned = value
-        .chars()
-        .map(|character| match character {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => character,
-            _ => '-',
-        })
-        .collect::<String>();
-    let cleaned = cleaned.trim_matches(['.', '-']);
-    if cleaned.is_empty() || matches!(cleaned, "." | "..") {
-        "unknown".into()
-    } else {
-        cleaned.chars().take(120).collect()
-    }
-}
-
 fn inline_text(value: &str) -> String {
     one_line(value).replace(['[', ']'], "")
 }
@@ -461,6 +358,7 @@ mod tests {
             findings: vec![FindingArchive {
                 id: "finding-1".into(),
                 thread_id: Some("thread-1".into()),
+                private_thread_file: None,
                 severity: "high".into(),
                 status: "open".into(),
                 title: "Bounds panic".into(),
@@ -483,20 +381,6 @@ mod tests {
                 }],
             }],
         }
-    }
-
-    #[test]
-    fn repeated_export_replaces_one_stable_document() {
-        let directory = tempfile::tempdir().unwrap();
-        let knowledge = Knowledge::open(directory.path()).unwrap();
-        let first = knowledge.export_review(&archive()).unwrap();
-        let before = fs::read_to_string(&first).unwrap();
-        let second = knowledge.export_review(&archive()).unwrap();
-        let after = fs::read_to_string(&second).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(before, after);
-        assert_eq!(after.matches("#### Observation").count(), 1);
-        assert!(after.contains("Retained snapshot snapshot-1"));
     }
 
     #[test]
@@ -556,14 +440,5 @@ mod tests {
                 .any(|c| matches!(c, '\u{200B}' | '\u{200D}' | '\u{2060}' | '\u{202E}')),
             "{rendered}"
         );
-    }
-
-    #[test]
-    fn repository_and_item_cannot_escape_the_root() {
-        let directory = tempfile::tempdir().unwrap();
-        let knowledge = Knowledge::open(directory.path()).unwrap();
-        let path = knowledge.review_path("../owner/../../repo", "../item");
-        assert!(path.starts_with(directory.path()));
-        assert!(!path.to_string_lossy().contains("/../"));
     }
 }

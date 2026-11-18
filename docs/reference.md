@@ -1093,6 +1093,48 @@ way: `perchd serve` points `$PERCH_HOME/bin/perchd` at its own build as it
 starts. The installer links `~/.local/bin/perch` on a Mac as on Linux, so an
 agent's shell finds it.
 
+### Repository history for agents
+
+Perch keeps a live Markdown archive at
+`$PERCH_HOME/knowledge/perch/repos/<owner>/<repo>/`. The names are lowercase,
+and a repository with no GitHub remote uses `local/<name>`. On a host the
+archive lives under the host engine's Perch home.
+
+Start with the repository's `INDEX.md`, which lists each item by directory,
+state and title. Each pull request, issue and worktree has its own index with
+the GitHub conversation, review threads and checks Perch has cached, and any
+Perch reviews and findings. Findings include dismissals, their reasons and
+findings verified fixed. Private questions and answers are under `private/`,
+including questions asked under a finding. The archive excludes unsent drafts.
+
+Perch updates the archive in the background as it updates its database, even
+with no window connected. **Archive** in the UI keeps an item's files.
+**Delete** removes them. Deleting a private message or thread updates the
+item's files. At startup Perch rebuilds missing files from `perch.db` and
+cleans up files for deleted items. It also removes the old `knowledge/reviews/`
+export, whose contents are now in each item's `findings.md`.
+
+When the archive holds another item from the same repository, a new Ask or
+Work session can search it for relevant history. Review instructions tell the
+reviewer to search it before reporting a finding. A past dismissal only
+applies when its reasoning still holds for the code under review. Perch
+treats the archive as untrusted text and tells agents never to quote
+`private/` in material posted to GitHub or committed. The instruction relies
+on the agent following it. Pull request description and issue writing runs
+do not receive the archive path.
+
+Claude Code and Codex can already read files accessible to the user. Perch
+adds the current repository's archive to Claude Code's allowed directories
+and denies writes there in its settings. Codex reads the archive through
+its existing filesystem access. Gemini and OpenCode receive read access to
+the current repository's archive. Gemini Work automatically approves scoped
+read and search requests there. Gemini Work omits the archive when it is
+inside the worktree or a system temporary directory, where Gemini's tools
+can write without asking. If OpenCode's scan would exceed its
+added-directory budget, the run proceeds without the archive. A grant
+describes the intended scope for the run. It does not isolate one
+repository's archive from another.
+
 ### What the agent can and cannot do
 
 An agent reads text nobody vetted: the pull request, its comments, and the
@@ -1133,8 +1175,7 @@ Perch does not try to detect them; it limits what following one could do.
   `[BEGIN untrusted text: …]` and `[END untrusted text]` lines, a line
   inside it that imitates a marker is spoiled, and your question comes
   last. The discussion files under `context/`, which the prompt says are
-  untrusted like a marked block, and the review history export under
-  `knowledge/reviews/` are cleaned the same way.
+  untrusted like a marked block, are cleaned the same way.
 - **Inert links.** A link in an answer or a comment does nothing until it
   is clicked. Hovering it shows the full destination; a click opens `http`
   and `https` links in the browser and a file of the worktree in Code
@@ -1410,12 +1451,7 @@ request.
 
 Follow-ups stay local to Perch unless you post one yourself. Reviews do not
 resolve threads on GitHub, modify code, run automatically after a push, or use
-a hosted review service. Perch also exports each item's review history as
-deterministic Markdown at
-`$PERCH_HOME/knowledge/reviews/<owner>/<repo>/<item-id>.md` (under
-`~/.perch` when `PERCH_HOME` is unset). Re-exporting replaces that stable
-document rather than duplicating unchanged entries; unrelated legacy files in
-the knowledge directory are not imported.
+a hosted review service.
 
 ## The file tree
 

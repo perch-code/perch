@@ -3800,10 +3800,10 @@ dependencies = [
  "jiff",
  "pulldown-cmark",
  "pulldown-cmark-to-cmark",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.20",
  "unicode-general-category",
 ]
 

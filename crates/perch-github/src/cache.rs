@@ -23,6 +23,7 @@ use crate::model::Thread;
 use crate::reactions::Reactions;
 use crate::workflow_runs::Checks;
 
+mod item_changes;
 mod review_store;
 
 /// The shape of the tables. Version 18 adds durable worktree-review history
@@ -195,6 +196,7 @@ CREATE TABLE IF NOT EXISTS repo_lsp_trust (
 pub struct Cache {
     conn: Connection,
     avatar_dir: Option<PathBuf>,
+    item_changes: Option<item_changes::ItemChanges>,
 }
 
 /// A Done mark or a snooze: the revision of a thread it was taken on, and
@@ -2762,6 +2764,7 @@ impl Cache {
         Ok(Self {
             conn,
             avatar_dir: None,
+            item_changes: None,
         })
     }
 
@@ -2789,7 +2792,10 @@ impl Cache {
         let outcome = initialize_schema(&mut conn)?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        Ok((Self { conn, avatar_dir }, outcome))
+        Ok((
+            Self { conn, avatar_dir, item_changes: None },
+            outcome,
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -4250,8 +4256,12 @@ impl Cache {
                 "an item needs a subject or a checkout".into(),
             ));
         }
+        Self::update_item_on(&self.conn, item)
+    }
+
+    fn update_item_on(conn: &Connection, item: &Item) -> Result<(), CacheError> {
         let c = ItemColumns::of(item)?;
-        self.conn.execute(
+        conn.execute(
             "UPDATE items SET
                 repo_full_name = ?2, subject_kind = ?3, subject_number = ?4,
                 subject_json = ?5, branch = ?6, base_ref = ?7, head_sha = ?8, checkout_path = ?9,
@@ -4287,6 +4297,132 @@ impl Cache {
             ],
         )?;
         Ok(())
+    }
+
+    /// Transfer a subject-only row onto the branch taking its pull request.
+    /// The item IDs embedded in review history must move together because a
+    /// group refers to its snapshot by (snapshot ID, item ID).
+    pub fn take_item_history(&self, from: &str, item: &Item) -> Result<(), CacheError> {
+        let to = &item.id;
+        if from == to || !item.is_valid() {
+            return Err(CacheError::Corrupt("invalid item history transfer".into()));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let can_transfer: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE id=?1 AND branch IS NULL)
+                 AND EXISTS(SELECT 1 FROM items WHERE id=?2)",
+            params![from, to],
+            |row| row.get(0),
+        )?;
+        if !can_transfer {
+            return Err(CacheError::Corrupt(
+                "item history transfer needs a subject-only row and an existing destination".into(),
+            ));
+        }
+        let busy: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE owner_item_id=?1
+                      AND status IN ('queued','starting','running','stopping'))
+                 OR EXISTS(SELECT 1 FROM review_groups WHERE item_id=?1
+                      AND status IN ('preparing','reviewing','stopping','reconciling'))",
+            [from],
+            |row| row.get(0),
+        )?;
+        if busy {
+            return Err(CacheError::ReviewConflict(
+                "the pull request has an active agent run".into(),
+            ));
+        }
+        tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
+        tx.execute(
+            "UPDATE comment_threads SET worktree_id=?2 WHERE worktree_id=?1",
+            params![from, to],
+        )?;
+        tx.execute(
+            "UPDATE runs SET owner_item_id=?2 WHERE owner_item_id=?1",
+            params![from, to],
+        )?;
+        tx.execute(
+            "UPDATE review_snapshots SET item_id=?2 WHERE item_id=?1",
+            params![from, to],
+        )?;
+        tx.execute(
+            "UPDATE review_groups SET item_id=?2, number=number+?3 WHERE item_id=?1",
+            params![
+                from,
+                to,
+                tx.query_row(
+                    "SELECT COALESCE(MAX(number), 0) FROM review_groups WHERE item_id=?1",
+                    [to],
+                    |row| row.get::<_, i64>(0),
+                )?
+            ],
+        )?;
+        // Keep both findings and their audit trails if the two rows had
+        // each reported the same stable key. Future matches use the key
+        // on the branch's existing finding.
+        let collisions = {
+            let mut stmt = tx.prepare(
+                "SELECT a.id FROM review_findings a JOIN review_findings b USING(stable_key)
+                 WHERE a.item_id=?1 AND b.item_id=?2",
+            )?;
+            let rows = stmt.query_map(params![from, to], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for id in collisions {
+            let mut key = format!("transferred:{id}");
+            while tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM review_findings
+                    WHERE item_id IN (?1, ?2) AND stable_key=?3)",
+                params![from, to, key],
+                |row| row.get::<_, bool>(0),
+            )? {
+                key.push(':');
+            }
+            tx.execute(
+                "UPDATE review_findings SET stable_key=?2 WHERE id=?1",
+                params![id, key],
+            )?;
+        }
+        tx.execute(
+            "UPDATE review_findings SET item_id=?2 WHERE item_id=?1",
+            params![from, to],
+        )?;
+        for table in ["discussions", "checks"] {
+            tx.execute(
+                &format!("UPDATE OR REPLACE {table} SET item_id=?2 WHERE item_id=?1"),
+                params![from, to],
+            )?;
+        }
+        for table in ["viewed", "reveals"] {
+            tx.execute(
+                &format!("UPDATE OR IGNORE {table} SET item_id=?2 WHERE item_id=?1"),
+                params![from, to],
+            )?;
+            tx.execute(&format!("DELETE FROM {table} WHERE item_id=?1"), [from])?;
+        }
+        // Children of either row keep their provenance. The branch
+        // itself may have been cut from the subject being transferred.
+        tx.execute(
+            "UPDATE items SET from_item_id=?2 WHERE from_item_id=?1 AND id<>?2",
+            params![from, to],
+        )?;
+        tx.execute("DELETE FROM items WHERE id=?1", [from])?;
+        Self::update_item_on(&tx, item)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether a checkout that disappeared has any local knowledge worth
+    /// keeping as an archived item.
+    pub fn has_item_history(&self, id: &str) -> Result<bool, CacheError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM comment_threads WHERE worktree_id=?1)
+                 OR EXISTS(SELECT 1 FROM review_groups WHERE item_id=?1)
+                 OR EXISTS(SELECT 1 FROM discussions WHERE item_id=?1)
+                 OR EXISTS(SELECT 1 FROM checks WHERE item_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?)
     }
 
     /// Delete an item and everything said in it, and what was fetched and
@@ -6411,6 +6547,44 @@ mod tests {
 
     fn stamp_of(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn transferring_a_pull_request_keeps_its_runs_and_parent_links() {
+        let cache = Cache::open_in_memory().unwrap();
+        let mut source = pr_item(7);
+        source.id = "w".into();
+        let mut branch = branch_item("feature");
+        branch.from_item_id = Some(source.id.clone());
+        let mut child = branch_item("child");
+        child.from_item_id = Some(source.id.clone());
+        cache.insert_item(&source).unwrap();
+        cache.insert_item(&branch).unwrap();
+        cache.insert_item(&child).unwrap();
+
+        let thread = comment_thread("source-thread", &source.id);
+        cache.insert_comment_thread(&thread).unwrap();
+        let run_id = thread.messages[1].run.as_ref().unwrap().id.as_str();
+        cache.store_discussion(&source.id, &discussion()).unwrap();
+
+        branch.subject = source.subject.clone();
+        branch.from_item_id = None;
+        cache.take_item_history(&source.id, &branch).unwrap();
+
+        assert!(cache.load_item(&source.id).unwrap().is_none());
+        assert!(cache.load_discussion(&branch.id).unwrap().is_some());
+        let run = cache.load_run(run_id).unwrap().unwrap();
+        assert_eq!(run.owner.item_id(), Some(branch.id.as_str()));
+        assert_eq!(
+            cache.load_item(&child.id).unwrap().unwrap().from_item_id,
+            Some(branch.id.clone())
+        );
+        let threads = cache.load_comment_threads(&branch.id).unwrap();
+        let kept = threads
+            .iter()
+            .find(|thread| thread.id == "source-thread")
+            .unwrap();
+        assert_eq!(kept.messages[1].run.as_ref().unwrap().id, run.id);
     }
 
     #[test]

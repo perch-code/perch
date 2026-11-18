@@ -326,6 +326,7 @@ impl RunManager {
             pending_terminal: Mutex::new(None),
         });
         entries.insert(run.id.clone(), entry.clone());
+        guard.publish_item_changes();
         drop(guard);
         drop(entries);
         drop(gate);
@@ -896,6 +897,7 @@ impl RunManager {
         if guard.append_run_event(id, &event).is_err() {
             return None;
         }
+        guard.publish_item_changes();
         let run = guard.load_run(id).ok().flatten()?;
         drop(guard);
         let _ = self

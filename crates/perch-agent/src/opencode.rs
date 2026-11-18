@@ -28,6 +28,7 @@ pub(crate) fn conversation(
     prompt: String,
     resume: Option<String>,
     writable: Vec<PathBuf>,
+    read_only: Vec<PathBuf>,
 ) -> Conversation {
     Conversation::Acp(Box::new(AcpClient::new(AcpSession {
         backend: Backend::OpenCode,
@@ -37,6 +38,7 @@ pub(crate) fn conversation(
         prompt,
         resume,
         writable,
+        read_only,
     })))
 }
 
@@ -95,7 +97,7 @@ fn slash_path(path: &Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn config_value(work: bool, external_reads: &[PathBuf]) -> Value {
+fn config_value(work: bool, external_reads: &[PathBuf], read_only: &[PathBuf]) -> Value {
     let rule = |action: &str, resource: &str, effect: &str| json!({"action": action, "resource": resource, "effect": effect});
     let gate = if work { "ask" } else { "deny" };
     let mut rules = vec![
@@ -142,6 +144,12 @@ fn config_value(work: bool, external_reads: &[PathBuf]) -> Value {
         for tool in ["edit", "shell", "webfetch", "websearch"] {
             rules.push(rule(tool, "*", "ask"));
         }
+        for path in read_only {
+            if let Some(slash) = slash_path(path) {
+                rules.push(rule("edit", &slash, "deny"));
+                rules.push(rule("edit", &format!("{slash}/*"), "deny"));
+            }
+        }
     }
     json!({
         "agents": { (mode(work)): {"mode": "primary", "permissions": rules} },
@@ -159,9 +167,10 @@ pub(crate) fn configure(
     command: &mut Command,
     work: bool,
     external_reads: &[PathBuf],
+    read_only: &[PathBuf],
 ) -> Result<(), String> {
     let home = perch_home()?;
-    configure_in(command, &home, work, external_reads)
+    configure_in(command, &home, work, external_reads, read_only)
 }
 
 fn configure_in(
@@ -169,6 +178,7 @@ fn configure_in(
     home: &Path,
     work: bool,
     external_reads: &[PathBuf],
+    read_only: &[PathBuf],
 ) -> Result<(), String> {
     // OpenCode applies previously saved "always allow" decisions after
     // agent-level "ask" rules. Keep Perch sessions in their own database
@@ -179,7 +189,7 @@ fn configure_in(
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("could not create {}: {e}", config_dir.display()))?;
 
-    let config = config_value(work, external_reads);
+    let config = config_value(work, external_reads, read_only);
     if let Some(key) = std::env::var_os("OPENCODE_API_KEY") {
         command.env("OPENCODE_API_KEY", key);
     }
@@ -203,7 +213,10 @@ pub(crate) fn refusal(cwd: &Path, added: &[PathBuf], trusted: bool) -> Option<St
     if trusted {
         return None;
     }
-    let mut budget = SCAN_LIMIT;
+    refusal_with_budget(cwd, added, SCAN_LIMIT)
+}
+
+fn refusal_with_budget(cwd: &Path, added: &[PathBuf], mut budget: usize) -> Option<String> {
     let starts = std::iter::once((cwd, true)).chain(added.iter().map(|d| (d.as_path(), false)));
     for (start, own) in starts {
         if let Some(finding) = vet_tree(start, &mut budget) {
@@ -211,6 +224,23 @@ pub(crate) fn refusal(cwd: &Path, added: &[PathBuf], trusted: bool) -> Option<St
         }
     }
     None
+}
+
+pub(crate) fn can_read_archive(dir: &Path) -> bool {
+    slash_path(&real_path(dir)).is_some() && refusal(dir, &[], false).is_none()
+}
+
+pub(crate) fn can_add_optional_read_dir(cwd: &Path, added: &[PathBuf], dir: &Path) -> bool {
+    can_add_read_dir_with_budget(cwd, added, dir, SCAN_LIMIT)
+}
+
+fn can_add_read_dir_with_budget(cwd: &Path, added: &[PathBuf], dir: &Path, budget: usize) -> bool {
+    if slash_path(&real_path(dir)).is_none() {
+        return false;
+    }
+    let mut dirs = added.to_vec();
+    dirs.push(dir.to_path_buf());
+    refusal_with_budget(cwd, &dirs, budget).is_none()
 }
 
 fn refusal_text(cwd: &Path, finding: &Finding, own: bool) -> String {
@@ -351,7 +381,7 @@ fn vet_dir_instructions(
 pub async fn opencode_catalog(binary: &Path) -> Result<Vec<String>, String> {
     let mut cmd = Command::new(binary);
     crate::scrub_env(&mut cmd);
-    configure(&mut cmd, false, &[])?;
+    configure(&mut cmd, false, &[], &[])?;
     cmd.args(["models", "--standalone"])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
@@ -430,6 +460,7 @@ mod tests {
             "Follow up".into(),
             Some("s1".into()),
             vec![],
+            vec![],
         );
         let resume =
             request(client.after_line(&json!({"id":1,"result":{"agentInfo":{"version":"2.3.0"}}})));
@@ -459,6 +490,7 @@ mod tests {
             "Edit".into(),
             None,
             vec![PathBuf::from("/work")],
+            vec![],
         );
         let mode = request(client.after_line(&json!({"id":3,"result":{"configOptions":[]}})));
         assert_eq!(mode["params"]["value"], "perch-work");
@@ -525,7 +557,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut cmd = Command::new("opencode");
-        configure_in(&mut cmd, dir.path(), false, &[]).unwrap();
+        configure_in(&mut cmd, dir.path(), false, &[], &[]).unwrap();
         assert!(dir.path().join("opencode/config").is_dir());
         let envs: Vec<_> = cmd.as_std().get_envs().collect();
         let env_of = |key: &str| {
@@ -547,6 +579,42 @@ mod tests {
             None,
             "XDG_DATA_HOME must not be overridden for child shell commands"
         );
+    }
+
+    #[test]
+    fn an_archive_over_budget_does_not_disqualify_the_checkout_or_discussion() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("checkout");
+        let discussion = temp.path().join("context");
+        let archive = temp.path().join("archive");
+        for dir in [&checkout, &discussion, &archive] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("INDEX.md"), "").unwrap();
+        }
+        let existing = [discussion];
+        let limit = 3;
+        assert!(can_add_read_dir_with_budget(&checkout, &existing, &archive, limit));
+        std::fs::write(archive.join("conversation.md"), "").unwrap();
+        assert!(!can_add_read_dir_with_budget(&checkout, &existing, &archive, limit));
+        assert!(refusal_with_budget(&checkout, &existing, limit).is_none());
+    }
+
+    #[test]
+    fn trusted_work_checks_the_archive_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::create_dir(&archive).unwrap();
+        let outside = tmp.path().join("instructions.md");
+        std::fs::write(&outside, "").unwrap();
+        std::os::unix::fs::symlink(&outside, checkout.join("AGENTS.md")).unwrap();
+        let ask = crate::Mode::Ask;
+        let work = crate::Mode::Work(crate::WorkGrant { trust: true, ..Default::default() });
+        assert!(!crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &ask));
+        assert!(crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &work));
+        std::os::unix::fs::symlink(&outside, archive.join("AGENTS.md")).unwrap();
+        assert!(!crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &work));
     }
 
     #[test]
@@ -572,7 +640,7 @@ mod tests {
 
         for work in [false, true] {
             let gate = if work { "ask" } else { "deny" };
-            let cfg = config_value(work, &external);
+            let cfg = config_value(work, &external, &[]);
             let rules = cfg["agents"][mode(work)]["permissions"].as_array().unwrap();
 
             assert!(

@@ -28,6 +28,7 @@ use tokio::sync::Semaphore;
 pub use avatar::APP_AVATAR_CORNER;
 pub use connections::{Connection, Engine, Lifetime};
 pub use issue_draft::with_found_in;
+pub use knowledge::cached_knowledge_dir;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 pub use settings::{CheckConfig, SettingsFile};
 use windows::{CommandSender, Fencing, View, Views};
@@ -40,6 +41,7 @@ mod connections;
 mod feedback;
 mod issue_draft;
 mod kept_servers;
+mod knowledge;
 pub(crate) mod open_pull;
 pub mod reviews;
 pub(crate) mod runs;
@@ -4653,6 +4655,10 @@ async fn run(
     // interrupted by a crash before entering the command loop.
     let data_root =
         perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let knowledge = knowledge::Archive::new(data_root.clone(), data_root.join("perch.db"));
+    if let Some(mut writer) = cache.as_ref().and_then(|cache| cache.lock().ok()) {
+        knowledge.watch(&mut writer);
+    }
     let local_preparer = Preparer::new(Store::new(data_root.clone()), None);
     retire_archived_checkouts_from_cache(&cache, &local_preparer, &events).await;
     // Nothing runs from Perch's servers yet: tidy them.
@@ -4721,13 +4727,6 @@ async fn run(
         detect_review_capabilities(&config.agent).await,
     )));
     let review_snapshots = Arc::new(ReviewSnapshotStore::new(data_root.clone()));
-    let knowledge = match perch_knowledge::Knowledge::open(data_root.join("knowledge")) {
-        Ok(knowledge) => Some(Arc::new(knowledge)),
-        Err(error) => {
-            tracing::warn!(%error, "review knowledge export is unavailable");
-            None
-        }
-    };
     let config = Arc::new(config);
     let run_manager = runs::RunManager::new(
         config.agent.max_concurrent_runs,
@@ -4765,8 +4764,8 @@ async fn run(
         review_navigation: Arc::new(tokio::sync::Mutex::new(())),
         review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
-        knowledge,
         item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
+        knowledge,
         root_cuts: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
         assignments: Arc::default(),
@@ -4913,6 +4912,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
     snooze_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let base = ctx;
+    let mut archive_task: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let (window, command, fenced) = tokio::select! {
             _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh, Fenced::default()),
@@ -4930,6 +4930,9 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 // Told to stop: the app quit, or the host's service did.
                 Some(connections::Inbound::Shutdown) | None => {
                     tracing::info!("backend shutting down");
+                    if let Some(task) = archive_task.take() {
+                        task.abort();
+                    }
                     base.runs.shutdown().await;
                     // Deferred archive waiters are detached tasks. Complete
                     // their local work synchronously before this runtime can
@@ -4964,6 +4967,9 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                     NotificationPollMode::Conditional
                 };
                 let poll_after = refresh(&ctx, mode).await;
+                if archive_task.is_none() && ctx.cache.is_some() {
+                    archive_task = Some(ctx.knowledge.start(ctx.item_lifecycle.clone()));
+                }
                 let now = tokio::time::Instant::now();
                 next_auto_poll = now + poll_after.wait;
                 last_poll = Some(now);
@@ -7066,14 +7072,13 @@ struct Ctx {
     /// Reconciliation reloads durable findings under this short lock. The
     /// database transaction remains the ultimate replay fence.
     review_reconcile: Arc<tokio::sync::Mutex<()>>,
-    /// Plain Markdown export is best-effort and never gates durable review.
-    knowledge: Option<Arc<perch_knowledge::Knowledge>>,
     /// Serializes an item's open, archive, restore, and delete so deferred
     /// agent cleanup cannot remove a worktree while it is being restored or
     /// deleted. One lock per item, and one per subject for the opens that
     /// find or make its item, so a slow open (a large clone) holds up only
     /// its own item: see `lock_item` and `lock_subject`.
     item_lifecycle: Arc<perch_git::KeyedMutex>,
+    knowledge: knowledge::Archive,
     /// Held by a root scan, and by a cut in a root from `git worktree add`
     /// until its row is in, so the scan cannot find the new worktree first
     /// and take it for the reader's own.
@@ -7626,7 +7631,9 @@ impl Ctx {
     fn with_cache<T>(&self, f: impl FnOnce(&Cache) -> T) -> Option<T> {
         let cache = self.cache.as_ref()?;
         let guard = cache.lock().ok()?;
-        Some(f(&guard))
+        let value = f(&guard);
+        guard.publish_item_changes();
+        Some(value)
     }
 
     fn item(&self, id: &str) -> Option<Item> {
@@ -8420,8 +8427,8 @@ impl Ctx {
             .is_some_and(|g| g.as_ref().is_some_and(|c| c.item_id == item_id))
     }
 
-    /// Hold one item's lifecycle. Nothing that holds it waits on a subject
-    /// or on another item, so `lock_subject` then this cannot deadlock.
+    /// Hold one item's lifecycle. A subject, when needed, is locked first.
+    /// The pull request takeover takes two item locks in ID order.
     async fn lock_item(&self, item_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         self.item_lifecycle.lock(format!("item {item_id}")).await
     }
@@ -9918,7 +9925,9 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
 
     ctx.with_cache(|c| c.delete_item(id))
         .transpose()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "the local database is unavailable".to_string())?;
+    ctx.knowledge.delete(item).await;
     drop_context_dirs(ctx, &context_before);
     ctx.send_items();
     Ok(())
@@ -15905,7 +15914,7 @@ async fn refresh_items(ctx: &Ctx) {
 }
 
 /// Every worktree under a declared repository's root is an item, and one
-/// whose directory has gone is deleted, or archived when it has threads.
+/// whose directory has gone is archived if it has history to keep.
 /// Returns whether anything changed.
 async fn scan_roots(ctx: &Ctx) -> bool {
     let _cuts = ctx.root_cuts.lock().await;
@@ -16062,7 +16071,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
 
     // Unowned items in scanned repositories whose branch no worktree has.
     // A directory that is gone takes its row with it, unless the row has
-    // threads, which are worth an archived row. A directory still there on
+    // history worth keeping in an archived row. A directory still there on
     // another branch is the reader switching; the row is put away with its
     // directory marked gone, and the scan brings it back when the branch
     // is checked out again. A row the reader archived is theirs, and is
@@ -16085,26 +16094,31 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         if seen.contains(&(path, c.branch.clone())) {
             continue;
         }
+        let _lifecycle = ctx.lock_item(&item.id).await;
         let still_there = c.path.join(".git").exists();
-        let has_threads = ctx
-            .with_cache(|cache| {
-                cache
-                    .load_comment_threads(&item.id)
-                    .map(|t| !t.is_empty())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if still_there || has_threads {
-            let mut item = item;
-            if let Some(c) = item.checkout.as_mut() {
-                c.on_disk = false;
+        let result = ctx.with_cache(|cache| {
+            let Some(mut current) = cache.load_item(&item.id)? else {
+                return Ok(false);
+            };
+            if current.is_archived() || current.checkout != item.checkout {
+                return Ok(false);
             }
-            item.archived_at = Some(Timestamp::now());
-            ctx.with_cache(|cache| cache.update_item(&item));
-        } else {
-            ctx.with_cache(|cache| cache.delete_item(&item.id));
+            if still_there || cache.has_item_history(&item.id)? {
+                if let Some(checkout) = current.checkout.as_mut() {
+                    checkout.on_disk = false;
+                }
+                current.archived_at = Some(Timestamp::now());
+                cache.update_item(&current)?;
+            } else {
+                cache.delete_item(&item.id)?;
+            }
+            Ok::<_, CacheError>(true)
+        });
+        match result {
+            Some(Ok(updated)) => changed |= updated,
+            Some(Err(error)) => tracing::warn!(item = %item.id, %error, "could not retire a missing root worktree"),
+            None => {}
         }
-        changed = true;
     }
     changed
 }
@@ -16280,34 +16294,23 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                         }
                         continue;
                     };
-                    // The row as it is now, not as it was when the loop
-                    // began: a click may have opened it since.
-                    let Some(mut item) = ctx.item(&item.id) else {
-                        break;
-                    };
-                    if item.subject.is_some() {
-                        break;
-                    }
                     let number = pr.number;
-                    match ctx.with_cache(|c| take_pull_request(c, &mut item, *pr)) {
-                        Some(Ok(true)) => {
-                            tracing::info!(item = %item.id, number, "branch gained a pull request");
+                    match attach_pull_request(ctx, &item.id, *pr).await {
+                        Ok(Some(updated)) => {
+                            tracing::info!(item = %updated.id, number, "branch gained a pull request");
                             if let Some(etag) = etag {
                                 ctx.with_cache(|c| c.set_meta(&key, &etag));
                             }
                             changed = true;
                         }
-                        // Held by a row with a checkout of its own: that
-                        // row keeps it, and this one stays a branch.
-                        Some(Ok(false)) => {
+                        Ok(None) => {
                             if let Some(etag) = etag {
                                 ctx.with_cache(|c| c.set_meta(&key, &etag));
                             }
                         }
-                        Some(Err(e)) => {
-                            tracing::warn!(error = %e, "could not attach the pull request")
+                        Err(error) => {
+                            tracing::warn!(%error, "could not attach the pull request");
                         }
-                        None => {}
                     }
                     break;
                 }
@@ -16363,36 +16366,82 @@ async fn head_repo_of(ctx: &Ctx, item: &Item, checkout: &ItemCheckout) -> String
         .unwrap_or_else(|| item.repo_full_name.clone())
 }
 
+/// Serialize a takeover with opens and with Delete on either row. Both
+/// item locks are acquired in ID order when the subject already has a row.
+async fn attach_pull_request(
+    ctx: &Ctx,
+    item_id: &str,
+    pr: PullRequest,
+) -> Result<Option<Item>, String> {
+    let _subject = ctx
+        .lock_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)
+        .await;
+    let holder = ctx
+        .with_cache(|cache| {
+            cache.find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)
+        })
+        .ok_or("The local database is unavailable")?
+        .map_err(|error| error.to_string())?;
+    let mut ids = vec![item_id];
+    if let Some(holder) = holder.as_ref().filter(|holder| holder.id != item_id) {
+        if holder.checkout.is_some() {
+            return Ok(None);
+        }
+        ids.push(&holder.id);
+        ids.sort_unstable();
+    }
+    let mut guards = Vec::new();
+    for id in ids {
+        guards.push(ctx.lock_item(id).await);
+    }
+
+    ctx.with_cache(|cache| {
+        let mut item = cache.load_item(item_id).map_err(|error| error.to_string())?
+            .ok_or("The item is gone")?;
+        if let Some(subject) = &item.subject {
+            let same = matches!(subject, ItemSubject::PullRequest(current)
+                if current.number == pr.number && current.repo_full_name.eq_ignore_ascii_case(&pr.repo_full_name));
+            if !same {
+                return Err("The branch already has a different GitHub item".into());
+            }
+        }
+        let attached = take_pull_request(cache, &mut item, pr).map_err(|error| error.to_string())?;
+        Ok(attached.then_some(item))
+    }).ok_or_else(|| "The local database is unavailable".to_string())?
+}
+
 /// Give a branch row its pull request, under the one lock. `Ok(false)`
 /// when another row has the pull request and a checkout of its own, one
 /// opened in Perch before the branch was checked out in a root: that row
 /// keeps it, and the branch stays a branch. A row with the subject and
 /// nothing else came from an earlier on-demand open; the branch row is the
-/// reader's local work, so it takes the subject and the other row goes, its
-/// marks carried across. The subject index allows one row per pull request,
-/// so the other row goes first.
+/// reader's local work, so it takes the subject, marks and history in one
+/// transaction. The subject index allows one row per pull request, so the
+/// old row is deleted before the branch is assigned the subject.
 fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<bool, CacheError> {
     let holder = cache
         .find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)?
         .filter(|other| other.id != item.id);
+    if holder.as_ref().is_some_and(|holder| holder.checkout.is_some()) {
+        return Ok(false);
+    }
+    let mut updated = item.clone();
+    if let Some(checkout) = updated.checkout.as_mut() {
+        checkout.base_ref = pr.base_ref.clone();
+    }
+    updated.subject = Some(ItemSubject::PullRequest(pr));
     if let Some(holder) = holder {
-        if holder.checkout.is_some() {
-            return Ok(false);
+        tracing::info!(item = %item.id, from = %holder.id, "the branch takes the pull request from the subject-only row");
+        updated.pinned_at = updated.pinned_at.or(holder.pinned_at);
+        updated.name = updated.name.or(holder.name);
+        if updated.from_item_id.as_deref() == Some(&holder.id) {
+            updated.from_item_id = holder.from_item_id.filter(|parent| parent != &updated.id);
         }
-        tracing::info!(item = %item.id, from = %holder.id, number = pr.number, "the branch takes the pull request from the subject-only row");
-        if item.pinned_at.is_none() {
-            item.pinned_at = holder.pinned_at;
-        }
-        if item.name.is_none() {
-            item.name = holder.name;
-        }
-        cache.delete_item(&holder.id)?;
+        cache.take_item_history(&holder.id, &updated)?;
+    } else {
+        cache.update_item(&updated)?;
     }
-    if let Some(c) = item.checkout.as_mut() {
-        c.base_ref = pr.base_ref.clone();
-    }
-    item.subject = Some(ItemSubject::PullRequest(pr));
-    cache.update_item(item)?;
+    *item = updated;
     Ok(true)
 }
 
@@ -18819,14 +18868,14 @@ async fn ask_as(
     // Finding follow-ups always carry explicit durable history and mapping
     // context. CLI session state is supplemental and may belong to an older
     // checkout, so do not make it the only source of truth.
-    let resume = finding_followup
+    let resumed_run = finding_followup
         .is_none()
-        .then(|| {
-            thread
-                .resumable_run_in(backend.name(), mode)
-                .and_then(|run| run.session_id.clone())
-        })
+        .then(|| thread.resumable_run_in(backend.name(), mode))
         .flatten();
+    let resume = resumed_run.and_then(|run| run.session_id.clone());
+    let resumed_knowledge = resumed_run.and_then(|run| recorded_knowledge_dir(ctx, &run.id));
+    let context_root = crate::context::root(ctx.preparer.store().root());
+    let read_dirs = vec![context_root];
     // The discussion on GitHub: all of it as files in a directory of the
     // run's own, and what fits of it in the prompt. A follow-up that
     // resumes a session is told only what changed since the run it
@@ -18862,6 +18911,20 @@ async fn ask_as(
             (Some(text), None, Some(manifest))
         }
     };
+    let knowledge_dir = if resume.is_none() || resumed_knowledge.is_some() {
+        run_knowledge_dir(
+            ctx,
+            &item,
+            backend,
+            &checkout.worktree,
+            &read_dirs,
+            work.as_ref().map(|(mode, _, _)| mode),
+        )
+        .await
+        .filter(|dir| resumed_knowledge.as_ref().is_none_or(|old_dir| old_dir == dir))
+    } else {
+        None
+    };
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
         issue: issue.as_ref().map(|i| (&i.0, i.1.as_slice())),
@@ -18877,15 +18940,16 @@ async fn ask_as(
             &history
         },
         discussion: discussion_text.as_deref(),
+        knowledge_dir: knowledge_dir.as_deref(),
         since: since_text.as_deref(),
     };
-    let mut prompt = if is_new {
+    let mut prompt = if resume.is_none() {
         crate::ask::first_prompt(&input)
     } else {
         crate::ask::follow_up_prompt(&input)
     };
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
-        *system = framing.clone();
+        *system = crate::ask::framing_with_knowledge(framing, knowledge_dir.as_deref());
     }
     // A resumed session keeps the framing it began with, and the reader
     // may have let Work commit since.
@@ -18906,7 +18970,7 @@ async fn ask_as(
     // constructed user prompt captures the source and conversation context
     // which this exact attempt was admitted with.
     run.prompt_snapshot = Some(prompt.user.clone());
-    let spec = crate::ask::run_spec(
+    let mut spec = crate::ask::run_spec(
         &ctx.config().agent,
         backend,
         &model,
@@ -18916,6 +18980,7 @@ async fn ask_as(
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
+    spec.read_dirs = read_dirs.into_iter().chain(knowledge_dir.clone()).collect();
     // Queue time begins at admission, after local prompt preparation. This
     // keeps the displayed FIFO order aligned with the scheduler's order.
     run.queued_at = Timestamp::now();
@@ -18936,7 +19001,13 @@ async fn ask_as(
             return;
         }
     };
-    record_run_context(ctx, &run.id, context_dir.as_deref(), manifest.as_ref());
+    record_run_context(
+        ctx,
+        &run.id,
+        context_dir.as_deref(),
+        manifest.as_ref(),
+        resumed_knowledge.as_deref().or(knowledge_dir.as_deref()),
+    );
     // Admission atomically links this request to the queued run before the
     // manager publishes it. There is no detached-run crash window here.
     ctx.send_threads(&item_id);
@@ -19734,17 +19805,73 @@ fn record_run_context(
     run_id: &str,
     dir: Option<&Path>,
     manifest: Option<&perch_knowledge::discussion::Manifest>,
+    knowledge_dir: Option<&Path>,
 ) {
-    if dir.is_none() && manifest.is_none() {
+    if dir.is_none() && manifest.is_none() && knowledge_dir.is_none() {
         return;
     }
     let dir = dir.map(|d| d.to_string_lossy().into_owned());
-    let manifest = manifest.and_then(|m| serde_json::to_string(m).ok());
+    let mut context = manifest.and_then(|manifest| serde_json::to_value(manifest).ok());
+    if let Some(knowledge_dir) = knowledge_dir {
+        let context = context.get_or_insert_with(|| serde_json::json!({}));
+        context["knowledge_dir"] = serde_json::json!(knowledge_dir.to_string_lossy());
+    }
+    let manifest = context.map(|value| value.to_string());
     if let Some(Err(error)) =
         ctx.with_cache(|c| c.set_run_context(run_id, dir.as_deref(), manifest.as_deref()))
     {
         tracing::warn!(run = run_id, %error, "could not record the run's discussion");
     }
+}
+
+fn recorded_knowledge_dir(ctx: &Ctx, run_id: &str) -> Option<PathBuf> {
+    let context = ctx.with_cache(|cache| cache.run_context(run_id).ok().flatten())??;
+    let value: serde_json::Value = serde_json::from_str(context.manifest.as_deref()?).ok()?;
+    value.get("knowledge_dir")?.as_str().map(PathBuf::from)
+}
+
+fn forget_run_knowledge_dir(ctx: &Ctx, run_id: &str) {
+    let result = ctx.with_cache(|cache| {
+        let Some(context) = cache.run_context(run_id)? else {
+            return Ok(());
+        };
+        let Some(mut manifest) = context.manifest.as_deref().and_then(|json| {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json).ok()
+        }) else {
+            return Ok(());
+        };
+        if manifest.remove("knowledge_dir").is_some() {
+            let manifest =
+                (!manifest.is_empty()).then(|| serde_json::Value::Object(manifest).to_string());
+            cache.set_run_context(run_id, context.dir.as_deref(), manifest.as_deref())?;
+        }
+        Ok::<_, CacheError>(())
+    });
+    if let Some(Err(error)) = result {
+        tracing::warn!(run = run_id, %error, "could not update the run's archive grant");
+    }
+}
+
+/// An optional archive only appears in the prompt when its backend can
+/// use the corresponding read grant. OpenCode's scan runs off the engine.
+async fn run_knowledge_dir(
+    ctx: &Ctx,
+    item: &Item,
+    backend: perch_agent::Backend,
+    cwd: &Path,
+    read_dirs: &[PathBuf],
+    mode: Option<&perch_agent::Mode>,
+) -> Option<PathBuf> {
+    let mode = mode.cloned().unwrap_or_default();
+    let dir = ctx.knowledge_dir(item).await?;
+    let cwd = cwd.to_owned();
+    let read_dirs = read_dirs.to_vec();
+    tokio::task::spawn_blocking(move || {
+        perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, &mode).then_some(dir)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Every discussion directory a run points at.
@@ -19800,7 +19927,30 @@ async fn execute_question(
     };
     let spawned = match crate::ask::host_refusal(spec.backend) {
         Some(why) => Err(perch_agent::Error::Refused(why)),
-        None => perch_agent::Run::spawn(spec, tx),
+        None => {
+            let archive = (spec.backend == perch_agent::Backend::OpenCode)
+                .then(|| recorded_knowledge_dir(ctx, &run.id))
+                .flatten()
+                .filter(|dir| spec.read_dirs.contains(dir));
+            match archive {
+                Some(dir) => match perch_agent::Run::spawn(spec.clone(), tx.clone()) {
+                    Err(perch_agent::Error::Refused(_)) => {
+                        // The live archive may have grown while this run waited.
+                        let mut spec = spec;
+                        spec.read_dirs.retain(|path| path != &dir);
+                        if let Some(system) = &mut spec.system {
+                            crate::ask::omit_knowledge_framing(system, &dir);
+                        }
+                        if spec.resume.is_none() {
+                            forget_run_knowledge_dir(ctx, &run.id);
+                        }
+                        perch_agent::Run::spawn(spec, tx)
+                    }
+                    spawned => spawned,
+                },
+                None => perch_agent::Run::spawn(spec, tx),
+            }
+        }
     };
     let handle = match spawned {
         Ok(handle) => handle,
@@ -20149,15 +20299,6 @@ async fn execute_question(
     if final_run.status == RunStatus::Completed && !unread.is_empty() {
         follow_up_run(ctx, &final_run, unread.join("\n\n"));
     }
-    // Finding threads start with the reviewer's report, then use the ordinary
-    // discussion flow for follow-ups. Keep the review archive in step with
-    // those later replies without creating archives for ordinary questions.
-    if matches!(
-        thread.messages.first().map(|message| &message.author),
-        Some(Author::Agent { .. })
-    ) {
-        reviews::export_item(ctx, &item_id);
-    }
     send_agent_runs(ctx, 50);
 }
 
@@ -20424,6 +20565,21 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         ctx.notice("The original request is gone");
         return;
     };
+    let mut read_dirs = vec![crate::context::root(ctx.preparer.store().root())];
+    let recorded_knowledge = recorded_knowledge_dir(ctx, &old.id);
+    let knowledge_dir = match recorded_knowledge {
+        Some(recorded) => run_knowledge_dir(
+            ctx,
+            &item,
+            backend,
+            directory,
+            &read_dirs,
+            work.as_ref().map(|(mode, _, _)| mode),
+        )
+        .await
+        .filter(|dir| dir == &recorded),
+        None => None,
+    };
     let input = crate::ask::PromptInput {
         pull_request: item.pull_request(),
         issue: None,
@@ -20437,18 +20593,19 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         // The captured prompt replaces the text below; it already carries
         // the discussion the first attempt was given.
         discussion: None,
+        knowledge_dir: knowledge_dir.as_deref(),
         since: None,
     };
-    let reconstructed_prompt = if old.purpose == RunPurpose::Question {
+    let reconstructed_prompt = if resume.is_none() {
         crate::ask::first_prompt(&input)
     } else {
         crate::ask::follow_up_prompt(&input)
     };
     let mut prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
-        *system = framing.clone();
+        *system = crate::ask::framing_with_knowledge(framing, knowledge_dir.as_deref());
     }
-    let spec = crate::ask::run_spec(
+    let mut spec = crate::ask::run_spec(
         &ctx.config().agent,
         backend,
         &model,
@@ -20458,6 +20615,9 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
+    let forget_archive = knowledge_dir.is_none() && spec.resume.is_none();
+    read_dirs.extend(knowledge_dir);
+    spec.read_dirs = read_dirs;
     let now = Timestamp::now();
     let run = RunRecord {
         id: perch_github::comments::new_id(),
@@ -20523,6 +20683,9 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         }) {
             tracing::warn!(run = %run.id, %error, "could not carry the discussion to the retry");
         }
+    }
+    if forget_archive {
+        forget_run_knowledge_dir(ctx, &run.id);
     }
     // Admission moved the request link and preserved its previous attempt in
     // the same transaction as the queued row and event.
@@ -20830,15 +20993,13 @@ fn save_draft(
     ctx.send_threads(item_id);
 }
 
-/// Put the reader's words in place of a reviewer's, and in the review
-/// archive, which keeps the finding threads.
+/// Put the reader's words in place of a reviewer's.
 fn edit_reviewer_message(ctx: &Ctx, item_id: &str, message_id: &str, body: &str) {
     if let Some(Err(e)) = ctx.with_cache(|c| c.update_reviewer_message_body(message_id, body)) {
         ctx.notice(format!("Could not save the edit: {e}"));
         return;
     }
     ctx.send_threads(item_id);
-    reviews::export_item(ctx, item_id);
 }
 
 /// Throw a draft away. A thread that was only on its way to GitHub for
@@ -22947,7 +23108,9 @@ mod tests {
         repos: Vec<perch_github::RepoConfig>,
     ) -> (Ctx, Receiver<Event>) {
         let (events, received) = std::sync::mpsc::channel();
-        let cache = Cache::open(&dir.join("perch.db"), None).unwrap();
+        let mut cache = Cache::open(&dir.join("perch.db"), None).unwrap();
+        let knowledge = knowledge::Archive::new(dir.join("store"), dir.join("perch.db"));
+        knowledge.watch(&mut cache);
         let mut config = Config::default();
         config.repo = repos;
         let cache = Some(Arc::new(std::sync::Mutex::new(cache)));
@@ -22987,8 +23150,8 @@ mod tests {
             review_navigation: Arc::new(tokio::sync::Mutex::new(())),
             review_admissions: Default::default(),
             review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
-            knowledge: None,
             item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
+            knowledge,
             root_cuts: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
             assignments: Arc::default(),
@@ -28956,6 +29119,84 @@ read eof || true
     }
 
     #[tokio::test]
+    async fn only_sessions_started_with_archive_framing_keep_the_archive_on_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut ctx, _events) = ctx(&root, &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = recording_claude(dir.path());
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let item = store_pull(&ctx, 7);
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        open_in_slot_at(&ctx, &item, "h7");
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree;
+
+        let ask_it = |thread: Option<String>, question: &str| {
+            ask(
+                &ctx,
+                item.id.clone(),
+                thread,
+                None,
+                question.to_string(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+                RunMode::Ask,
+            )
+        };
+        let thread_for = |question: &str| {
+            ctx.with_cache(|cache| cache.load_comment_threads(&item.id).unwrap())
+                .unwrap()
+                .into_iter()
+                .find(|thread| thread.messages.iter().any(|message| message.body == question))
+                .unwrap()
+        };
+
+        ask_it(None, "Before the archive").await;
+        store_pull(&ctx, 8);
+        let exporter = ctx.knowledge.start(ctx.item_lifecycle.clone());
+        let archive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(archive) = ctx.knowledge_dir(&item).await {
+                    break archive;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        exporter.abort();
+        assert!(exporter.await.unwrap_err().is_cancelled());
+
+        let old_thread = thread_for("Before the archive");
+        ask_it(Some(old_thread.id), "Resume the old session").await;
+        ask_it(None, "With the archive").await;
+        let new_thread = thread_for("With the archive");
+        ask_it(Some(new_thread.id.clone()), "Resume the new session").await;
+
+        let args = |n| std::fs::read_to_string(dir.path().join(format!("args-{n}"))).unwrap();
+        let shown = perch_agent::prompt_path(&archive);
+        let grant = archive.canonicalize().unwrap();
+        let no_grant = args(2);
+        assert!(no_grant.contains("--resume\ns1\n"));
+        assert!(!no_grant.contains(grant.to_str().unwrap()));
+        let fresh = args(3);
+        assert!(fresh.contains(&format!("`{shown}/`")));
+        assert!(fresh.contains(&format!("--add-dir\n{}\n", grant.display())));
+        let resumed = args(4);
+        assert!(resumed.contains("--resume\ns1\n"));
+        assert!(resumed.contains(&format!("--add-dir\n{}\n", grant.display())));
+        assert!(!resumed.contains("--append-system-prompt"));
+        let resumed = ctx
+            .with_cache(|cache| cache.runs_for_discussion(&new_thread.id).unwrap())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(recorded_knowledge_dir(&ctx, &resumed.id), Some(archive));
+    }
+
+    #[tokio::test]
     async fn a_question_is_given_the_discussion_and_a_resumed_follow_up_what_changed() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ctx, _events) = ctx(dir.path(), &nowhere(), &[]);
@@ -33838,6 +34079,33 @@ read eof || true
         let hidden = rows.iter().find(|i| i.id == next.id).unwrap();
         assert_eq!(branch_of(hidden), "renamed");
         assert!(hidden.is_archived());
+    }
+
+    #[tokio::test]
+    async fn a_missing_root_worktree_keeps_its_review_in_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("notes");
+        let worktree = root_with_branch(&root, "reviewed");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _) = ctx_declaring(&base, &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx
+            .with_cache(|cache| cache.load_items().unwrap().remove(0))
+            .unwrap();
+        ctx.with_cache(|cache| {
+            knowledge::tests::admit_review(cache, &item, "kept");
+            knowledge::tests::finish_review(cache, "kept");
+        });
+        git(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
+        assert!(scan_roots(&ctx).await);
+        assert!(ctx.item(&item.id).unwrap().is_archived());
+        assert!(ctx
+            .with_cache(|cache| cache.load_review_group("kept").unwrap())
+            .unwrap()
+            .is_some());
+        knowledge::tests::assert_rebuild(&ctx).await;
     }
 
     #[tokio::test]
