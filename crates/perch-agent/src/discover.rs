@@ -9,18 +9,28 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 /// Where the CLIs and what they need get installed: the native installers'
-/// `~/.local/bin`, then Homebrew, MacPorts and Nix. A Finder launch gets
+/// bin directories, Homebrew, MacPorts, Nix and Cargo. A Finder launch gets
 /// only `/usr/bin:/bin:/usr/sbin:/sbin` on `PATH`, which holds none of them.
 pub fn install_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from);
+    install_dirs_in(home.as_deref(), cargo_home.as_deref())
+}
+
+fn install_dirs_in(home: Option<&Path>, cargo_home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = &home {
+    if let Some(home) = home {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join(".opencode/bin"));
     }
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from));
-    if let Some(home) = &home {
+    if let Some(home) = home {
         dirs.push(home.join(".nix-profile/bin"));
+    }
+    if let Some(root) = cargo_home.filter(|p| p.is_absolute()) {
+        dirs.push(root.join("bin"));
+    } else if let Some(home) = home.filter(|p| p.is_absolute()) {
+        dirs.push(home.join(".cargo/bin"));
     }
     dirs
 }
@@ -367,6 +377,26 @@ gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
             None,
             "no PATH, no extras, nothing"
         );
+    }
+
+    #[test]
+    fn cargo_bin_uses_an_absolute_cargo_home_or_the_rustup_default() {
+        let home = Path::new("/home/reader");
+        let default_bin = home.join(".cargo/bin");
+        for cargo_home in [None, Some(Path::new("")), Some(Path::new("relative"))] {
+            // Last, so a Homebrew or Nix cargo already listed wins.
+            assert_eq!(
+                install_dirs_in(Some(home), cargo_home).last(),
+                Some(&default_bin)
+            );
+        }
+        let custom = Path::new("/tools/cargo");
+        let dirs = install_dirs_in(Some(home), Some(custom));
+        assert_eq!(dirs.last(), Some(&custom.join("bin")));
+        assert!(!dirs.contains(&default_bin));
+        assert!(install_dirs_in(None, None)
+            .iter()
+            .all(|dir| !dir.ends_with(".cargo/bin")));
     }
 
     #[test]
