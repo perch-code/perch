@@ -184,6 +184,7 @@ fn the_token_stays_with_the_engine() {
         error: None,
         present: ["token".to_string()].into(),
         warnings: Vec::new(),
+        knowledge_problems: Default::default(),
     });
     let json = serde_json::to_string(&settings).unwrap();
     assert!(!json.contains("ghp_secret"), "{json}");

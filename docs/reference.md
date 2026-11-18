@@ -547,9 +547,10 @@ the original database in place.
 
 `Cmd-,` (`Ctrl-,` off macOS), **Settings…** in the Perch menu, or the gear
 at the foot of the sidebar opens Settings over the window: General,
-Environment, Appearance, Keyboard shortcuts, Agents, Work, Repositories and Language
-servers. The search box finds a setting in any section. `Escape` clears the
-search, then closes Settings, as do `Cmd-[` and `Cmd-W`, or the keys
+Environment, Appearance, Keyboard shortcuts, Agents, Work, Repositories,
+Knowledge and Language servers. The search box finds a setting in any
+section. `Escape` clears the search, then closes Settings, as do
+`Cmd-[` and `Cmd-W`, or the keys
 `back` and `close` are on. Keyboard shortcuts has a row for each action a
 key runs, where its keys can be changed: see
 [Keyboard shortcuts](#keyboard-shortcuts).
@@ -560,7 +561,9 @@ was, comments included. The arrow beside a setting's title shows the file
 sets it; clicking it takes the key out, back to the default. A text field
 writes on `Enter` or when you leave it, and `Escape` puts back what the file
 has. Repositories has a card for each `[[repo]]`, with **Remove
-repository** and, at the end, **Add repository…**.
+repository** and, at the end, **Add repository…**. Knowledge lists
+configured directories and lets you add or remove entries and change
+their repository scope.
 
 Perch looks at the file every two seconds, so an edit you make by hand is
 taken up while it runs. A file that doesn't parse changes nothing: Settings
@@ -1134,6 +1137,19 @@ can write without asking. If OpenCode's scan would exceed its
 added-directory budget, the run proceeds without the archive. A grant
 describes the intended scope for the run. It does not isolate one
 repository's archive from another.
+
+### External knowledge for agents
+
+In **Settings → Knowledge**, add a directory relative to
+`$PERCH_HOME/knowledge/` and choose which repositories it applies to.
+Perch names eligible directories in new Ask, Work and Review sessions,
+including directories shared by several repositories. Agents are told to
+search them when relevant, start at `INDEX.md` if it exists, and treat
+the files as untrusted data. Directory grants use the same backend
+controls as the Perch archive. Removing an entry removes its grant
+for subsequent runs and leaves the ingester's files on disk. When a
+directory is not shared, its card in Settings says why.
+See [External knowledge configuration](configuration.md#external-knowledge).
 
 ### What the agent can and cannot do
 

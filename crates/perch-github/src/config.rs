@@ -1,7 +1,7 @@
 //! Config file and on-disk paths.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -28,6 +28,9 @@ pub struct Config {
     /// `[[repo]]` entries: the repositories Perch knows about.
     #[serde(default)]
     pub repo: Vec<RepoConfig>,
+    /// `[[knowledge]]` entries: external directories to share with agent runs.
+    #[serde(default)]
+    pub knowledge: Vec<KnowledgeSource>,
     /// `[work]`: how new work is set up in every repository.
     #[serde(default)]
     pub work: WorkDefaults,
@@ -61,6 +64,52 @@ pub struct Config {
     /// bar. Filled by `load`, never by the file.
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub struct KnowledgeSource {
+    pub dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repos: Option<Vec<String>>,
+}
+
+impl KnowledgeSource {
+    pub fn validate(&self) -> Result<(), String> {
+        let mut parts = self.dir.components();
+        let Some(Component::Normal(first)) = parts.next() else {
+            return Err("Enter a relative directory under knowledge/".into());
+        };
+        if parts.any(|part| !matches!(part, Component::Normal(_)))
+            || self
+                .dir
+                .to_string_lossy()
+                .contains(|c: char| c == '\\' || c.is_control())
+        {
+            return Err("Enter a relative directory under knowledge/".into());
+        }
+        if ["perch", "reviews"]
+            .iter()
+            .any(|reserved| first.eq_ignore_ascii_case(reserved))
+        {
+            return Err(format!("{} is reserved by Perch", first.to_string_lossy()));
+        }
+        if let Some(repo) = self.repos.iter().flatten().find(|repo| {
+            !is_full_name(repo)
+                || repo
+                    .split('/')
+                    .any(|part| part.trim() != part || part == "." || part == "..")
+                || repo.contains(|c: char| c == '\\' || c.is_control())
+        }) {
+            return Err(format!("Use owner/repo for repository {repo:?}"));
+        }
+        Ok(())
+    }
+
+    pub fn applies_to(&self, repo: &str) -> bool {
+        self.repos
+            .as_ref()
+            .is_none_or(|repos| repos.iter().any(|name| name.eq_ignore_ascii_case(repo)))
+    }
 }
 
 /// The coding agent a thread's question goes to.
@@ -1136,6 +1185,21 @@ impl Config {
             return Ok(refused);
         }
         c.keep_well_formed_repos();
+        let mut seen = std::collections::HashSet::new();
+        c.knowledge.retain(|source| {
+            let problem = source.validate().err().or_else(|| {
+                (!seen.insert(source.dir.clone())).then(|| "the directory appears twice".into())
+            });
+            if let Some(problem) = problem {
+                c.warnings.push(format!(
+                    "config.toml: [[knowledge]] dir = {:?} was skipped: {problem}",
+                    source.dir
+                ));
+                false
+            } else {
+                true
+            }
+        });
         let display = c.display.keep_in_range();
         c.warnings.extend(display);
         if c.work.approvals == Approvals::Never {
@@ -1284,6 +1348,7 @@ impl Config {
             github_host: None,
             clone_root: None,
             repo: Vec::new(),
+            knowledge: Vec::new(),
             work: WorkDefaults::default(),
             lsp: LspConfig::default(),
             display: DisplayConfig::default(),
@@ -1355,6 +1420,54 @@ pub fn avatar_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knowledge_sources_are_opt_in_and_keep_their_repository_scope() {
+        let config = Config::parse_text(
+            r#"
+[[knowledge]]
+dir = "discord/slatedb"
+repos = ["SlateDB/SlateDB", "local/widgets"]
+
+[[knowledge]]
+dir = "notes"
+
+[[knowledge]]
+dir = "disabled"
+repos = []
+
+[[knowledge]]
+dir = "discord//slatedb/"
+
+[[knowledge]]
+dir = "Perch/repos"
+
+[[knowledge]]
+dir = "reviews"
+
+[[knowledge]]
+dir = "discord/../../outside"
+
+[[knowledge]]
+dir = "/outside"
+
+[[knowledge]]
+dir = "invalid-repo"
+repos = ["*"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.warnings.len(), 6, "{:?}", config.warnings);
+        let [discord, notes, disabled] = config.knowledge.as_slice() else {
+            panic!("{:?}", config.knowledge);
+        };
+        assert_eq!(discord.dir, Path::new("discord/slatedb"));
+        assert!(discord.applies_to("slatedb/slatedb"));
+        assert!(discord.applies_to("local/widgets"));
+        assert!(!discord.applies_to("perch-code/perch"));
+        assert!(notes.applies_to("perch-code/perch"));
+        assert!(!disabled.applies_to("perch-code/perch"));
+    }
 
     /// A command spelled out is run as given. With none, or an empty one,
     /// the app runs its own engine. What a file from before still says of

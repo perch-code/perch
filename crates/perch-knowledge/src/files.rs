@@ -153,6 +153,45 @@ pub fn child_dirs(path: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(children)
 }
 
+/// Why an external source can't be shared with a run, without creating or
+/// changing anything: it is missing or not a plain directory, something in
+/// it is a symlink or a file an agent CLI would load as instructions, or it
+/// holds more than `limit` entries, which stops the walk.
+pub fn check_source(path: &Path, limit: usize) -> Result<(), String> {
+    let dir = match open_directory(path, false) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err("the directory does not exist".into())
+        }
+        Err(error) => return Err(format!("the directory can't be opened: {error}")),
+    };
+    let mut seen = 0_usize;
+    let mut refusal = None;
+    let walked = walk_tree(&dir, Path::new(""), &mut |path, kind| {
+        seen += 1;
+        let why = if seen > limit {
+            format!("it holds more than {limit} files and directories")
+        } else if kind == Some(FileType::Symlink) {
+            format!("{} is a symlink", path.display())
+        } else if path.file_name().is_some_and(|name| {
+            ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+                .iter()
+                .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        }) {
+            format!("{} is an agent instructions file", path.display())
+        } else {
+            return Ok(());
+        };
+        refusal = Some(why);
+        Err(io::ErrorKind::InvalidInput.into())
+    });
+    match (refusal, walked) {
+        (Some(why), _) => Err(why),
+        (None, Err(error)) => Err(format!("the directory can't be read: {error}")),
+        (None, Ok(())) => Ok(()),
+    }
+}
+
 /// Remove a directory tree only if it contains no symlinks. A missing
 /// directory needs no work.
 pub fn remove_dir(path: &Path) -> io::Result<()> {
@@ -272,11 +311,25 @@ fn refuse_symlink(name: &OsStr) -> io::Error {
 }
 
 fn check_tree(dir: &OwnedFd) -> io::Result<()> {
+    walk_tree(dir, Path::new(""), &mut |path, kind| match kind {
+        Some(FileType::Symlink) => Err(refuse_symlink(path.as_os_str())),
+        _ => Ok(()),
+    })
+}
+
+/// Visit every entry under `dir`, by its path from it, before descending
+/// into it. A symlink is visited and never followed.
+fn walk_tree(
+    dir: &OwnedFd,
+    prefix: &Path,
+    visit: &mut impl FnMut(&Path, Option<FileType>) -> io::Result<()>,
+) -> io::Result<()> {
     for name in entry_names(dir)? {
-        match kind(dir, &name)? {
-            Some(FileType::Symlink) => return Err(refuse_symlink(&name)),
-            Some(FileType::Directory) => check_tree(&open_subdirectory(dir, &name, false)?)?,
-            _ => {}
+        let path = prefix.join(&name);
+        let kind = kind(dir, &name)?;
+        visit(&path, kind)?;
+        if kind == Some(FileType::Directory) {
+            walk_tree(&open_subdirectory(dir, &name, false)?, &path, visit)?;
         }
     }
     Ok(())
@@ -405,6 +458,41 @@ mod tests {
     use std::fs::{self, FileTimes};
     use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn a_source_says_why_it_cannot_be_shared() {
+        let (_scratch, root) = scratch();
+        assert_eq!(
+            check_source(&root.join("missing"), 10),
+            Err("the directory does not exist".into())
+        );
+
+        let source = root.join("discord");
+        fs::create_dir_all(source.join("2026/11")).unwrap();
+        fs::write(source.join("INDEX.md"), "# Index").unwrap();
+        fs::write(source.join("2026/11/general.md"), "hello").unwrap();
+        assert_eq!(check_source(&source, 10), Ok(()));
+        assert_eq!(
+            check_source(&source, 3),
+            Err("it holds more than 3 files and directories".into())
+        );
+
+        fs::write(source.join("2026/11/claude.md"), "instructions").unwrap();
+        assert_eq!(
+            check_source(&source, 10),
+            Err("2026/11/claude.md is an agent instructions file".into())
+        );
+        fs::remove_file(source.join("2026/11/claude.md")).unwrap();
+
+        symlink(source.join("2026/11"), source.join("latest")).unwrap();
+        assert_eq!(check_source(&source, 10), Err("latest is a symlink".into()));
+        fs::remove_file(source.join("latest")).unwrap();
+
+        // The source itself, or a directory on the way to it, a link.
+        symlink(&source, root.join("alias")).unwrap();
+        assert!(check_source(&root.join("alias"), 10).is_err());
+        assert_eq!(check_source(&source, 10), Ok(()));
+    }
 
     fn scratch() -> (tempfile::TempDir, PathBuf) {
         let scratch = tempfile::tempdir().unwrap();

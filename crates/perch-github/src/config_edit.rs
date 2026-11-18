@@ -11,7 +11,7 @@ use std::path::Path;
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
-use crate::config::{toml_error_line, Appearance, Approvals, Config, RepoConfig};
+use crate::config::{toml_error_line, Appearance, Approvals, Config, KnowledgeSource, RepoConfig};
 
 /// Remote windows write app preferences on the UI thread while the local
 /// engine can edit the same file from its worker thread.
@@ -89,6 +89,11 @@ pub enum Setting {
         identity: String,
         change: RepoSetting,
     },
+    /// A `[[knowledge]]` entry, identified by its relative directory.
+    Knowledge {
+        dir: std::path::PathBuf,
+        change: KnowledgeSetting,
+    },
 }
 
 /// The tables that are the client's: how its windows look and what its
@@ -129,6 +134,15 @@ pub enum RepoSetting {
     LspTrust(bool),
     Write(Vec<String>),
     Network(Vec<String>),
+}
+
+/// An edit to one external knowledge directory. An omitted repository list
+/// grants it to every repository. An empty one grants it to none.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum KnowledgeSetting {
+    Add(Option<Vec<String>>),
+    Repositories(Option<Vec<String>>),
+    Remove,
 }
 
 /// What a write left in the file: the config it now loads as, and the
@@ -276,6 +290,9 @@ fn loaded(doc: &DocumentMut, config: &Config) -> Vec<bool> {
 }
 
 fn apply(doc: &mut DocumentMut, change: &Setting, known: &[RepoConfig]) -> Result<(), String> {
+    if let Setting::Knowledge { dir, change } = change {
+        return edit_knowledge(doc, dir, change);
+    }
     let (place, value) = place_of(change)?;
     let left = match &place.repo {
         None => edit_in(doc.as_table_mut(), false, place.tables, &place, value)?,
@@ -306,6 +323,134 @@ fn apply(doc: &mut DocumentMut, change: &Setting, known: &[RepoConfig]) -> Resul
         put_above_header(doc, left);
     }
     Ok(())
+}
+
+fn knowledge_dir(table: &dyn TableLike) -> Option<&Path> {
+    table.get("dir").and_then(Item::as_str).map(Path::new)
+}
+
+fn edit_knowledge(
+    doc: &mut DocumentMut,
+    dir: &Path,
+    change: &KnowledgeSetting,
+) -> Result<(), String> {
+    let repos = match change {
+        KnowledgeSetting::Add(repos) | KnowledgeSetting::Repositories(repos) => {
+            KnowledgeSource {
+                dir: dir.to_path_buf(),
+                repos: repos.clone(),
+            }
+            .validate()?;
+            repos
+                .as_ref()
+                .map(|repos| Value::Array(repos.iter().map(String::as_str).collect()))
+        }
+        KnowledgeSetting::Remove => None,
+    };
+    let add = matches!(change, KnowledgeSetting::Add(_));
+    let remove = matches!(change, KnowledgeSetting::Remove);
+    let missing = || format!("config.toml has no [[knowledge]] for {}", dir.display());
+    let Some(item) = doc.get_mut("knowledge") else {
+        if !add {
+            return Err(missing());
+        }
+        let mut array = ArrayOfTables::new();
+        array.push(knowledge_table(dir, repos)?);
+        doc.insert("knowledge", Item::ArrayOfTables(array));
+        return Ok(());
+    };
+    let place = Place {
+        repo: None,
+        tables: &[],
+        key: "repos".into(),
+        label: format!("[[knowledge]] repos for {}", dir.display()),
+    };
+    let left = match item {
+        Item::ArrayOfTables(array) => {
+            let index = knowledge_index(
+                array.iter().map(|table| Some(table as &dyn TableLike)),
+                dir,
+                add,
+            )?;
+            match index {
+                None => {
+                    array.push(knowledge_table(dir, repos)?);
+                    None
+                }
+                Some(index) if remove => {
+                    array.remove(index);
+                    None
+                }
+                Some(index) => {
+                    let table = array.get_mut(index).expect("matched table");
+                    let header = table.position();
+                    edit_in(table, false, &[], &place, repos)?.map(|mut left| {
+                        left.header = header;
+                        left
+                    })
+                }
+            }
+        }
+        Item::Value(Value::Array(array)) => {
+            let index = knowledge_index(
+                array
+                    .iter()
+                    .map(|value| value.as_inline_table().map(|table| table as &dyn TableLike)),
+                dir,
+                add,
+            )?;
+            match index {
+                None => array.push(knowledge_table(dir, repos)?.into_inline_table()),
+                Some(index) if remove => {
+                    array.remove(index);
+                }
+                Some(index) => {
+                    let table = array
+                        .get_mut(index)
+                        .and_then(Value::as_inline_table_mut)
+                        .expect("matched table");
+                    edit_in(table, true, &[], &place, repos)?;
+                }
+            }
+            None
+        }
+        _ => return Err("config.toml must list knowledge entries as [[knowledge]]".into()),
+    };
+    if let Some(left) = left {
+        put_above_header(doc, left);
+    }
+    Ok(())
+}
+
+fn knowledge_index<'a>(
+    entries: impl Iterator<Item = Option<&'a dyn TableLike>>,
+    dir: &Path,
+    add: bool,
+) -> Result<Option<usize>, String> {
+    let mut matching = entries
+        .enumerate()
+        .filter_map(|(index, table)| (table.and_then(knowledge_dir) == Some(dir)).then_some(index));
+    let index = matching.next();
+    if (add && index.is_some()) || matching.next().is_some() {
+        return Err(format!("config.toml already lists {}", dir.display()));
+    }
+    if !add && index.is_none() {
+        return Err(format!(
+            "config.toml has no [[knowledge]] for {}",
+            dir.display()
+        ));
+    }
+    Ok(index)
+}
+
+fn knowledge_table(dir: &Path, repos: Option<Value>) -> Result<Table, String> {
+    let dir = dir.to_str().ok_or("Knowledge directory must be UTF-8")?;
+    let mut table = Table::new();
+    table.insert("dir", toml_edit::value(dir));
+    if let Some(repos) = repos {
+        table.insert("repos", Item::Value(repos));
+    }
+    Ok(table)
 }
 
 fn no_repo(identity: &str) -> String {
@@ -390,6 +535,7 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             };
             (place, value)
         }
+        Setting::Knowledge { .. } => unreachable!("handled in edit_knowledge"),
     })
 }
 
@@ -789,8 +935,25 @@ pub fn present_keys(text: &str, known: &[RepoConfig]) -> BTreeSet<String> {
             }
             _ => collect_key(key, item, &mut keys),
         }
+        if key == "knowledge" {
+            if let Some(array) = item.as_array_of_tables() {
+                for table in array.iter() {
+                    collect_knowledge_keys(table, &mut keys);
+                }
+            } else if let Some(array) = item.as_array() {
+                for table in array.iter().filter_map(Value::as_inline_table) {
+                    collect_knowledge_keys(table, &mut keys);
+                }
+            }
+        }
     }
     keys
+}
+
+fn collect_knowledge_keys(table: &dyn TableLike, keys: &mut BTreeSet<String>) {
+    if let Some(dir) = knowledge_dir(table) {
+        collect_keys(&format!("knowledge.{}", dir.display()), table, keys);
+    }
 }
 
 fn collect_keys(prefix: &str, table: &dyn TableLike, keys: &mut BTreeSet<String>) {
@@ -880,6 +1043,58 @@ mod tests {
             identity: identity.into(),
             change,
         }
+    }
+
+    fn knowledge(dir: &str, change: KnowledgeSetting) -> Setting {
+        Setting::Knowledge {
+            dir: dir.into(),
+            change,
+        }
+    }
+
+    #[test]
+    fn knowledge_edits_preserve_other_sources_and_repo_scope() {
+        let text = "poll_interval_secs = 60\n\n# Design discussions\n[[knowledge]]\ndir = \"discord/project\"\nrepos = [] # Paused\n";
+        let add = knowledge("notes", KnowledgeSetting::Add(None));
+        let update = knowledge(
+            "discord/project",
+            KnowledgeSetting::Repositories(Some(vec!["acme/widgets".into()])),
+        );
+        let edited = edit(text, &[add, update]);
+        assert!(edited.contains("poll_interval_secs = 60"));
+        assert!(edited.contains("# Design discussions"));
+        assert!(edited.contains("repos = [\"acme/widgets\"] # Paused"));
+        assert!(edited.contains("[[knowledge]]\ndir = \"notes\""));
+        assert!(present_keys(&edited, &[]).contains("knowledge.discord/project.repos"));
+        assert!(!present_keys(&edited, &[]).contains("knowledge.notes.repos"));
+        let remove = knowledge("notes", KnowledgeSetting::Remove);
+        let reset = knowledge("discord/project", KnowledgeSetting::Repositories(None));
+        let edited = edit(&edited, &[remove, reset]);
+        let config = Config::parse_text(&edited).unwrap();
+        assert_eq!(config.knowledge.len(), 1);
+        assert!(config.knowledge[0].repos.is_none());
+        assert!(edited.contains("poll_interval_secs = 60"));
+    }
+
+    #[test]
+    fn write_knowledge_preserves_inline_arrays_and_rejects_invalid_adds() {
+        let text = "knowledge = [{ dir = \"notes\" }] # Keep this comment\n";
+        let add = knowledge("discord/project", KnowledgeSetting::Add(Some(Vec::new())));
+        let (edited, config) = edit_text(text, &[add], &[]).unwrap();
+        assert_eq!(config.knowledge[1].repos, Some(Vec::new()));
+        assert!(edited.ends_with(" # Keep this comment\n"));
+        assert!(present_keys(&edited, &[]).contains("knowledge.discord/project.repos"));
+        let duplicate = knowledge("discord//project", KnowledgeSetting::Add(None));
+        assert!(edit_text(&edited, &[duplicate], &[]).is_err());
+        let reserved = knowledge("perch/repos", KnowledgeSetting::Add(None));
+        assert!(edit_text(&edited, &[reserved], &[]).is_err());
+        assert_eq!(
+            edit(
+                &edited,
+                &[knowledge("discord/project", KnowledgeSetting::Remove)]
+            ),
+            text
+        );
     }
 
     #[test]

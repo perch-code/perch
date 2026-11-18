@@ -28,7 +28,7 @@ use tokio::sync::Semaphore;
 pub use avatar::APP_AVATAR_CORNER;
 pub use connections::{Connection, Engine, Lifetime};
 pub use issue_draft::with_found_in;
-pub use knowledge::cached_knowledge_dir;
+pub use knowledge::{cached_knowledge_dir, external_knowledge_dirs};
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 pub use settings::{CheckConfig, SettingsFile};
 use windows::{CommandSender, Fencing, View, Views};
@@ -4969,6 +4969,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 let poll_after = refresh(&ctx, mode).await;
                 if archive_task.is_none() && ctx.cache.is_some() {
                     archive_task = Some(ctx.knowledge.start(ctx.item_lifecycle.clone()));
+                    tokio::spawn(knowledge::refresh_knowledge_status(ctx.clone()));
                 }
                 let now = tokio::time::Instant::now();
                 next_auto_poll = now + poll_after.wait;
@@ -16116,7 +16117,9 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         });
         match result {
             Some(Ok(updated)) => changed |= updated,
-            Some(Err(error)) => tracing::warn!(item = %item.id, %error, "could not retire a missing root worktree"),
+            Some(Err(error)) => {
+                tracing::warn!(item = %item.id, %error, "could not retire a missing root worktree")
+            }
             None => {}
         }
     }
@@ -16422,7 +16425,10 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
     let holder = cache
         .find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)?
         .filter(|other| other.id != item.id);
-    if holder.as_ref().is_some_and(|holder| holder.checkout.is_some()) {
+    if holder
+        .as_ref()
+        .is_some_and(|holder| holder.checkout.is_some())
+    {
         return Ok(false);
     }
     let mut updated = item.clone();
@@ -18921,9 +18927,30 @@ async fn ask_as(
             work.as_ref().map(|(mode, _, _)| mode),
         )
         .await
-        .filter(|dir| resumed_knowledge.as_ref().is_none_or(|old_dir| old_dir == dir))
+        .filter(|dir| {
+            resumed_knowledge
+                .as_ref()
+                .is_none_or(|old_dir| old_dir == dir)
+        })
     } else {
         None
+    };
+    let mut read_dirs = read_dirs;
+    read_dirs.extend(knowledge_dir.iter().cloned());
+    let external_knowledge_dirs = run_external_knowledge_dirs(
+        ctx,
+        &item.repo_full_name,
+        backend,
+        &checkout.worktree,
+        &read_dirs,
+        work.as_ref().map(|(mode, _, _)| mode),
+    )
+    .await;
+    let external_knowledge_dirs = match resumed_run {
+        Some(prior) if resume.is_some() => {
+            retained_external_dirs(ctx, &prior.id, external_knowledge_dirs)
+        }
+        _ => external_knowledge_dirs,
     };
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
@@ -18941,6 +18968,7 @@ async fn ask_as(
         },
         discussion: discussion_text.as_deref(),
         knowledge_dir: knowledge_dir.as_deref(),
+        external_knowledge_dirs: &external_knowledge_dirs,
         since: since_text.as_deref(),
     };
     let mut prompt = if resume.is_none() {
@@ -18949,7 +18977,11 @@ async fn ask_as(
         crate::ask::follow_up_prompt(&input)
     };
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
-        *system = crate::ask::framing_with_knowledge(framing, knowledge_dir.as_deref());
+        *system = crate::ask::framing_with_knowledge(
+            framing,
+            knowledge_dir.as_deref(),
+            &external_knowledge_dirs,
+        );
     }
     // A resumed session keeps the framing it began with, and the reader
     // may have let Work commit since.
@@ -18980,7 +19012,8 @@ async fn ask_as(
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
-    spec.read_dirs = read_dirs.into_iter().chain(knowledge_dir.clone()).collect();
+    read_dirs.extend(external_knowledge_dirs.iter().cloned());
+    spec.read_dirs = read_dirs;
     // Queue time begins at admission, after local prompt preparation. This
     // keeps the displayed FIFO order aligned with the scheduler's order.
     run.queued_at = Timestamp::now();
@@ -19007,6 +19040,7 @@ async fn ask_as(
         context_dir.as_deref(),
         manifest.as_ref(),
         resumed_knowledge.as_deref().or(knowledge_dir.as_deref()),
+        &external_knowledge_dirs,
     );
     // Admission atomically links this request to the queued run before the
     // manager publishes it. There is no detached-run crash window here.
@@ -19806,8 +19840,13 @@ fn record_run_context(
     dir: Option<&Path>,
     manifest: Option<&perch_knowledge::discussion::Manifest>,
     knowledge_dir: Option<&Path>,
+    external_knowledge_dirs: &[PathBuf],
 ) {
-    if dir.is_none() && manifest.is_none() && knowledge_dir.is_none() {
+    if dir.is_none()
+        && manifest.is_none()
+        && knowledge_dir.is_none()
+        && external_knowledge_dirs.is_empty()
+    {
         return;
     }
     let dir = dir.map(|d| d.to_string_lossy().into_owned());
@@ -19815,6 +19854,10 @@ fn record_run_context(
     if let Some(knowledge_dir) = knowledge_dir {
         let context = context.get_or_insert_with(|| serde_json::json!({}));
         context["knowledge_dir"] = serde_json::json!(knowledge_dir.to_string_lossy());
+    }
+    if !external_knowledge_dirs.is_empty() {
+        let context = context.get_or_insert_with(|| serde_json::json!({}));
+        context["external_knowledge_dirs"] = serde_json::json!(external_knowledge_dirs);
     }
     let manifest = context.map(|value| value.to_string());
     if let Some(Err(error)) =
@@ -19825,12 +19868,35 @@ fn record_run_context(
 }
 
 fn recorded_knowledge_dir(ctx: &Ctx, run_id: &str) -> Option<PathBuf> {
-    let context = ctx.with_cache(|cache| cache.run_context(run_id).ok().flatten())??;
-    let value: serde_json::Value = serde_json::from_str(context.manifest.as_deref()?).ok()?;
+    let value = recorded_context_manifest(ctx, run_id)?;
     value.get("knowledge_dir")?.as_str().map(PathBuf::from)
 }
 
-fn forget_run_knowledge_dir(ctx: &Ctx, run_id: &str) {
+fn recorded_context_manifest(ctx: &Ctx, run_id: &str) -> Option<serde_json::Value> {
+    let context = ctx.with_cache(|cache| cache.run_context(run_id).ok().flatten())??;
+    serde_json::from_str(context.manifest.as_deref()?).ok()
+}
+
+fn recorded_external_knowledge_dirs(ctx: &Ctx, run_id: &str) -> Vec<PathBuf> {
+    recorded_context_manifest(ctx, run_id)
+        .and_then(|mut manifest| {
+            serde_json::from_value(manifest.get_mut("external_knowledge_dirs")?.take()).ok()
+        })
+        .unwrap_or_default()
+}
+
+fn retained_external_dirs(ctx: &Ctx, run_id: &str, available: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut recorded = recorded_external_knowledge_dirs(ctx, run_id);
+    recorded.retain(|dir| available.contains(dir));
+    recorded
+}
+
+fn trim_run_knowledge_grants(
+    ctx: &Ctx,
+    run_id: &str,
+    forget_archive: bool,
+    external_dirs: &[PathBuf],
+) {
     let result = ctx.with_cache(|cache| {
         let Some(context) = cache.run_context(run_id)? else {
             return Ok(());
@@ -19840,7 +19906,14 @@ fn forget_run_knowledge_dir(ctx: &Ctx, run_id: &str) {
         }) else {
             return Ok(());
         };
-        if manifest.remove("knowledge_dir").is_some() {
+        let removed_archive = forget_archive && manifest.remove("knowledge_dir").is_some();
+        let previous_external = manifest.remove("external_knowledge_dirs");
+        let external = (!external_dirs.is_empty()).then(|| serde_json::json!(external_dirs));
+        let changed_external = previous_external != external;
+        if let Some(external) = external {
+            manifest.insert("external_knowledge_dirs".into(), external);
+        }
+        if removed_archive || changed_external {
             let manifest =
                 (!manifest.is_empty()).then(|| serde_json::Value::Object(manifest).to_string());
             cache.set_run_context(run_id, context.dir.as_deref(), manifest.as_deref())?;
@@ -19874,6 +19947,82 @@ async fn run_knowledge_dir(
     .flatten()
 }
 
+async fn run_external_knowledge_dirs(
+    ctx: &Ctx,
+    repo: &str,
+    backend: perch_agent::Backend,
+    cwd: &Path,
+    read_dirs: &[PathBuf],
+    mode: Option<&perch_agent::Mode>,
+) -> Vec<PathBuf> {
+    let config = ctx.config();
+    if config.knowledge.is_empty() {
+        return Vec::new();
+    }
+    let root = ctx.preparer.store().root().to_owned();
+    let (repo, cwd, read_dirs, mode) = (
+        repo.to_owned(),
+        cwd.to_owned(),
+        read_dirs.to_vec(),
+        mode.cloned().unwrap_or_default(),
+    );
+    let dirs = tokio::task::spawn_blocking(move || {
+        external_knowledge_dirs(&root, &config, &repo, backend, &cwd, &read_dirs, &mode)
+    })
+    .await
+    .unwrap_or_default();
+    // The run may have found a source changed; Settings says so.
+    tokio::spawn(knowledge::refresh_knowledge_status(ctx.clone()));
+    dirs
+}
+
+/// Sources are live and can change while an admitted run waits in the queue.
+async fn recheck_external_knowledge_dirs(
+    ctx: &Ctx,
+    run: &RunRecord,
+    spec: &mut perch_agent::RunSpec,
+) -> Vec<PathBuf> {
+    let recorded = recorded_external_knowledge_dirs(ctx, &run.id);
+    if recorded.is_empty() {
+        return recorded;
+    }
+    let base_dirs: Vec<_> = spec
+        .read_dirs
+        .iter()
+        .filter(|dir| !recorded.contains(dir))
+        .cloned()
+        .collect();
+    let available = match run.owner.item_id().and_then(|id| ctx.item(id)) {
+        Some(item) => {
+            run_external_knowledge_dirs(
+                ctx,
+                &item.repo_full_name,
+                spec.backend,
+                &spec.cwd,
+                &base_dirs,
+                Some(&spec.mode),
+            )
+            .await
+        }
+        None => Vec::new(),
+    };
+    let retained: Vec<_> = recorded
+        .iter()
+        .filter(|dir| available.contains(dir))
+        .cloned()
+        .collect();
+    if retained != recorded {
+        spec.read_dirs
+            .retain(|dir| !recorded.contains(dir) || retained.contains(dir));
+        if let Some(system) = &mut spec.system {
+            crate::ask::omit_external_knowledge_framing(system, &recorded);
+            system.push_str(&perch_agent::external_knowledge_framing(&retained));
+        }
+        trim_run_knowledge_grants(ctx, &run.id, false, &retained);
+    }
+    retained
+}
+
 /// Every discussion directory a run points at.
 fn context_dirs(ctx: &Ctx) -> std::collections::HashSet<PathBuf> {
     ctx.with_cache(|c| c.run_context_dirs())
@@ -19898,7 +20047,7 @@ async fn execute_question(
     thread: CommentThread,
     request_id: String,
     mut run: RunRecord,
-    spec: perch_agent::RunSpec,
+    mut spec: perch_agent::RunSpec,
     admission: runs::Admission,
 ) {
     let Some(lease) = ctx.runs.start(admission).await else {
@@ -19928,27 +20077,42 @@ async fn execute_question(
     let spawned = match crate::ask::host_refusal(spec.backend) {
         Some(why) => Err(perch_agent::Error::Refused(why)),
         None => {
+            let external_dirs = recheck_external_knowledge_dirs(ctx, &run, &mut spec).await;
             let archive = (spec.backend == perch_agent::Backend::OpenCode)
                 .then(|| recorded_knowledge_dir(ctx, &run.id))
                 .flatten()
                 .filter(|dir| spec.read_dirs.contains(dir));
-            match archive {
-                Some(dir) => match perch_agent::Run::spawn(spec.clone(), tx.clone()) {
+            if archive.is_some()
+                || (!external_dirs.is_empty()
+                    && matches!(
+                        spec.backend,
+                        perch_agent::Backend::OpenCode | perch_agent::Backend::Gemini
+                    ))
+            {
+                match perch_agent::Run::spawn(spec.clone(), tx.clone()) {
                     Err(perch_agent::Error::Refused(_)) => {
-                        // The live archive may have grown while this run waited.
-                        let mut spec = spec;
-                        spec.read_dirs.retain(|path| path != &dir);
-                        if let Some(system) = &mut spec.system {
-                            crate::ask::omit_knowledge_framing(system, &dir);
+                        // A source may have changed since preflight.
+                        spec.read_dirs.retain(|path| {
+                            archive.as_ref() != Some(path) && !external_dirs.contains(path)
+                        });
+                        if let Some(system) = spec.system.as_mut() {
+                            if let Some(dir) = &archive {
+                                crate::ask::omit_knowledge_framing(system, dir);
+                            }
+                            crate::ask::omit_external_knowledge_framing(system, &external_dirs);
                         }
-                        if spec.resume.is_none() {
-                            forget_run_knowledge_dir(ctx, &run.id);
-                        }
+                        trim_run_knowledge_grants(
+                            ctx,
+                            &run.id,
+                            archive.is_some() && spec.resume.is_none(),
+                            &[],
+                        );
                         perch_agent::Run::spawn(spec, tx)
                     }
                     spawned => spawned,
-                },
-                None => perch_agent::Run::spawn(spec, tx),
+                }
+            } else {
+                perch_agent::Run::spawn(spec, tx)
             }
         }
     };
@@ -20580,6 +20744,20 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         .filter(|dir| dir == &recorded),
         None => None,
     };
+    read_dirs.extend(knowledge_dir.iter().cloned());
+    let external_knowledge_dirs = retained_external_dirs(
+        ctx,
+        &old.id,
+        run_external_knowledge_dirs(
+            ctx,
+            &item.repo_full_name,
+            backend,
+            directory,
+            &read_dirs,
+            work.as_ref().map(|(mode, _, _)| mode),
+        )
+        .await,
+    );
     let input = crate::ask::PromptInput {
         pull_request: item.pull_request(),
         issue: None,
@@ -20594,6 +20772,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         // the discussion the first attempt was given.
         discussion: None,
         knowledge_dir: knowledge_dir.as_deref(),
+        external_knowledge_dirs: &external_knowledge_dirs,
         since: None,
     };
     let reconstructed_prompt = if resume.is_none() {
@@ -20603,7 +20782,11 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
     };
     let mut prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
-        *system = crate::ask::framing_with_knowledge(framing, knowledge_dir.as_deref());
+        *system = crate::ask::framing_with_knowledge(
+            framing,
+            knowledge_dir.as_deref(),
+            &external_knowledge_dirs,
+        );
     }
     let mut spec = crate::ask::run_spec(
         &ctx.config().agent,
@@ -20616,7 +20799,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
     let forget_archive = knowledge_dir.is_none() && spec.resume.is_none();
-    read_dirs.extend(knowledge_dir);
+    read_dirs.extend(external_knowledge_dirs.iter().cloned());
     spec.read_dirs = read_dirs;
     let now = Timestamp::now();
     let run = RunRecord {
@@ -20684,9 +20867,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
             tracing::warn!(run = %run.id, %error, "could not carry the discussion to the retry");
         }
     }
-    if forget_archive {
-        forget_run_knowledge_dir(ctx, &run.id);
-    }
+    trim_run_knowledge_grants(ctx, &run.id, forget_archive, &external_knowledge_dirs);
     // Admission moved the request link and preserved its previous attempt in
     // the same transaction as the queued row and event.
     ctx.send_threads(&item_id);
@@ -29119,7 +29300,7 @@ read eof || true
     }
 
     #[tokio::test]
-    async fn only_sessions_started_with_archive_framing_keep_the_archive_on_resume() {
+    async fn resumed_sessions_retain_only_knowledge_sources_they_started_with_and_can_still_use() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let (mut ctx, _events) = ctx(&root, &nowhere(), &[]);
@@ -29149,12 +29330,27 @@ read eof || true
             ctx.with_cache(|cache| cache.load_comment_threads(&item.id).unwrap())
                 .unwrap()
                 .into_iter()
-                .find(|thread| thread.messages.iter().any(|message| message.body == question))
+                .find(|thread| {
+                    thread
+                        .messages
+                        .iter()
+                        .any(|message| message.body == question)
+                })
                 .unwrap()
         };
 
         ask_it(None, "Before the archive").await;
         store_pull(&ctx, 8);
+        let external = ctx.preparer.store().root().join("knowledge/discord");
+        std::fs::create_dir_all(&external).unwrap();
+        let mut config = (*ctx.config()).clone();
+        config
+            .knowledge
+            .push(perch_github::config::KnowledgeSource {
+                dir: "discord".into(),
+                repos: Some(vec![item.repo_full_name.clone()]),
+            });
+        ctx.replace_config(config);
         let exporter = ctx.knowledge.start(ctx.item_lifecycle.clone());
         let archive = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -29181,12 +29377,16 @@ read eof || true
         let no_grant = args(2);
         assert!(no_grant.contains("--resume\ns1\n"));
         assert!(!no_grant.contains(grant.to_str().unwrap()));
+        assert!(!no_grant.contains(external.to_str().unwrap()));
         let fresh = args(3);
         assert!(fresh.contains(&format!("`{shown}/`")));
         assert!(fresh.contains(&format!("--add-dir\n{}\n", grant.display())));
+        assert!(fresh.contains(&format!("`{}/`", perch_agent::prompt_path(&external))));
+        assert!(fresh.contains(&format!("--add-dir\n{}\n", external.display())));
         let resumed = args(4);
         assert!(resumed.contains("--resume\ns1\n"));
         assert!(resumed.contains(&format!("--add-dir\n{}\n", grant.display())));
+        assert!(resumed.contains(&format!("--add-dir\n{}\n", external.display())));
         assert!(!resumed.contains("--append-system-prompt"));
         let resumed = ctx
             .with_cache(|cache| cache.runs_for_discussion(&new_thread.id).unwrap())
@@ -29194,6 +29394,23 @@ read eof || true
             .pop()
             .unwrap();
         assert_eq!(recorded_knowledge_dir(&ctx, &resumed.id), Some(archive));
+        assert_eq!(
+            recorded_external_knowledge_dirs(&ctx, &resumed.id),
+            std::slice::from_ref(&external)
+        );
+
+        let mut config = (*ctx.config()).clone();
+        config.knowledge.clear();
+        ctx.replace_config(config);
+        ask_it(
+            Some(new_thread.id),
+            "Resume after removing the external source",
+        )
+        .await;
+        let resumed = args(5);
+        assert!(resumed.contains("--resume\ns1\n"));
+        assert!(resumed.contains(&format!("--add-dir\n{}\n", grant.display())));
+        assert!(!resumed.contains(external.to_str().unwrap()));
     }
 
     #[tokio::test]

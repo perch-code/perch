@@ -1021,7 +1021,7 @@ async fn queue_attempt(
             return;
         }
     };
-    super::record_run_context(ctx, &run_id, discussion_dir, None, None);
+    super::record_run_context(ctx, &run_id, discussion_dir, None, None, &[]);
     if let Err(message) = cache(ctx, |cache| cache.attach_reviewer_run(&attempt.id, &run_id)) {
         ctx.runs.cancel(&run_id);
         fail_attempt(ctx, &attempt.id, &message);
@@ -1189,13 +1189,23 @@ async fn execute_attempt(
         .and_then(|context| context.dir)
         .map(PathBuf::from)
         .filter(|dir| dir.is_dir());
-    let read_dirs: Vec<_> = discussion_dir.iter().cloned().collect();
+    let mut read_dirs: Vec<_> = discussion_dir.iter().cloned().collect();
     let knowledge_dir = match run.owner.item_id().and_then(|id| ctx.item(id)) {
         Some(item) => {
             super::run_knowledge_dir(ctx, &item, backend, &checkout, &read_dirs, None).await
         }
         None => None,
     };
+    read_dirs.extend(knowledge_dir.iter().cloned());
+    let external_knowledge_dirs = super::run_external_knowledge_dirs(
+        ctx,
+        &captured.manifest.range.source_repository,
+        backend,
+        &checkout,
+        &read_dirs,
+        None,
+    )
+    .await;
     let spec = perch_agent::ReviewSpec {
         backend,
         binary: attempt
@@ -1214,17 +1224,21 @@ async fn execute_attempt(
         instructions,
         discussion_dir,
         knowledge_dir,
+        external_knowledge_dirs,
         transcript: Some(transcript(captured.root(), &attempt.id, "review")),
     };
 
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Reviewing);
     send_group(ctx, &group_id);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let spawned = if backend == perch_agent::Backend::OpenCode && spec.knowledge_dir.is_some() {
+    let spawned = if matches!(backend, AgentBackend::Gemini | AgentBackend::OpenCode)
+        && (spec.knowledge_dir.is_some() || !spec.external_knowledge_dirs.is_empty())
+    {
         match perch_agent::Run::spawn_review(spec.clone(), tx.clone()) {
             Err(perch_agent::Error::InvalidReview(_)) => {
                 let mut spec = spec;
                 spec.knowledge_dir = None;
+                spec.external_knowledge_dirs.clear();
                 perch_agent::Run::spawn_review(spec, tx)
             }
             spawned => spawned,

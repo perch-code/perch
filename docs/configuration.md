@@ -64,6 +64,8 @@ repository's `github` and `root`.
 | `[remote] host` | none | SSH host to use when there is no saved window session (for example `"chris@devbox:2222"`). Perch subsequently reopens each window in its last environment. |
 | `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app sends the `perchd` it carries there, starts it, and replaces an engine of another build it finds running idle |
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
+| `[[knowledge]] dir` | required per entry | External directory relative to `$PERCH_HOME/knowledge/` |
+| `[[knowledge]] repos` | every repository | Repository identities that get the directory |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |
 | `[[repo]] root` | none | Your local clone, where Perch finds branches and worktrees and cuts new ones |
@@ -75,6 +77,46 @@ repository's `github` and `root`.
 | `[repo.lsp] trust` | `false` | Start rust-analyzer and jdtls on anything in this repository without asking |
 
 The [reference](reference.md) covers what each setting does in more detail.
+
+## External knowledge
+
+Add directories in **Settings → Knowledge** or in the engine's
+`config.toml`.
+
+```toml
+[[knowledge]]
+dir = "discord/slatedb"
+repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
+
+[[knowledge]]
+dir = "notes"
+```
+
+Perch matches repository identities case-insensitively. Use `local/<name>`
+for a local-only repository. An omitted `repos` applies to every
+repository. An empty array applies to none. In Settings, the **All
+repositories** switch controls this. Turning it off starts from no
+repositories, and clearing the list leaves the directory shared with
+none.
+
+Write Markdown into that directory on the engine's machine. Use
+`INDEX.md` as an optional entry point and include links back to original
+messages or documents where possible. Use ordinary directories and files
+with no symlinks or agent instruction files such as `AGENTS.md`,
+`CLAUDE.md` and `GEMINI.md`. The top-level names `perch` and `reviews`
+are reserved.
+
+Perch shares each configured directory and its contents with eligible
+Ask, Work and Review runs as untrusted context. An external ingester
+handles fetching, updates, deletions and scheduling. Start a new agent
+session to pick up newly configured directories.
+
+Perch skips a directory that is missing, contains a symlink or an agent
+instruction file, or holds more than 200,000 files and directories. It
+also skips one the agent backend cannot add. Settings shows why a
+directory is not shared, and the engine log records each change.
+Perch reuses a directory's check for up to a minute, so a fix appears
+at the first run after that.
 
 ## OpenCode
 

@@ -5,9 +5,9 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use perch_github::{Cache, CacheError, Item, ItemKind, SubjectState};
+use perch_github::{Cache, CacheError, Config, Item, ItemKind, SubjectState};
 use perch_knowledge::sanitize::{clean, one_line};
 use perch_knowledge::{
     child_dirs, encode_component, ensure_dir, prune_temporary_files, remove_dir, remove_empty_dir,
@@ -497,6 +497,114 @@ pub fn cached_knowledge_dir(
     existing_knowledge_dir(&root, &repo_path, own.as_ref(), &items)
 }
 
+/// How many files and directories a configured source may hold. The check
+/// stops there and the source is not shared, as OpenCode's own scan of a
+/// granted directory stops.
+pub const SOURCE_ENTRY_LIMIT: usize = 200_000;
+
+/// How long a source's check is trusted. A run checks its sources when it
+/// is admitted and again when it starts, and Settings shows the same
+/// answer, so one walk of a large source serves all of them.
+const SOURCE_CHECK_TTL: Duration = Duration::from_secs(60);
+
+/// Each source's last check, by directory, kept after it goes stale so a
+/// change of answer can be told from the same answer again.
+type SourceChecks = HashMap<PathBuf, (Instant, Result<(), String>)>;
+static SOURCE_CHECKS: Mutex<Option<SourceChecks>> = Mutex::new(None);
+
+/// Why a configured source can't be shared with runs, or `None` when it can.
+/// A fresh answer is reused; a new one that differs from the last is logged.
+fn source_problem(dir: &Path) -> Option<String> {
+    let cached = SOURCE_CHECKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|checks| checks.get(dir).cloned());
+    if let Some((at, result)) = &cached {
+        if at.elapsed() < SOURCE_CHECK_TTL {
+            return result.clone().err();
+        }
+    }
+    let result = perch_knowledge::check_source(dir, SOURCE_ENTRY_LIMIT);
+    if cached.as_ref().map(|(_, previous)| previous) != Some(&result) {
+        match &result {
+            Err(why) => {
+                tracing::warn!(dir = %dir.display(), %why, "knowledge source is not shared with runs")
+            }
+            Ok(()) if cached.is_some() => {
+                tracing::info!(dir = %dir.display(), "knowledge source is shared with runs again")
+            }
+            Ok(()) => {}
+        }
+    }
+    SOURCE_CHECKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .insert(dir.to_owned(), (Instant::now(), result.clone()));
+    result.err()
+}
+
+/// Why each configured source that can't be shared isn't, by its `dir` as
+/// config.toml has it, for the Settings page.
+pub fn knowledge_problems(root: &Path, config: &Config) -> BTreeMap<PathBuf, String> {
+    let root = canonical_home(root).join("knowledge");
+    config
+        .knowledge
+        .iter()
+        .filter(|source| source.validate().is_ok())
+        .filter_map(|source| {
+            source_problem(&root.join(&source.dir)).map(|why| (source.dir.clone(), why))
+        })
+        .collect()
+}
+
+/// Check every configured source again and give Settings what changed.
+pub(super) async fn refresh_knowledge_status(ctx: Ctx) {
+    let config = ctx.config();
+    let root = ctx.preparer.store().root().to_owned();
+    let problems = tokio::task::spawn_blocking(move || knowledge_problems(&root, &config))
+        .await
+        .unwrap_or_default();
+    ctx.settings.set_knowledge_problems(&ctx, problems);
+}
+
+/// Locate configured sources on the engine and check whether the backend
+/// can add them alongside the existing read grants.
+pub fn external_knowledge_dirs(
+    root: &Path,
+    config: &Config,
+    repo: &str,
+    backend: perch_agent::Backend,
+    cwd: &Path,
+    read_dirs: &[PathBuf],
+    mode: &perch_agent::Mode,
+) -> Vec<PathBuf> {
+    if config.knowledge.is_empty() {
+        return Vec::new();
+    }
+    let root = canonical_home(root).join("knowledge");
+    let mut added = read_dirs.to_vec();
+    for source in &config.knowledge {
+        if !source.applies_to(repo) || source.validate().is_err() {
+            continue;
+        }
+        let dir = root.join(&source.dir);
+        if dir
+            .to_str()
+            .is_none_or(|path| path.contains(char::is_control))
+            || added.contains(&dir)
+            || source_problem(&dir).is_some()
+        {
+            continue;
+        }
+        if perch_agent::can_add_read_dir(backend, cwd, &added, &dir, mode) {
+            added.push(dir);
+        }
+    }
+    added.split_off(read_dirs.len())
+}
+
 fn existing_knowledge_dir(
     root: &Path,
     repo: &Path,
@@ -570,6 +678,102 @@ pub(super) mod tests {
         ReviewerPhase, ThreadOrigin,
     };
     use std::fs;
+
+    #[test]
+    fn external_knowledge_grants_only_matching_configured_safe_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let knowledge = root.join("knowledge");
+        for relative in [
+            "discord/slatedb",
+            "notes",
+            "perch",
+            "unconfigured",
+            "includes-link",
+            "includes-instructions/topic",
+        ] {
+            fs::create_dir_all(knowledge.join(relative)).unwrap();
+        }
+        fs::write(knowledge.join("notes/INDEX.md"), "# Notes").unwrap();
+        fs::write(
+            knowledge.join("includes-instructions/topic/AGENTS.md"),
+            "text",
+        )
+        .unwrap();
+        let home = root.join("perch-home");
+        std::os::unix::fs::symlink(&root, &home).unwrap();
+        std::os::unix::fs::symlink(knowledge.join("perch"), knowledge.join("alias")).unwrap();
+        std::os::unix::fs::symlink(&root, knowledge.join("includes-link/outside")).unwrap();
+        let config = Config::parse_text(
+            r#"
+[[knowledge]]
+dir = "discord/slatedb"
+repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
+[[knowledge]]
+dir = "notes"
+[[knowledge]]
+dir = "alias"
+[[knowledge]]
+dir = "includes-link"
+[[knowledge]]
+dir = "includes-instructions"
+[[knowledge]]
+dir = "missing"
+"#,
+        )
+        .unwrap();
+        let grants = |repo| {
+            external_knowledge_dirs(
+                &home,
+                &config,
+                repo,
+                perch_agent::Backend::ClaudeCode,
+                &root,
+                &[],
+                &perch_agent::Mode::Ask,
+            )
+        };
+        assert_eq!(
+            grants("SlateDB/SlateDB-Go"),
+            [knowledge.join("discord/slatedb"), knowledge.join("notes")]
+        );
+        assert_eq!(grants("perch-code/perch"), [knowledge.join("notes")]);
+        assert!(!knowledge.join("missing").exists());
+
+        // Settings is told why each source that is skipped is.
+        let problems = knowledge_problems(&home, &config);
+        let why = |dir: &str| problems.get(Path::new(dir)).map(String::as_str);
+        assert_eq!(why("discord/slatedb"), None);
+        assert_eq!(why("notes"), None);
+        assert_eq!(why("missing"), Some("the directory does not exist"));
+        assert_eq!(why("includes-link"), Some("outside is a symlink"));
+        assert_eq!(
+            why("includes-instructions"),
+            Some("topic/AGENTS.md is an agent instructions file")
+        );
+        assert!(why("alias").is_some());
+    }
+
+    #[test]
+    fn a_source_is_walked_once_while_its_check_is_fresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().canonicalize().unwrap().join("notes");
+        fs::create_dir_all(&source).unwrap();
+        assert_eq!(source_problem(&source), None);
+        // A link made now is not seen until the check goes stale, so a run's
+        // admission and its start walk a large source once between them.
+        std::os::unix::fs::symlink(&source, source.join("loop")).unwrap();
+        assert_eq!(source_problem(&source), None);
+        SOURCE_CHECKS
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .get_mut(&source)
+            .unwrap()
+            .0 -= SOURCE_CHECK_TTL;
+        assert_eq!(source_problem(&source), Some("loop is a symlink".into()));
+    }
 
     fn worktree(repo: &str, branch: &str) -> Item {
         let mut item = Item::new(repo, Timestamp::now());

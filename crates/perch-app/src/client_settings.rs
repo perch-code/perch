@@ -115,6 +115,7 @@ pub fn alone(path: std::path::PathBuf, local: &Local) -> SettingsFile {
             error: None,
             present: Default::default(),
             warnings: Vec::new(),
+            knowledge_problems: Default::default(),
         },
         local,
     );
@@ -164,6 +165,7 @@ pub fn merge(engine: SettingsFile, local: &Local) -> SettingsFile {
         error: engine.error,
         present,
         warnings,
+        knowledge_problems: engine.knowledge_problems,
     }
 }
 
@@ -218,6 +220,7 @@ mod tests {
             error: Some("line 1: expected `]`".into()),
             present: Default::default(),
             warnings: Vec::new(),
+            knowledge_problems: Default::default(),
         };
         let merged = merge(engine, &local);
         assert_eq!(merged.error.as_deref(), Some("line 1: expected `]`"));
@@ -271,6 +274,7 @@ mod tests {
             path: "/home/chris/.perch/config.toml".into(),
             present: perch_github::present_keys(engine_text, &[]),
             warnings: Vec::new(),
+            knowledge_problems: Default::default(),
             config: Some(Arc::new(engine_config)),
             error: None,
         };

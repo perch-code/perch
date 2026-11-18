@@ -205,7 +205,7 @@ async fn ask(
 
     let backend = backend_for(&config.agent, &config.agent.model);
     let mut read_dirs = vec![perch_engine::context::root(&root)];
-    let knowledge_dir = {
+    let (knowledge_dir, external_knowledge_dirs) = {
         let repo = full_name.to_string();
         let kind = if pr.is_some() {
             perch_github::ItemKind::PullRequest
@@ -213,14 +213,20 @@ async fn ask(
             perch_github::ItemKind::Issue
         };
         let cwd = checkout.worktree.clone();
-        let read_dirs = read_dirs.clone();
+        let mut read_dirs = read_dirs.clone();
+        let config = config.clone();
         tokio::task::spawn_blocking(move || {
-            let dir = perch_engine::backend::cached_knowledge_dir(&root, &repo, kind, number)?;
-            perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, &perch_agent::Mode::Ask).then_some(dir)
+            let mode = perch_agent::Mode::Ask;
+            let archive = perch_engine::backend::cached_knowledge_dir(&root, &repo, kind, number)
+                .filter(|dir| perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, dir, &mode));
+            read_dirs.extend(archive.iter().cloned());
+            let external = perch_engine::backend::external_knowledge_dirs(
+                &root, &config, &repo, backend, &cwd, &read_dirs, &mode,
+            );
+            (archive, external)
         })
         .await
-        .ok()
-        .flatten()
+        .unwrap_or_default()
     };
     let prompt = first_prompt(&PromptInput {
         pull_request: pr.as_ref(),
@@ -234,6 +240,7 @@ async fn ask(
         history: &[],
         discussion: section.as_deref(),
         knowledge_dir: knowledge_dir.as_deref(),
+        external_knowledge_dirs: &external_knowledge_dirs,
         since: None,
     });
     println!(
@@ -264,6 +271,7 @@ async fn ask(
         perch_agent::Mode::Ask,
     );
     read_dirs.extend(knowledge_dir);
+    read_dirs.extend(external_knowledge_dirs);
     spec.read_dirs = read_dirs;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let run = perch_agent::Run::spawn(spec, tx).map_err(|e| e.to_string())?;

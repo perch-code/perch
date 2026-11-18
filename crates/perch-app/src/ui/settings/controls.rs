@@ -525,7 +525,6 @@ pub(crate) fn entry(
     submit: impl Fn(String) -> bool + 'static,
     debug: &'static str,
 ) -> impl View {
-    let editing = settings.editing;
     let send: Rc<dyn Fn()> = {
         let enabled = enabled.clone();
         Rc::new(move || {
@@ -542,13 +541,44 @@ pub(crate) fn entry(
             }
         })
     };
+    let input = entry_input(
+        settings,
+        enabled.clone(),
+        draft,
+        placeholder,
+        {
+            let send = send.clone();
+            move || send()
+        },
+        debug,
+    );
+    Stack::horizontal((
+        input,
+        button(
+            label,
+            format!("{debug}-go"),
+            move || enabled() && draft.with(|s| !s.trim().is_empty()),
+            move || send(),
+        ),
+    ))
+    .style(|s| s.gap(8.0).items_center())
+}
+
+/// A field for a form that submits with Enter or a separate button.
+pub(crate) fn entry_input(
+    settings: super::SettingsState,
+    enabled: impl Fn() -> bool + 'static,
+    draft: RwSignal<String>,
+    placeholder: &str,
+    submit: impl Fn() + 'static,
+    debug: &'static str,
+) -> impl View {
+    let editing = settings.editing;
     let input = TextInput::new(draft)
         .placeholder(placeholder.to_string())
         .debug_name(debug);
     let id = input.view_id();
-    let writable = enabled.clone();
-    let (send_key, send_button) = (send.clone(), send);
-    let input = input
+    input
         .on_event_cont(el::FocusGained, move |_, _| editing.set(Some(id)))
         .on_event_cont(el::FocusLost, move |_, _| {
             if editing.get_untracked() == Some(id) {
@@ -561,7 +591,7 @@ pub(crate) fn entry(
             }
             match key.code {
                 Code::Enter | Code::NumpadEnter => {
-                    send_key();
+                    submit();
                     EventPropagation::Stop
                 }
                 Code::Escape => {
@@ -590,18 +620,8 @@ pub(crate) fn entry(
                 .focus(|s| s.border_color(theme::accent()))
                 .set(SelectionColor, Brush::Solid(theme::selection_bg()))
                 .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
-                .set_disabled(!writable())
-        });
-    Stack::horizontal((
-        input,
-        button(
-            label,
-            format!("{debug}-go"),
-            move || enabled() && draft.with(|s| !s.trim().is_empty()),
-            move || send_button(),
-        ),
-    ))
-    .style(|s| s.gap(8.0).items_center())
+                .set_disabled(!enabled())
+        })
 }
 
 /// The keys macOS keeps for itself: Quit, Hide and Hide Others, which the

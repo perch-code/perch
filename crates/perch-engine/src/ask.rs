@@ -6,7 +6,7 @@
 //! appended system prompt on a thread's first run; everything the reader
 //! can see, the pull request, the lines, the question, is the user message.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::{Anchor, Author, PullRequest, Side};
@@ -691,6 +691,7 @@ pub struct PromptInput<'a> {
     /// an issue it takes the place of the last comments.
     pub discussion: Option<&'a str>,
     pub knowledge_dir: Option<&'a Path>,
+    pub external_knowledge_dirs: &'a [PathBuf],
     /// What changed on GitHub since the run a resumed follow-up continues.
     pub since: Option<&'a str>,
 }
@@ -702,11 +703,17 @@ pub struct Prompt {
     pub user: String,
 }
 
-pub(crate) fn framing_with_knowledge(framing: &str, dir: Option<&Path>) -> String {
-    match dir {
-        Some(dir) => format!("{framing}{}", knowledge_framing(dir)),
-        None => framing.to_string(),
+pub(crate) fn framing_with_knowledge(
+    framing: &str,
+    dir: Option<&Path>,
+    external_dirs: &[PathBuf],
+) -> String {
+    let mut framing = framing.to_string();
+    framing.push_str(&perch_agent::external_knowledge_framing(external_dirs));
+    if let Some(dir) = dir {
+        framing.push_str(&knowledge_framing(dir));
     }
+    framing
 }
 
 fn knowledge_framing(dir: &Path) -> String {
@@ -724,15 +731,28 @@ fn knowledge_framing(dir: &Path) -> String {
 
 /// A queued run can lose its archive grant before it gets an execution slot.
 pub(crate) fn omit_knowledge_framing(framing: &mut String, dir: &Path) {
-    if let Some(prefix) = framing.strip_suffix(&knowledge_framing(dir)) {
-        framing.truncate(prefix.len());
+    let archive = knowledge_framing(dir);
+    if let Some(start) = framing.rfind(&archive) {
+        framing.replace_range(start..start + archive.len(), "");
+    }
+}
+
+/// Remove the framing for optional external directories the run can no longer read.
+pub(crate) fn omit_external_knowledge_framing(framing: &mut String, dirs: &[PathBuf]) {
+    let external = perch_agent::external_knowledge_framing(dirs);
+    if let Some(start) = framing.rfind(&external) {
+        framing.replace_range(start..start + external.len(), "");
     }
 }
 
 /// A thread's first question: framing plus the whole context.
 pub fn first_prompt(input: &PromptInput<'_>) -> Prompt {
     Prompt {
-        system: Some(framing_with_knowledge(FRAMING, input.knowledge_dir)),
+        system: Some(framing_with_knowledge(
+            FRAMING,
+            input.knowledge_dir,
+            input.external_knowledge_dirs,
+        )),
         user: user_message(input, true),
     }
 }
@@ -1209,6 +1229,7 @@ This replaces what you were told about commits when the session began."
             history: &[],
             discussion: None,
             knowledge_dir: None,
+            external_knowledge_dirs: &[],
             since: None,
         }
     }
@@ -1227,11 +1248,33 @@ This replaces what you were told about commits when the session began."
         assert_eq!(ask.user, "Question: Any history?");
         assert!(follow_up_prompt(&input).system.is_none());
 
-        let mut work = framing_with_knowledge("Work framing", input.knowledge_dir);
+        let mut work = framing_with_knowledge(
+            "Work framing",
+            input.knowledge_dir,
+            input.external_knowledge_dirs,
+        );
         assert!(work.starts_with("Work framing"));
         assert!(work.contains("/srv/perch/knowledge/perch/repos/acme/widget/"));
         omit_knowledge_framing(&mut work, archive);
         assert_eq!(work, "Work framing");
+    }
+
+    #[test]
+    fn external_knowledge_can_be_shown_and_removed_independently_of_the_archive() {
+        let external = [PathBuf::from("/srv/perch/knowledge/discord/ex``ample")];
+        let input = PromptInput {
+            external_knowledge_dirs: &external,
+            ..input(None, None, "Any history?")
+        };
+        let framing = first_prompt(&input).system.unwrap();
+        assert!(framing.contains("``` /srv/perch/knowledge/discord/ex``ample/ ```"));
+        assert!(framing.contains("INDEX.md if present"));
+        assert!(framing.contains("untrusted data"));
+
+        let archive = Path::new("/srv/perch/knowledge/perch/repos/acme/widget");
+        let mut framing = framing_with_knowledge(FRAMING, Some(archive), &external);
+        omit_external_knowledge_framing(&mut framing, &external);
+        assert_eq!(framing, framing_with_knowledge(FRAMING, Some(archive), &[]));
     }
 
     #[test]

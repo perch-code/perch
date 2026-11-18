@@ -15,6 +15,7 @@ pub(crate) mod controls;
 mod environment;
 mod general;
 mod keyboard;
+mod knowledge;
 mod language_servers;
 mod repositories;
 mod work;
@@ -156,11 +157,12 @@ pub enum Section {
     Agents,
     Work,
     Repositories,
+    Knowledge,
     LanguageServers,
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::General,
         Section::Environment,
         Section::Appearance,
@@ -168,6 +170,7 @@ impl Section {
         Section::Agents,
         Section::Work,
         Section::Repositories,
+        Section::Knowledge,
         Section::LanguageServers,
     ];
 
@@ -180,6 +183,7 @@ impl Section {
             Section::Agents => "Agents",
             Section::Work => "Work",
             Section::Repositories => "Repositories",
+            Section::Knowledge => "Knowledge",
             Section::LanguageServers => "Language servers",
         }
     }
@@ -193,6 +197,7 @@ impl Section {
             Section::Agents => SidebarIcon::Agents,
             Section::Work => SidebarIcon::Branch,
             Section::Repositories => SidebarIcon::Repository,
+            Section::Knowledge => SidebarIcon::Folder,
             Section::LanguageServers => SidebarIcon::Server,
         }
     }
@@ -209,6 +214,7 @@ impl Section {
             Section::Agents => agents::groups(page),
             Section::Work => work::groups(page),
             Section::Repositories => repositories::groups(page),
+            Section::Knowledge => knowledge::groups(page),
             Section::LanguageServers => language_servers::groups(page),
         }
     }
@@ -1247,7 +1253,7 @@ mod tests {
 
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::kurbo::Rect;
-    use perch_github::RepoSetting;
+    use perch_github::{KnowledgeSetting, RepoSetting};
 
     use super::*;
     use crate::backend::{Command, SettingsFile};
@@ -1284,6 +1290,7 @@ mod tests {
             error: error.map(str::to_string),
             present: Default::default(),
             warnings: Vec::new(),
+            knowledge_problems: Default::default(),
         };
         let broken_host = file(Some("line 1"));
         let whole = file(None);
@@ -1388,6 +1395,7 @@ mod tests {
             warnings: config.warnings.clone(),
             config: Some(Arc::new(config)),
             error: None,
+            knowledge_problems: Default::default(),
         }
     }
 
@@ -1710,6 +1718,89 @@ mod tests {
         assert!(shown(&harness, "settings-group:Repositories · gadgets"));
         assert!(shown(&harness, "settings-row:repo:acme/widgets:work-trust"));
         assert!(shown(&harness, "settings-row:repo:acme/gadgets:work-trust"));
+    }
+
+    #[test]
+    fn knowledge_settings_add_edit_and_remove_directories() {
+        let (mut harness, state, mut commands) = window(1400.0, 900.0, "");
+        open_on(&mut harness, state, Section::Knowledge);
+
+        click(&mut harness, "settings-knowledge-add-dir");
+        type_text(&mut harness, "discord/project");
+        enter_in(&mut harness, "settings-knowledge-add-repos", "acme/widgets");
+        let change = |change| Setting::Knowledge {
+            dir: "discord/project".into(),
+            change,
+        };
+        assert_eq!(
+            written(&mut commands),
+            vec![change(KnowledgeSetting::Add(Some(vec![
+                "acme/widgets".into()
+            ])))]
+        );
+        state.settings_file.set(Some(file(
+            "[[knowledge]]\ndir = \"discord/project\"\nrepos = [\"acme/widgets\"]\n",
+        )));
+        settle(&mut harness);
+        assert!(shown(&harness, "settings-group:discord/project"));
+        click(
+            &mut harness,
+            "settings-reset:knowledge:discord/project:repos",
+        );
+        assert_eq!(
+            written(&mut commands),
+            vec![change(KnowledgeSetting::Repositories(None))]
+        );
+        click(&mut harness, "settings-knowledge:discord/project:remove");
+        assert_eq!(
+            written(&mut commands),
+            vec![change(KnowledgeSetting::Remove)]
+        );
+
+        // Every repository is a switch, and the list shows only without it,
+        // so emptying the list never widens the directory.
+        click(&mut harness, "settings-knowledge:discord/project:all");
+        assert_eq!(
+            written(&mut commands),
+            vec![change(KnowledgeSetting::Repositories(None))]
+        );
+        state
+            .settings_file
+            .set(Some(file("[[knowledge]]\ndir = \"discord/project\"\n")));
+        settle(&mut harness);
+        assert!(!shown(
+            &harness,
+            "settings-row:knowledge:discord/project:repos"
+        ));
+        click(&mut harness, "settings-knowledge:discord/project:all");
+        assert_eq!(
+            written(&mut commands),
+            vec![change(KnowledgeSetting::Repositories(Some(Vec::new())))]
+        );
+        state.settings_file.set(Some(file(
+            "[[knowledge]]\ndir = \"discord/project\"\nrepos = []\n",
+        )));
+        settle(&mut harness);
+        assert!(shown(
+            &harness,
+            "settings-row:knowledge:discord/project:repos"
+        ));
+        assert!(!shown(
+            &harness,
+            "settings-row:knowledge:discord/project:status"
+        ));
+
+        // What the engine found wrong with the directory.
+        let mut broken = file("[[knowledge]]\ndir = \"discord/project\"\n");
+        broken
+            .knowledge_problems
+            .insert("discord/project".into(), "latest is a symlink".into());
+        state.settings_file.set(Some(broken));
+        settle(&mut harness);
+        assert!(shown(
+            &harness,
+            "settings-row:knowledge:discord/project:status"
+        ));
     }
 
     /// Picking from a dropdown writes the setting.

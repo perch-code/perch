@@ -3,7 +3,7 @@
 //! and then the whole file is taken up again, as it is after an edit made
 //! by hand while Perch runs: the file stays the one place settings live.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -42,6 +42,11 @@ pub struct SettingsFile {
     pub present: BTreeSet<String>,
     /// Everything loading the file had to say.
     pub warnings: Vec<String>,
+    /// Why each `[[knowledge]]` directory that runs are not given isn't,
+    /// by its `dir`: missing, a symlink or an agent's instructions file in
+    /// it, or too many files to check. Checked on the engine's machine.
+    #[serde(default)]
+    pub knowledge_problems: BTreeMap<PathBuf, String>,
 }
 
 impl SettingsFile {
@@ -52,6 +57,7 @@ impl SettingsFile {
             warnings: config.warnings.clone(),
             config: Some(Arc::new(config.clone())),
             error: None,
+            knowledge_problems: BTreeMap::new(),
         }
     }
 
@@ -62,6 +68,7 @@ impl SettingsFile {
             error: Some(error),
             present: BTreeSet::new(),
             warnings: Vec::new(),
+            knowledge_problems: BTreeMap::new(),
         }
     }
 }
@@ -206,13 +213,33 @@ impl Held {
 
     /// Held while the Settings go, so a client's resync never sends an
     /// older file after this one.
-    fn send(&self, ctx: &Ctx, file: SettingsFile) {
+    fn send(&self, ctx: &Ctx, mut file: SettingsFile) {
         let mut last = self
             .last
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Until the sources are checked again, what was found last stands.
+        if let Some(previous) = last.as_ref() {
+            file.knowledge_problems = previous.knowledge_problems.clone();
+        }
         *last = Some(file.clone());
         let _ = ctx.events.send(Event::Settings(file));
+    }
+
+    /// Put the knowledge sources' problems on the Settings last sent, and
+    /// send them again when that changes what they say.
+    pub(super) fn set_knowledge_problems(&self, ctx: &Ctx, problems: BTreeMap<PathBuf, String>) {
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(file) = last.as_mut() else {
+            return;
+        };
+        if file.knowledge_problems != problems {
+            file.knowledge_problems = problems;
+            let _ = ctx.events.send(Event::Settings(file.clone()));
+        }
     }
 
     /// Run `send` with the Settings last sent, for a client that asks for
@@ -360,6 +387,7 @@ pub(super) async fn take_up_whole_config(ctx: &Ctx, path: &Path) -> Result<Confi
         ctx.notice(warning);
     }
     held.send(ctx, SettingsFile::read(path, &text, &file));
+    tokio::spawn(super::knowledge::refresh_knowledge_status(ctx.clone()));
 
     // Servers held for code a repository now trusts may start; ones on
     // show for code a repository no longer trusts go back to asking.
