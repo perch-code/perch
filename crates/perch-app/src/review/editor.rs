@@ -2103,8 +2103,10 @@ fn wire_cursor(
             floem::action::exec_after(
                 std::time::Duration::from_millis(hover::ASK_DELAY_MILLIS),
                 move |_| {
-                    if state.last_position.with_untracked(|p| *p == position)
-                        && state.last_position_base.get_untracked() == pos_base
+                    if state
+                        .last_position
+                        .try_with_untracked(|p| p.is_some_and(|p| *p == position))
+                        && state.last_position_base.try_get_untracked() == Some(pos_base)
                     {
                         state.ask_highlights(&backend, symbol);
                     }

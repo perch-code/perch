@@ -1288,6 +1288,12 @@ impl AppState {
         });
     }
 
+    /// Whether this state's window is still open. A closed window's
+    /// signals are disposed, while copies of its state can still be held.
+    pub fn is_live(&self) -> bool {
+        self.toasts.try_with_untracked(|t| t.is_some())
+    }
+
     pub fn current_toast(&self) -> Option<Toast> {
         self.toasts.with(|toasts| toasts.front().cloned())
     }
@@ -1324,14 +1330,16 @@ impl AppState {
         let token = toast.token;
         self.toast_leaving.set(Some(toast));
         let state = *self;
-        floem::action::exec_after(TOAST_FADE, move |_| {
-            if state
-                .toast_leaving
-                .with_untracked(|leaving| leaving.as_ref().is_some_and(|l| l.token == token))
-            {
-                state.toast_leaving.set(None);
-            }
-        });
+        floem::action::exec_after(TOAST_FADE, move |_| state.clear_faded_toast(token));
+    }
+
+    fn clear_faded_toast(&self, token: u64) {
+        // The window or environment may have closed while the card faded.
+        if self.toast_leaving.try_with_untracked(|leaving| {
+            leaving.is_some_and(|l| l.as_ref().is_some_and(|l| l.token == token))
+        }) {
+            self.toast_leaving.set(None);
+        }
     }
 
     /// Take down every toast `drop` picks, and start the clock on the one
@@ -1368,14 +1376,16 @@ impl AppState {
         if offer {
             return;
         }
-        floem::action::exec_after(Duration::from_secs(8), move |_| {
-            if state
-                .toasts
-                .with_untracked(|toasts| toasts.front().is_some_and(|toast| toast.token == token))
-            {
-                state.dismiss_toast(token);
-            }
-        });
+        floem::action::exec_after(Duration::from_secs(8), move |_| state.expire_toast(token));
+    }
+
+    fn expire_toast(&self, token: u64) {
+        // The window or environment may have closed in the meantime.
+        if self.toasts.try_with_untracked(|toasts| {
+            toasts.is_some_and(|t| t.front().is_some_and(|toast| toast.token == token))
+        }) {
+            self.dismiss_toast(token);
+        }
     }
 
     pub fn set_agent_run_detail(
@@ -4412,7 +4422,7 @@ fn slide_on(
     length: Duration,
 ) {
     let step = move |_| {
-        if runs.get_untracked() != run {
+        if runs.try_get_untracked() != Some(run) {
             return;
         }
         let t = started.elapsed().as_secs_f64() / length.as_secs_f64().max(f64::EPSILON);
@@ -7856,6 +7866,43 @@ mod tests {
         app.apply(Event::Status(Status::Refreshing));
         app.apply(Event::Status(error));
         assert_eq!(app.notice(), None, "the same error, still going");
+    }
+
+    /// Closing a window or switching its environment disposes its signals
+    /// while the app's eight-second toast timer is still in flight.
+    #[test]
+    fn toast_timers_after_scope_disposal_do_nothing() {
+        let _root = floem::headless::TestRoot::new();
+        let live = AppState::new();
+        live.apply(Event::Notice("first".into()));
+        let live_token = live.current_toast().unwrap().token;
+        live.expire_toast(live_token);
+        assert!(live.current_toast().is_none());
+
+        let scope = floem::reactive::Scope::new();
+        let (disposed, token) = scope.enter(|| {
+            let app = AppState::new();
+            app.apply(Event::Notice("gone with the window".into()));
+            let toast = app.current_toast().unwrap();
+            let token = toast.token;
+            app.toast_leaving.set(Some(toast));
+            (app, token)
+        });
+        scope.dispose();
+
+        disposed.expire_toast(token);
+        disposed.clear_faded_toast(token);
+    }
+
+    /// A New Window built after the window it copies has closed starts
+    /// from scratch instead.
+    #[test]
+    fn a_state_is_not_live_once_its_scope_is_disposed() {
+        let scope = floem::reactive::Scope::new();
+        let app = scope.enter(AppState::new);
+        assert!(app.is_live());
+        scope.dispose();
+        assert!(!app.is_live());
     }
 
     #[test]

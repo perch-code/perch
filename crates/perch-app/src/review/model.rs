@@ -3737,10 +3737,16 @@ impl ReviewState {
     /// opening the file: the file is the active one, asked for, and not
     /// here. One that failed is not loading.
     pub fn still_opening(&self, path: &str, epoch: u64) -> bool {
-        self.editor_epoch.get_untracked() == epoch
-            && self.active.with_untracked(|a| a.as_deref() == Some(path))
-            && self.loading.with_untracked(|l| l.contains(path))
-            && self.files.with_untracked(|f| !f.contains_key(path))
+        self.editor_epoch.try_get_untracked() == Some(epoch)
+            && self
+                .active
+                .try_with_untracked(|a| a.is_some_and(|a| a.as_deref() == Some(path)))
+            && self
+                .loading
+                .try_with_untracked(|l| l.is_some_and(|l| l.contains(path)))
+            && self
+                .files
+                .try_with_untracked(|f| f.is_some_and(|f| !f.contains_key(path)))
     }
 
     /// Mark `path` loading unless it is loaded or loading already.
@@ -4443,9 +4449,10 @@ impl ReviewState {
 
     /// The commit sent under `token` is no longer waited on.
     pub fn forget_suggestion_commit(&self, token: u64) {
+        // A popover can outlive the window whose review it commits from.
         if self
             .suggestion_commits
-            .with_untracked(|c| c.contains_key(&token))
+            .try_with_untracked(|c| c.is_some_and(|c| c.contains_key(&token)))
         {
             self.suggestion_commits.update(|c| {
                 c.remove(&token);
@@ -8368,5 +8375,33 @@ mod tests {
                  1 comment is still a draft."
             )
         );
+    }
+
+    #[test]
+    fn forget_suggestion_commit_after_scope_disposal_does_nothing() {
+        let scope = floem::reactive::Scope::new();
+        let state = scope.enter(|| {
+            let state = ReviewState::new();
+            state.start_suggestion_commit(7);
+            state
+        });
+        state.forget_suggestion_commit(7);
+        assert!(state.suggestion_commits.with_untracked(|c| c.is_empty()));
+        state.start_suggestion_commit(7);
+        scope.dispose();
+        state.forget_suggestion_commit(7);
+    }
+
+    #[test]
+    fn still_opening_is_false_after_scope_disposal() {
+        let scope = floem::reactive::Scope::new();
+        let (state, epoch) = scope.enter(|| {
+            let state = ReviewState::new();
+            state.open_tab("src/lib.rs");
+            (state, state.editor_epoch.get_untracked())
+        });
+        assert!(state.still_opening("src/lib.rs", epoch));
+        scope.dispose();
+        assert!(!state.still_opening("src/lib.rs", epoch));
     }
 }

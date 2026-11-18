@@ -753,6 +753,11 @@ fn view(
             if let Some(timer) = close_timer.take() {
                 timer.cancel();
             }
+            // Its signals are still here, until the window's scope goes.
+            if let Some(window) = raise_id.window_id() {
+                crate::ui::menu::window_closed(window);
+                crate::review::apply_suggestion::window_closed(window);
+            }
             if close_requested.get() {
                 save_windows();
             } else {
@@ -928,7 +933,8 @@ fn last_window() -> Option<SavedWindow> {
 fn open_window(from: Option<AppState>, saved: Option<SavedWindow>) {
     let (config, frame) = config(saved.as_ref());
     floem::new_window(
-        move |_| view(from, frame, false, saved.clone()).into_any(),
+        // `from` may have closed before the new window is built.
+        move |_| view(from.filter(AppState::is_live), frame, false, saved.clone()).into_any(),
         Some(config),
     );
 }

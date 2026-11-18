@@ -299,9 +299,9 @@ fn arm_clock(state: AppState) {
 
 fn tick_clock(state: AppState) {
     floem::action::exec_after(Duration::from_secs(1), move |_| {
-        let active = state
-            .agent_runs
-            .with_untracked(|runs| runs.iter().any(|run| run.status.is_active()));
+        let active = state.agent_runs.try_with_untracked(|runs| {
+            runs.is_some_and(|runs| runs.iter().any(|run| run.status.is_active()))
+        });
         if active {
             state.now.set(jiff::Timestamp::now());
             tick_clock(state);

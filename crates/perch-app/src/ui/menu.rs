@@ -933,6 +933,19 @@ pub fn close() {
     }
 }
 
+/// Put away the menu `window` has up, as `window` closes. floem disposes
+/// a closing window's signals without removing its views, so the menu's
+/// own cleanup never runs; left open, it would count as up app-wide.
+pub fn window_closed(window: floem::window::WindowId) {
+    let host = OPEN.with(|open| open.borrow().clone());
+    let Some(host) = host.filter(|h| h.overlay.get().and_then(|o| o.window_id()) == Some(window))
+    else {
+        return;
+    };
+    host.close();
+    host.scope.dispose();
+}
+
 /// Open `menu` under `trigger`, at least as wide as it. `keyboard` when a
 /// key opened it: the first row starts picked.
 pub fn open_below(cx: &floem::context::EventCx<'_>, trigger: ViewId, menu: Menu, keyboard: bool) {
@@ -1314,8 +1327,17 @@ fn host_view(host: Rc<Host>) -> impl View {
             }
         })
         .on_cleanup({
-            let scope = host.scope;
-            move || scope.dispose()
+            let host = host.clone();
+            move || {
+                host.closed.set(true);
+                OPEN.with(|open| {
+                    let mut open = open.borrow_mut();
+                    if open.as_ref().is_some_and(|h| Rc::ptr_eq(h, &host)) {
+                        *open = None;
+                    }
+                });
+                host.scope.dispose();
+            }
         })
         .debug_name("menu")
         .style(|s| {
@@ -1969,6 +1991,17 @@ mod tests {
         settle(harness);
         harness.pointer_up(1.0, 1.0);
         settle(harness);
+    }
+
+    /// A window that closes with a menu up puts it away, since floem runs
+    /// no view cleanups for a closing window.
+    #[test]
+    fn closing_the_window_puts_its_menu_away() {
+        let (mut harness, _) = window_with((20.0, 20.0), (400.0, 300.0), sample);
+        open_it(&mut harness);
+        assert!(is_open());
+        window_closed(harness.window_id());
+        assert!(!is_open());
     }
 
     #[test]

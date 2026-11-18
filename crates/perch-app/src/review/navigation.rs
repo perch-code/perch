@@ -604,7 +604,7 @@ fn track(state: ReviewState, backend: &Rc<Backend>, symbol: Option<Symbol>) {
     floem::action::exec_after(Duration::from_millis(hover::ASK_DELAY_MILLIS), move |_| {
         if state
             .pointer_symbol
-            .with_untracked(|s| s.as_ref() == Some(&symbol))
+            .try_with_untracked(|s| s.is_some_and(|s| s.as_ref() == Some(&symbol)))
         {
             state.ask_hover(&backend, symbol);
         }

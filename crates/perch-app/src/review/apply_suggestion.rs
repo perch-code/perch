@@ -179,6 +179,7 @@ fn bar(
 /// is out, which keeps it up.
 struct Open {
     overlay: ViewId,
+    scope: Scope,
     busy: Box<dyn Fn() -> bool>,
 }
 
@@ -204,6 +205,27 @@ fn remove() {
     if let Some(open) = OPEN.with(|open| open.borrow_mut().take()) {
         open.overlay.clear_focus();
         floem::action::remove_overlay(open.overlay);
+    }
+}
+
+/// Let go of the popover when `window`, which has it up, closes. floem
+/// disposes a closing window's signals without removing its views, so the
+/// popover's own cleanup never runs; left here, the next popover would
+/// remove it from another window and reach the closed window's review.
+pub fn window_closed(window: floem::window::WindowId) {
+    let open = OPEN.with(|open| {
+        let mut open = open.borrow_mut();
+        if open
+            .as_ref()
+            .is_some_and(|o| o.overlay.window_id() == Some(window))
+        {
+            open.take()
+        } else {
+            None
+        }
+    });
+    if let Some(open) = open {
+        open.scope.dispose();
     }
 }
 
@@ -236,10 +258,10 @@ fn open_popover(state: ReviewState, backend: Rc<Backend>, trigger: ViewId, seed:
     let scope = Scope::new();
     let token = scope.enter(|| RwSignal::new(None::<u64>));
     let busy = move || {
-        token.get_untracked().is_some_and(|t| {
+        token.try_get_untracked().flatten().is_some_and(|t| {
             state
                 .suggestion_commits
-                .with_untracked(|c| matches!(c.get(&t), Some(None)))
+                .try_with_untracked(|c| matches!(c.and_then(|c| c.get(&t)), Some(None)))
         })
     };
     let view = scope.enter(|| popover(state, backend, item_id, rect, seed, token, scope));
@@ -247,6 +269,7 @@ fn open_popover(state: ReviewState, backend: Rc<Backend>, trigger: ViewId, seed:
     OPEN.with(|open| {
         *open.borrow_mut() = Some(Open {
             overlay,
+            scope,
             busy: Box::new(busy),
         })
     });
@@ -460,7 +483,7 @@ fn popover(
             }
         })
         .on_cleanup(move || {
-            if let Some(t) = token.get_untracked() {
+            if let Some(t) = token.try_get_untracked().flatten() {
                 state.forget_suggestion_commit(t);
             }
             scope.dispose();
@@ -715,6 +738,34 @@ mod tests {
         settle(&mut harness);
         assert!(!is_open());
         assert!(commands.try_recv().is_err(), "nothing sent");
+    }
+
+    /// A window that closes with the popover up lets go of it, so the next
+    /// popover, in another window, does not reach the closed one's review.
+    #[test]
+    fn closing_the_window_lets_go_of_its_popover() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_suggestion("```suggestion\nlet c = 3;\n```");
+        let (backend, _commands) = Backend::recording();
+        let view = crate::review::threads::messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            "t1".into(),
+            ThreadFace::Card,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 800.0);
+        settle(&mut harness);
+        click(&mut harness, "apply-suggestion");
+        assert!(is_open());
+        window_closed(harness.window_id());
+        assert!(!is_open());
+        close();
+        // A real window closes without removing its views; dropping the
+        // harness would remove them, running the editor's cleanup on the
+        // popover's disposed signals.
+        std::mem::forget(harness);
     }
 
     /// No change, or a thread resolved, leaves the button off; a closed

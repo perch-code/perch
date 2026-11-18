@@ -590,7 +590,10 @@ impl Mentions {
     /// Ask GitHub about the query that is waiting, if it is still `ask`:
     /// typing has rested on it. It is then asked, and not again.
     pub fn ask_if_waiting(&self, backend: &Backend, ask: &Ask) {
-        if self.waiting.with_untracked(|w| w.as_ref() != Some(ask)) {
+        if !self
+            .waiting
+            .try_with_untracked(|w| w.is_some_and(|w| w.as_ref() == Some(ask)))
+        {
             return;
         }
         self.waiting.set(None);
@@ -1392,5 +1395,23 @@ mod tests {
             placement((900.0, 200.0, 220.0), (400.0, 100.0), window).0,
             592.0
         );
+    }
+
+    #[test]
+    fn ask_if_waiting_after_scope_disposal_does_nothing() {
+        let ask = Ask {
+            item_id: "item".into(),
+            repo: "owner/repo".into(),
+            trigger: Trigger::At,
+            query: "chris".into(),
+        };
+        let scope = floem::reactive::Scope::new();
+        let mentions = scope.enter(|| {
+            let mentions = Mentions::new();
+            mentions.waiting.set(Some(ask.clone()));
+            mentions
+        });
+        scope.dispose();
+        mentions.ask_if_waiting(&Backend::detached(), &ask);
     }
 }
