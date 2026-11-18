@@ -70,8 +70,42 @@ jobs:
           fi
           KEYCHAIN_PATH="$RUNNER_TEMP/perch-signing.keychain-db"
           KEYCHAIN_PASS="$(uuidgen)"
+          CERT_RAW="$RUNNER_TEMP/perch-signing-raw.p12"
+          CERT_PEM="$RUNNER_TEMP/perch-signing.pem"
           CERT_PATH="$RUNNER_TEMP/perch-signing.p12"
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          APPLE_CERTIFICATE_PASSWORD="${APPLE_CERTIFICATE_PASSWORD%$'\r'}"
+          APPLE_CERTIFICATE_PASSWORD="${APPLE_CERTIFICATE_PASSWORD%$'\n'}"
+          export APPLE_CERTIFICATE_PASSWORD
+          python3 -c 'import base64,os,sys; sys.stdout.buffer.write(base64.b64decode("".join(os.environ["APPLE_CERTIFICATE_P12"].split())))' > "$CERT_RAW"
+
+          # Repackage into legacy 3DES/SHA-1 PKCS#12: modern OpenSSL 3 and
+          # macOS LibreSSL export AES-256/SHA-256 PBES2 by default, which
+          # macOS's `security import` rejects with "passphrase is not correct".
+          OPENSSL_BIN=""
+          for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /opt/homebrew/opt/openssl/bin/openssl "$(command -v openssl)"; do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+              OPENSSL_BIN="$candidate"
+              break
+            fi
+          done
+          LEGACY_FLAG=()
+          if "$OPENSSL_BIN" version | grep -qi '^OpenSSL 3'; then
+            LEGACY_FLAG=(-legacy)
+          fi
+          "$OPENSSL_BIN" pkcs12 "${LEGACY_FLAG[@]}" \
+            -in "$CERT_RAW" \
+            -passin env:APPLE_CERTIFICATE_PASSWORD \
+            -nodes \
+            -out "$CERT_PEM"
+          "$OPENSSL_BIN" pkcs12 -export "${LEGACY_FLAG[@]}" \
+            -certpbe PBE-SHA1-3DES \
+            -keypbe PBE-SHA1-3DES \
+            -macalg sha1 \
+            -in "$CERT_PEM" \
+            -passout env:APPLE_CERTIFICATE_PASSWORD \
+            -out "$CERT_PATH"
+          rm -f "$CERT_RAW" "$CERT_PEM"
+
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
@@ -216,8 +250,42 @@ jobs:
           fi
           KEYCHAIN_PATH="$RUNNER_TEMP/perch-signing.keychain-db"
           KEYCHAIN_PASS="$(uuidgen)"
+          CERT_RAW="$RUNNER_TEMP/perch-signing-raw.p12"
+          CERT_PEM="$RUNNER_TEMP/perch-signing.pem"
           CERT_PATH="$RUNNER_TEMP/perch-signing.p12"
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          APPLE_CERTIFICATE_PASSWORD="${APPLE_CERTIFICATE_PASSWORD%$'\r'}"
+          APPLE_CERTIFICATE_PASSWORD="${APPLE_CERTIFICATE_PASSWORD%$'\n'}"
+          export APPLE_CERTIFICATE_PASSWORD
+          python3 -c 'import base64,os,sys; sys.stdout.buffer.write(base64.b64decode("".join(os.environ["APPLE_CERTIFICATE_P12"].split())))' > "$CERT_RAW"
+
+          # Repackage into legacy 3DES/SHA-1 PKCS#12: modern OpenSSL 3 and
+          # macOS LibreSSL export AES-256/SHA-256 PBES2 by default, which
+          # macOS's `security import` rejects with "passphrase is not correct".
+          OPENSSL_BIN=""
+          for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /opt/homebrew/opt/openssl/bin/openssl "$(command -v openssl)"; do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+              OPENSSL_BIN="$candidate"
+              break
+            fi
+          done
+          LEGACY_FLAG=()
+          if "$OPENSSL_BIN" version | grep -qi '^OpenSSL 3'; then
+            LEGACY_FLAG=(-legacy)
+          fi
+          "$OPENSSL_BIN" pkcs12 "${LEGACY_FLAG[@]}" \
+            -in "$CERT_RAW" \
+            -passin env:APPLE_CERTIFICATE_PASSWORD \
+            -nodes \
+            -out "$CERT_PEM"
+          "$OPENSSL_BIN" pkcs12 -export "${LEGACY_FLAG[@]}" \
+            -certpbe PBE-SHA1-3DES \
+            -keypbe PBE-SHA1-3DES \
+            -macalg sha1 \
+            -in "$CERT_PEM" \
+            -passout env:APPLE_CERTIFICATE_PASSWORD \
+            -out "$CERT_PATH"
+          rm -f "$CERT_RAW" "$CERT_PEM"
+
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
