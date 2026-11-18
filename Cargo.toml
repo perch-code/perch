@@ -212,10 +212,17 @@ incremental = true
 # reach a view that is only `.focusable()` after Tab has been pressed.
 # floem then looked only for views in the Tab order, so the window could
 # not take the keyboard back, and `j` and `e` did nothing until a click.
-# Last, one that ends the editor's drag at a key it acts on. A trackpad's
+# Then one that ends the editor's drag at a key it acts on. A trackpad's
 # tap-drag and three-finger drag hold the button for a moment after the
 # fingers lift, so Delete came before the release: it took the selection,
 # and the pointer's next move selected again from the caret it left.
+# Then one that centres text on its `H` when the font names no cap
+# height. DejaVu Sans, the default on many Linux desktops, has an OS/2
+# table too old to carry one, and its labels were centred on the ascent,
+# 0.1em low. Last, one that keeps the arrows in the editor on every
+# platform. Alt with Left or Right is a word movement only on macOS, and
+# elsewhere the editor had no command for it, so floem's default action
+# walked the focus out of a text box with it.
 # Drop a patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
