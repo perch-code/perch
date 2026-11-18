@@ -31,16 +31,18 @@ pub enum AgentBackend {
     Claude,
     Codex,
     Gemini,
+    OpenCode,
 }
 
 impl AgentBackend {
-    pub const ALL: [AgentBackend; 3] = [Self::Claude, Self::Codex, Self::Gemini];
+    pub const ALL: [AgentBackend; 4] = [Self::Claude, Self::Codex, Self::Gemini, Self::OpenCode];
 
     fn table(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &["agent"],
             Self::Codex => &["agent", "codex"],
             Self::Gemini => &["agent", "gemini"],
+            Self::OpenCode => &["agent", "opencode"],
         }
     }
 }

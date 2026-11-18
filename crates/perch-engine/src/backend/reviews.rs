@@ -1196,6 +1196,7 @@ async fn execute_attempt(
         model: attempt.model.clone(),
         effort,
         cwd: checkout,
+        diff_path: captured.diff_path(),
         merge_base_ref: perch_git::MERGE_BASE_REF.to_string(),
         merge_base_sha: captured.manifest.range.merge_base.clone(),
         head_sha: captured.manifest.range.head.clone(),
@@ -2092,6 +2093,7 @@ async fn run_verification(
         model: attempt.model.clone(),
         effort,
         cwd: snapshot.checkout(),
+        diff_path: Some(snapshot.diff_path()),
         prompt,
         transcript: Some(transcript(snapshot.root(), &attempt.id, "verification")),
     };
@@ -2300,15 +2302,22 @@ fn json_candidate(raw: &str) -> Option<&str> {
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
         return Some(trimmed);
     }
-    let open = "```json\n";
-    if let Some(at) = raw
-        .rfind(&format!("\n{open}"))
-        .map(|at| at + 1)
-        .or_else(|| raw.starts_with(open).then_some(0))
-    {
-        let tail = &raw[at + open.len()..];
-        if let Some(end) = tail.rfind("\n```") {
-            return Some(tail[..end].trim());
+    let mut offset = 0;
+    let mut open_after = None;
+    for line in raw.split_inclusive('\n') {
+        let next = offset + line.len();
+        if line.trim_end() == "```json" {
+            open_after = Some(next);
+        }
+        offset = next;
+    }
+    if let Some(start) = open_after {
+        let mut offset = start;
+        for line in raw[start..].split_inclusive('\n') {
+            if line.trim_end() == "```" {
+                return Some(raw[start..offset].trim());
+            }
+            offset += line.len();
         }
     }
     let start = raw.find("```json")? + "```json".len();
@@ -4158,5 +4167,12 @@ mod tests {
         assert_eq!(parsed.verifications.len(), 1);
         assert_eq!(parsed.verifications[0].finding_id, "f1");
         assert!(parsed.verifications[0].reason.contains("```foo```"));
+
+        let trailing = format!("{raw}\n\nRelevant snippet:\n```rust\nfn foo() {{}}\n```\n");
+        let candidate =
+            json_candidate(&trailing).expect("last json fenced block before rust block");
+        let parsed: VerificationEnvelope = serde_json::from_str(candidate).unwrap();
+        assert_eq!(parsed.verifications.len(), 1);
+        assert_eq!(parsed.verifications[0].finding_id, "f1");
     }
 }

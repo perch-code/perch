@@ -69,6 +69,8 @@ pub struct Board {
     pub codex: Account,
     /// agy reports no limits Perch can read; this stays empty.
     pub gemini: Account,
+    #[serde(default)]
+    pub opencode: Account,
 }
 
 impl Board {
@@ -77,6 +79,7 @@ impl Board {
             Backend::ClaudeCode => &self.claude,
             Backend::Codex => &self.codex,
             Backend::Gemini => &self.gemini,
+            Backend::OpenCode => &self.opencode,
         }
     }
 
@@ -85,6 +88,7 @@ impl Board {
             Backend::ClaudeCode => &mut self.claude,
             Backend::Codex => &mut self.codex,
             Backend::Gemini => &mut self.gemini,
+            Backend::OpenCode => &mut self.opencode,
         }
     }
 }
@@ -148,7 +152,7 @@ pub(crate) fn observe(backend: Backend, line: &Value) {
         .then(|| line.pointer("/params/rateLimits"))
         .flatten()
         .and_then(from_codex_snapshot),
-        Backend::Gemini => None,
+        Backend::Gemini | Backend::OpenCode => None,
     };
     if let Some(usage) = usage {
         record(backend, usage, false);

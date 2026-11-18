@@ -611,27 +611,35 @@ pub fn summarize(name: &str, args: &Value) -> String {
             "DirectoryPath",
             "SearchPath",
             "SearchDirectory",
+            "path",
+            "filePath",
         ])
         .map(|p| short_path(&p))
     };
     let summary = match name {
+        "shell" => format!("Ran {}", field(&["command"]).unwrap_or_default()),
         "run_command" => format!(
             "Ran {}",
             field(&["CommandLine", "Command"]).unwrap_or_default()
         ),
-        "view_file" | "read_file" | "view_file_outline" | "view_code_item" => {
+        "read" | "view_file" | "read_file" | "view_file_outline" | "view_code_item" => {
             format!("Read {}", path().unwrap_or_default())
         }
         "list_dir" => format!("Listed {}", path().unwrap_or_else(|| ".".into())),
-        "find_by_name" => format!("Listed {}", field(&["Pattern"]).unwrap_or_default()),
-        "grep_search" => {
-            let query = field(&["Query", "Pattern"]).unwrap_or_default();
+        "find_by_name" | "glob" => format!(
+            "Listed {}",
+            field(&["Pattern", "pattern"]).unwrap_or_default()
+        ),
+        "grep_search" | "grep" => {
+            let query = field(&["Query", "Pattern", "pattern"]).unwrap_or_default();
             match path() {
                 Some(p) => format!("Searched for {query} in {p}"),
                 None => format!("Searched for {query}"),
             }
         }
-        "write_file"
+        "write"
+        | "edit"
+        | "write_file"
         | "write_to_file"
         | "replace_file_content"
         | "multi_replace_file_content"
@@ -966,6 +974,7 @@ fn user_message(text: &str) -> String {
 /// What a Work session starts with.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AcpSession {
+    pub backend: crate::Backend,
     pub cwd: PathBuf,
     pub model: String,
     /// agy's name for the effort; ACP takes it as a thinking level.
@@ -995,13 +1004,15 @@ pub(crate) struct AcpClient {
     next_prompt: u64,
     /// Prompts sent and not yet answered.
     open_prompts: HashSet<u64>,
-    /// The reader's messages not yet sent, and those sent but not yet
-    /// echoed back as read.
+    /// The reader's messages not yet sent, and those sent (`(wire, raw)`)
+    /// but not yet echoed back as read.
     queued: VecDeque<String>,
-    sent: VecDeque<String>,
-    /// Each steer's prompt by its request id: an answered prompt was read
-    /// whether or not agy echoed it.
+    sent: VecDeque<(String, String)>,
+    /// Each steer's raw text by its request id.
     steer_ids: HashMap<u64, String>,
+    /// A `session/prompt` result held while an OpenCode `_session/steering`
+    /// call is still in flight, in case it replies `promptRequired`.
+    pending_end: Option<Value>,
     /// The agent's text since its last step.
     text: String,
     /// Tool calls that have begun, and those that have ended.
@@ -1027,6 +1038,7 @@ impl AcpClient {
             queued: VecDeque::new(),
             sent: VecDeque::new(),
             steer_ids: HashMap::new(),
+            pending_end: None,
             text: String::new(),
             started: HashSet::new(),
             ended: HashSet::new(),
@@ -1035,6 +1047,10 @@ impl AcpClient {
             refused: false,
             done: false,
         }
+    }
+
+    pub fn opencode_work(&self) -> bool {
+        self.session.backend == crate::Backend::OpenCode && !self.session.writable.is_empty()
     }
 
     pub fn opening(&mut self) -> Vec<String> {
@@ -1052,43 +1068,85 @@ impl AcpClient {
         )]
     }
 
-    /// agy steers a running turn with another prompt. One sent before
-    /// the session exists waits for it.
+    /// agy steers a running turn with another prompt; OpenCode steers via
+    /// `_session/steering`. One sent before a prompt is running waits for it.
     pub fn steer(&mut self, text: &str) -> Vec<String> {
         if self.done {
             return Vec::new();
         }
-        self.queued.push_back(text.to_string());
         if self.session_id.is_empty() || self.open_prompts.is_empty() {
+            self.queued.push_back(text.to_string());
             return Vec::new();
         }
-        self.send_queued()
+        if self.session.backend == crate::Backend::OpenCode {
+            let id = self.next_id();
+            let wire = self.wire_prompt(text);
+            self.steer_ids.insert(id, text.to_string());
+            vec![request(
+                id,
+                "_session/steering",
+                json!({
+                    "sessionId": self.session_id,
+                    "prompt": [{"type": "text", "text": wire}],
+                }),
+            )]
+        } else {
+            let (id, line) = self.prompt(text);
+            self.sent
+                .push_back((self.wire_prompt(text), text.to_string()));
+            self.steer_ids.insert(id, text.to_string());
+            vec![line]
+        }
     }
 
-    fn send_queued(&mut self) -> Vec<String> {
-        let texts: Vec<String> = self.queued.drain(..).collect();
-        texts
-            .into_iter()
-            .map(|text| {
-                let write = self.prompt(&text);
-                self.steer_ids.insert(self.next_prompt - 1, text.clone());
-                self.sent.push_back(text);
-                write
-            })
-            .collect()
+    fn send_queued(&mut self) -> Reply {
+        if self.queued.is_empty() {
+            return Reply::default();
+        }
+        let text = self.queued.drain(..).collect::<Vec<_>>().join("\n\n");
+        let (id, write) = self.prompt(&text);
+        let mut events = self.flush_text();
+        if self.session.backend == crate::Backend::OpenCode {
+            events.push(RunEvent::Steered(text));
+        } else {
+            self.sent.push_back((self.wire_prompt(&text), text.clone()));
+            self.steer_ids.insert(id, text);
+        }
+        Reply {
+            writes: vec![write],
+            events,
+            ..Reply::default()
+        }
     }
 
-    fn prompt(&mut self, text: &str) -> String {
+    fn next_id(&mut self) -> u64 {
         let id = self.next_prompt;
         self.next_prompt += 1;
+        id
+    }
+
+    fn wire_prompt(&self, text: &str) -> String {
+        if self.session.backend == crate::Backend::OpenCode && text.trim_start().starts_with('/') {
+            format!("Reader message:\n{text}")
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn prompt(&mut self, text: &str) -> (u64, String) {
+        let id = self.next_id();
         self.open_prompts.insert(id);
-        request(
+        let wire = self.wire_prompt(text);
+        (
             id,
-            "session/prompt",
-            json!({
-                "sessionId": self.session_id,
-                "prompt": [{"type": "text", "text": text}],
-            }),
+            request(
+                id,
+                "session/prompt",
+                json!({
+                    "sessionId": self.session_id,
+                    "prompt": [{"type": "text", "text": wire}],
+                }),
+            ),
         )
     }
 
@@ -1148,11 +1206,45 @@ impl AcpClient {
     }
 
     fn response(&mut self, id: u64, v: &Value) -> Reply {
+        if self.session.backend == crate::Backend::OpenCode && self.steer_ids.contains_key(&id) {
+            let raw_text = self.steer_ids.remove(&id).unwrap_or_default();
+            if v.get("error").is_some() {
+                let ready = self.open_prompts.is_empty() && self.steer_ids.is_empty();
+                return match ready.then(|| self.pending_end.take()).flatten() {
+                    Some(end) => self.turn_over(&end, Vec::new()),
+                    None => Reply::default(),
+                };
+            }
+            return match v.pointer("/result/outcome").and_then(Value::as_str) {
+                Some("promptRequired") => {
+                    self.queued.push_back(raw_text);
+                    if self.open_prompts.is_empty() {
+                        self.pending_end = None;
+                        self.send_queued()
+                    } else {
+                        Reply::default()
+                    }
+                }
+                // "injected", or any other acknowledgement of the steer.
+                _ => {
+                    let mut events = self.flush_text();
+                    events.push(RunEvent::Steered(raw_text));
+                    let ready = self.open_prompts.is_empty() && self.steer_ids.is_empty();
+                    match ready.then(|| self.pending_end.take()).flatten() {
+                        Some(end) => self.turn_over(&end, events),
+                        None => Reply {
+                            events,
+                            ..Reply::default()
+                        },
+                    }
+                }
+            };
+        }
         // A steer agy would not take is left unread, for Perch to send as
         // a follow-up, rather than failing the run it came into.
         if v.get("error").is_some() && self.steer_ids.contains_key(&id) {
             let text = self.steer_ids.remove(&id).unwrap_or_default();
-            if let Some(at) = self.sent.iter().position(|s| *s == text) {
+            if let Some(at) = self.sent.iter().position(|(_, raw)| *raw == text) {
                 self.sent.remove(at);
             }
             if !self.open_prompts.remove(&id) || !self.open_prompts.is_empty() {
@@ -1164,13 +1256,22 @@ impl AcpClient {
             let message = error
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("agy refused the request")
+                .unwrap_or("The agent refused the request")
                 .to_string();
             return self.fail(one_line(&message, 300));
         }
         let result = v.get("result").cloned().unwrap_or(Value::Null);
         match id {
             INITIALIZE => {
+                if self.session.backend == crate::Backend::OpenCode
+                    && result
+                        .pointer("/agentInfo/version")
+                        .and_then(Value::as_str)
+                        .and_then(crate::CliVersion::parse)
+                        .is_none_or(|v| v < crate::MIN_OPENCODE_VERSION)
+                {
+                    return self.fail("Perch requires OpenCode 2.3.0 or newer".into());
+                }
                 let params = json!({
                     "cwd": self.session.cwd.to_string_lossy(),
                     "mcpServers": [],
@@ -1204,6 +1305,41 @@ impl AcpClient {
                     ..Reply::default()
                 }
             }
+            SET_MODEL if self.session.backend == crate::Backend::OpenCode => {
+                let effort = result["configOptions"]
+                    .as_array()
+                    .and_then(|options| options.iter().find(|o| o["id"] == "effort"));
+                let requested = self.session.effort.as_str();
+                let write = match effort {
+                    Some(option) => {
+                        let offered = option["options"]
+                            .as_array()
+                            .is_some_and(|opts| opts.iter().any(|v| v["value"] == requested));
+                        self.set_option(
+                            SET_THOUGHT,
+                            "effort",
+                            if offered { requested } else { "default" },
+                        )
+                    }
+                    None => self.set_option(
+                        SET_MODE,
+                        "mode",
+                        crate::opencode::mode(self.opencode_work()),
+                    ),
+                };
+                Reply {
+                    writes: vec![write],
+                    ..Reply::default()
+                }
+            }
+            SET_THOUGHT if self.session.backend == crate::Backend::OpenCode => Reply {
+                writes: vec![self.set_option(
+                    SET_MODE,
+                    "mode",
+                    crate::opencode::mode(self.opencode_work()),
+                )],
+                ..Reply::default()
+            },
             SET_MODEL => Reply {
                 writes: vec![self.set_option(
                     SET_THOUGHT,
@@ -1222,17 +1358,29 @@ impl AcpClient {
             },
             SET_MODE => {
                 let prompt = self.session.prompt.clone();
-                let mut writes = vec![self.prompt(&prompt)];
-                writes.extend(self.send_queued());
+                let (_, first) = self.prompt(&prompt);
+                let mut writes = vec![first];
+                let mut events = Vec::new();
+                if self.session.backend == crate::Backend::OpenCode {
+                    let queued: Vec<String> = self.queued.drain(..).collect();
+                    for text in queued {
+                        writes.extend(self.steer(&text));
+                    }
+                } else {
+                    let queued = self.send_queued();
+                    writes.extend(queued.writes);
+                    events.extend(queued.events);
+                }
                 Reply {
                     writes,
+                    events,
                     ..Reply::default()
                 }
             }
             id if self.open_prompts.remove(&id) => {
                 let mut steered = Vec::new();
                 if let Some(text) = self.steer_ids.remove(&id) {
-                    if let Some(at) = self.sent.iter().position(|s| *s == text) {
+                    if let Some(at) = self.sent.iter().position(|(_, raw)| *raw == text) {
                         self.sent.remove(at);
                         steered = self.flush_text();
                         steered.push(RunEvent::Steered(text));
@@ -1266,17 +1414,30 @@ impl AcpClient {
     fn turn_end(&mut self, result: &Value) -> Reply {
         // A steer that came as the turn ended goes as the next.
         if !self.queued.is_empty() {
-            let mut reply = Reply {
-                writes: self.send_queued(),
-                ..Reply::default()
-            };
-            reply.events = self.flush_text();
-            return reply;
+            return self.send_queued();
+        }
+        if self.session.backend == crate::Backend::OpenCode {
+            match result["stopReason"].as_str() {
+                Some("max_tokens" | "max_turn_requests") => {
+                    return self.fail("OpenCode reached its turn limit".into())
+                }
+                Some("cancelled") => return self.end(RunEvent::Stopped { forced: false }),
+                _ => {}
+            }
         }
         if result.get("stopReason").and_then(Value::as_str) == Some("refusal") {
             return self.fail("The model refused to go on".into());
         }
-        let stopped = self.refused && self.text.trim().is_empty();
+        if self.session.backend == crate::Backend::OpenCode && !self.steer_ids.is_empty() {
+            self.pending_end = Some(result.clone());
+            return Reply {
+                events: self.flush_text(),
+                ..Reply::default()
+            };
+        }
+        let stopped = self.session.backend == crate::Backend::Gemini
+            && self.refused
+            && self.text.trim().is_empty();
         let session_id = self.session_id.clone();
         let mut reply = self.end(RunEvent::Finished {
             session_id,
@@ -1309,9 +1470,11 @@ impl AcpClient {
             "user_message_chunk" => {
                 let text = u.pointer("/content/text").and_then(Value::as_str);
                 match (text, self.sent.front()) {
-                    (Some(text), Some(front)) if text == front => {
+                    (Some(text), Some((wire, _))) if text == wire => {
                         let mut events = self.flush_text();
-                        events.extend(self.sent.pop_front().map(RunEvent::Steered));
+                        if let Some((_, raw)) = self.sent.pop_front() {
+                            events.push(RunEvent::Steered(raw));
+                        }
                         events
                     }
                     _ => Vec::new(),
@@ -1344,17 +1507,68 @@ impl AcpClient {
         let status = str_of(u, "status");
         if matches!(status.as_str(), "completed" | "failed") {
             self.ended.insert(id.clone());
-            let output = u
-                .pointer("/rawOutput/output")
+            let exit = u
+                .pointer("/rawOutput/exit_code")
+                .or_else(|| u.pointer("/rawOutput/metadata/exit"))
+                .and_then(Value::as_i64);
+            let signal = u
+                .pointer("/rawOutput/metadata/signal")
                 .and_then(Value::as_str)
-                .unwrap_or("");
-            let exit = u.pointer("/rawOutput/exit_code").and_then(Value::as_i64);
-            let failed = status == "failed" || exit.is_some_and(|code| code != 0);
-            let failure = failed.then(|| crate::codex::last_line(output));
+                .filter(|s| !s.is_empty());
+            let killed = u
+                .pointer("/rawOutput/metadata/killed")
+                .and_then(Value::as_bool)
+                == Some(true);
+            let timed_out = u
+                .pointer("/rawOutput/metadata/timeout")
+                .and_then(Value::as_bool)
+                == Some(true);
+            let failed = status == "failed"
+                || exit.is_some_and(|code| code != 0)
+                || signal.is_some()
+                || killed
+                || timed_out;
+            let summary = if failed {
+                let text = u
+                    .pointer("/rawOutput/error")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| {
+                        u.pointer("/rawOutput/output")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                    })
+                    .or_else(|| {
+                        u.get("content")
+                            .and_then(Value::as_array)
+                            .and_then(|items| {
+                                items.iter().rev().find_map(|item| {
+                                    item.pointer("/content/text")
+                                        .or_else(|| item.get("text"))
+                                        .and_then(Value::as_str)
+                                        .filter(|s| !s.trim().is_empty())
+                                })
+                            })
+                    })
+                    .unwrap_or("");
+                let line = crate::codex::last_line(text);
+                if !line.is_empty() {
+                    line
+                } else {
+                    exit.filter(|&c| c != 0)
+                        .map(|c| format!("Exit code {c}"))
+                        .or_else(|| signal.map(|s| format!("Killed by {s}")))
+                        .or_else(|| timed_out.then(|| "Timed out".to_string()))
+                        .or_else(|| killed.then(|| "Killed".to_string()))
+                        .unwrap_or_default()
+                }
+            } else {
+                String::new()
+            };
             events.push(RunEvent::ToolResult {
                 id,
-                ok: failure.is_none(),
-                summary: failure.unwrap_or_default(),
+                ok: !failed,
+                summary,
             });
         }
         events
@@ -1381,7 +1595,14 @@ impl AcpClient {
             .cloned()
             .unwrap_or_default();
         let mut events = self.flush_text();
-        if let Some(paths) = edit_paths(&call) {
+        if self.session.backend == crate::Backend::OpenCode && !self.opencode_work() {
+            return Reply {
+                writes: answer_line(&id, &options, false).into_iter().collect(),
+                events,
+                ..Reply::default()
+            };
+        }
+        if let Some(paths) = edit_paths(&call, &self.session.cwd) {
             if paths
                 .iter()
                 .any(|path| is_protected(path, &self.session.cwd, &self.session.writable))
@@ -1414,10 +1635,53 @@ impl AcpClient {
             other => other.to_string(),
         };
         self.pending.insert(key.clone(), (id, options));
-        events.push(RunEvent::Approval {
-            id: key,
-            request: approval(&call, &self.session.writable),
-        });
+        let mut request = approval(&call, &self.session.cwd, &self.session.writable);
+        if self.session.backend == crate::Backend::OpenCode {
+            let input = tool_args(&call);
+            match &request.kind {
+                ApprovalKind::Command => {
+                    if let Some(dir) = input["workdir"].as_str().map(|p| {
+                        let joined = self.session.cwd.join(p);
+                        resolve(&joined).unwrap_or(joined)
+                    }) {
+                        if dir != self.session.cwd {
+                            // Include the directory in both the card and the exact command grant.
+                            let quoted = dir.to_string_lossy().replace('\'', "'\\''");
+                            request.subject = format!("cd '{quoted}' && {}", request.subject);
+                        }
+                    }
+                }
+                ApprovalKind::Tool { name } => {
+                    let exact = if input.as_object().is_some_and(|m| !m.is_empty()) {
+                        Some(input.to_string())
+                    } else {
+                        call.get("locations")
+                            .and_then(Value::as_array)
+                            .filter(|locs| !locs.is_empty())
+                            .map(|locs| Value::Array(locs.clone()).to_string())
+                    };
+                    if request.subject == *name {
+                        if let Some(locs) = call.get("locations").and_then(Value::as_array) {
+                            let paths: Vec<String> = locs
+                                .iter()
+                                .map(|loc| str_of(loc, "path"))
+                                .filter(|p| !p.is_empty())
+                                .collect();
+                            if !paths.is_empty() {
+                                request.subject = paths.join(", ");
+                            }
+                        }
+                    }
+                    if let Some(exact) = exact {
+                        // The display summary can be truncated; grant the exact arguments only.
+                        request.suggestion = Some(exact.clone());
+                        request.detail = Some(exact);
+                    }
+                }
+                _ => {}
+            }
+        }
+        events.push(RunEvent::Approval { id: key, request });
         Reply {
             events,
             ..Reply::default()
@@ -1472,11 +1736,28 @@ fn tool_summary(u: &Value) -> String {
     }
 }
 
+const EDIT_PATH_KEYS: &[&str] = &[
+    "Path",
+    "TargetFile",
+    "AbsolutePath",
+    "File",
+    "FilePath",
+    "filePath",
+    "path",
+    "file_path",
+    "target_file",
+];
+
 fn is_edit_call(call: &Value) -> bool {
     str_of(call, "kind") == "edit"
         || matches!(
             tool_name(call).as_str(),
-            "write_file"
+            "write"
+                | "edit"
+                | "patch"
+                | "apply_patch"
+                | "multiedit"
+                | "write_file"
                 | "write_to_file"
                 | "replace_file_content"
                 | "multi_replace_file_content"
@@ -1487,38 +1768,66 @@ fn is_edit_call(call: &Value) -> bool {
 }
 
 /// The files an edit request writes, when it is one: ACP's `edit` kind,
-/// with its locations, or the path in its input.
-fn edit_paths(call: &Value) -> Option<Vec<PathBuf>> {
+/// with its locations, the paths in its input, or an `apply_patch` body,
+/// each resolved against `cwd`.
+fn edit_paths(call: &Value, cwd: &Path) -> Option<Vec<PathBuf>> {
     if !is_edit_call(call) {
         return None;
     }
-    let mut paths: Vec<PathBuf> = call
-        .get("locations")
-        .and_then(Value::as_array)
-        .map(|locations| {
-            locations
-                .iter()
-                .map(|l| str_of(l, "path"))
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut push = |raw: &str| {
+        if raw.is_empty() {
+            return;
+        }
+        let p = PathBuf::from(raw);
+        let joined = if p.is_relative() { cwd.join(p) } else { p };
+        let norm = resolve(&joined).unwrap_or(joined);
+        if !paths.contains(&norm) {
+            paths.push(norm);
+        }
+    };
+    if let Some(locations) = call.get("locations").and_then(Value::as_array) {
+        for loc in locations {
+            push(&str_of(loc, "path"));
+        }
+    }
     let args = tool_args(call);
-    for key in [
-        "Path",
-        "TargetFile",
-        "AbsolutePath",
-        "File",
-        "FilePath",
-        "path",
-        "file_path",
-        "target_file",
-    ] {
-        if let Some(path) = args.get(key).and_then(Value::as_str) {
-            let path = PathBuf::from(path);
-            if !paths.contains(&path) {
-                paths.push(path);
+    for key in EDIT_PATH_KEYS {
+        if let Some(path) = args.get(*key).and_then(Value::as_str) {
+            push(path);
+        }
+    }
+    for list_key in ["files", "edits"] {
+        if let Some(items) = args.get(list_key).and_then(Value::as_array) {
+            for item in items {
+                if let Some(path) = item.as_str() {
+                    push(path);
+                } else {
+                    for key in EDIT_PATH_KEYS {
+                        if let Some(path) = item.get(*key).and_then(Value::as_str) {
+                            push(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(patch) = args
+        .get("patchText")
+        .or_else(|| args.get("patch"))
+        .and_then(Value::as_str)
+    {
+        for line in patch.lines() {
+            let line = line.trim_end_matches('\r');
+            for prefix in [
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ] {
+                if let Some(rest) = line.strip_prefix(prefix) {
+                    push(rest.trim());
+                }
             }
         }
     }
@@ -1612,7 +1921,7 @@ fn is_protected(path: &Path, cwd: &Path, writable: &[PathBuf]) -> bool {
 }
 
 /// A permission request as the card shows it.
-fn approval(call: &Value, writable: &[PathBuf]) -> ApprovalRequest {
+fn approval(call: &Value, cwd: &Path, writable: &[PathBuf]) -> ApprovalRequest {
     let name = tool_name(call);
     let args = tool_args(call);
     let title = str_of(call, "title");
@@ -1621,6 +1930,7 @@ fn approval(call: &Value, writable: &[PathBuf]) -> ApprovalRequest {
             kind: ApprovalKind::Command,
             subject: args
                 .get("CommandLine")
+                .or_else(|| args.get("command"))
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or(title),
@@ -1631,10 +1941,10 @@ fn approval(call: &Value, writable: &[PathBuf]) -> ApprovalRequest {
                 .map(|s| one_line(s, 200)),
             suggestion: None,
         },
-        "edit" => {
+        kind if kind == "edit" || is_edit_call(call) => {
             // Every path that needs asking, so none hides behind one that
             // would have gone anyway, and "Always" keeps exactly that set.
-            let asked: Vec<PathBuf> = edit_paths(call)
+            let asked: Vec<PathBuf> = edit_paths(call, cwd)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|p| !may_edit(p, writable))
@@ -2102,6 +2412,7 @@ mod tests {
     fn session(dir: &Path) -> AcpSession {
         AcpSession {
             cwd: dir.to_path_buf(),
+            backend: crate::Backend::Gemini,
             model: "gemini-4-carbon".into(),
             effort: "max".into(),
             prompt: "Fix it".into(),
@@ -2455,7 +2766,7 @@ mod tests {
                 {"path": wt.join(".claude/settings.json")},
             ],
         });
-        let request = approval(&call, &writable);
+        let request = approval(&call, &wt, &writable);
         assert_eq!(
             request.subject,
             format!("/etc/hosts, {}", wt.join(".claude/settings.json").display())
@@ -2463,6 +2774,7 @@ mod tests {
         assert_eq!(request.detail, None, "not all of it is in the worktree");
         let bare = approval(
             &json!({"kind": "edit", "name": "write_file", "rawInput": {"x": 1}}),
+            &wt,
             &writable,
         );
         assert_ne!(bare.subject, "files");
@@ -2601,5 +2913,273 @@ mod tests {
             "Searched for fn main in wt/src"
         );
         assert_eq!(summarize("finish", &json!({})), "finish");
+    }
+
+    fn opencode_ready(cwd: &Path, writable: Vec<PathBuf>) -> AcpClient {
+        let mut acp = AcpClient::new(AcpSession {
+            backend: crate::Backend::OpenCode,
+            cwd: cwd.to_path_buf(),
+            model: "provider/model".into(),
+            effort: "high".into(),
+            prompt: "Fix it".into(),
+            resume: None,
+            writable,
+        });
+        acp.opening();
+        acp.after_line(&json!({"id": 1, "result": {"agentInfo": {"version": "2.3.0"}}}));
+        acp.after_line(&json!({"id": 2, "result": {"sessionId": "oc-1"}}));
+        acp.after_line(&json!({
+            "id": 3,
+            "result": {"configOptions": [{"id": "effort", "options": [{"value": "high"}]}]},
+        }));
+        acp.after_line(&json!({"id": 4, "result": {}}));
+        acp.after_line(&json!({"id": 5, "result": {}}));
+        acp
+    }
+
+    #[test]
+    fn opencode_tool_failures_and_nonzero_exits_report_their_reason() {
+        let mut acp = opencode_ready(Path::new("/repo"), vec![PathBuf::from("/repo")]);
+        let shell = acp.after_line(&json!({
+            "method": "session/update",
+            "params": {"update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "s1",
+                "name": "shell",
+                "kind": "execute",
+                "status": "completed",
+                "rawInput": {"command": "cargo test"},
+                "rawOutput": {"metadata": {"exit": 1}},
+                "content": [{"type": "content", "content": {"type": "text", "text": "running 1 test\nerror: test failed\n"}}],
+            }},
+        }));
+        assert_eq!(
+            shell.events.last(),
+            Some(&RunEvent::ToolResult {
+                id: "s1".into(),
+                ok: false,
+                summary: "error: test failed".into(),
+            })
+        );
+
+        let silent_exit = acp.after_line(&json!({
+            "method": "session/update",
+            "params": {"update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "s2",
+                "name": "shell",
+                "kind": "execute",
+                "status": "completed",
+                "rawOutput": {"metadata": {"exit": 2}},
+                "content": [],
+            }},
+        }));
+        assert_eq!(
+            silent_exit.events.last(),
+            Some(&RunEvent::ToolResult {
+                id: "s2".into(),
+                ok: false,
+                summary: "Exit code 2".into(),
+            })
+        );
+
+        let killed = acp.after_line(&json!({
+            "method": "session/update",
+            "params": {"update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "s3",
+                "name": "shell",
+                "kind": "execute",
+                "status": "completed",
+                "rawOutput": {"metadata": {"signal": "SIGKILL", "killed": true}},
+            }},
+        }));
+        assert_eq!(
+            killed.events.last(),
+            Some(&RunEvent::ToolResult {
+                id: "s3".into(),
+                ok: false,
+                summary: "Killed by SIGKILL".into(),
+            })
+        );
+
+        let failed = acp.after_line(&json!({
+            "method": "session/update",
+            "params": {"update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "s4",
+                "name": "read",
+                "kind": "read",
+                "status": "failed",
+                "rawOutput": {"error": "Permission denied: read"},
+            }},
+        }));
+        assert_eq!(
+            failed.events.last(),
+            Some(&RunEvent::ToolResult {
+                id: "s4".into(),
+                ok: false,
+                summary: "Permission denied: read".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn opencode_steers_use_session_steering_and_queue_on_prompt_required() {
+        let mut acp = opencode_ready(Path::new("/repo"), vec![PathBuf::from("/repo")]);
+        let writes = acp.steer("/review src/lib.rs");
+        assert_eq!(writes.len(), 1);
+        let steer: Value = serde_json::from_str(&writes[0]).unwrap();
+        assert_eq!(steer["id"], 101);
+        assert_eq!(steer["method"], "_session/steering");
+        assert_eq!(steer["params"]["sessionId"], "oc-1");
+        assert_eq!(
+            steer["params"]["prompt"][0]["text"],
+            "Reader message:\n/review src/lib.rs"
+        );
+
+        let injected = acp.after_line(&json!({"id": 101, "result": {"outcome": "injected"}}));
+        assert!(!injected.close && injected.writes.is_empty());
+        assert_eq!(
+            injected.events,
+            vec![RunEvent::Steered("/review src/lib.rs".into())]
+        );
+
+        let late = acp.steer("/explain");
+        let late_msg: Value = serde_json::from_str(&late[0]).unwrap();
+        assert_eq!(late_msg["id"], 102);
+        assert_eq!(late_msg["method"], "_session/steering");
+        let required = acp.after_line(&json!({
+            "id": 102,
+            "result": {"outcome": "promptRequired", "reason": "noRunningTurn"},
+        }));
+        assert!(!required.close && required.writes.is_empty() && required.events.is_empty());
+
+        let next = acp.after_line(&json!({"id": 100, "result": {"stopReason": "end_turn"}}));
+        assert!(!next.close);
+        assert_eq!(next.events, vec![RunEvent::Steered("/explain".into())]);
+        let follow: Value = serde_json::from_str(&next.writes[0]).unwrap();
+        assert_eq!(follow["id"], 103);
+        assert_eq!(follow["method"], "session/prompt");
+        assert_eq!(
+            follow["params"]["prompt"][0]["text"],
+            "Reader message:\n/explain"
+        );
+
+        let done = acp.after_line(&json!({"id": 103, "result": {"stopReason": "end_turn"}}));
+        assert!(done.close);
+        assert!(
+            matches!(done.events.last(), Some(RunEvent::Finished { session_id, .. }) if session_id == "oc-1")
+        );
+
+        // When stdout delivers end_turn before _session/steering's promptRequired,
+        // the client holds completion until the steer response starts the next turn.
+        let mut raced = opencode_ready(Path::new("/repo"), vec![PathBuf::from("/repo")]);
+        raced.steer("One more thing");
+        let held = raced.after_line(&json!({"id": 100, "result": {"stopReason": "end_turn"}}));
+        assert!(!held.close && held.writes.is_empty());
+        let resumed = raced.after_line(&json!({
+            "id": 101,
+            "result": {"outcome": "promptRequired", "reason": "noRunningTurn"},
+        }));
+        assert_eq!(
+            resumed.events,
+            vec![RunEvent::Steered("One more thing".into())]
+        );
+        let resumed_req: Value = serde_json::from_str(&resumed.writes[0]).unwrap();
+        assert_eq!(resumed_req["id"], 102);
+        assert_eq!(resumed_req["method"], "session/prompt");
+        assert!(
+            raced
+                .after_line(&json!({"id": 102, "result": {"stopReason": "end_turn"}}))
+                .close
+        );
+    }
+
+    #[test]
+    fn opencode_edit_permissions_normalize_and_deduplicate_relative_paths() {
+        let mut acp = opencode_ready(Path::new("/wt/repo"), vec![PathBuf::from("/wt/repo")]);
+        let dedup = acp.after_line(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/request_permission",
+            "id": "p1",
+            "params": {
+                "toolCall": {
+                    "toolCallId": "w1",
+                    "name": "write",
+                    "kind": "edit",
+                    "locations": [{"path": "/outside/secret.txt"}],
+                    "rawInput": {"path": "../../outside/secret.txt"},
+                },
+                "options": [
+                    {"optionId": "allow", "kind": "allow_once"},
+                    {"optionId": "deny", "kind": "reject_once"},
+                ],
+            },
+        }));
+        assert_eq!(
+            dedup.events,
+            vec![RunEvent::Approval {
+                id: "p1".into(),
+                request: ApprovalRequest {
+                    kind: ApprovalKind::Edit,
+                    subject: "/outside/secret.txt".into(),
+                    detail: None,
+                    suggestion: None,
+                },
+            }]
+        );
+
+        let mixed = acp.after_line(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/request_permission",
+            "id": "p2",
+            "params": {
+                "toolCall": {
+                    "toolCallId": "w2",
+                    "name": "patch",
+                    "kind": "edit",
+                    "rawInput": {
+                        "patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** Add File: ../../outside/secret.txt\n+secret\n*** End Patch"
+                    },
+                },
+                "options": [
+                    {"optionId": "allow", "kind": "allow_once"},
+                    {"optionId": "deny", "kind": "reject_once"},
+                ],
+            },
+        }));
+        assert_eq!(
+            mixed.events,
+            vec![RunEvent::Approval {
+                id: "p2".into(),
+                request: ApprovalRequest {
+                    kind: ApprovalKind::Edit,
+                    subject: "/outside/secret.txt".into(),
+                    detail: None,
+                    suggestion: None,
+                },
+            }]
+        );
+
+        let inside = acp.after_line(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/request_permission",
+            "id": "p3",
+            "params": {
+                "toolCall": {
+                    "toolCallId": "w3",
+                    "name": "edit",
+                    "kind": "edit",
+                    "rawInput": {"filePath": "src/lib.rs"},
+                },
+                "options": [
+                    {"optionId": "allow", "kind": "allow_once"},
+                    {"optionId": "deny", "kind": "reject_once"},
+                ],
+            },
+        }));
+        assert!(inside.events.is_empty(), "{:?}", inside.events);
+        assert_eq!(written(&inside)["result"]["outcome"]["optionId"], "allow");
     }
 }

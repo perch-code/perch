@@ -9,6 +9,9 @@ use perch_github::RunRecord;
 /// `gpt-6.1-sol` and "GPT 5.5" for `gpt-5.5`. The date on the end of an
 /// id such as `claude-haiku-4-5-20251001` goes; the version says it.
 pub fn model_label(model: &str) -> String {
+    if model.contains('/') {
+        return model.to_string();
+    }
     // Claude Code can report the context window on the end: `[1m]`.
     let model = model.split('[').next().unwrap_or_default().trim();
     let mut words = Vec::new();

@@ -4394,7 +4394,7 @@ fn watch_usage(agent: &perch_github::AgentConfig, data_root: &Path, events: &Eve
 async fn detect_review_capabilities(
     agent: &perch_github::AgentConfig,
 ) -> Vec<perch_agent::ReviewCapability> {
-    let (claude, codex, gemini) = tokio::join!(
+    let (claude, codex, gemini, opencode) = tokio::join!(
         perch_agent::detect_review_capability(
             perch_agent::Backend::ClaudeCode,
             Path::new(&agent.binary),
@@ -4407,8 +4407,12 @@ async fn detect_review_capabilities(
             perch_agent::Backend::Gemini,
             Path::new(&agent.gemini.binary),
         ),
+        perch_agent::detect_review_capability(
+            perch_agent::Backend::OpenCode,
+            Path::new(&agent.opencode.binary)
+        ),
     );
-    vec![claude, codex, gemini]
+    vec![claude, codex, gemini, opencode]
 }
 
 /// Start the engine in this process, with the app as its one client.
@@ -4584,14 +4588,16 @@ async fn run(
                 claude = %agent.binary,
                 codex = ?agent.codex.models,
                 gemini = ?agent.gemini.models,
+            opencode = ?agent.opencode.models,
                 "agents found"
             );
             if agent.models.is_empty()
                 && agent.codex.models.is_empty()
                 && agent.gemini.models.is_empty()
+                && agent.opencode.models.is_empty()
             {
                 let _ = events.send(Event::Notice(
-                    "No coding agent found. Install Claude Code, Codex or agy (Gemini), or set agent.binary in config.toml.".into(),
+                    "No coding agent found. Install Claude Code, Codex, agy (Gemini) or OpenCode, or set agent.binary in config.toml.".into(),
                 ));
             }
             let _ = events.send(Event::AgentConfig(agent.clone()));
@@ -18821,8 +18827,14 @@ async fn ask_as(
     // may have let Work commit since.
     if let (Some((perch_agent::Mode::Work(grant), _, _)), None) = (&work, &prompt.system) {
         if grant.commit {
-            let note =
-                crate::ask::resumed_commit_note(packed_refs_closed(backend, &checkout.worktree));
+            let note = if matches!(
+                backend,
+                perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode
+            ) {
+                crate::ask::acp_resumed_commit_note()
+            } else {
+                crate::ask::resumed_commit_note(packed_refs_closed(backend, &checkout.worktree))
+            };
             prompt.user = format!("{note}\n\n{}", prompt.user);
         }
     }
@@ -19003,18 +19015,22 @@ async fn on_approval(
 /// asked about, always. Their run goes on acting inside the sandbox
 /// while git runs, so it can stage a submodule and move a repository in
 /// after any look, and git would run that repository's `core.fsmonitor`
-/// outside the sandbox. Gemini has no sandbox and asks before each
-/// command, so nothing changes the worktree between the look and git
-/// that the reader didn't allow. There a commit that would run hooks is
-/// asked about (they may be what the run wrote), and so is one where a
-/// `.git` appeared or changed below the top since the run started.
+/// outside the sandbox. Gemini and OpenCode run over ACP with no sandbox
+/// and ask before each command, so nothing changes the worktree between
+/// the look and git that the reader didn't allow. There a commit that
+/// would run hooks is asked about (they may be what the run wrote), and
+/// so is one where a `.git` appeared or changed below the top since the
+/// run started.
 async fn commit_grant_answers(
     backend: Option<perch_agent::Backend>,
     worktree: Option<&Path>,
     nested: Option<(&Path, &crate::nested_git::Nested)>,
 ) -> Result<(), Option<String>> {
     const IN_THE_SANDBOX: &str = "The commit grant lets this agent commit inside its sandbox, not outside it: the run can change the worktree while git runs there, and git would run what a repository it put there holds.";
-    if backend != Some(perch_agent::Backend::Gemini) {
+    if !matches!(
+        backend,
+        Some(perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode)
+    ) {
         return Err(Some(
             nested_since(nested)
                 .await
@@ -19354,7 +19370,10 @@ fn work_setup(
         }
         _ => "reaches no host without asking".to_string(),
     };
-    if backend == perch_agent::Backend::Gemini {
+    if matches!(
+        backend,
+        perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode
+    ) {
         // agy's ACP server has no sandbox Perch can shape: every command
         // is a request, and the framing says so instead.
         let (branch, base) = item
@@ -19362,7 +19381,7 @@ fn work_setup(
             .as_ref()
             .map(|c| (c.branch.clone(), c.base_ref.clone()))
             .unwrap_or_default();
-        let framing = crate::ask::gemini_work_framing(
+        let framing = crate::ask::acp_work_framing(
             &config.display_name(&item.repo_full_name),
             &branch,
             &base,
@@ -28535,21 +28554,28 @@ read eof || true
         }
     }
 
-    /// Gemini has no sandbox and asks before every command, so its grant
-    /// answers a commit while no `.git` has appeared below the top; the
-    /// sandboxed agents' grant never answers one outside the sandbox.
+    /// Gemini and OpenCode run over ACP with no sandbox and ask before
+    /// every command, so their grant answers a commit while no hook runs
+    /// and no `.git` has appeared below the top; the sandboxed agents'
+    /// grant never answers one outside the sandbox.
     #[tokio::test]
-    async fn only_gemini_s_commit_grant_answers_git_outside_a_sandbox() {
+    async fn only_acp_agents_commit_grant_answers_git_outside_a_sandbox() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let worktree = dir.path();
         git(worktree, &["init", "-q"]);
         let before = crate::nested_git::below(worktree);
         let nested = Some((worktree, &before));
-        let gemini = Some(perch_agent::Backend::Gemini);
-        assert_eq!(
-            commit_grant_answers(gemini, Some(worktree), nested).await,
-            Ok(())
-        );
+        let acp_backends = [
+            Some(perch_agent::Backend::Gemini),
+            Some(perch_agent::Backend::OpenCode),
+        ];
+        for backend in acp_backends {
+            assert_eq!(
+                commit_grant_answers(backend, Some(worktree), nested).await,
+                Ok(())
+            );
+        }
         for backend in [
             Some(perch_agent::Backend::ClaudeCode),
             Some(perch_agent::Backend::Codex),
@@ -28564,15 +28590,30 @@ read eof || true
                 "{said}"
             );
         }
+
+        let hook = worktree.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for backend in acp_backends {
+            assert_eq!(
+                commit_grant_answers(backend, Some(worktree), nested).await,
+                Err(None)
+            );
+        }
+        std::fs::remove_file(&hook).unwrap();
+
         std::fs::create_dir_all(worktree.join("sub/.git")).unwrap();
-        let said = commit_grant_answers(gemini, Some(worktree), nested)
-            .await
-            .unwrap_err()
-            .unwrap();
-        assert!(
-            said.starts_with("A Git repository appeared at sub/.git"),
-            "{said}"
-        );
+        for backend in acp_backends {
+            let said = commit_grant_answers(backend, Some(worktree), nested)
+                .await
+                .unwrap_err()
+                .unwrap();
+            assert!(
+                said.starts_with("A Git repository appeared at sub/.git"),
+                "{said}"
+            );
+        }
     }
 
     #[tokio::test]

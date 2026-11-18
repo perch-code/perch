@@ -455,7 +455,13 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
         agent.gemini.binary_version.as_deref(),
         !agent.gemini.models.is_empty(),
     );
-    let agents = vec![claude.0, codex.0, gemini.0];
+    let opencode = cli_line(
+        "OpenCode",
+        &agent.opencode.binary,
+        agent.opencode.binary_version.as_deref(),
+        !agent.opencode.models.is_empty(),
+    );
+    let agents = vec![claude.0, codex.0, gemini.0, opencode.0];
 
     let servers = language_servers(ctx, request).await;
 
@@ -534,6 +540,9 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
         summary.push_str(&format!(" · Antigravity {v}"));
     }
 
+    if let Some(v) = opencode.1 {
+        summary.push_str(&format!(" · OpenCode {v}"));
+    }
     FeedbackContext {
         summary,
         sections: vec![

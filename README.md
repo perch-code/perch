@@ -5,13 +5,13 @@ made Perch to combine them into one native application.
 
 Features:
 
-* Uses `gh`, `claude`, and `codex` CLIs for everything.
+* Uses `gh` for GitHub and local coding-agent CLIs for Ask, Work, and Review.
 * Fully integrated with GitHub's inbox, PRs, and issues.
 * Completely browsable codebase for each PR and code review.
 * Language server protocol (LSP) support, so you can "find references",
   "open call hierarchy", and so on.
 * Threaded GitHub-style conversations with humans and agents.
-* Fully integrated client-side Claude/Codex reviews.
+* Client-side reviews with Claude Code, Codex, Gemini, or OpenCode.
 
 <img src="docs/screenshot.png" width="720" alt="Perch showing a pull request's code with a review thread, find references, and the inbox">
 
@@ -23,9 +23,9 @@ You need:
   GTK 3), with git
 - The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`
 - For agents: [Claude Code](https://claude.com/claude-code) 2.1.223+,
-  [Codex CLI](https://github.com/openai/codex) 0.155.1+, and/or
+  [Codex CLI](https://github.com/openai/codex) 0.155.1+,
   [Antigravity CLI](https://antigravity.google/docs/cli/reference) (`agy`)
-  1.5.5+, signed in
+  1.5.5+, or [OpenCode](docs/configuration.md#opencode) 2.3.0+, signed in
 
 Then install the latest release:
 

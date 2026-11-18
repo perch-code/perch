@@ -97,6 +97,8 @@ pub struct AgentConfig {
     pub codex: CodexConfig,
     #[serde(default)]
     pub gemini: GeminiConfig,
+    #[serde(default)]
+    pub opencode: OpenCodeConfig,
 }
 
 /// The second backend. Absent from an old file is the usual case: the
@@ -144,11 +146,30 @@ pub struct GeminiConfig {
     pub efforts: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OpenCodeConfig {
+    pub binary: String,
+    pub binary_version: Option<String>,
+    pub models: Vec<String>,
+}
+
+impl Default for OpenCodeConfig {
+    fn default() -> Self {
+        Self {
+            binary: "opencode".into(),
+            binary_version: None,
+            models: Vec::new(),
+        }
+    }
+}
+
 /// The backend names, spelled as `perch-agent` spells them. Strings rather
 /// than its enum so this crate does not have to depend on it.
 pub const CLAUDE_CODE: &str = "claude-code";
 pub const CODEX: &str = "codex";
 pub const GEMINI: &str = "gemini";
+pub const OPENCODE: &str = "opencode";
 
 /// What the picker starts on when Claude Code is missing and Codex offers
 /// it: GPT-6.1-Sol.
@@ -193,6 +214,7 @@ impl Default for AgentConfig {
             max_concurrent_runs: default_max_concurrent_runs(),
             codex: CodexConfig::default(),
             gemini: GeminiConfig::default(),
+            opencode: OpenCodeConfig::default(),
         }
     }
 }
@@ -227,9 +249,11 @@ impl AgentConfig {
         let claude = self.models.iter().any(|m| m == model);
         let codex = self.codex.models.iter().any(|m| m == model);
         let gemini = self.gemini.models.iter().any(|m| m == model);
-        match (claude, codex, gemini) {
-            (false, true, false) => CODEX,
-            (false, false, true) => GEMINI,
+        let opencode = self.opencode.models.iter().any(|m| m == model);
+        match (claude, codex, gemini, opencode) {
+            (false, true, false, false) => CODEX,
+            (false, false, true, false) => GEMINI,
+            (false, false, false, true) => OPENCODE,
             _ => CLAUDE_CODE,
         }
     }
@@ -240,6 +264,7 @@ impl AgentConfig {
         match backend {
             CODEX => &self.codex.binary,
             GEMINI => &self.gemini.binary,
+            OPENCODE => &self.opencode.binary,
             _ => &self.binary,
         }
     }
@@ -248,6 +273,7 @@ impl AgentConfig {
         match backend {
             CODEX => self.codex.binary_version.as_deref(),
             GEMINI => self.gemini.binary_version.as_deref(),
+            OPENCODE => self.opencode.binary_version.as_deref(),
             _ => self.binary_version.as_deref(),
         }
     }
@@ -267,6 +293,7 @@ impl AgentConfig {
         match backend {
             CODEX => &self.codex.models,
             GEMINI => &self.gemini.models,
+            OPENCODE => &self.opencode.models,
             _ => &self.models,
         }
     }
@@ -279,6 +306,7 @@ impl AgentConfig {
     pub fn effort_supported(&self, model: &str, effort: &str) -> bool {
         let listed = match self.backend_of(model) {
             GEMINI => self.gemini.efforts.get(model),
+            OPENCODE => None, // ACP advertises variants after the model is selected.
             _ => self.codex.efforts.get(model),
         };
         match listed {
@@ -1154,6 +1182,7 @@ impl Config {
         self.agent.codex.efforts.clear();
         self.agent.gemini.binary_version = None;
         self.agent.gemini.efforts.clear();
+        self.agent.opencode.binary_version = None;
         for repo in &mut self.repo {
             repo.identity = None;
         }
@@ -2411,6 +2440,9 @@ efforts = { gpt = ["low"] }
 [agent.gemini]
 efforts = { pro = ["high"] }
 
+[agent.opencode]
+binary_version = "9.9"
+
 [[repo]]
 root = "/srv/notes"
 identity = "someone/else"
@@ -2420,6 +2452,7 @@ identity = "someone/else"
         assert_eq!(config.agent.codex.binary_version, None);
         assert!(config.agent.codex.efforts.is_empty());
         assert!(config.agent.gemini.efforts.is_empty());
+        assert_eq!(config.agent.opencode.binary_version, None);
         assert_eq!(config.repo[0].identity(), None);
 
         // What discovery filled in does survive a trip through serde.

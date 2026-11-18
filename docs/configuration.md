@@ -50,6 +50,8 @@ repository's `github` and `root`.
 | `[agent.codex] models` | Codex's own list | Codex models the picker offers |
 | `[agent.gemini] binary` | `"agy"` | Antigravity CLI executable, a name on `PATH` or a path |
 | `[agent.gemini] models` | `agy`'s own list | Gemini models the picker offers |
+| `[agent.opencode] binary` | `"opencode"` | OpenCode 2.3.0+ executable, a name on `PATH` or a path |
+| `[agent.opencode] models` | OpenCode's own list | Provider-qualified IDs from `opencode models` |
 | `[work] branch_prefix` | `""` | Put before branch names Perch fills in, such as `"chris/"` |
 | `[work] approvals` | `"auto"` | Who answers a Work run's requests outside its sandbox: `"auto"` (the CLI's auto-reviewer, then you) or `"ask"` (you) |
 | `[work] approval_timeout_mins` | `15` in the app, `480` under `perchd` | Minutes a request to you waits before it is denied |
@@ -73,3 +75,27 @@ repository's `github` and `root`.
 | `[repo.lsp] trust` | `false` | Start rust-analyzer and jdtls on anything in this repository without asking |
 
 The [reference](reference.md) covers what each setting does in more detail.
+
+## OpenCode
+
+Perch discovers OpenCode models on the machine running the engine. Select one
+in the model picker for Ask or Work, or enable OpenCode in the Review dialog.
+You can pin a shorter list under **Settings → Agents → OpenCode**.
+
+Perch gives OpenCode a separate profile so saved terminal permissions cannot
+silently approve Work commands. To sign in to a provider for Perch, run this
+on the engine machine and restart Perch to refresh its model list.
+
+```sh
+perch_home="${PERCH_HOME:-$HOME/.perch}"
+OPENCODE_DB="$perch_home/opencode/opencode.db" OPENCODE_CONFIG_DIR="$perch_home/opencode/config" opencode auth login --standalone
+```
+
+Custom provider configuration goes in `$perch_home/opencode/config/opencode.json`.
+OpenCode Zen also accepts `OPENCODE_API_KEY` in the engine's environment.
+
+Ask and Review have read and search tools. Work allows worktree edits and sends
+shell commands through Perch's approval controls. Perch disables project
+configuration, plugins and MCP servers for these sessions. When the model
+offers the selected effort variant, Perch uses it. Otherwise OpenCode uses
+the model's default.

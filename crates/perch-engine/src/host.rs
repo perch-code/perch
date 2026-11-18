@@ -110,6 +110,7 @@ pub(crate) enum Agent {
     ClaudeCode,
     Codex,
     Gemini,
+    OpenCode,
 }
 
 impl Agent {
@@ -118,6 +119,7 @@ impl Agent {
             Agent::ClaudeCode => "Claude Code",
             Agent::Codex => "Codex",
             Agent::Gemini => "agy (Gemini)",
+            Agent::OpenCode => "OpenCode",
         }
     }
 
@@ -127,6 +129,7 @@ impl Agent {
             Agent::ClaudeCode => Some("curl -fsSL https://claude.ai/install.sh | bash"),
             Agent::Codex => Some("npm install -g @openai/codex"),
             Agent::Gemini => None,
+            Agent::OpenCode => Some("npm install -g @opencode/cli"),
         }
     }
 }
@@ -588,6 +591,11 @@ fn on_disk(config: &Config, path: Option<&OsStr>, linux: bool) -> Found {
             &agent.gemini.binary,
             &agent.gemini.binary_version,
         ),
+        (
+            Agent::OpenCode,
+            &agent.opencode.binary,
+            &agent.opencode.binary_version,
+        ),
     ]
     .into_iter()
     .map(|(which, binary, version)| AgentFound {
@@ -670,6 +678,7 @@ mod tests {
                 Agent::ClaudeCode => "claude",
                 Agent::Codex => "codex",
                 Agent::Gemini => "agy",
+                Agent::OpenCode => "opencode",
             }
             .into(),
             found: found.then(|| (PathBuf::from("/usr/local/bin/x"), Some("1.0".into()))),

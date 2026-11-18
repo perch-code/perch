@@ -175,35 +175,21 @@ pub(crate) fn agents_section(
         dyn_container(
             move || (app.review_capabilities.get(), app.agent.get()),
             move |_| {
-                Stack::vertical((
-                    reviewer_row(
-                        app,
-                        state,
-                        rows_backend.clone(),
-                        perch_agent::Backend::ClaudeCode,
-                    ),
-                    reviewer_row(
-                        app,
-                        state,
-                        rows_backend.clone(),
-                        perch_agent::Backend::Codex,
-                    ),
-                    // Gemini is the newcomer: its row shows once agy is
-                    // installed rather than greyed out for everyone.
-                    if models_for(&app.agent.get_untracked(), perch_agent::Backend::Gemini)
-                        .is_empty()
-                    {
-                        Empty::new().into_any()
-                    } else {
-                        reviewer_row(
-                            app,
-                            state,
-                            rows_backend.clone(),
-                            perch_agent::Backend::Gemini,
-                        )
-                        .into_any()
-                    },
-                ))
+                let agent = app.agent.get_untracked();
+                Stack::vertical_from_iter(
+                    perch_agent::Backend::ALL
+                        .into_iter()
+                        .filter(|backend| {
+                            matches!(
+                                backend,
+                                perch_agent::Backend::ClaudeCode | perch_agent::Backend::Codex
+                            ) || !agent.models_for(backend.name()).is_empty()
+                        })
+                        .map(|backend| {
+                            reviewer_row(app, state, rows_backend.clone(), backend).into_any()
+                        })
+                        .collect::<Vec<_>>(),
+                )
                 .style(|s| s.flex_col().width_full().gap(4.0))
             },
         ),

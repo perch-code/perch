@@ -970,7 +970,7 @@ slot from Claude Code or Codex. Stopping a run terminates and reaps its process 
 Perch does the same for every process it owns; after an abnormal exit,
 nonterminal rows return as Interrupted and are not replayed automatically.
 
-Perch discovers all three CLIs automatically. Their optional settings are:
+Perch discovers the installed agent CLIs automatically. Their optional settings are:
 
 ```toml
 [agent]
@@ -987,11 +987,14 @@ models = ["gpt-6-astra"]       # omit to use Codex's own model catalog
 [agent.gemini]
 binary = "agy"
 models = ["gemini-4-carbon"]   # omit to use agy's own model catalog
+
+[agent.opencode]
+binary = "opencode"           # omit models to use OpenCode's provider/model catalog
 ```
 
 Without Claude Code installed, a Claude `model` gives way to `gpt-6.1-sol`
 when Codex offers it, at the same effort, or to `agy`'s first Gemini model
-when only `agy` is installed. For heavy PR review usage with Gemini, prefer
+when only `agy` is installed. With only OpenCode installed, Perch selects its first model. See the [OpenCode profile setup](configuration.md#opencode) for provider sign-in. For heavy PR review usage with Gemini, prefer
 setting `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) over a personal subscription
 OAuth login in `agy`.
 
@@ -1616,7 +1619,7 @@ put on it first. On it:
    or your distribution's), which Claude Code's sandbox needs there.
 2. Sign in to what the engine uses, as the user it runs as: `gh auth login`
    (or `token` in its config.toml), and each agent CLI you run, `claude`,
-   `codex` or `agy`. Nothing is copied from the Mac.
+   `codex`, `agy` or `opencode`. Nothing is copied from the Mac.
 
 Open **Settings > Environment** in the window you want to change. Enter
 the SSH host and select **Connect**. That window opens the host’s
@@ -1683,7 +1686,7 @@ the same list. It checks:
   github.com repository the fix is the `git clone` that puts it there.
   While it fails, its row has an **Add repository…** button, which goes to
   Settings > Repositories.
-- **Claude Code**, **Codex**, **agy (Gemini)**: each agent CLI as the
+- **Claude Code**, **Codex**, **agy (Gemini)**, **OpenCode**: each agent CLI as the
   engine's agent discovery found it, with its path and version. None is
   required while another is installed; with none at all, Claude Code is.
   Fixes: `curl -fsSL https://claude.ai/install.sh | bash` and `npm install

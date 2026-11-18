@@ -209,6 +209,7 @@ struct Shown {
     accounts: Vec<(&'static str, Account)>,
     /// Gemini runs, but agy reports no limits to show.
     gemini: bool,
+    opencode: bool,
     now: Timestamp,
 }
 
@@ -228,13 +229,16 @@ fn popover(app: AppState) -> impl IntoView {
             })
         },
         gemini: app.agent.with(|agent| !agent.gemini.models.is_empty()),
+        opencode: app.agent.with(|agent| !agent.opencode.models.is_empty()),
         now: now.get(),
     });
     dyn_container(
         move || shown.get(),
         |shown| {
             if shown.accounts.is_empty() {
-                let text = if shown.gemini {
+                let text = if shown.opencode {
+                    "OpenCode reports no usage limits"
+                } else if shown.gemini {
                     "agy reports no usage limits"
                 } else {
                     "No agent CLI found"
@@ -484,6 +488,7 @@ mod tests {
                 error: Some("Codex took too long to report usage".into()),
             },
             gemini: Account::default(),
+            opencode: Account::default(),
         });
         settle(&mut harness);
         (harness, app, review)

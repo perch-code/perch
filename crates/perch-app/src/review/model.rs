@@ -633,6 +633,7 @@ pub fn default_destination(
                     .iter()
                     .chain(agent.codex_models())
                     .chain(agent.gemini_models())
+                    .chain(&agent.opencode.models)
                     .any(|m| m == model);
                 let Some(backend) = perch_agent::Backend::parse(backend).filter(|_| offered) else {
                     return last_agent();

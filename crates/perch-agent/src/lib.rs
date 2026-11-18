@@ -1,17 +1,14 @@
 //! Run a coding agent as a child process and read what it does.
 //!
-//! Three agents: Claude Code, driven as `claude -p`; Codex, driven as
-//! `codex app-server` or, for a review, `codex exec`; and Gemini, through
-//! the Antigravity CLI, driven as `agy` in print mode or, for Work, as
-//! `agy acp`; each with JSON events on stdout. No SDK and no library:
-//! the binary on `PATH`, a child process, one JSON object per line. Perch
-//! works with whatever version of the CLI the user has, and the parsers
-//! are the whole contract with them.
+//! Claude Code uses print mode, Codex its app server or exec, Gemini the
+//! Antigravity CLI, and OpenCode its ACP server. Each adapter translates
+//! the installed CLI's stdout into the same stream of run events.
 
 mod codex;
 mod discover;
 mod gemini;
 mod interactive;
+mod opencode;
 mod parse;
 mod review;
 pub mod usage;
@@ -42,6 +39,7 @@ pub use gemini::{
 };
 pub use interactive::{ApprovalKind, ApprovalRequest, Decision};
 use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
+pub use opencode::{opencode_catalog, MIN_OPENCODE_VERSION};
 pub use parse::{parse_line, summarize_tool_call};
 pub use review::{
     assess_review_capability, detect_review_capability, extract_review, preserve_native_response,
@@ -56,16 +54,23 @@ pub enum Backend {
     ClaudeCode,
     Codex,
     Gemini,
+    OpenCode,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 3] = [Backend::ClaudeCode, Backend::Codex, Backend::Gemini];
+    pub const ALL: [Backend; 4] = [
+        Backend::ClaudeCode,
+        Backend::Codex,
+        Backend::Gemini,
+        Backend::OpenCode,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Backend::ClaudeCode => "claude-code",
             Backend::Codex => "codex",
             Backend::Gemini => "gemini",
+            Backend::OpenCode => "opencode",
         }
     }
 
@@ -75,6 +80,7 @@ impl Backend {
             Backend::ClaudeCode => "Claude",
             Backend::Codex => "Codex",
             Backend::Gemini => "Gemini",
+            Backend::OpenCode => "OpenCode",
         }
     }
 
@@ -286,6 +292,9 @@ pub const WORK_PROTECTED: &[&str] = &[
     "_agents",
     "_agent",
     ".gemini",
+    ".opencode",
+    "opencode.json",
+    "opencode.jsonc",
 ];
 
 /// Permission rules scoping the editing tools to the worktree, in Claude
@@ -777,6 +786,7 @@ impl RunSpec {
             Backend::ClaudeCode => self.claude_args(),
             Backend::Codex => self.codex_args(),
             Backend::Gemini => self.gemini_args(),
+            Backend::OpenCode => vec!["acp".into()],
         }
     }
 
@@ -801,9 +811,8 @@ impl RunSpec {
         }
     }
 
-    /// agy takes no system prompt of its own in print mode, so what Perch
-    /// would append to it goes ahead of the first prompt.
-    fn gemini_prompt(&self) -> String {
+    /// Fold the first turn's framing into a prompt for CLIs without a system input.
+    fn framed_prompt(&self) -> String {
         match &self.system {
             Some(system) if self.resume.is_none() => format!("{system}\n\n{}", self.prompt),
             _ => self.prompt.clone(),
@@ -811,9 +820,9 @@ impl RunSpec {
     }
 
     /// Why this run will not start, when it will not: a Gemini run in a
-    /// checkout carrying agy configuration that runs code, unless trusted.
-    /// A question checks every directory it adds to agy's workspace, each
-    /// of which agy loads configuration from; Work, over ACP, adds none.
+    /// checkout carrying agy configuration that runs code, or an OpenCode
+    /// run in a checkout whose `AGENTS.md` or `CLAUDE.md` links outside the
+    /// repository, unless trusted.
     pub fn refusal(&self) -> Option<String> {
         match (self.backend, &self.mode) {
             (Backend::Gemini, Mode::Work(grant)) => gemini::refusal(&self.cwd, &[], grant.trust),
@@ -822,6 +831,10 @@ impl RunSpec {
                 &gemini::print_dirs(&self.cwd, &self.read_dirs),
                 false,
             ),
+            (Backend::OpenCode, Mode::Work(grant)) => {
+                opencode::refusal(&self.cwd, &self.read_dirs, grant.trust)
+            }
+            (Backend::OpenCode, Mode::Ask) => opencode::refusal(&self.cwd, &self.read_dirs, false),
             _ => None,
         }
     }
@@ -912,18 +925,35 @@ impl RunSpec {
         match self.backend {
             Backend::ClaudeCode => Conversation::Claude(ClaudeHost::new(self.prompt.clone())),
             Backend::Codex => Conversation::Codex(Box::new(CodexServer::new(self.codex_thread()))),
+            Backend::OpenCode => {
+                let writable = match &self.mode {
+                    Mode::Ask => Vec::new(),
+                    Mode::Work(grant) => std::iter::once(real_path(&self.cwd))
+                        .chain(grant.write.iter().map(|path| real_path(path)))
+                        .collect(),
+                };
+                opencode::conversation(
+                    &self.cwd,
+                    &self.model,
+                    self.effort.name(),
+                    self.framed_prompt(),
+                    self.resume.clone(),
+                    writable,
+                )
+            }
             Backend::Gemini => match &self.mode {
-                Mode::Ask => Conversation::Gemini(gemini::GeminiHost::new(self.gemini_prompt())),
+                Mode::Ask => Conversation::Gemini(gemini::GeminiHost::new(self.framed_prompt())),
                 Mode::Work(grant) => {
                     let mut writable = vec![real_path(&self.cwd)];
                     writable.extend(grant.write.iter().map(|p| real_path(p)));
                     // The path the refusal check walked, so agy looks above
                     // the same directory it did.
                     Conversation::Acp(Box::new(gemini::AcpClient::new(gemini::AcpSession {
+                        backend: Backend::Gemini,
                         cwd: real_path(&self.cwd),
                         model: self.model.clone(),
                         effort: gemini::effort_name(self.effort).to_string(),
-                        prompt: self.gemini_prompt(),
+                        prompt: self.framed_prompt(),
                         resume: self.resume.clone(),
                         writable,
                     })))
@@ -1072,6 +1102,7 @@ enum ParserKind {
     },
     Codex(CodexParser),
     Gemini(GeminiParser),
+    OpenCode,
 }
 
 /// Where a run's raw protocol output is kept, line for line, beside the
@@ -1137,6 +1168,7 @@ impl Parser {
             },
             Backend::Codex => ParserKind::Codex(CodexParser::new()),
             Backend::Gemini => ParserKind::Gemini(GeminiParser::new()),
+            Backend::OpenCode => ParserKind::OpenCode,
         };
         Self {
             kind,
@@ -1234,6 +1266,7 @@ impl Parser {
                 events
             }
             ParserKind::Codex(p) => p.parse_line(line),
+            ParserKind::OpenCode => Vec::new(), // ACP parses the complete conversation.
             ParserKind::Gemini(p) => {
                 let mut events = p.parse_value(value);
                 if more {
@@ -1249,6 +1282,7 @@ impl Parser {
             ParserKind::Claude { .. } => Backend::ClaudeCode,
             ParserKind::Codex(_) => Backend::Codex,
             ParserKind::Gemini(_) => Backend::Gemini,
+            ParserKind::OpenCode => Backend::OpenCode,
         }
     }
 
@@ -1647,6 +1681,15 @@ impl Run {
         if let Some(why) = spec.refusal() {
             return Err(Error::Refused(why));
         }
+        let external_reads = if spec.backend == Backend::OpenCode {
+            let mut paths = gemini::print_dirs(&spec.cwd, &spec.read_dirs);
+            if let Mode::Work(grant) = &spec.mode {
+                paths.extend(grant.write.iter().cloned());
+            }
+            paths
+        } else {
+            Vec::new()
+        };
         let args = spec.args();
         let conversation = Some(spec.conversation());
         Self::spawn_process(
@@ -1656,6 +1699,7 @@ impl Run {
             args,
             None,
             conversation,
+            external_reads,
             events,
         )
     }
@@ -1689,15 +1733,36 @@ impl Run {
         spec.validate().map_err(Error::InvalidReview)?;
         let args = spec.args();
         let transcript = spec.transcript.clone();
-        Self::spawn_process(
+        let external_reads = if spec.backend == Backend::OpenCode {
+            std::iter::once(spec.diff_path.clone())
+                .chain(spec.discussion_dir.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let conversation = (spec.backend == Backend::OpenCode).then(|| {
+            opencode::conversation(
+                &spec.cwd,
+                &spec.model,
+                spec.effort.name(),
+                spec.opencode_prompt(),
+                None,
+                Vec::new(),
+            )
+        });
+        let mut run = Self::spawn_process(
             spec.backend,
             spec.binary,
             spec.cwd,
             args,
             transcript,
-            None,
+            conversation,
+            external_reads,
             events,
-        )
+        )?;
+        // The ACP transport needs stdin, but a review has no interactive inputs.
+        run.inputs = None;
+        Ok(run)
     }
 
     /// Start a structured prior-finding verification pass without inheriting
@@ -1709,17 +1774,37 @@ impl Run {
         spec.validate().map_err(Error::InvalidReview)?;
         let args = spec.args();
         let transcript = spec.transcript.clone();
-        Self::spawn_process(
+        let external_reads = if spec.backend == Backend::OpenCode {
+            spec.diff_path.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let conversation = (spec.backend == Backend::OpenCode).then(|| {
+            opencode::conversation(
+                &spec.cwd,
+                &spec.model,
+                spec.effort.name(),
+                spec.opencode_prompt(),
+                None,
+                Vec::new(),
+            )
+        });
+        let mut run = Self::spawn_process(
             spec.backend,
             spec.binary,
             spec.cwd,
             args,
             transcript,
-            None,
+            conversation,
+            external_reads,
             events,
-        )
+        )?;
+        // The ACP transport needs stdin, but a review has no interactive inputs.
+        run.inputs = None;
+        Ok(run)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_process(
         backend: Backend,
         binary: PathBuf,
@@ -1727,6 +1812,7 @@ impl Run {
         args: Vec<String>,
         transcript: Option<Transcript>,
         mut conversation: Option<Conversation>,
+        external_reads: Vec<PathBuf>,
         events: UnboundedSender<RunEvent>,
     ) -> Result<Run, Error> {
         let started_at = Instant::now();
@@ -1745,6 +1831,10 @@ impl Run {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         scrub_env(&mut command);
+        if backend == Backend::OpenCode {
+            let work = matches!(conversation.as_ref(), Some(Conversation::Acp(client)) if client.opencode_work());
+            opencode::configure(&mut command, work, &external_reads).map_err(Error::Refused)?;
+        }
         // Put every CLI invocation in its own process group. Claude and
         // Codex may launch commands and subagents of their own; signalling
         // the group keeps those descendants under the same lifetime.
@@ -3436,5 +3526,41 @@ mod tests {
         for name in ["GEMINI_API_KEY", "GOOGLE_API_KEY"] {
             assert!(!is_scrubbed_env(name), "{name}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_runs_refuse_external_instruction_symlinks_until_trusted() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, "secret").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink(&secret, dir.path().join("sub/AGENTS.md")).unwrap();
+
+        let make = |mode: Mode| RunSpec {
+            backend: Backend::OpenCode,
+            binary: "opencode".into(),
+            model: "provider/model".into(),
+            read_dirs: Vec::new(),
+            effort: Effort::High,
+            cwd: dir.path().to_path_buf(),
+            prompt: "Why?".into(),
+            system: None,
+            resume: None,
+            mode,
+        };
+        assert!(make(Mode::Ask).refusal().is_some());
+        let untrusted = make(Mode::Work(WorkGrant::default()));
+        assert!(untrusted.refusal().is_some());
+        let trusted = make(Mode::Work(WorkGrant {
+            trust: true,
+            ..WorkGrant::default()
+        }));
+        assert_eq!(trusted.refusal(), None);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(matches!(Run::spawn(untrusted, tx), Err(Error::Refused(_))));
     }
 }

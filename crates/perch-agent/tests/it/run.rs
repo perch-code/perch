@@ -167,6 +167,7 @@ async fn a_review_keeps_the_raw_stream_and_stderr_when_asked() {
         model: "sonnet".into(),
         effort: ReviewEffort::Low,
         cwd: tmp.path().to_path_buf(),
+        diff_path: Default::default(),
         merge_base_ref: "refs/perch/merge-base".into(),
         merge_base_sha: "1".repeat(40),
         head_sha: "2".repeat(40),

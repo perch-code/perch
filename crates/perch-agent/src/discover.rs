@@ -16,6 +16,7 @@ pub fn install_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = &home {
         dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".opencode/bin"));
     }
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from));
     if let Some(home) = &home {

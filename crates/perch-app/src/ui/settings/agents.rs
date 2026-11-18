@@ -38,6 +38,7 @@ fn title(backend: AgentBackend) -> &'static str {
         AgentBackend::Claude => "Claude Code",
         AgentBackend::Codex => "Codex",
         AgentBackend::Gemini => "Gemini (Antigravity)",
+        AgentBackend::OpenCode => "OpenCode",
     }
 }
 
@@ -47,6 +48,7 @@ fn slug(backend: AgentBackend) -> &'static str {
         AgentBackend::Claude => "claude",
         AgentBackend::Codex => "codex",
         AgentBackend::Gemini => "gemini",
+        AgentBackend::OpenCode => "opencode",
     }
 }
 
@@ -56,6 +58,7 @@ fn table(backend: AgentBackend) -> &'static str {
         AgentBackend::Claude => "agent",
         AgentBackend::Codex => "agent.codex",
         AgentBackend::Gemini => "agent.gemini",
+        AgentBackend::OpenCode => "agent.opencode",
     }
 }
 
@@ -71,6 +74,11 @@ fn parts(agent: &AgentConfig, backend: AgentBackend) -> (&str, Option<&str>, &[S
             &agent.codex.binary,
             agent.codex.binary_version.as_deref(),
             &agent.codex.models,
+        ),
+        AgentBackend::OpenCode => (
+            &agent.opencode.binary,
+            agent.opencode.binary_version.as_deref(),
+            &agent.opencode.models,
         ),
         AgentBackend::Gemini => (
             &agent.gemini.binary,
@@ -133,7 +141,14 @@ fn model(page: &Page) -> Row {
         || "What a new conversation or run starts on.".to_string(),
         control,
     )
-    .keywords(&["model", "claude", "codex", "gemini", "agent.model"])
+    .keywords(&[
+        "model",
+        "claude",
+        "codex",
+        "gemini",
+        "opencode",
+        "agent.model",
+    ])
     .reset("agent.model", Setting::AgentModel(None))
 }
 
@@ -301,6 +316,7 @@ fn default_binary(backend: AgentBackend) -> &'static str {
         AgentBackend::Claude => "claude",
         AgentBackend::Codex => "codex",
         AgentBackend::Gemini => "agy",
+        AgentBackend::OpenCode => "opencode",
     }
 }
 
@@ -325,6 +341,7 @@ fn models(page: &Page, backend: AgentBackend) -> Row {
                     AgentBackend::Claude => "fable, opus, sonnet, haiku",
                     AgentBackend::Codex => "Codex's catalog",
                     AgentBackend::Gemini => "agy's catalog",
+                    AgentBackend::OpenCode => "OpenCode's catalog",
                 },
                 move |typed| {
                     let models = split_list(&typed);
@@ -342,6 +359,9 @@ fn models(page: &Page, backend: AgentBackend) -> Row {
         AgentBackend::Claude => "The models the picker offers, between commas.",
         AgentBackend::Codex => {
             "The models the picker offers, between commas. Left empty, Codex's own catalog."
+        }
+        AgentBackend::OpenCode => {
+            "Provider/model IDs, between commas. Left empty, OpenCode's own catalog."
         }
         AgentBackend::Gemini => {
             "The models the picker offers, between commas. Left empty, agy's own catalog."

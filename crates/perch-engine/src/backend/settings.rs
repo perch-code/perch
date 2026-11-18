@@ -247,6 +247,8 @@ fn needs_discovery(before: &AgentConfig, after: &AgentConfig) -> bool {
         || before.codex.models != after.codex.models
         || before.gemini.binary != after.gemini.binary
         || before.gemini.models != after.gemini.models
+        || before.opencode.binary != after.opencode.binary
+        || before.opencode.models != after.opencode.models
 }
 
 /// What discovery found, with the file's own model, effort and run limit.
@@ -431,14 +433,16 @@ fn discover_again(ctx: &Ctx, mut agent: AgentConfig) {
             claude = %agent.binary,
             codex = ?agent.codex.models,
             gemini = ?agent.gemini.models,
+            opencode = ?agent.opencode.models,
             "agents found again"
         );
         if agent.models.is_empty()
             && agent.codex.models.is_empty()
             && agent.gemini.models.is_empty()
+            && agent.opencode.models.is_empty()
         {
             ctx.notice(
-                "No coding agent found. Install Claude Code, Codex or agy (Gemini), or set agent.binary in config.toml.",
+                "No coding agent found. Install Claude Code, Codex, agy (Gemini) or OpenCode, or set agent.binary in config.toml.",
             );
         }
         ctx.replace_agent(agent.clone());

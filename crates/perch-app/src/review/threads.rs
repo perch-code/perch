@@ -117,6 +117,7 @@ fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
         .iter()
         .chain(agent.codex_models())
         .chain(agent.gemini_models())
+        .chain(&agent.opencode.models)
         .any(|m| *m == agent.model);
     let model = if offered {
         agent.model.clone()
@@ -1567,19 +1568,23 @@ fn composer_original(
 }
 
 /// The picker's sections: one per backend that has models, Claude Code
-/// first, then Codex, then Gemini. Each entry names the backend the model runs on, which is
+/// first. Each entry names the backend the model runs on, which is
 /// config's call, not the section's, so a model listed under both stays
 /// with Claude Code wherever it appears.
 pub(crate) fn model_groups(
     agent: &perch_github::AgentConfig,
 ) -> Vec<Vec<(perch_agent::Backend, String)>> {
     let entry = |m: &String| (crate::ask::backend_for(agent, m), m.clone());
-    let claude: Vec<_> = agent.models.iter().map(entry).collect();
-    let codex: Vec<_> = agent.codex_models().iter().map(entry).collect();
-    let gemini: Vec<_> = agent.gemini_models().iter().map(entry).collect();
-    [claude, codex, gemini]
+    perch_agent::Backend::ALL
         .into_iter()
-        .filter(|g| !g.is_empty())
+        .map(|backend| {
+            agent
+                .models_for(backend.name())
+                .iter()
+                .map(entry)
+                .collect::<Vec<_>>()
+        })
+        .filter(|group| !group.is_empty())
         .collect()
 }
 
@@ -1609,13 +1614,9 @@ pub(crate) fn model_sections(
     agent: &perch_github::AgentConfig,
 ) -> Vec<(&'static str, Vec<ModelFamily>)> {
     use perch_agent::Backend;
-    let lists = [
-        (Backend::ClaudeCode, agent.models.as_slice()),
-        (Backend::Codex, agent.codex_models()),
-        (Backend::Gemini, agent.gemini_models()),
-    ];
-    lists
+    Backend::ALL
         .into_iter()
+        .map(|backend| (backend, agent.models_for(backend.name())))
         .filter(|(_, models)| !models.is_empty())
         .map(|(maker, models)| {
             let mut families: Vec<ModelFamily> = Vec::new();
@@ -1885,6 +1886,11 @@ fn approvals_note(approvals: perch_github::Approvals, agent: Option<&AgentChoice
     match approvals {
         Approvals::Ask => "Every request to leave the sandbox comes to you",
         Approvals::Auto if haiku => "Haiku has no auto mode, so every request comes to you",
+        Approvals::Auto
+            if agent.is_some_and(|(backend, _, _)| *backend == perch_agent::Backend::OpenCode) =>
+        {
+            "OpenCode sends approval requests to you"
+        }
         Approvals::Auto if gemini => "Gemini has no auto mode, so every request comes to you",
         Approvals::Auto => "The agent's reviewer decides; what it won't comes to you",
         Approvals::Never => "Perch allows every request without asking",
