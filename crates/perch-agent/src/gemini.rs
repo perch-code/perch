@@ -1006,9 +1006,17 @@ const SET_MODE: u64 = 5;
 /// Prompts count up from here: the first, then one per steer.
 const PROMPTS: u64 = 100;
 
+/// What Perch sends agy when a command it left running in the background
+/// ends. agy picks the result up by itself after its turn, but nothing
+/// marks the end of a turn it starts unasked; a prompt's answer does, and
+/// agy folds the two into one turn.
+const COMMAND_ENDED: &str = "The command you left running has finished. Carry on from its result.";
+
 /// `agy acp` over stdio. Perch opens or resumes one session, pins its
 /// model, thinking level and mode, sends the prompt, and closes stdin
-/// once the last prompt is answered, which ends the server.
+/// once the last prompt is answered, which ends the server and with it
+/// any command agy still runs. So a turn agy ends with a command going
+/// in the background leaves the session open until the command is done.
 pub(crate) struct AcpClient {
     session: AcpSession,
     session_id: String,
@@ -1029,6 +1037,17 @@ pub(crate) struct AcpClient {
     /// Tool calls that have begun, and those that have ended.
     started: HashSet<String>,
     ended: HashSet<String>,
+    /// agy's commands, but for daemons, which are meant to outlive the
+    /// run; those running now; and those agy moved on from while they ran.
+    /// A command that outlasts its wait goes on in the background, and agy
+    /// may end the turn without it.
+    commands: HashSet<String>,
+    running: HashSet<String>,
+    backgrounded: HashSet<String>,
+    /// A command ended in the background and no prompt has gone since.
+    unseen: bool,
+    /// The last prompt is answered and a command is still running.
+    held: bool,
     /// Each pending request by Perch's id: the JSON-RPC id to answer, and
     /// the options it offered.
     pending: HashMap<String, (Value, Vec<Value>)>,
@@ -1053,6 +1072,11 @@ impl AcpClient {
             text: String::new(),
             started: HashSet::new(),
             ended: HashSet::new(),
+            commands: HashSet::new(),
+            running: HashSet::new(),
+            backgrounded: HashSet::new(),
+            unseen: false,
+            held: false,
             pending: HashMap::new(),
             usage: None,
             refused: false,
@@ -1089,7 +1113,7 @@ impl AcpClient {
         if self.done {
             return Vec::new();
         }
-        if self.session_id.is_empty() || self.open_prompts.is_empty() {
+        if self.session_id.is_empty() || (self.open_prompts.is_empty() && !self.held) {
             self.queued.push_back(text.to_string());
             return Vec::new();
         }
@@ -1151,6 +1175,8 @@ impl AcpClient {
     fn prompt(&mut self, text: &str) -> (u64, String) {
         let id = self.next_id();
         self.open_prompts.insert(id);
+        self.held = false;
+        self.unseen = false;
         let wire = self.wire_prompt(text);
         (
             id,
@@ -1402,7 +1428,7 @@ impl AcpClient {
                     }
                 }
                 if let Some(usage) = result.get("usage").filter(|u| u.is_object()) {
-                    self.usage = Some(usage.clone());
+                    self.add_usage(usage);
                 }
                 if !self.open_prompts.is_empty() {
                     return Reply {
@@ -1450,6 +1476,25 @@ impl AcpClient {
                 ..Reply::default()
             };
         }
+        // Closing now would kill the command; its end starts the next turn.
+        if !self.running.is_empty() {
+            self.backgrounded.extend(self.running.iter().cloned());
+            self.held = true;
+            return Reply {
+                events: self.flush_text(),
+                ..Reply::default()
+            };
+        }
+        // One ended while the turn was going, too late for agy to take it in.
+        if self.unseen {
+            let events = self.flush_text();
+            let (_, write) = self.prompt(COMMAND_ENDED);
+            return Reply {
+                writes: vec![write],
+                events,
+                ..Reply::default()
+            };
+        }
         let stopped = self.session.backend == crate::Backend::Gemini
             && self.refused
             && self.text.trim().is_empty();
@@ -1476,10 +1521,15 @@ impl AcpClient {
     fn update(&mut self, u: &Value) -> Reply {
         let events = match str_of(u, "sessionUpdate").as_str() {
             "agent_message_chunk" => {
+                self.moved_on();
                 if let Some(text) = u.pointer("/content/text").and_then(Value::as_str) {
                     self.text.push_str(text);
                     self.refused &= text.trim().is_empty();
                 }
+                Vec::new()
+            }
+            "agent_thought_chunk" => {
+                self.moved_on();
                 Vec::new()
             }
             "user_message_chunk" => {
@@ -1495,12 +1545,47 @@ impl AcpClient {
                     _ => Vec::new(),
                 }
             }
-            "tool_call" | "tool_call_update" => self.tool(u),
+            "tool_call" | "tool_call_update" => {
+                let events = self.tool(u);
+                if self.held && self.unseen {
+                    let (_, write) = self.prompt(COMMAND_ENDED);
+                    return Reply {
+                        writes: vec![write],
+                        events,
+                        ..Reply::default()
+                    };
+                }
+                events
+            }
             _ => Vec::new(),
         };
         Reply {
             events,
             ..Reply::default()
+        }
+    }
+
+    /// agy thinks or speaks again only once the commands it ran have
+    /// ended or gone to the background.
+    fn moved_on(&mut self) {
+        self.backgrounded.extend(self.running.iter().cloned());
+    }
+
+    /// agy counts each turn's tokens on its own.
+    fn add_usage(&mut self, usage: &Value) {
+        let Some(total) = self.usage.as_mut().and_then(Value::as_object_mut) else {
+            self.usage = Some(usage.clone());
+            return;
+        };
+        for (key, value) in usage.as_object().into_iter().flatten() {
+            match (total.get(key).and_then(Value::as_u64), value.as_u64()) {
+                (Some(a), Some(b)) => {
+                    total.insert(key.clone(), json!(a + b));
+                }
+                _ => {
+                    total.insert(key.clone(), value.clone());
+                }
+            }
         }
     }
 
@@ -1512,6 +1597,13 @@ impl AcpClient {
         let mut events = self.flush_text();
         if self.started.insert(id.clone()) {
             self.refused = false;
+            // Known by its first update; later ones may leave out the name.
+            if self.session.backend == crate::Backend::Gemini
+                && tool_name(u) == "run_command"
+                && tool_args(u).get("IsDaemon").and_then(Value::as_bool) != Some(true)
+            {
+                self.commands.insert(id.clone());
+            }
             events.push(RunEvent::ToolCall {
                 id: id.clone(),
                 name: tool_name(u),
@@ -1520,6 +1612,24 @@ impl AcpClient {
             });
         }
         let status = str_of(u, "status");
+        // A command waiting to be allowed is "pending", and a refused one
+        // may never be heard of again. An update without a status changes
+        // nothing.
+        if self.commands.contains(&id) {
+            match status.as_str() {
+                "in_progress" => {
+                    self.running.insert(id.clone());
+                }
+                "pending" => {
+                    self.running.remove(&id);
+                }
+                "completed" | "failed" => {
+                    self.running.remove(&id);
+                    self.unseen |= self.backgrounded.remove(&id);
+                }
+                _ => {}
+            }
+        }
         if matches!(status.as_str(), "completed" | "failed") {
             self.ended.insert(id.clone());
             let exit = u
@@ -1620,7 +1730,10 @@ impl AcpClient {
         if let Some(paths) = edit_paths(&call, &self.session.cwd) {
             if paths.as_ref().map_or(true, |paths| {
                 paths.iter().any(|path| {
-                    self.session.read_only.iter().any(|dir| path.starts_with(dir))
+                    self.session
+                        .read_only
+                        .iter()
+                        .any(|dir| path.starts_with(dir))
                         || is_protected(path, &self.session.cwd, &self.session.writable)
                 })
             }) {
@@ -1635,9 +1748,12 @@ impl AcpClient {
                     ..Reply::default()
                 };
             }
-            if paths.is_ok_and(|paths| !paths.is_empty()
-                && paths.iter().all(|path| may_edit(path, &self.session.writable)))
-            {
+            if paths.is_ok_and(|paths| {
+                !paths.is_empty()
+                    && paths
+                        .iter()
+                        .all(|path| may_edit(path, &self.session.writable))
+            }) {
                 return Reply {
                     writes: answer_line(&id, &options, true).into_iter().collect(),
                     events,
@@ -1779,24 +1895,45 @@ fn may_read(call: &Value, cwd: &Path, dirs: &[PathBuf]) -> bool {
         || is_edit_call(call)
         || !matches!(
             tool_name(call).as_str(),
-            "read" | "read_file" | "view_file" | "view_file_outline" | "view_code_item"
-                | "list_dir" | "find_by_name" | "glob" | "grep" | "grep_search"
+            "read"
+                | "read_file"
+                | "view_file"
+                | "view_file_outline"
+                | "view_code_item"
+                | "list_dir"
+                | "find_by_name"
+                | "glob"
+                | "grep"
+                | "grep_search"
         )
     {
         return false;
     }
     let args = tool_args(call);
-    let locations = call["locations"].as_array().into_iter().flatten()
+    let locations = call["locations"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|location| location["path"].as_str());
-    let arguments = EDIT_PATH_KEYS.iter()
+    let arguments = EDIT_PATH_KEYS
+        .iter()
         .copied()
-        .chain(["DirectoryPath", "SearchPath", "SearchDirectory", "directory"])
+        .chain([
+            "DirectoryPath",
+            "SearchPath",
+            "SearchDirectory",
+            "directory",
+        ])
         .filter_map(|key| args[key].as_str());
-    let mut paths = locations.chain(arguments).filter(|path| !path.is_empty()).peekable();
-    paths.peek().is_some() && paths.all(|path| {
-        resolve_tool_path(cwd, path)
-            .is_some_and(|real| dirs.iter().any(|dir| real.starts_with(dir)))
-    })
+    let mut paths = locations
+        .chain(arguments)
+        .filter(|path| !path.is_empty())
+        .peekable();
+    paths.peek().is_some()
+        && paths.all(|path| {
+            resolve_tool_path(cwd, path)
+                .is_some_and(|real| dirs.iter().any(|dir| real.starts_with(dir)))
+        })
 }
 
 fn is_edit_call(call: &Value) -> bool {
@@ -2593,45 +2730,76 @@ mod tests {
             read_only: vec![archive.clone()],
             ..session(&root)
         });
-        let permission = |id, name, kind, input| json!({
-            "id": id,
-            "method": "session/request_permission",
-            "params": {
-                "toolCall": {"name": name, "kind": kind, "rawInput": input},
-                "options": [
-                    {"optionId": "allow", "kind": "allow_once"},
-                    {"optionId": "deny", "kind": "reject_once"}
-                ]
-            }
-        });
+        let permission = |id, name, kind, input| {
+            json!({
+                "id": id,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {"name": name, "kind": kind, "rawInput": input},
+                    "options": [
+                        {"optionId": "allow", "kind": "allow_once"},
+                        {"optionId": "deny", "kind": "reject_once"}
+                    ]
+                }
+            })
+        };
         for call in [
             permission("read", "read_file", "read", json!({"Path": file})),
-            permission("search", "grep_search", "search", json!({"SearchPath": archive})),
+            permission(
+                "search",
+                "grep_search",
+                "search",
+                json!({"SearchPath": archive}),
+            ),
         ] {
             let reply = acp.after_line(&call);
             assert!(reply.events.is_empty());
             assert_eq!(written(&reply)["result"]["outcome"]["optionId"], "allow");
         }
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap()).canonicalize().unwrap();
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .canonicalize()
+            .unwrap();
         let relative_to_home = "../".repeat(home.components().count() - 1);
-        let tilde = |path: &Path| format!("~/{relative_to_home}{}", path.strip_prefix("/").unwrap().display());
+        let tilde = |path: &Path| {
+            format!(
+                "~/{relative_to_home}{}",
+                path.strip_prefix("/").unwrap().display()
+            )
+        };
         let missing_file = archive.join("missing/checks.md");
-        let mut read = permission("missing", "read_file", "read", json!({"Path": tilde(&missing_file)}));
+        let mut read = permission(
+            "missing",
+            "read_file",
+            "read",
+            json!({"Path": tilde(&missing_file)}),
+        );
         read["params"]["toolCall"]["locations"] = json!([{"path": missing_file}]);
         let reply = acp.after_line(&read);
         assert!(reply.events.is_empty());
         assert_eq!(written(&reply)["result"]["outcome"]["optionId"], "allow");
 
         let edit = acp.after_line(&permission(
-            "edit", "write_file", "edit", json!({"Path": tilde(&missing_file)}),
+            "edit",
+            "write_file",
+            "edit",
+            json!({"Path": tilde(&missing_file)}),
         ));
-        assert!(matches!(edit.events.as_slice(), [RunEvent::PermissionDenied { .. }]));
+        assert!(matches!(
+            edit.events.as_slice(),
+            [RunEvent::PermissionDenied { .. }]
+        ));
         assert_eq!(written(&edit)["result"]["outcome"]["optionId"], "deny");
         let outside = acp.after_line(&permission(
-            "outside", "grep_search", "search", json!({"SearchPath": root}),
+            "outside",
+            "grep_search",
+            "search",
+            json!({"SearchPath": root}),
         ));
         assert!(outside.writes.is_empty());
-        assert!(matches!(outside.events.as_slice(), [RunEvent::Approval { .. }]));
+        assert!(matches!(
+            outside.events.as_slice(),
+            [RunEvent::Approval { .. }]
+        ));
     }
 
     #[test]
@@ -3000,6 +3168,225 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, RunEvent::Steered(_) | RunEvent::Failed { .. })));
+    }
+
+    fn command(id: &str, status: &str) -> Value {
+        json!({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": id,
+            "name": "run_command",
+            "kind": "execute",
+            "status": status,
+            "rawInput": {"CommandLine": "cargo test", "WaitMsBeforeAsync": 500},
+            "rawOutput": {"output": "ok\n", "exit_code": 0},
+        }}})
+    }
+
+    #[test]
+    fn a_turn_that_leaves_a_command_running_waits_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut acp = AcpClient::new(session(dir.path()));
+        acp.opening();
+        for id in 1..=5 {
+            acp.after_line(&line(&format!(
+                r#"{{"id":{id},"result":{{"sessionId":"s"}}}}"#
+            )));
+        }
+        // As agy sends them: in progress, pending while it asks, then running.
+        for status in ["in_progress", "pending", "in_progress"] {
+            acp.after_line(&command("t1", status));
+        }
+        acp.after_line(&line(
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I will continue once it finishes."}}}}"#,
+        ));
+        let held = acp.after_line(&line(r#"{"id":100,"result":{"stopReason":"end_turn"}}"#));
+        assert!(!held.close && held.writes.is_empty());
+        assert_eq!(
+            held.events,
+            vec![RunEvent::Text("I will continue once it finishes.".into())]
+        );
+        // A message meanwhile goes straight in, and its turn's end waits too.
+        let steer: Value = serde_json::from_str(&acp.steer("Any news?")[0]).unwrap();
+        assert_eq!(steer["id"], 101);
+        let still = acp.after_line(&line(r#"{"id":101,"result":{"stopReason":"end_turn"}}"#));
+        assert!(!still.close && still.writes.is_empty());
+        assert_eq!(still.events, vec![RunEvent::Steered("Any news?".into())]);
+        // The command's end starts a turn whose answer ends the run.
+        let ended = acp.after_line(&command("t1", "completed"));
+        assert!(!ended.close);
+        assert!(matches!(
+            ended.events.last(),
+            Some(RunEvent::ToolResult { ok: true, .. })
+        ));
+        let nudge = written(&ended);
+        assert_eq!(nudge["method"], "session/prompt");
+        assert_eq!(nudge["id"], 102);
+        assert_eq!(nudge["params"]["prompt"][0]["text"], COMMAND_ENDED);
+        let echoed = acp.after_line(&json!({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": COMMAND_ENDED},
+        }}}));
+        assert!(
+            echoed.events.is_empty(),
+            "Perch's own words are not the reader's"
+        );
+        let done = acp.after_line(&line(r#"{"id":102,"result":{"stopReason":"end_turn"}}"#));
+        assert!(done.close);
+        assert!(matches!(
+            done.events.last(),
+            Some(RunEvent::Finished { .. })
+        ));
+    }
+
+    #[test]
+    fn a_command_that_ends_in_its_turn_or_is_never_allowed_holds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        for statuses in [
+            &["in_progress", "completed"][..],
+            &["in_progress", "pending"],
+        ] {
+            let mut acp = AcpClient::new(session(dir.path()));
+            acp.opening();
+            for id in 1..=5 {
+                acp.after_line(&line(&format!(
+                    r#"{{"id":{id},"result":{{"sessionId":"s"}}}}"#
+                )));
+            }
+            for status in statuses {
+                let reply = acp.after_line(&command("t1", status));
+                assert!(reply.writes.is_empty());
+            }
+            let end = acp.after_line(&line(r#"{"id":100,"result":{"stopReason":"end_turn"}}"#));
+            assert!(end.close, "{statuses:?}");
+        }
+    }
+
+    fn ready(dir: &Path) -> AcpClient {
+        let mut acp = AcpClient::new(session(dir));
+        acp.opening();
+        for id in 1..=5 {
+            acp.after_line(&line(&format!(
+                r#"{{"id":{id},"result":{{"sessionId":"s"}}}}"#
+            )));
+        }
+        acp
+    }
+
+    fn thought() -> Value {
+        json!({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "Waiting on it."},
+        }}})
+    }
+
+    fn turn_end(id: u64) -> Value {
+        json!({"id": id, "result": {"stopReason": "end_turn"}})
+    }
+
+    #[test]
+    fn a_command_that_ends_in_the_background_before_the_turn_does_is_followed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut acp = ready(dir.path());
+        acp.after_line(&command("t1", "in_progress"));
+        // agy goes on while it runs, so it went to the background.
+        acp.after_line(&thought());
+        let ended = acp.after_line(&command("t1", "completed"));
+        assert!(ended.writes.is_empty(), "the turn is still going");
+        let end = acp.after_line(&turn_end(100));
+        assert!(!end.close);
+        let nudge = written(&end);
+        assert_eq!(nudge["id"], 101);
+        assert_eq!(nudge["params"]["prompt"][0]["text"], COMMAND_ENDED);
+        assert!(acp.after_line(&turn_end(101)).close);
+    }
+
+    #[test]
+    fn each_background_command_s_end_is_taken_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut acp = ready(dir.path());
+        acp.after_line(&command("t1", "in_progress"));
+        acp.after_line(&command("t2", "in_progress"));
+        assert!(acp.after_line(&turn_end(100)).writes.is_empty());
+        let first = acp.after_line(&command("t1", "completed"));
+        assert_eq!(written(&first)["id"], 101);
+        // t2 ends while agy answers for t1.
+        assert!(acp
+            .after_line(&command("t2", "completed"))
+            .writes
+            .is_empty());
+        let next = acp.after_line(&turn_end(101));
+        assert!(!next.close);
+        assert_eq!(written(&next)["id"], 102);
+        assert!(acp.after_line(&turn_end(102)).close);
+    }
+
+    #[test]
+    fn a_steer_s_turn_still_takes_in_a_command_that_ends_during_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut acp = ready(dir.path());
+        acp.after_line(&command("t1", "in_progress"));
+        acp.after_line(&turn_end(100));
+        acp.steer("Any news?");
+        acp.after_line(&command("t1", "completed"));
+        let end = acp.after_line(&turn_end(101));
+        assert!(!end.close);
+        assert_eq!(written(&end)["params"]["prompt"][0]["text"], COMMAND_ENDED);
+    }
+
+    #[test]
+    fn an_update_without_a_name_or_status_leaves_a_command_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut acp = ready(dir.path());
+        acp.after_line(&command("t1", "in_progress"));
+        acp.after_line(&json!({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "t1",
+            "content": [{"type": "content", "content": {"type": "text", "text": "Compiling"}}],
+        }}}));
+        let end = acp.after_line(&turn_end(100));
+        assert!(!end.close && end.writes.is_empty());
+        let ended = acp.after_line(&json!({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "t1",
+            "status": "completed",
+        }}}));
+        assert_eq!(
+            written(&ended)["params"]["prompt"][0]["text"],
+            COMMAND_ENDED
+        );
+    }
+
+    #[test]
+    fn a_daemon_does_not_hold_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut acp = ready(dir.path());
+        acp.after_line(&json!({"method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "d1",
+            "name": "run_command",
+            "kind": "execute",
+            "status": "in_progress",
+            "rawInput": {"CommandLine": "npm run dev", "IsDaemon": true},
+        }}}));
+        acp.after_line(&thought());
+        assert!(acp.after_line(&turn_end(100)).close);
+    }
+
+    #[test]
+    fn usage_adds_up_across_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut acp = ready(dir.path());
+        acp.after_line(&command("t1", "in_progress"));
+        acp.after_line(&json!({"id": 100, "result": {"stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 2, "cachedReadTokens": 5}}}));
+        acp.after_line(&command("t1", "completed"));
+        let done = acp.after_line(&json!({"id": 101, "result": {"stopReason": "end_turn",
+            "usage": {"inputTokens": 4, "outputTokens": 1, "cachedReadTokens": 7}}}));
+        assert!(done.events.contains(&RunEvent::Usage {
+            input_tokens: Some(14),
+            output_tokens: Some(3),
+            cached_input_tokens: Some(12),
+        }));
     }
 
     #[test]
