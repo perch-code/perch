@@ -694,15 +694,19 @@ pub fn can_add_read_dir(
     cwd: &std::path::Path,
     read_dirs: &[PathBuf],
     extra: &std::path::Path,
-    work: bool,
+    mode: &Mode,
 ) -> bool {
     if !extra.is_dir() {
         return false;
     }
-    match (backend, work) {
-        (Backend::OpenCode, _) => opencode::can_add_read_dir(cwd, read_dirs, extra),
-        (Backend::Gemini, true) => gemini::can_share_with_work(cwd, extra),
-        (Backend::Gemini, false) => {
+    match (backend, mode) {
+        (Backend::OpenCode, Mode::Work(grant)) if grant.trust => {
+            // Trust applies to the existing workspace, not the optional archive.
+            opencode::can_read_archive(extra)
+        }
+        (Backend::OpenCode, _) => opencode::can_add_optional_read_dir(cwd, read_dirs, extra),
+        (Backend::Gemini, Mode::Work(_)) => gemini::can_share_with_work(cwd, extra),
+        (Backend::Gemini, Mode::Ask) => {
             let mut dirs = read_dirs.to_vec();
             dirs.push(extra.to_path_buf());
             gemini::refusal(cwd, &dirs, false).is_none()

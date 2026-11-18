@@ -1618,13 +1618,12 @@ impl AcpClient {
             };
         }
         if let Some(paths) = edit_paths(&call, &self.session.cwd) {
-            if paths
-                .iter()
-                .any(|path| {
+            if paths.as_ref().map_or(true, |paths| {
+                paths.iter().any(|path| {
                     self.session.read_only.iter().any(|dir| path.starts_with(dir))
                         || is_protected(path, &self.session.cwd, &self.session.writable)
                 })
-            {
+            }) {
                 self.refused = true;
                 events.push(RunEvent::PermissionDenied {
                     tool: Some(tool_name(&call)).filter(|n| !n.is_empty()),
@@ -1636,10 +1635,8 @@ impl AcpClient {
                     ..Reply::default()
                 };
             }
-            if !paths.is_empty()
-                && paths
-                    .iter()
-                    .all(|path| may_edit(path, &self.session.writable))
+            if paths.is_ok_and(|paths| !paths.is_empty()
+                && paths.iter().all(|path| may_edit(path, &self.session.writable)))
             {
                 return Reply {
                     writes: answer_line(&id, &options, true).into_iter().collect(),
@@ -1779,6 +1776,7 @@ const EDIT_PATH_KEYS: &[&str] = &[
 /// the granted directories. The CLI still asks about other tool calls.
 fn may_read(call: &Value, cwd: &Path, dirs: &[PathBuf]) -> bool {
     if dirs.is_empty()
+        || is_edit_call(call)
         || !matches!(
             tool_name(call).as_str(),
             "read" | "read_file" | "view_file" | "view_file_outline" | "view_code_item"
@@ -1796,8 +1794,8 @@ fn may_read(call: &Value, cwd: &Path, dirs: &[PathBuf]) -> bool {
         .filter_map(|key| args[key].as_str());
     let mut paths = locations.chain(arguments).filter(|path| !path.is_empty()).peekable();
     paths.peek().is_some() && paths.all(|path| {
-        std::fs::canonicalize(cwd.join(path))
-            .is_ok_and(|real| dirs.iter().any(|dir| real.starts_with(dir)))
+        resolve_tool_path(cwd, path)
+            .is_some_and(|real| dirs.iter().any(|dir| real.starts_with(dir)))
     })
 }
 
@@ -1823,18 +1821,20 @@ fn is_edit_call(call: &Value) -> bool {
 /// The files an edit request writes, when it is one: ACP's `edit` kind,
 /// with its locations, the paths in its input, or an `apply_patch` body,
 /// each resolved against `cwd`.
-fn edit_paths(call: &Value, cwd: &Path) -> Option<Vec<PathBuf>> {
+fn edit_paths(call: &Value, cwd: &Path) -> Option<Result<Vec<PathBuf>, ()>> {
     if !is_edit_call(call) {
         return None;
     }
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut unresolved = false;
     let mut push = |raw: &str| {
         if raw.is_empty() {
             return;
         }
-        let p = PathBuf::from(raw);
-        let joined = if p.is_relative() { cwd.join(p) } else { p };
-        let norm = resolve(&joined).unwrap_or(joined);
+        let Some(norm) = resolve_tool_path(cwd, raw) else {
+            unresolved = true;
+            return;
+        };
         if !paths.contains(&norm) {
             paths.push(norm);
         }
@@ -1884,41 +1884,57 @@ fn edit_paths(call: &Value, cwd: &Path) -> Option<Vec<PathBuf>> {
             }
         }
     }
-    Some(paths)
+    Some(if unresolved { Err(()) } else { Ok(paths) })
 }
 
-/// `path` with `..` and `.` resolved and the longest part that exists
-/// taken through its symlinks: a file the edit creates does not exist
-/// yet. `None` for a relative path, or one that climbs above the root.
+fn resolve_tool_path(cwd: &Path, raw: &str) -> Option<PathBuf> {
+    let path = if raw == "~" || raw.starts_with("~/") {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        if !home.is_absolute() {
+            return None;
+        }
+        home.join(raw[1..].trim_start_matches('/'))
+    } else if raw.starts_with('~') {
+        // A named user's home is ambiguous across tools.
+        return None;
+    } else {
+        cwd.join(raw)
+    };
+    resolve(&path)
+}
+
+/// Resolve existing components through symlinks before appending any
+/// missing file or directory names. Reject ambiguous paths.
 fn resolve(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
-    let mut lexical = PathBuf::new();
+    match path.canonicalize() {
+        Ok(real) => return Some(real),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let mut resolved = PathBuf::new();
     for component in path.components() {
         match component {
             Component::ParentDir => {
-                if !lexical.pop() {
+                if !resolved.pop() {
                     return None;
                 }
             }
             Component::CurDir => {}
-            other => lexical.push(other),
-        }
-    }
-    let mut existing = lexical.as_path();
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(existing) {
-            let mut out = real;
-            for part in rest.iter().rev() {
-                out.push(part);
+            other => {
+                resolved.push(other);
+                match resolved.symlink_metadata() {
+                    Ok(meta) if meta.is_symlink() => resolved = resolved.canonicalize().ok()?,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
             }
-            return Some(out);
         }
-        rest.push(existing.file_name()?.to_os_string());
-        existing = existing.parent()?;
     }
+    Some(resolved)
 }
 
 fn has_protected_name(path: &Path) -> bool {
@@ -1998,6 +2014,7 @@ fn approval(call: &Value, cwd: &Path, writable: &[PathBuf]) -> ApprovalRequest {
             // Every path that needs asking, so none hides behind one that
             // would have gone anyway, and "Always" keeps exactly that set.
             let asked: Vec<PathBuf> = edit_paths(call, cwd)
+                .and_then(Result::ok)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|p| !may_edit(p, writable))
@@ -2595,9 +2612,18 @@ mod tests {
             assert!(reply.events.is_empty());
             assert_eq!(written(&reply)["result"]["outcome"]["optionId"], "allow");
         }
-        let new_file = archive.join("new.md");
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap()).canonicalize().unwrap();
+        let relative_to_home = "../".repeat(home.components().count() - 1);
+        let tilde = |path: &Path| format!("~/{relative_to_home}{}", path.strip_prefix("/").unwrap().display());
+        let missing_file = archive.join("missing/checks.md");
+        let mut read = permission("missing", "read_file", "read", json!({"Path": tilde(&missing_file)}));
+        read["params"]["toolCall"]["locations"] = json!([{"path": missing_file}]);
+        let reply = acp.after_line(&read);
+        assert!(reply.events.is_empty());
+        assert_eq!(written(&reply)["result"]["outcome"]["optionId"], "allow");
+
         let edit = acp.after_line(&permission(
-            "edit", "write_file", "edit", json!({"Path": new_file}),
+            "edit", "write_file", "edit", json!({"Path": tilde(&missing_file)}),
         ));
         assert!(matches!(edit.events.as_slice(), [RunEvent::PermissionDenied { .. }]));
         assert_eq!(written(&edit)["result"]["outcome"]["optionId"], "deny");

@@ -18848,9 +18848,16 @@ async fn ask_as(
         }
     };
     let knowledge_dir = if resume.is_none() || resumed_knowledge.is_some() {
-        run_knowledge_dir(ctx, &item, backend, &checkout.worktree, &read_dirs, work.is_some())
-            .await
-            .filter(|dir| resumed_knowledge.as_ref().is_none_or(|old_dir| old_dir == dir))
+        run_knowledge_dir(
+            ctx,
+            &item,
+            backend,
+            &checkout.worktree,
+            &read_dirs,
+            work.as_ref().map(|(mode, _, _)| mode),
+        )
+        .await
+        .filter(|dir| resumed_knowledge.as_ref().is_none_or(|old_dir| old_dir == dir))
     } else {
         None
     };
@@ -19789,13 +19796,14 @@ async fn run_knowledge_dir(
     backend: perch_agent::Backend,
     cwd: &Path,
     read_dirs: &[PathBuf],
-    work: bool,
+    mode: Option<&perch_agent::Mode>,
 ) -> Option<PathBuf> {
+    let mode = mode.cloned().unwrap_or_default();
     let dir = ctx.knowledge_dir(item).await?;
     let cwd = cwd.to_owned();
     let read_dirs = read_dirs.to_vec();
     tokio::task::spawn_blocking(move || {
-        perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, work).then_some(dir)
+        perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, &mode).then_some(dir)
     })
     .await
     .ok()
@@ -20496,9 +20504,16 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
     let mut read_dirs = vec![crate::context::root(ctx.preparer.store().root())];
     let recorded_knowledge = recorded_knowledge_dir(ctx, &old.id);
     let knowledge_dir = match recorded_knowledge {
-        Some(recorded) => run_knowledge_dir(ctx, &item, backend, directory, &read_dirs, work.is_some())
-            .await
-            .filter(|dir| dir == &recorded),
+        Some(recorded) => run_knowledge_dir(
+            ctx,
+            &item,
+            backend,
+            directory,
+            &read_dirs,
+            work.as_ref().map(|(mode, _, _)| mode),
+        )
+        .await
+        .filter(|dir| dir == &recorded),
         None => None,
     };
     let input = crate::ask::PromptInput {
@@ -20536,6 +20551,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
+    let forget_archive = knowledge_dir.is_none() && spec.resume.is_none();
     read_dirs.extend(knowledge_dir);
     spec.read_dirs = read_dirs;
     let now = Timestamp::now();
@@ -20603,6 +20619,9 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         }) {
             tracing::warn!(run = %run.id, %error, "could not carry the discussion to the retry");
         }
+    }
+    if forget_archive {
+        forget_run_knowledge_dir(ctx, &run.id);
     }
     // Admission moved the request link and preserved its previous attempt in
     // the same transaction as the queued row and event.

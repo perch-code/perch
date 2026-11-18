@@ -216,7 +216,7 @@ async fn ask(
         let read_dirs = read_dirs.clone();
         tokio::task::spawn_blocking(move || {
             let dir = perch_engine::backend::cached_knowledge_dir(&root, &repo, kind, number)?;
-            perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, false).then_some(dir)
+            perch_agent::can_add_read_dir(backend, &cwd, &read_dirs, &dir, &perch_agent::Mode::Ask).then_some(dir)
         })
         .await
         .ok()

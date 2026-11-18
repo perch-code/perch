@@ -83,6 +83,7 @@ struct Catalog {
     places: HashMap<String, Place>,
     repos: BTreeMap<PathBuf, BTreeMap<PathBuf, Entry>>,
     changed_repos: BTreeSet<PathBuf>,
+    startup_complete: bool,
 }
 
 #[derive(PartialEq, Eq)]
@@ -193,10 +194,18 @@ impl Catalog {
     }
 }
 
+// Resolve the configured home once. Archive components below it still use
+// the filesystem helpers that refuse symlinks.
+fn canonical_home(root: &Path) -> PathBuf {
+    root.canonicalize()
+        .or_else(|_| std::path::absolute(root))
+        .unwrap_or_else(|_| root.to_owned())
+}
+
 impl Archive {
     pub(super) fn new(root: PathBuf, db: PathBuf) -> Self {
         Self {
-            root: std::path::absolute(&root).unwrap_or(root),
+            root: canonical_home(&root),
             db: std::path::absolute(&db).unwrap_or(db),
             shared: Arc::default(),
         }
@@ -289,6 +298,7 @@ impl Archive {
             }
             catalog.write_indexes();
             if startup {
+                catalog.startup_complete = true;
                 match cache.load_items() {
                     Ok(items) => archive.sweep(&catalog, &items),
                     Err(error) => {
@@ -404,7 +414,9 @@ impl Archive {
                 }
             }
             catalog.remove_item(&item.id, current);
-            catalog.write_indexes();
+            if catalog.startup_complete {
+                catalog.write_indexes();
+            }
         })
         .await
         {
@@ -416,10 +428,20 @@ impl Archive {
 impl Ctx {
     pub(super) async fn knowledge_dir(&self, item: &Item) -> Option<PathBuf> {
         let place = place(&self.knowledge.root, item)?;
-        let shared = self.knowledge.shared.clone();
+        let archive = self.knowledge.clone();
         let id = item.id.clone();
         tokio::task::spawn_blocking(move || {
-            let mut catalog = shared.catalog.lock().expect("archive catalog");
+            let mut catalog = archive.shared.catalog.lock().expect("archive catalog");
+            if !catalog.startup_complete {
+                drop(catalog);
+                let cache = Cache::open_read_only(&archive.db).ok()?;
+                return existing_knowledge_dir(
+                    &archive.root,
+                    &place.repo,
+                    Some(&place),
+                    &cache.load_items().ok()?,
+                );
+            }
             let entries = catalog.repos.get(&place.repo)?;
             if !entries.iter().any(|(path, entry)| {
                 *path != place.item
@@ -456,6 +478,7 @@ pub fn cached_knowledge_dir(
     kind: ItemKind,
     number: u64,
 ) -> Option<PathBuf> {
+    let root = canonical_home(root);
     let cache = Cache::open_read_only(&root.join("perch.db")).ok()?;
     let (target, items) = cache
         .read_snapshot(|cache| {
@@ -466,31 +489,37 @@ pub fn cached_knowledge_dir(
         })
         .ok()?
         .ok()?;
-    let own = target.as_ref().and_then(|item| place(root, item));
+    let own = target.as_ref().and_then(|item| place(&root, item));
     let repo_path = match &own {
         Some(place) => place.repo.clone(),
-        None => repo_place(root, repo)?,
+        None => repo_place(&root, repo)?,
     };
-    if !std::fs::symlink_metadata(repo_path.join("INDEX.md")).is_ok_and(|meta| meta.is_file()) {
+    existing_knowledge_dir(&root, &repo_path, own.as_ref(), &items)
+}
+
+fn existing_knowledge_dir(
+    root: &Path,
+    repo: &Path,
+    own: Option<&Place>,
+    items: &[Item],
+) -> Option<PathBuf> {
+    child_dirs(repo).ok()?;
+    let has_index = |dir: &Path| {
+        std::fs::symlink_metadata(dir.join("INDEX.md")).is_ok_and(|meta| meta.is_file())
+    };
+    if !has_index(repo) {
         return None;
     }
-    let other = items
+    items
         .iter()
         .filter_map(|item| place(root, item))
         .any(|place| {
-            place.repo == repo_path
-                && Some(&place) != own.as_ref()
-                && std::fs::symlink_metadata(place.path().join("INDEX.md"))
-                    .is_ok_and(|meta| meta.is_file())
-        });
-    if other {
-        // Opening the directory without following symlinks also verifies
-        // its ancestors before a backend is pointed at it.
-        child_dirs(&repo_path).ok()?;
-        std::path::absolute(repo_path).ok()
-    } else {
-        None
-    }
+            place.repo == repo
+                && Some(&place) != own
+                && child_dirs(&place.path()).is_ok()
+                && has_index(&place.path())
+        })
+        .then(|| repo.to_owned())
 }
 
 fn dirs(path: &Path) -> Vec<PathBuf> {
@@ -791,6 +820,43 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn startup_uses_the_existing_index_through_a_symlinked_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let (mut ctx, _) = ctx(&home, &nowhere(), &[]);
+        let actual = ctx.knowledge.root.clone();
+        fs::create_dir_all(&actual).unwrap();
+        let alias = home.join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        ctx.knowledge = Archive::new(alias, ctx.knowledge.db.clone());
+
+        let items = ["one", "two", "three"].map(|branch| worktree("a/b", branch));
+        ctx.with_cache(|cache| {
+            for item in &items {
+                cache.insert_item(item).unwrap();
+            }
+        });
+        flush(&ctx, true).await;
+        let repo = repo_place(&actual, "a/b").unwrap();
+        let index = repo.join("INDEX.md");
+        let contents = fs::read_to_string(&index).unwrap();
+        let mtime = fs::metadata(&index).unwrap().modified().unwrap();
+
+        *ctx.knowledge.shared.catalog.lock().unwrap() = Catalog::default();
+        let archive = &ctx.knowledge;
+        let cache = Cache::open_read_only(&archive.db).unwrap();
+        assert_eq!(ctx.knowledge_dir(&items[0]).await, Some(repo.clone()));
+        for item in &items[..2] {
+            assert!(archive.write_item(&cache, &item.id).unwrap());
+        }
+        assert_eq!(ctx.knowledge_dir(&items[0]).await, Some(repo));
+        delete_item(&ctx, &items[1].id, true).await.unwrap();
+        assert!(!place(&actual, &items[1]).unwrap().path().exists());
+        assert_eq!(fs::read_to_string(&index).unwrap(), contents);
+        assert_eq!(fs::metadata(&index).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[tokio::test]
     async fn the_live_archive_matches_a_rebuild_after_unopened_item_changes_and_takeover() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _) = ctx(&dir.path().canonicalize().unwrap(), &nowhere(), &[]);
@@ -813,7 +879,7 @@ pub(super) mod tests {
                 .unwrap();
             admit_review(cache, &pull, "pull-review");
         });
-        flush(&ctx, false).await;
+        flush(&ctx, true).await;
         assert!(branch_path.join("INDEX.md").is_file());
         assert!(pull_path.join("private/removed.md").is_file());
         assert_eq!(

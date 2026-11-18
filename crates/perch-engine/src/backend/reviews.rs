@@ -1192,7 +1192,7 @@ async fn execute_attempt(
     let read_dirs: Vec<_> = discussion_dir.iter().cloned().collect();
     let knowledge_dir = match run.owner.item_id().and_then(|id| ctx.item(id)) {
         Some(item) => {
-            super::run_knowledge_dir(ctx, &item, backend, &checkout, &read_dirs, false).await
+            super::run_knowledge_dir(ctx, &item, backend, &checkout, &read_dirs, None).await
         }
         None => None,
     };

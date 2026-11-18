@@ -226,7 +226,11 @@ fn refusal_with_budget(cwd: &Path, added: &[PathBuf], mut budget: usize) -> Opti
     None
 }
 
-pub(crate) fn can_add_read_dir(cwd: &Path, added: &[PathBuf], dir: &Path) -> bool {
+pub(crate) fn can_read_archive(dir: &Path) -> bool {
+    slash_path(&real_path(dir)).is_some() && refusal(dir, &[], false).is_none()
+}
+
+pub(crate) fn can_add_optional_read_dir(cwd: &Path, added: &[PathBuf], dir: &Path) -> bool {
     can_add_read_dir_with_budget(cwd, added, dir, SCAN_LIMIT)
 }
 
@@ -593,6 +597,24 @@ mod tests {
         std::fs::write(archive.join("conversation.md"), "").unwrap();
         assert!(!can_add_read_dir_with_budget(&checkout, &existing, &archive, limit));
         assert!(refusal_with_budget(&checkout, &existing, limit).is_none());
+    }
+
+    #[test]
+    fn trusted_work_checks_the_archive_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::create_dir(&archive).unwrap();
+        let outside = tmp.path().join("instructions.md");
+        std::fs::write(&outside, "").unwrap();
+        std::os::unix::fs::symlink(&outside, checkout.join("AGENTS.md")).unwrap();
+        let ask = crate::Mode::Ask;
+        let work = crate::Mode::Work(crate::WorkGrant { trust: true, ..Default::default() });
+        assert!(!crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &ask));
+        assert!(crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &work));
+        std::os::unix::fs::symlink(&outside, archive.join("AGENTS.md")).unwrap();
+        assert!(!crate::can_add_read_dir(Backend::OpenCode, &checkout, &[], &archive, &work));
     }
 
     #[test]
