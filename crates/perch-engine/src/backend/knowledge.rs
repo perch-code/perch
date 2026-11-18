@@ -526,3 +526,396 @@ fn prune_repo(repo: &Path) -> io::Result<()> {
 fn warn_path(path: &Path, error: io::Error) {
     tracing::warn!(path = %path.display(), %error, "could not update item archive");
 }
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::backend::{
+        delete_item, take_pull_request,
+        tests::{ctx, nowhere, pull_request},
+    };
+    use jiff::Timestamp;
+    use perch_github::{
+        Author, CheckState, Checks, CommentMessage, CommentThread, Discussion, ItemCheckout,
+        ItemSubject, NewReviewerAttempt, ReviewAdmission, ReviewGroupStatus, ReviewSnapshot,
+        ReviewerPhase, ThreadOrigin,
+    };
+    use std::fs;
+
+    fn worktree(repo: &str, branch: &str) -> Item {
+        let mut item = Item::new(repo, Timestamp::now());
+        item.checkout = Some(ItemCheckout {
+            branch: branch.into(),
+            base_ref: "main".into(),
+            head_sha: "head".into(),
+            path: "/checkout".into(),
+            owned: false,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        item
+    }
+
+    #[test]
+    fn archive_places_are_stable_and_distinguish_worktrees() {
+        let root = Path::new("/perch-home");
+        let slash = worktree("Acme/Widgets", "fix/wal");
+        let hyphen = worktree("acme/widgets", "fix-wal");
+        let upper = worktree("acme/widgets", "Fix");
+        let lower = worktree("acme/widgets", "fix");
+        let path = |item: &Item| place(root, item).unwrap();
+        assert_eq!(path(&slash).repo, path(&hyphen).repo);
+        assert_ne!(path(&slash), path(&hyphen));
+        assert_ne!(path(&upper), path(&lower));
+        let mut changed = slash.clone();
+        changed.checkout.as_mut().unwrap().branch = "renamed".into();
+        assert_ne!(path(&changed), path(&slash));
+        changed.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        assert_eq!(path(&changed).item, Path::new("pulls/7"));
+    }
+
+    async fn flush(ctx: &Ctx, startup: bool) {
+        let archive = &ctx.knowledge;
+        let cache = Cache::open_read_only(&archive.db).unwrap();
+        let ids = if startup {
+            cache
+                .load_items()
+                .unwrap()
+                .into_iter()
+                .map(|item| item.id)
+                .collect()
+        } else {
+            std::mem::take(&mut *archive.shared.marked.lock().unwrap())
+        };
+        archive
+            .write_batch(cache, &ctx.item_lifecycle, ids, startup)
+            .await
+            .unwrap();
+    }
+
+    fn tree(path: &Path) -> BTreeMap<PathBuf, String> {
+        fn read(root: &Path, path: &Path, out: &mut BTreeMap<PathBuf, String>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    read(root, &entry.path(), out);
+                } else {
+                    out.insert(
+                        entry.path().strip_prefix(root).unwrap().into(),
+                        fs::read_to_string(entry.path()).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        read(path, path, &mut files);
+        files
+    }
+
+    pub(in crate::backend) async fn assert_rebuild(ctx: &Ctx) {
+        flush(ctx, false).await;
+        let root = ctx.knowledge.root.join("knowledge/perch");
+        let before = tree(&root);
+        assert!(before.keys().any(|file| file.ends_with("findings.md")));
+        fs::remove_dir_all(&root).unwrap();
+        *ctx.knowledge.shared.catalog.lock().unwrap() = Catalog::default();
+        flush(ctx, true).await;
+        assert_eq!(tree(&root), before);
+    }
+
+    pub(in crate::backend) fn admit_review(cache: &Cache, item: &Item, id: &str) {
+        let now = Timestamp::now();
+        cache
+            .admit_review_group(&ReviewAdmission {
+                group_id: id.into(),
+                snapshot: ReviewSnapshot {
+                    id: format!("{id}-snapshot"),
+                    item_id: item.id.clone(),
+                    repository: item.repo_full_name.clone(),
+                    branch_label: item.branch().map(str::to_string),
+                    requested_base_ref: "main".into(),
+                    base_tip_sha: "base".into(),
+                    merge_base_sha: "base".into(),
+                    head_sha: "head".into(),
+                    dirty_edits_excluded: false,
+                    retention_key: format!("{id}-retention"),
+                    retained_ref: None,
+                    manifest_path: None,
+                    diff_path: None,
+                    created_at: now,
+                    worktree_parent_sha: None,
+                },
+                attempts: vec![NewReviewerAttempt {
+                    id: format!("{id}-attempt"),
+                    run_id: None,
+                    backend: "codex".into(),
+                    executable: None,
+                    executable_version: None,
+                    model: "test".into(),
+                    effort: "low".into(),
+                    adapter_version: "1".into(),
+                    output_format_version: "1".into(),
+                    created_at: now,
+                }],
+                admitted_at: now,
+                instructions: None,
+            })
+            .unwrap();
+    }
+
+    pub(in crate::backend) fn finish_review(cache: &Cache, id: &str) {
+        let now = Timestamp::now();
+        let attempt = format!("{id}-attempt");
+        cache
+            .transition_review_group(id, ReviewGroupStatus::Reviewing, now)
+            .unwrap();
+        cache
+            .transition_reviewer_attempt(&attempt, ReviewerPhase::Reviewing, now)
+            .unwrap();
+        cache
+            .transition_reviewer_attempt(&attempt, ReviewerPhase::Completed, now)
+            .unwrap();
+        cache
+            .transition_review_group(id, ReviewGroupStatus::Reconciling, now)
+            .unwrap();
+        cache
+            .finish_review_group(id, ReviewGroupStatus::Empty, now)
+            .unwrap();
+    }
+
+    fn private_thread(item: &Item, id: &str) -> CommentThread {
+        let now = Timestamp::now();
+        CommentThread {
+            id: id.into(),
+            worktree_id: item.id.clone(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: now,
+            messages: vec![CommentMessage {
+                id: format!("{id}-question"),
+                thread_id: id.into(),
+                origin: ThreadOrigin::Local,
+                author: Author::User,
+                body: "Private question".into(),
+                created_at: now,
+                run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_poll_proceeds_before_a_large_archive_is_written() {
+        use crate::backend::{command_loop, connections::Inbound, tests::serve_by_method};
+
+        let (url, requests) = serve_by_method(|_, _, _| ("200 OK", "[]".into()));
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(&tmp.path().canonicalize().unwrap(), &url, &[]);
+        ctx.with_cache(|cache| {
+            for number in 0..2_000 {
+                cache
+                    .insert_item(&worktree("local/notes", &format!("branch-{number}")))
+                    .unwrap();
+            }
+        });
+
+        let (gathered, gathered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        *ctx.knowledge.shared.after_gather.lock().unwrap() = Some(Box::new(move || {
+            let _ = gathered.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        }));
+        let (commands, inbound) = tokio::sync::mpsc::unbounded_channel();
+        let engine = tokio::spawn(command_loop(ctx.clone(), inbound));
+        tokio::time::timeout(Duration::from_secs(5), gathered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.starts_with("/notifications")));
+        assert!(!ctx.knowledge.root.join("knowledge/perch/repos").exists());
+        commands.send(Inbound::Shutdown).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), engine)
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_waits_for_an_export_that_already_gathered_the_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(&dir.path().canonicalize().unwrap(), &nowhere(), &[]);
+        let item = worktree("a/b", "ready");
+        let path = place(&ctx.knowledge.root, &item).unwrap().path();
+        ctx.with_cache(|cache| cache.insert_item(&item).unwrap());
+
+        let (gathered, gathered_rx) = tokio::sync::oneshot::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel();
+        *ctx.knowledge.shared.after_gather.lock().unwrap() = Some(Box::new(move || {
+            gathered.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }));
+        let writing = tokio::spawn({
+            let ctx = ctx.clone();
+            async move { flush(&ctx, false).await }
+        });
+        gathered_rx.await.unwrap();
+        let mut deleting = tokio::spawn({
+            let ctx = ctx.clone();
+            let id = item.id.clone();
+            async move { delete_item(&ctx, &id, true).await }
+        });
+        let blocked = tokio::time::timeout(Duration::from_millis(50), &mut deleting).await;
+        resume.send(()).unwrap();
+        assert!(blocked.is_err(), "Delete must wait for the exporter");
+        writing.await.unwrap();
+        deleting.await.unwrap().unwrap();
+        flush(&ctx, false).await;
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn the_live_archive_matches_a_rebuild_after_unopened_item_changes_and_takeover() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(&dir.path().canonicalize().unwrap(), &nowhere(), &[]);
+        let archive = &ctx.knowledge;
+        let mut branch = worktree("a/b", "branch");
+        let mut pull = Item::new("a/b", Timestamp::now());
+        pull.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        let pull_id = pull.id.clone();
+        let branch_path = place(&archive.root, &branch).unwrap().path();
+        let pull_place = place(&archive.root, &pull).unwrap();
+        let pull_path = pull_place.path();
+        ctx.with_cache(|cache| {
+            cache.insert_item(&branch).unwrap();
+            cache.insert_item(&pull).unwrap();
+            cache
+                .insert_comment_thread(&private_thread(&pull, "question"))
+                .unwrap();
+            cache
+                .insert_comment_thread(&private_thread(&pull, "removed"))
+                .unwrap();
+            admit_review(cache, &pull, "pull-review");
+        });
+        flush(&ctx, false).await;
+        assert!(branch_path.join("INDEX.md").is_file());
+        assert!(pull_path.join("private/removed.md").is_file());
+        assert_eq!(
+            ctx.knowledge_dir(&branch).await,
+            Some(pull_place.repo.clone())
+        );
+
+        ctx.with_cache(|cache| {
+            cache
+                .store_checks(
+                    &pull.id,
+                    &pull.pull_request().unwrap().head_sha,
+                    &Checks {
+                        state: CheckState::Passing,
+                        url: None,
+                        runs: vec![perch_github::Check {
+                            name: "unit tests".into(),
+                            workflow: None,
+                            event: None,
+                            state: perch_github::CheckRunState::Success,
+                            description: None,
+                            url: None,
+                            started_at: None,
+                            completed_at: None,
+                            kind: perch_github::CheckKind::StatusContext,
+                        }],
+                    },
+                )
+                .unwrap();
+            cache.delete_private_messages("removed").unwrap();
+            finish_review(cache, "pull-review");
+        });
+        flush(&ctx, false).await;
+        assert!(
+            pull_path.join("checks.md").is_file(),
+            "checks without a stored discussion"
+        );
+        assert!(!pull_path.join("private/removed.md").exists());
+        assert!(fs::read_to_string(pull_path.join("findings.md"))
+            .unwrap()
+            .contains("empty"));
+
+        let mut merged = pull_request(7);
+        merged.merged = true;
+        merged.state = "closed".into();
+        pull.subject = Some(ItemSubject::PullRequest(merged.clone()));
+        ctx.with_cache(|cache| {
+            cache.update_item(&pull).unwrap();
+            cache
+                .rewrite_discussion(&pull.id, &Discussion::default())
+                .unwrap();
+        });
+        flush(&ctx, false).await;
+        assert!(fs::read_to_string(pull_place.repo.join("INDEX.md"))
+            .unwrap()
+            .contains("merged"));
+
+        ctx.with_cache(|cache| {
+            admit_review(cache, &branch, "branch-review");
+            finish_review(cache, "branch-review");
+            assert!(take_pull_request(cache, &mut branch, merged).unwrap());
+            assert!(cache.load_item(&pull_id).unwrap().is_none());
+            assert_eq!(
+                cache
+                    .list_review_groups(&branch.id, None, 10)
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert!(cache.load_discussion(&branch.id).unwrap().is_some());
+        });
+        flush(&ctx, false).await;
+        assert!(!branch_path.exists());
+        assert!(pull_path.join("private/question.md").is_file());
+        assert!(ctx.knowledge_dir(&branch).await.is_none());
+
+        let knowledge = archive.root.join("knowledge");
+        let before = tree(&knowledge);
+        let repo_index = pull_place.repo.join("INDEX.md");
+        let mtime = fs::metadata(&repo_index).unwrap().modified().unwrap();
+        flush(&ctx, true).await;
+        assert_eq!(
+            fs::metadata(&repo_index).unwrap().modified().unwrap(),
+            mtime
+        );
+        fs::remove_dir_all(knowledge.join("perch")).unwrap();
+        let legacy = knowledge.join("reviews/a/b");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("old.md"), "old history").unwrap();
+        let abandoned = pull_place.repo.join("pulls/23");
+        fs::create_dir_all(&abandoned).unwrap();
+        fs::write(abandoned.join("INDEX.md"), "left after a crash").unwrap();
+        // A fresh process starts with an empty catalog.
+        *ctx.knowledge.shared.catalog.lock().unwrap() = Catalog::default();
+        flush(&ctx, true).await;
+        assert_eq!(tree(&knowledge), before);
+        assert!(!abandoned.exists());
+        assert!(!knowledge.join("reviews").exists());
+        delete_item(&ctx, &branch.id, true).await.unwrap();
+        assert!(!pull_path.exists());
+        assert!(!pull_place.repo.exists());
+        flush(&ctx, false).await;
+        assert!(!pull_path.exists());
+    }
+}

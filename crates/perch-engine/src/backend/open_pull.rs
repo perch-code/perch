@@ -15,7 +15,7 @@ use perch_github::{Item, ItemCheckout, PullLookup, PullRequest};
 
 use super::{
     configured_base, count_divergence, head_repo_of, install_pull_request_snapshot,
-    refresh_open_item, refresh_scope, root_of, take_pull_request, Ctx, Event,
+    attach_pull_request, refresh_open_item, refresh_scope, root_of, Ctx, Event,
 };
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -189,7 +189,7 @@ async fn create_inner(
         .ok_or_else(|| format!("{head_repo} is not a GitHub repository"))?;
     if let Some(pr) = open_pull(ctx, &item, &head_owner, &head_repo, &checkout.branch).await? {
         let number = pr.number;
-        attach(ctx, item_id, pr)?;
+        attach(ctx, item_id, pr).await?;
         return Ok((
             number,
             Some(format!("#{number} was already open on this branch.")),
@@ -220,7 +220,7 @@ async fn create_inner(
     };
     let number = pr.number;
     tracing::info!(item = item_id, number, "opened a pull request");
-    attach(ctx, item_id, pr)?;
+    attach(ctx, item_id, pr).await?;
     Ok((number, None))
 }
 
@@ -1087,19 +1087,11 @@ async fn remote_for(ctx: &Ctx, checkout: &ItemCheckout, head_repo: &str) -> Stri
 }
 
 /// Give the branch's row its pull request, and the open view with it.
-fn attach(ctx: &Ctx, item_id: &str, pr: PullRequest) -> Result<(), String> {
-    let mut item = ctx.item(item_id).ok_or("The item is gone")?;
+async fn attach(ctx: &Ctx, item_id: &str, pr: PullRequest) -> Result<(), String> {
     let number = pr.number;
-    match ctx.with_cache(|c| take_pull_request(c, &mut item, pr)) {
-        Some(Ok(true)) => {}
-        Some(Ok(false)) => {
-            return Err(format!(
-                "#{number} is open, and another row with a worktree has it."
-            ));
-        }
-        Some(Err(e)) => return Err(e.to_string()),
-        None => return Err("The local database is unavailable".into()),
-    }
+    let item = attach_pull_request(ctx, item_id, pr).await?.ok_or_else(|| {
+        format!("#{number} is open, and another row with a worktree has it.")
+    })?;
     let Some(pull_request) = item.pull_request().cloned() else {
         return Err("The pull request was not stored".into());
     };

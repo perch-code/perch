@@ -8412,8 +8412,8 @@ impl Ctx {
             .is_some_and(|g| g.as_ref().is_some_and(|c| c.item_id == item_id))
     }
 
-    /// Hold one item's lifecycle. Nothing that holds it waits on a subject
-    /// or on another item, so `lock_subject` then this cannot deadlock.
+    /// Hold one item's lifecycle. A subject, when needed, is locked first.
+    /// The pull request takeover takes two item locks in ID order.
     async fn lock_item(&self, item_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         self.item_lifecycle.lock(format!("item {item_id}")).await
     }
@@ -16052,7 +16052,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
 
     // Unowned items in scanned repositories whose branch no worktree has.
     // A directory that is gone takes its row with it, unless the row has
-    // threads, which are worth an archived row. A directory still there on
+    // history worth keeping in an archived row. A directory still there on
     // another branch is the reader switching; the row is put away with its
     // directory marked gone, and the scan brings it back when the branch
     // is checked out again. A row the reader archived is theirs, and is
@@ -16076,25 +16076,30 @@ async fn scan_roots(ctx: &Ctx) -> bool {
             continue;
         }
         let still_there = c.path.join(".git").exists();
-        let has_threads = ctx
-            .with_cache(|cache| {
-                cache
-                    .load_comment_threads(&item.id)
-                    .map(|t| !t.is_empty())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if still_there || has_threads {
-            let mut item = item;
-            if let Some(c) = item.checkout.as_mut() {
-                c.on_disk = false;
+        let _lifecycle = ctx.lock_item(&item.id).await;
+        let result = ctx.with_cache(|cache| {
+            let Some(mut current) = cache.load_item(&item.id)? else {
+                return Ok(false);
+            };
+            if current.is_archived() || current.checkout != item.checkout {
+                return Ok(false);
             }
-            item.archived_at = Some(Timestamp::now());
-            ctx.with_cache(|cache| cache.update_item(&item));
-        } else {
-            ctx.with_cache(|cache| cache.delete_item(&item.id));
+            if still_there || cache.has_item_history(&item.id)? {
+                if let Some(checkout) = current.checkout.as_mut() {
+                    checkout.on_disk = false;
+                }
+                current.archived_at = Some(Timestamp::now());
+                cache.update_item(&current)?;
+            } else {
+                cache.delete_item(&item.id)?;
+            }
+            Ok::<_, CacheError>(true)
+        });
+        match result {
+            Some(Ok(updated)) => changed |= updated,
+            Some(Err(error)) => tracing::warn!(item = %item.id, %error, "could not retire a missing root worktree"),
+            None => {}
         }
-        changed = true;
     }
     changed
 }
@@ -16270,34 +16275,23 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                         }
                         continue;
                     };
-                    // The row as it is now, not as it was when the loop
-                    // began: a click may have opened it since.
-                    let Some(mut item) = ctx.item(&item.id) else {
-                        break;
-                    };
-                    if item.subject.is_some() {
-                        break;
-                    }
                     let number = pr.number;
-                    match ctx.with_cache(|c| take_pull_request(c, &mut item, *pr)) {
-                        Some(Ok(true)) => {
-                            tracing::info!(item = %item.id, number, "branch gained a pull request");
+                    match attach_pull_request(ctx, &item.id, *pr).await {
+                        Ok(Some(updated)) => {
+                            tracing::info!(item = %updated.id, number, "branch gained a pull request");
                             if let Some(etag) = etag {
                                 ctx.with_cache(|c| c.set_meta(&key, &etag));
                             }
                             changed = true;
                         }
-                        // Held by a row with a checkout of its own: that
-                        // row keeps it, and this one stays a branch.
-                        Some(Ok(false)) => {
+                        Ok(None) => {
                             if let Some(etag) = etag {
                                 ctx.with_cache(|c| c.set_meta(&key, &etag));
                             }
                         }
-                        Some(Err(e)) => {
-                            tracing::warn!(error = %e, "could not attach the pull request")
+                        Err(error) => {
+                            tracing::warn!(%error, "could not attach the pull request");
                         }
-                        None => {}
                     }
                     break;
                 }
@@ -16353,6 +16347,50 @@ async fn head_repo_of(ctx: &Ctx, item: &Item, checkout: &ItemCheckout) -> String
         .unwrap_or_else(|| item.repo_full_name.clone())
 }
 
+/// Serialize a takeover with opens and with Delete on either row. Both
+/// item locks are acquired in ID order when the subject already has a row.
+async fn attach_pull_request(
+    ctx: &Ctx,
+    item_id: &str,
+    pr: PullRequest,
+) -> Result<Option<Item>, String> {
+    let _subject = ctx
+        .lock_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)
+        .await;
+    let holder = ctx
+        .with_cache(|cache| {
+            cache.find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)
+        })
+        .ok_or("The local database is unavailable")?
+        .map_err(|error| error.to_string())?;
+    let mut ids = vec![item_id];
+    if let Some(holder) = holder.as_ref().filter(|holder| holder.id != item_id) {
+        if holder.checkout.is_some() {
+            return Ok(None);
+        }
+        ids.push(&holder.id);
+        ids.sort_unstable();
+    }
+    let mut guards = Vec::new();
+    for id in ids {
+        guards.push(ctx.lock_item(id).await);
+    }
+
+    ctx.with_cache(|cache| {
+        let mut item = cache.load_item(item_id).map_err(|error| error.to_string())?
+            .ok_or("The item is gone")?;
+        if let Some(subject) = &item.subject {
+            let same = matches!(subject, ItemSubject::PullRequest(current)
+                if current.number == pr.number && current.repo_full_name.eq_ignore_ascii_case(&pr.repo_full_name));
+            if !same {
+                return Err("The branch already has a different GitHub item".into());
+            }
+        }
+        let attached = take_pull_request(cache, &mut item, pr).map_err(|error| error.to_string())?;
+        Ok(attached.then_some(item))
+    }).ok_or_else(|| "The local database is unavailable".to_string())?
+}
+
 /// Give a branch row its pull request, under the one lock. `Ok(false)`
 /// when another row has the pull request and a checkout of its own, one
 /// opened in Perch before the branch was checked out in a root: that row
@@ -16365,24 +16403,26 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
     let holder = cache
         .find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)?
         .filter(|other| other.id != item.id);
+    if holder.as_ref().is_some_and(|holder| holder.checkout.is_some()) {
+        return Ok(false);
+    }
+    let mut updated = item.clone();
+    if let Some(checkout) = updated.checkout.as_mut() {
+        checkout.base_ref = pr.base_ref.clone();
+    }
+    updated.subject = Some(ItemSubject::PullRequest(pr));
     if let Some(holder) = holder {
-        if holder.checkout.is_some() {
-            return Ok(false);
+        tracing::info!(item = %item.id, from = %holder.id, "the branch takes the pull request from the subject-only row");
+        updated.pinned_at = updated.pinned_at.or(holder.pinned_at);
+        updated.name = updated.name.or(holder.name);
+        if updated.from_item_id.as_deref() == Some(&holder.id) {
+            updated.from_item_id = holder.from_item_id.filter(|parent| parent != &updated.id);
         }
-        tracing::info!(item = %item.id, from = %holder.id, number = pr.number, "the branch takes the pull request from the subject-only row");
-        if item.pinned_at.is_none() {
-            item.pinned_at = holder.pinned_at;
-        }
-        if item.name.is_none() {
-            item.name = holder.name;
-        }
-        cache.delete_item(&holder.id)?;
+        cache.take_item_history(&holder.id, &updated)?;
+    } else {
+        cache.update_item(&updated)?;
     }
-    if let Some(c) = item.checkout.as_mut() {
-        c.base_ref = pr.base_ref.clone();
-    }
-    item.subject = Some(ItemSubject::PullRequest(pr));
-    cache.update_item(item)?;
+    *item = updated;
     Ok(true)
 }
 
@@ -33690,6 +33730,33 @@ read eof || true
         let hidden = rows.iter().find(|i| i.id == next.id).unwrap();
         assert_eq!(branch_of(hidden), "renamed");
         assert!(hidden.is_archived());
+    }
+
+    #[tokio::test]
+    async fn a_missing_root_worktree_keeps_its_review_in_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("notes");
+        let worktree = root_with_branch(&root, "reviewed");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _) = ctx_declaring(&base, &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx
+            .with_cache(|cache| cache.load_items().unwrap().remove(0))
+            .unwrap();
+        ctx.with_cache(|cache| {
+            knowledge::tests::admit_review(cache, &item, "kept");
+            knowledge::tests::finish_review(cache, "kept");
+        });
+        git(&root, &["worktree", "remove", worktree.to_str().unwrap()]);
+        assert!(scan_roots(&ctx).await);
+        assert!(ctx.item(&item.id).unwrap().is_archived());
+        assert!(ctx
+            .with_cache(|cache| cache.load_review_group("kept").unwrap())
+            .unwrap()
+            .is_some());
+        knowledge::tests::assert_rebuild(&ctx).await;
     }
 
     #[tokio::test]
