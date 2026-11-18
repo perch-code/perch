@@ -219,10 +219,13 @@ incremental = true
 # Then one that centres text on its `H` when the font names no cap
 # height. DejaVu Sans, the default on many Linux desktops, has an OS/2
 # table too old to carry one, and its labels were centred on the ascent,
-# 0.1em low. Last, one that keeps the arrows in the editor on every
+# 0.1em low. Then one that keeps the arrows in the editor on every
 # platform. Alt with Left or Right is a word movement only on macOS, and
 # elsewhere the editor had no command for it, so floem's default action
-# walked the focus out of a text box with it.
+# walked the focus out of a text box with it. Last, one that ends the
+# text input's drag at a key as the editor's is ended: a letter typed
+# over a title's selection before the trackpad let the button go was
+# selected by the pointer's next move.
 # Drop a patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
