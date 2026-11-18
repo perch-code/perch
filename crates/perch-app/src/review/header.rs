@@ -506,6 +506,13 @@ pub(crate) mod tests {
     #[test]
     fn the_bar_is_the_title_the_switch_and_its_controls_in_a_row() {
         let (mut harness, app, _) = pull_request_harness();
+        // The bar reserves room for the inline shortcut text beside Back
+        // and Forward. It only shows after a Command hold, so reveal it
+        // before measuring: with it hidden the arrows are the two icons
+        // alone and give the shortcuts no room.
+        app.shortcut_hints.set(crate::state::ShortcutHints::Visible);
+        harness.rebuild();
+        harness.paint();
         let bar = rect(&harness, "item bar");
         assert_eq!(bar.height(), theme::REVIEW_HEADER_HEIGHT);
         assert_eq!(
