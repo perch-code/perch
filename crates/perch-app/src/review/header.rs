@@ -506,10 +506,17 @@ pub(crate) mod tests {
     #[test]
     fn the_bar_is_the_title_the_switch_and_its_controls_in_a_row() {
         let (mut harness, app, _) = pull_request_harness();
-        // The bar reserves room for the inline shortcut text beside Back
-        // and Forward. It only shows after a Command hold, so reveal it
-        // before measuring: with it hidden the arrows are the two icons
-        // alone and give the shortcuts no room.
+        // Until Command is held the shortcut text beside Back and Forward
+        // takes no room: the arrows are the two icons alone, and the
+        // title follows straight after them.
+        let arrows = rect(&harness, "history arrows");
+        assert_eq!(arrows.width(), 2.0 * 26.0, "no room for hidden shortcuts");
+        assert_eq!(
+            rect(&harness, "item title").x0,
+            arrows.x1 + 8.0 + 16.0 + 8.0
+        );
+        // The rest is measured with the shortcuts revealed, as a Command
+        // hold leaves them.
         app.shortcut_hints.set(crate::state::ShortcutHints::Visible);
         harness.rebuild();
         harness.paint();
