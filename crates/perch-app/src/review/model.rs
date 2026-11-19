@@ -4737,6 +4737,24 @@ impl ReviewState {
         });
     }
 
+    /// A run asked to stop says so where its thread shows it: the stop is
+    /// the scheduler's and comes with no step and no reload of the
+    /// threads, and without this the line keeps its Stop and its last
+    /// step until the process is gone.
+    pub fn apply_stopping(&self, update: &perch_github::RunRecord) {
+        use perch_github::RunStatus;
+        if update.status != RunStatus::Stopping {
+            return;
+        }
+        self.change_run(&update.id, |run| {
+            if run.status != RunStatus::Stopping
+                && run.status.can_transition_to(RunStatus::Stopping)
+            {
+                run.status = RunStatus::Stopping;
+            }
+        });
+    }
+
     /// The reader told run `run_id` something while it worked.
     pub fn apply_steer(&self, run_id: &str, text: &str) {
         self.change_run(run_id, |run| crate::ask::apply_steer(run, text));

@@ -5237,6 +5237,64 @@ mod tests {
         .is_some());
     }
 
+    /// Stop shows at once on the run's line: the scheduler's word that
+    /// the run is stopping reaches the thread without a step or a reload,
+    /// and the line says Stopping where it said what the agent was on.
+    #[test]
+    fn a_stopped_run_s_line_says_stopping() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages[2].body = String::new();
+        let running = RunRecord {
+            id: "run-1".into(),
+            status: RunStatus::Running,
+            ..RunRecord::default()
+        };
+        thread.messages[2].run = Some(running.clone());
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Label: \"Thinking\"").is_some());
+
+        // A later snapshot of the run still going changes nothing.
+        state.apply_stopping(&running);
+        state.apply_stopping(&RunRecord {
+            status: RunStatus::Stopping,
+            ..running.clone()
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Label: \"Stopping\"").is_some());
+        assert!(find(harness.root_id(), "Label: \"Thinking\"").is_none());
+
+        // One that has ended is not brought back to stopping.
+        state.comment_threads.update(|threads| {
+            let mut all = threads.as_ref().clone();
+            all[0].messages[2].run.as_mut().unwrap().status = RunStatus::Stopped;
+            *threads = Arc::new(all);
+        });
+        state.apply_stopping(&RunRecord {
+            status: RunStatus::Stopping,
+            ..running
+        });
+        let status = state
+            .comment_threads
+            .with_untracked(|threads| threads[0].messages[2].run.as_ref().unwrap().status);
+        assert_eq!(status, RunStatus::Stopped);
+    }
+
     /// A run on the reader's question draws as the agent's comment under
     /// it, with the agent's mark and the model, as its answer will.
     #[test]

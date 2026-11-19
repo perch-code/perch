@@ -1288,8 +1288,10 @@ async fn execute_attempt(
                 | perch_agent::RunEvent::Failed { .. }
                 | perch_agent::RunEvent::Stopped { .. }
         );
+        // The last event there is. Not left to the channel closing: the
+        // sender kept from a first spawn that worked holds it open.
         if terminal {
-            continue;
+            break;
         }
         if let perch_agent::RunEvent::Report {
             input, parent_id, ..

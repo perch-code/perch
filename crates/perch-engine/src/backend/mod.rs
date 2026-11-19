@@ -20301,8 +20301,15 @@ async fn execute_question(
                 | perch_agent::RunEvent::Failed { .. }
                 | perch_agent::RunEvent::Stopped { .. }
         );
+        // The last event there is, and `handle.wait` has what it says.
+        // Not left to the channel closing: a sender this function still
+        // holds, as after a first spawn that was not refused, keeps it
+        // open for good, and the run would never end nor stop.
+        if terminal {
+            break;
+        }
         let stored = reviews::stored_process_event(&event);
-        if !terminal && persistence_error.is_none() {
+        if persistence_error.is_none() {
             let Some(stored) = stored else { continue };
             match append_stored_event(ctx, &run.id, &format!("process-{event_index}"), stored) {
                 Ok(updated) => {
