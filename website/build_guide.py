@@ -12,6 +12,7 @@ from html.parser import HTMLParser
 import pathlib
 import re
 from string import Template
+from xml.etree import ElementTree as ET
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -19,8 +20,8 @@ WEBSITE = ROOT / "website"
 GUIDE = WEBSITE / "guide"
 TEMPLATES = WEBSITE / "templates"
 PUBLIC_ORIGIN = "https://perch.chat"
-HOME_TITLE = "Agents PRs suck. Perch helps you review them."
-HOME_DESCRIPTION = "The best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance."
+HOME_TITLE = "Perch — Review GitHub pull requests with coding agents"
+HOME_DESCRIPTION = "Review pull requests, discuss code with your team and coding agents, and start work from GitHub issues in one native app for macOS and Linux."
 HOME_CARD_TITLE = "Agent PRs suck."
 HOME_CARD_DESCRIPTION = "Perch gives you the best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance."
 GUIDE_TITLE = "The Perch Field Guide"
@@ -758,10 +759,26 @@ def render_markdown(
     return "\n".join(out)
 
 
+def canonical_url(path: str) -> str:
+    url = f"{PUBLIC_ORIGIN}/{path}"
+    return url.removesuffix("index.html") if path.rsplit("/", 1)[-1] == "index.html" else url
+
+
+def write_crawl_files(flat_pages) -> None:
+    paths = ["index.html", "guide/index.html"]
+    paths.extend(f"guide/{page['slug']}.html" for _, page in flat_pages)
+    sitemap = ET.Element("urlset", xmlns="http://www.sitemaps.org/schemas/sitemap/0.9")
+    for path in paths:
+        entry = ET.SubElement(sitemap, "url")
+        ET.SubElement(entry, "loc").text = canonical_url(path)
+    ET.indent(sitemap)
+    ET.ElementTree(sitemap).write(WEBSITE / "sitemap.xml", encoding="utf-8", xml_declaration=True)
+    (WEBSITE / "robots.txt").write_text(f"User-agent: *\nAllow: /\n\nSitemap: {PUBLIC_ORIGIN}/sitemap.xml\n")
+
+
 def social_metadata(path: str, title: str, description: str) -> str:
     page = pathlib.PurePosixPath(path)
     is_index = page.name == "index.html"
-    url = f"{PUBLIC_ORIGIN}/{path}"
     image = pathlib.PurePosixPath("img/social") / page.with_suffix(".png")
     if not (WEBSITE / image).is_file():
         raise FileNotFoundError(f"Missing {image}. Run website/build_social_cards.py to generate it.")
@@ -772,7 +789,7 @@ def social_metadata(path: str, title: str, description: str) -> str:
         image_alt = f"Field Guide cover with the Perch wren and the title “{title.removesuffix(' · Perch Field Guide')}”."
     template = Template((TEMPLATES / "social.tmpl").read_text())
     return template.substitute(
-        url=url.removesuffix("index.html") if is_index else url,
+        url=canonical_url(path),
         kind="website" if is_index else "article",
         title=html.escape(title), description=html.escape(description),
         image=f"{PUBLIC_ORIGIN}/{image}",
@@ -793,9 +810,14 @@ def render_page(
     current = ""
     if guide:
         current = ' aria-current="page"' if contents else ' aria-current="location"'
+    site_name = ""
+    if path == "index.html":
+        data = {"@context": "https://schema.org", "@type": "WebSite", "name": "Perch", "url": canonical_url(path)}
+        site_name = f'\n<script type="application/ld+json">{json.dumps(data)}</script>'
     return shell.substitute(
         title=html.escape(title), description=html.escape(description, quote=True),
         social=social_metadata(path, title, description),
+        site_name=site_name,
         prefix=prefix, page_class="guide-page" if guide else "tour-page",
         guide_current=current, install_id="footer-install" if guide else "install",
         page_css=f'<link rel="stylesheet" href="{prefix}{stylesheet}?v=1">',
@@ -981,6 +1003,7 @@ def main() -> None:
     ))
     (WEBSITE / "install.sh").write_bytes((ROOT / "install.sh").read_bytes())
     build_search_index(flat_pages)
+    write_crawl_files(flat_pages)
     print(f"Built the homepage, {len(flat_pages)} guide pages, guide contents, and search index.")
 
 

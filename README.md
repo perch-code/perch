@@ -3,6 +3,8 @@
 I got tired of flipping between github.com, VS Code, and Claude/Codex, so I
 made Perch to combine them into one native application.
 
+[Perch homepage](https://perch.chat/) · [Field Guide](https://perch.chat/guide/)
+
 Features:
 
 * Uses `gh` for GitHub and local coding-agent CLIs for Ask, Work, and Review.
