@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Settings window · Perch Field Guide</title>
+<meta name="description" content="Live-reloading preferences in the Settings window, reset controls, and parse-error handling.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html">Start work on an issue</a></li>
+<li><a href="starting-work.html">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html" aria-current="page">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <span id="settings"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Preferences and shortcuts</p>
+        <h1>Settings window</h1>
+        <p class="lede">How the Settings window edits ~/.perch/config.toml in place while Perch runs.</p>
+      </header>
+      <article class="prose">
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#sections-and-search">Sections and search</a></li><li><a href="#saving-and-live-reload">Saving and live reload</a></li></ul></details></nav>
+<h2 id="sections-and-search">Sections and search</h2>
+<p><code>Cmd-,</code> (<code>Ctrl-,</code> off macOS), <b>Settings…</b> in the Perch menu, or the gear at the foot of the sidebar opens Settings over the window: General, Environment, Appearance, Keyboard shortcuts, Agents, Work, Repositories, Knowledge and Language servers. The search box finds a setting in any section. <code>Escape</code> clears the search, then closes Settings, as do <code>Cmd-[</code> and <code>Cmd-W</code>, or the keys <code>back</code> and <code>close</code> are on. Keyboard shortcuts has a row for each action a key runs, where its keys can be changed: see <a href="keyboard-shortcuts.html#keyboard-shortcuts">Keyboard shortcuts</a>.</p>
+<h2 id="saving-and-live-reload">Saving and live reload</h2>
+<p>The environment choice under <b>This window</b> lasts for that window. Preferences are saved in <code>config.toml</code>. Each preference writes its own key and leaves the rest of the file as it was, comments included. The arrow beside a setting's title shows the file sets it; clicking it takes the key out, back to the default. A text field writes on <code>Enter</code> or when you leave it, and <code>Escape</code> puts back what the file has. Repositories has a card for each <code>[[repo]]</code>, with <b>Remove repository</b> and, at the end, <b>Add repository…</b>. Knowledge lists configured directories and lets you add or remove entries and change their repository scope.</p>
+<p>Perch looks at the file every two seconds, so an edit you make by hand is taken up while it runs. A file that doesn't parse changes nothing: Settings says why and turns its controls off, and Perch goes on with what it read last until the file is fixed. <b>Open in editor</b> opens it.</p>
+<p>Most settings apply at once. A new executable or models list makes Perch look for the agents again. Lowering <b>Runs at once</b> lets the runs going finish and holds new ones until there is room. Turning off <b>Start language servers without asking</b> sends servers on code no longer trusted back to asking. Zoom, code font size and the code font apply after a restart; Settings marks the ones waiting and offers to restart Perch.</p>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="agent-context.html" rel="prev"><span>Previous</span>Agent context and knowledge</a>
+<a href="configuration.html" rel="next"><span>Next</span>Configuration file (config.toml)</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>

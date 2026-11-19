@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Authentication · Perch Field Guide</title>
+<meta name="description" content="How Perch resolves a GitHub token from a GUI launch and which repository permissions each action needs.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html" aria-current="page">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html">Start work on an issue</a></li>
+<li><a href="starting-work.html">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <span id="authentication"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Get set up</p>
+        <h1>Authentication</h1>
+        <p class="lede">How Perch finds a GitHub token from a desktop launch, and what permissions reviews, merges, and issues need.</p>
+      </header>
+      <article class="prose">
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#credential-lookup-order">Credential lookup order</a></li><li><a href="#desktop-launches-and-login-shells">Desktop launches and login shells</a></li><li><a href="#required-github-permissions">Required GitHub permissions</a></li></ul></details></nav>
+<h2 id="credential-lookup-order">Credential lookup order</h2>
+<p>Perch calls GitHub's API directly. It resolves credentials in this order:</p>
+<ol><li><code>GITHUB_TOKEN</code></li><li><code>GH_TOKEN</code></li><li><code>gh auth token</code></li><li><code>token</code> in <code>~/.perch/config.toml</code></li><li><code>GITHUB_TOKEN</code>, then <code>GH_TOKEN</code>, as your login shell exports them</li></ol>
+<h2 id="desktop-launches-and-login-shells">Desktop launches and login shells</h2>
+<p>Using <code>gh auth login</code> is the simplest setup for the desktop app because a GUI launch does not normally inherit shell environment variables: opened from Finder or the Dock, Perch never sees an <code>export</code> in <code>~/.zprofile</code> or <code>~/.zshrc</code>. The last step is for that. With no token from the first four, Perch starts <code>$SHELL</code> as a terminal does, as a login and interactive shell, and reads the two variables from the environment it ends up with. It does this once, the first time it finds no token, and gives the shell five seconds; so an export added while Perch runs is found the next time Perch starts, while a <code>gh auth login</code> or a <code>token</code> in the config is found on the next poll.</p>
+<h2 id="required-github-permissions">Required GitHub permissions</h2>
+<p>The credential must be allowed to read and update notifications and to read the repositories you open. Merging a pull request also requires <code>Contents: write</code> permission on its repository, as does pushing a branch from Perch's own clone; opening a pull request requires <code>Pull requests: write</code>. Commenting on, approving, or requesting changes on a pull request requires <code>Pull requests: write</code> permission, as do resolving a thread and reacting to a pull request or anything said on it; reacting on an issue requires <code>Issues: write</code>, as do Close as issue and closing an issue.</p>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="install.html" rel="prev"><span>Previous</span>Install Perch</a>
+<a href="remote-engine.html" rel="next"><span>Next</span>Remote hosts (SSH)</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>

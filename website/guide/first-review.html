@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Review your first pull request · Perch Field Guide</title>
+<meta name="description" content="A walkthrough of reviewing a pull request in Perch: read the thread, follow a symbol, ask an agent, and post a review.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html" aria-current="page">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html">Start work on an issue</a></li>
+<li><a href="starting-work.html">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Review a change</p>
+        <h1>Review your first pull request</h1>
+        <p class="lede">Trace a changed symbol through the codebase, ask an agent about it privately, and submit your review.</p>
+      </header>
+      <article class="prose">
+<h2 id="open">Open a pull request</h2>
+<p>Pick a pull request under <b>Inbox</b> in the sidebar. If your inbox has none waiting yet, switch the sidebar to <b>Browse</b> (<kbd>Cmd-4</kbd>) with your repository selected to see open pull requests, or press <kbd>Cmd-O</kbd> to open any pull request by URL or number (see <a href="inbox.html">The inbox</a>).</p>
+<p>Items open on <b>Conversation</b>: the description, timeline events, and review threads in chronological order. Read the description and latest discussion, and pick a question that depends on what the surrounding code does.</p>
+
+<h2 id="code">Switch to Code</h2>
+<p>Press <kbd>Cmd-Shift-2</kbd> (<kbd>Ctrl-Shift-2</kbd> on Linux), or click <b>Code</b> at the center of the top bar. Code opens the pull request's checkout with the changed-files drawer on the right. Open a file from the tree, or press <kbd>Cmd-P</kbd> to jump to any file on the branch, changed or not.</p>
+<figure>
+  <div class="plate-frame">
+    <picture>
+      <source srcset="../img/review-dark.png?v=8" media="(prefers-color-scheme: dark)">
+      <img src="../img/review-light.png?v=8" width="2474" height="2070" loading="lazy" alt="Perch Code view showing compactor_executor.rs diff lines, the changed-files drawer, and the open Callers of start_compaction_job call hierarchy panel">
+    </picture>
+  </div>
+  <figcaption>Code view shows the full file checkout, inline review threads, the changed-files drawer, and language-server panels such as Call Hierarchy.</figcaption>
+</figure>
+
+<h2 id="symbol">Follow a symbol</h2>
+<p>Hover any identifier for its signature and doc comment, then navigate with the shortcuts you already know from VS Code:</p>
+<div class="table"><table>
+<thead><tr><th>Action</th><th>Key</th></tr></thead>
+<tbody>
+<tr><td>Go to Definition</td><td><kbd>Cmd-click</kbd> or <kbd>F12</kbd></td></tr>
+<tr><td>Go to Implementations</td><td><kbd>Cmd-F12</kbd></td></tr>
+<tr><td>Find All References</td><td><kbd>Shift-F12</kbd></td></tr>
+<tr><td>Show Call Hierarchy</td><td><kbd>Shift-Alt-H</kbd></td></tr>
+<tr><td>Back, Forward</td><td><kbd>Ctrl--</kbd>, <kbd>Ctrl-Shift--</kbd></td></tr>
+</tbody></table></div>
+<p>A single match opens right away; multiple matches open a panel under the editor. Definitions inside a dependency or the standard library open in a read-only tab badged with their crate or package, such as <code>tokio 1.40.0</code>. See <a href="code-navigation.html">Code navigation</a> for scopes, split diffs, and clickable code links.</p>
+<p class="note"><b>If nothing opens</b>Check the status bar: if a language server is missing or waiting for workspace trust (such as <code>rust-analyzer</code> on an external PR), triggering Go to Definition offers to install or <b>Trust and start</b> it.</p>
+
+<h2 id="ask">Ask an agent on the line (optional)</h2>
+<p>With a supported coding-agent CLI signed in (<a href="install.html#tools">Claude Code, Codex, Antigravity, or OpenCode</a>), click <kbd>+</kbd> in the gutter beside a line—or click <b>Ask about this</b> on an existing GitHub comment—to open the composer. Choose a model from the dropdown, then type your question. You can bring multiple models into the same thread to cross-check an answer; see <a href="agents.html">Agent sandbox and approvals</a>.</p>
+<figure>
+  <div class="plate-frame">
+    <picture>
+      <source srcset="../img/ask-dark.png?v=8" media="(prefers-color-scheme: dark)">
+      <img src="../img/ask-light.png?v=8" width="768" height="306" loading="lazy" alt="Perch’s composer with the model dropdown open and Opus selected in the Claude submenu">
+    </picture>
+  </div>
+  <figcaption>The issue composer shown here uses the same model picker as a line thread. Choose a different model from the dropdown for a follow-up.</figcaption>
+</figure>
+
+<h2 id="post">Post your review</h2>
+<p>To leave feedback for the author, switch the composer's destination to <b>GitHub</b>. Line comments save locally with a <code>Draft</code> pill, survive restarts and offline work, and stay hidden from github.com until you submit.</p>
+<p>When you are ready, click <b>Review</b> in the top bar, choose your verdict, and submit—publishing all of your drafts in one batch. See <a href="posting.html">Posting and drafts</a> for inline suggestions and replies, or <a href="worktree-reviews.html">Agent reviews of a worktree</a> to run automated bug checks first.</p>
+<div class="next-steps">
+  <a href="first-branch.html">
+    <b>Next walkthrough: Start work on an issue →</b>
+    <span>Cut an isolated branch worktree, let an agent make the change, commit, and open a pull request.</span>
+  </a>
+</div>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="remote-engine.html" rel="prev"><span>Previous</span>Remote hosts (SSH)</a>
+<a href="inbox.html" rel="next"><span>Next</span>The inbox</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>

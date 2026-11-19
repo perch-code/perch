@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Worktrees · Perch Field Guide</title>
+<meta name="description" content="Create isolated git worktrees from Cmd-N, an issue, or a pull request, and keep uncommitted or unpushed work safe.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html">Start work on an issue</a></li>
+<li><a href="starting-work.html" aria-current="page">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <span id="starting-work"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Start work</p>
+        <h1>Worktrees</h1>
+        <p class="lede">Cut a branch into its own worktree from a prompt, an issue, or any pull request without disturbing your main clone.</p>
+      </header>
+      <article class="prose">
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#new-worktree-composer">New worktree composer</a></li><li><a href="#start-work-from-an-item">Start work from an item</a></li><li><a href="#keeping-work-safe">Keeping work safe</a></li></ul></details></nav>
+<h2 id="new-worktree-composer">New worktree composer</h2>
+<p><code>+</code> at the top of the sidebar, or <code>Cmd-N</code> from anywhere, opens the new-work view, titled <b>New worktree</b> in the bar: a box for what the work is, and under it three chips.</p>
+<ul><li><b>Repository</b>: the <code>[[repo]]</code> entries in the file's order, a local one marked <code>(local)</code>. It opens on the open item's repository, else the last one picked. <b>Add repository…</b> picks a folder and appends a <code>[[repo]]</code> naming its repository to <code>config.toml</code>, without rewriting the file; Perch takes it up at once.</li><li><b>Base</b>: the branch to start from. For a repository with a root, the root's local branches and its remote's, with no network; for a GitHub repository without one, GitHub's. It opens on the repository's base branch.</li><li><b>New branch</b>: the name of the branch to cut, filled in from the message (<code>branch_prefix</code>, then its first five words) until you type in it. A name you typed that is taken is an error; one Perch filled in gets <code>-2</code>.</li></ul>
+<p>With a message, <b>Start</b> makes the worktree, opens it named for the message's first line, and sends the message to the agent picked beside it as the item's first Work run. Without one, <b>Create worktree</b> makes the worktree alone. <code>Escape</code>, <code>Cmd-[</code>, or the bar's X leaves the view and keeps what was typed until Perch quits.</p>
+<p>Worktrees go under <code>~/.perch/worktrees/</code> by default, named for the repository and the branch. To put new worktrees elsewhere, set <a href="configuration.html#worktree-directory"><code>worktrees_dir</code></a>.</p>
+<p>A repository with a root is cut in the root, your own clone: the branch is its branch, with your remotes and config, and <code>git worktree list</code> there shows the worktree. Perch writes exactly this much in a root: the new branch, git's record of the worktree, a fetch of the one base branch from its remote, on Delete that branch, and when you open a pull request or press Push, a push of the branch and the upstream it then tracks. The fetch uses your own credentials and never Perch's token, and cannot prompt: a key that wants a passphrase fails it, and the cut goes ahead from what the clone had, with a notice saying how old that is. A GitHub repository with no root is cut in Perch's own clone, as <b>Start work</b> on an issue or a pull request is. Start work on a worktree in a local repository cuts in that repository.</p>
+<h2 id="start-work-from-an-item">Start work from an item</h2>
+<p><b>Start Work</b> is on the Worktree row of an item's details, behind the list button in the bar: a button on an item with no worktree, and a row of the worktree's menu on one that has a worktree. It is also in an item row's menu and in the menu of a notification about a pull request or an issue. It cuts a new branch from the item into a worktree of your own and opens it:</p>
+<ul><li>From an <b>issue</b>, <code>perch/issue-&lt;n&gt;</code> from the default branch.</li><li>From a <b>pull request</b>, anyone's and from any fork, <code>perch/pr-&lt;n&gt;-work</code> from the head Code shows: the pull request's worktree when it has one, commits not pushed yet and all, else its head on GitHub. The branch is diffed against the pull request's base, so it shows the whole change, and a pull request opened from it takes it over.</li><li>From a <b>worktree</b>, a new branch from its head, named for it with <code>-2</code>.</li></ul>
+<p>An issue or a pull request leaves a prompt to work on it in the new worktree's composer, and a second press opens the worktree the first made. The new worktree is listed under <b>In Perch</b> on the item it came from. A pull request opened from it says <code>Closes #&lt;n&gt;</code>, so merging it closes the issue or the pull request it came from. A merged pull request, and anything archived, has no Start work.</p>
+<p>From a notification, Start work cuts from the item Perch has for its pull request or issue, and makes that item first if there is none. It is greyed once Perch has seen the pull request merged or the issue closed. A pull request whose worktree was removed has to be opened first, which restores it. Other kinds of notification have no Start work.</p>
+<h2 id="keeping-work-safe">Keeping work safe</h2>
+<p>A worktree made for work can hold the only copy of it.</p>
+<ul><li><b>Delete</b> asks again, naming the count, when the branch has commits no other branch, tag, remote-tracking branch or ref of Perch's holds. A branch pushed from Perch's own clone is not seen as pushed until a pull request brings its head back.</li><li><b>Archive</b> of a worktree asks first when the directory holds files git ignores, such as a <code>.env</code>, and names them: archiving removes the directory, and git keeps no copy of those. The branch and its commits stay. Worktrees with no pull request are never archived for age; pull request checkouts still are, after 14 days unopened.</li><li>A pull request's worktree follows its head when the head moves only if the commit on disk is one the pull request had. A commit you made there and have not pushed keeps the worktree where it is, reported stale, as uncommitted changes do.</li><li>A worktree of your own is never moved to its pull request's head. When the two are at different commits, the Branch row and the item's bylines say how: <code>3 unpushed</code>, <code>2 behind PR</code>, both, or <code>PR head not fetched</code> when the pull request's head isn't in the repository. Perch counts this in the worktree's own repository at each scan and open and fetches nothing to do it. <b>Submit review</b> and <b>Merge</b> are unavailable while the heads differ, since what is on screen isn't what GitHub would review or merge.</li><li><b>Update branch</b>, on the Branch row and in place of Merge, shows when the pull request's head isn't fetched or the worktree is only behind it. It fetches the pull request's branch, with your git credentials in one of your clones and Perch's token in its own, and fast-forwards the worktree to its head. A worktree with unpushed commits of its own isn't moved; the fetch only lets the row count both sides. Uncommitted changes to files the pull request changes stop the update.</li></ul>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="first-branch.html" rel="prev"><span>Previous</span>Start work on an issue</a>
+<a href="opening-a-pull-request.html" rel="next"><span>Next</span>Opening a pull request</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>

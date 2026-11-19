@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Agents PRs suck. Perch helps you review them.</title>
+<meta name="description" content="The best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance.">
+<link rel="icon" href="img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="site.css?v=32">
+<link rel="stylesheet" href="tour.css?v=1">
+</head>
+<body class="tour-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="index.html"><img src="img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" href="guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <section class="tour wrap" aria-label="A tour of Perch">
+    <div class="tour-stage" hidden>
+      <div class="tour-captions"></div>
+      <div class="tour-screen"><a class="tour-frame"><canvas aria-hidden="true"></canvas></a></div>
+    </div>
+    <div class="tour-steps">
+      <article class="tour-step" id="tour-overview" data-view="overview">
+        <div class="tour-copy">
+          <div class="tour-intro">
+            <h1>Agents PRs suck. <em>Perch helps you review them.</em></h1>
+            <p>The best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance.</p>
+            <a class="button" href="#install"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>Install Perch</a>
+          </div>
+        </div>
+        <a class="tour-still" href="img/tour/overview-light.webp" aria-label="View full screenshot. Perch in Warm Linen with the GitHub inbox, an inline Rust review thread, and the file tree.">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="img/tour/overview-dark.webp">
+            <img src="img/tour/overview-light.webp" width="2760" height="1760" fetchpriority="high" alt="Perch in Warm Linen with the GitHub inbox, an inline Rust review thread, and the file tree.">
+          </picture>
+        </a>
+      </article>
+      <article class="tour-step" id="tour-thread" data-view="thread">
+        <div class="tour-copy">
+          <h2>Multiple agents, one thread</h2>
+          <p>Ask Claude about a line of code, then bring Codex, Gemini, or OpenCode into the same conversation.</p>
+        </div>
+        <a class="tour-still" href="img/tour/thread-light.webp" aria-label="View full screenshot. Two developers, Claude, and Codex discuss snapshot retention in one inline thread.">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="img/tour/thread-dark.webp">
+            <img src="img/tour/thread-light.webp" width="2760" height="1760" loading="lazy" alt="Two developers, Claude, and Codex discuss snapshot retention in one inline thread.">
+          </picture>
+        </a>
+      </article>
+      <article class="tour-step" id="tour-code" data-view="code">
+        <div class="tour-copy">
+          <h2>Browse the whole codebase</h2>
+          <p>Follow a symbol beyond the diff. Open the file tree and use call hierarchy to see who calls a function.</p>
+        </div>
+        <a class="tour-still" href="img/tour/code-light.webp" aria-label="View full screenshot. The SlateDB repository tree beside the Rust editor, with the callers of start_compaction_job open below.">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="img/tour/code-dark.webp">
+            <img src="img/tour/code-light.webp" width="2760" height="1760" loading="lazy" alt="The SlateDB repository tree beside the Rust editor, with the callers of start_compaction_job open below.">
+          </picture>
+        </a>
+      </article>
+      <article class="tour-step" id="tour-review" data-view="review">
+        <div class="tour-copy">
+          <h2>Multi-agent code reviews</h2>
+          <p>Choose the agents you want on a review. Their findings land as draft comments for you to check before posting.</p>
+        </div>
+        <a class="tour-still" href="img/tour/review-light.webp" aria-label="View full screenshot. The Review menu with Claude and Codex checked, each with its own model and effort setting.">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="img/tour/review-dark.webp">
+            <img src="img/tour/review-light.webp" width="2760" height="1760" loading="lazy" alt="The Review menu with Claude and Codex checked, each with its own model and effort setting.">
+          </picture>
+        </a>
+      </article>
+      <article class="tour-step" id="tour-issue" data-view="issue">
+        <div class="tour-copy">
+          <h2>Start work from an issue</h2>
+          <p>Give an agent its own Git worktree and keep the work linked to the GitHub issue.</p>
+        </div>
+        <a class="tour-still" href="img/tour/issue-light.webp" aria-label="View full screenshot. The Create worktree confirmation above SlateDB issue 2233.">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="img/tour/issue-dark.webp">
+            <img src="img/tour/issue-light.webp" width="2760" height="1760" loading="lazy" alt="The Create worktree confirmation above SlateDB issue 2233.">
+          </picture>
+        </a>
+      </article>
+      <article class="tour-step" id="tour-agents" data-view="agents">
+        <div class="tour-copy">
+          <h2>Bring your coding agents</h2>
+          <p>Use Claude Code, Codex, Gemini through Antigravity, or OpenCode. Pick your default in Settings.</p>
+        </div>
+        <a class="tour-still" href="img/tour/agents-light.webp" aria-label="View full screenshot. Perch’s Agents settings show the executables and models for the four supported agents.">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="img/tour/agents-dark.webp">
+            <img src="img/tour/agents-light.webp" width="2760" height="1760" loading="lazy" alt="Perch’s Agents settings show the executables and models for the four supported agents.">
+          </picture>
+        </a>
+      </article>
+      <article class="tour-step" id="tour-environment" data-view="environment">
+        <div class="tour-copy">
+          <h2>Local or remote</h2>
+          <p>Switch environments from your profile. Git, language servers, and agents run where your code lives.</p>
+        </div>
+        <a class="tour-still" href="img/tour/environment-light.webp" aria-label="View full screenshot. The account menu with the current computer selected and two saved SSH hosts.">
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="img/tour/environment-dark.webp">
+            <img src="img/tour/environment-light.webp" width="2760" height="1760" loading="lazy" alt="The account menu with the current computer selected and two saved SSH hosts.">
+          </picture>
+        </a>
+      </article>
+    </div>
+  </section>
+</main>
+<dialog class="tour-viewer" aria-label="Full-size Perch screenshot">
+  <div class="viewer-image"></div>
+  <button type="button" class="viewer-close" aria-label="Close screenshot" autofocus>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+  </button>
+</dialog>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="site.js?v=12"></script>
+<script src="tour.js?v=6"></script>
+</body></html>

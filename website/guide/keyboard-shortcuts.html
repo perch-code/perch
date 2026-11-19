@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Keyboard shortcuts · Perch Field Guide</title>
+<meta name="description" content="Every default keyboard shortcut in Perch grouped by view, plus how to customize bindings in Settings or config.toml.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html">Start work on an issue</a></li>
+<li><a href="starting-work.html">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html" aria-current="page">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <span id="keyboard-shortcuts"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Preferences and shortcuts</p>
+        <h1>Keyboard shortcuts</h1>
+        <p class="lede">Every action ID and default shortcut in Perch, and how to rebind keys in Settings or ~/.perch/config.toml.</p>
+      </header>
+      <article class="prose">
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#customizing-keybindings">Customizing keybindings</a></li><li><a href="#default-shortcuts-by-view">Default shortcuts by view</a></li><li><a href="#general">General</a></li><li><a href="#sidebar">Sidebar</a></li><li><a href="#item">Item</a></li><li><a href="#conversation-code">Conversation &amp; Code</a></li><li><a href="#code">Code</a></li><li><a href="#find">Find</a></li><li><a href="#composer">Composer</a></li></ul></details></nav>
+<h2 id="customizing-keybindings">Customizing keybindings</h2>
+<p>Every key below can be changed, in <code>[keybindings]</code> in <code>config.toml</code> or in Settings' Keyboard shortcuts section. Each action has an id; give it a key as a string, several as a list, or none as <code>&quot;&quot;</code> or <code>[]</code>. Keys you give an action take the place of its defaults, so a list that leaves a default out drops it.</p>
+<pre><code>[keybindings]
+go_to_file = &quot;super+t&quot;          # Go to File on Cmd-T, and no longer on Cmd-P
+pin = &quot;&quot;                        # no key; [] does the same
+refresh = [&quot;super+r&quot;, &quot;f5&quot;]     # two keys for one action
+toggle_sidebar = &#x27;super+\&#x27;     # a backslash in single quotes, or &quot;super+\\&quot;</code></pre>
+<p>A key is written as its modifiers, then the key, joined by <code>+</code>, in any case:</p>
+<ul><li>Modifiers: <code>super</code> (also <code>cmd</code>, <code>command</code> or <code>meta</code>), <code>ctrl</code> (or <code>control</code>), <code>alt</code> (or <code>option</code>) and <code>shift</code>. <code>super</code> is the command key: Cmd on macOS, Ctrl elsewhere, so off macOS <code>ctrl+p</code> and <code>super+p</code> are the same key.</li><li>Keys: a letter, a digit, punctuation as a US keyboard has it (<code>[ ] \ / , . ; &#x27; = - `</code>), <code>enter</code>, <code>escape</code>, <code>tab</code>, <code>space</code>, <code>backspace</code>, <code>delete</code>, <code>up</code>, <code>down</code>, <code>left</code>, <code>right</code>, <code>pageup</code>, <code>pagedown</code>, <code>home</code>, <code>end</code>, <code>f1</code> to <code>f20</code>, or a key's code as floem names it, such as <code>KeyH</code> or <code>NumpadEnter</code>. Keys are physical: <code>shift+]</code> is the key a US keyboard writes <code>}</code> with, wherever your layout puts it.</li><li>A backslash is an escape in a TOML string in double quotes, so write <code>super+\</code> as <code>&quot;super+\\&quot;</code>, or as <code>&#x27;super+\&#x27;</code> in single quotes. <code>&quot;super+\&quot;</code> leaves the string open, and Perch can't read any of <code>config.toml</code> then.</li></ul>
+<p>The modifiers must be the ones held, no more: <code>super+g</code> doesn't run on Cmd-Shift-G. An id Perch doesn't have, or a key it can't read, is left out with a notice, and the rest of the table still applies.</p>
+<p>A key with no Cmd, Ctrl or Alt that types something, a letter, a digit, punctuation or the space bar, Shift or not, is a bare key. A bare key never runs an action while the keyboard is in a box: the sidebar's search, a composer, Review's form, a find bar or any other text field. There it types, so <code>/</code> searches the sidebar from anywhere else and is a <code>/</code> in a comment.</p>
+<p>Two actions heard in the same place shouldn't share a key: only one of them would run. Settings says when they do. The composer's keys are heard only in a composer, so they can share a key with most of the window's: <code>super+g</code> suggests a change in a comment and finds the next match everywhere else. Not with the window keys that work from a composer too, such as New Work, Close, Go to File or Toggle Files: the window hears those first, so the composer's action would never run.</p>
+<p>On macOS, New Window, Open… and Settings… in the Perch menu show their action's first key, unless it is bare; the other keys work in the window. Menus that show keys, such as a worktree's menu in an item's details and the right-click menu in the code, show the first key of the action they do. A button with a key says it in its tip.</p>
+<p>These stay as they are: <code>Escape</code>, <code>Enter</code>, the arrows and <code>Tab</code> inside menus, Go to File, pickers, dialogs and the find bar; the text keys of boxes and the editor, <code>Cmd-C</code>, <code>Cmd-A</code> and the like; <code>Cmd-Enter</code>, which sends or submits; <code>Cmd-click</code> on a symbol; the mouse's back and forward buttons; the single letters of an open item menu; and the keys macOS keeps, <code>Cmd-Q</code>, <code>Cmd-H</code>, <code>Cmd-Opt-H</code>, <code>Cmd-M</code>, <code>Cmd-`</code> and <code>Cmd-Tab</code>. Settings won't take these macOS keys for an action. An action given <code>Cmd-Q</code>, <code>Cmd-H</code>, <code>Cmd-Opt-H</code> or <code>Cmd-Tab</code> by hand never runs, as macOS has them first, and Settings says so on its row.</p>
+<p>Settings' Keyboard shortcuts section has a row for each action, in the groups below. Click its keys, or press <code>Enter</code> or <code>Space</code> on them, then press the new key: it replaces every key the action had. <code>Escape</code> stops without a change, and a key macOS keeps is refused. macOS acts on <code>Cmd-Q</code>, <code>Cmd-H</code>, <code>Cmd-Opt-H</code> and <code>Cmd-Tab</code> before Perch hears them, so pressing one there does what it always does. The × beside the keys takes them all away, and the reset arrow puts the defaults back. Several keys for one action are written in the file.</p>
+<p>Hold Command on macOS or Ctrl on Linux for a moment to see the current shortcuts: inline beside the sidebar tabs and the Conversation and Code tabs, and in the place of the icon on the sidebar toggle, New Work, and Back and Forward arrows. Narrow toolbars hide hints to keep the controls in reach. The Inbox, Worktrees, and Browse defaults yield to any shortcut you assign in Settings or in <code>[keybindings]</code>.</p>
+<h2 id="default-shortcuts-by-view">Default shortcuts by view</h2>
+<p>Each action's id, its default keys and what it does, grouped as Settings groups them:</p>
+<h3 id="general">General</h3>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>new_work</code></td><td><code>super+n</code></td><td>Opens New Work, to start an agent on a new branch</td></tr><tr><td><code>new_window</code></td><td><code>super+shift+n</code></td><td>Opens another window</td></tr><tr><td><code>open</code></td><td><code>super+o</code></td><td>Opens a pull request or issue from its link or number</td></tr><tr><td><code>settings</code></td><td><code>super+,</code></td><td>Opens Settings</td></tr><tr><td><code>close</code></td><td><code>super+w</code></td><td>Closes the open file, else the open item, else the window; closes Settings too</td></tr><tr><td><code>back</code></td><td><code>super+[</code></td><td>Closes the open item or New Work, back to the sidebar; closes Settings too</td></tr><tr><td><code>history_back</code></td><td><code>ctrl+-</code></td><td>Goes back to where you were</td></tr><tr><td><code>history_forward</code></td><td><code>ctrl+shift+-</code></td><td>Goes forward again after going back</td></tr><tr><td><code>toggle_agents</code></td><td><code>super+shift+a</code></td><td>Opens or shuts the agents running across Perch</td></tr><tr><td><code>send_feedback</code></td><td>none</td><td>Opens or shuts Send Feedback</td></tr></tbody></table></div>
+<h3 id="sidebar">Sidebar</h3>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>toggle_sidebar</code></td><td><code>super+\</code></td><td>Shows or hides the sidebar</td></tr><tr><td><code>focus_search</code></td><td><code>super+1</code>, <code>/</code></td><td>Puts the keyboard in the sidebar's search, opening the sidebar if it is shut</td></tr><tr><td><code>inbox</code></td><td><code>super+2</code></td><td>Shows the Inbox, opening the sidebar if it is shut</td></tr><tr><td><code>worktrees</code></td><td><code>super+3</code></td><td>Shows Worktrees, opening the sidebar if it is shut</td></tr><tr><td><code>browse</code></td><td><code>super+4</code></td><td>Shows Browse, opening the sidebar if it is shut</td></tr><tr><td><code>next_item</code></td><td><code>j</code></td><td>Opens the row after the open one in the sidebar's list, or the first; a notification that opens in the browser is passed over</td></tr><tr><td><code>previous_item</code></td><td><code>k</code></td><td>Opens the row before the open one</td></tr><tr><td><code>mark_done</code></td><td><code>e</code></td><td>Marks the Inbox row under the pointer done, else the open item's row</td></tr><tr><td><code>mark_unread</code></td><td><code>shift+u</code></td><td>Marks the Inbox row under the pointer unread, else the open item</td></tr><tr><td><code>pin</code></td><td><code>p</code></td><td>Pins or unpins the row under the pointer, else the open one</td></tr></tbody></table></div>
+<h3 id="item">Item</h3>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>show_conversation</code></td><td><code>super+shift+1</code></td><td>Shows the open item's Conversation</td></tr><tr><td><code>show_code</code></td><td><code>super+shift+2</code></td><td>Shows the open item's Code</td></tr><tr><td><code>next_tab</code></td><td><code>super+shift+]</code></td><td>Goes to the next file tab, <code>Cmd-}</code> on a US keyboard</td></tr><tr><td><code>previous_tab</code></td><td><code>super+shift+[</code></td><td>Goes to the file tab before, <code>Cmd-{</code></td></tr><tr><td><code>refresh</code></td><td><code>super+r</code></td><td>Fetches the open item from GitHub again</td></tr><tr><td><code>open_on_github</code></td><td><code>super+shift+o</code></td><td>Opens the row under the pointer, else the open item, in the browser</td></tr><tr><td><code>copy_link</code></td><td><code>super+shift+c</code></td><td>Copies the open item's link</td></tr><tr><td><code>copy_branch_name</code></td><td>none</td><td>Copies the open item's branch name</td></tr><tr><td><code>start_work</code></td><td>none</td><td>Starts work on the open item</td></tr><tr><td><code>toggle_review</code></td><td><code>super+shift+r</code></td><td>Opens or shuts the Review box, where the bar has Review</td></tr><tr><td><code>toggle_merge</code></td><td><code>super+shift+m</code></td><td>Opens or shuts the Merge box, where the bar has Merge</td></tr></tbody></table></div>
+<h3 id="conversation-code">Conversation &amp; Code</h3>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>comment</code></td><td><code>a</code></td><td>Comments on the selected lines on Code, or on the item as a whole on Conversation</td></tr><tr><td><code>page_up</code></td><td><code>pageup</code></td><td>Scrolls up a page</td></tr><tr><td><code>page_down</code></td><td><code>pagedown</code></td><td>Scrolls down a page</td></tr><tr><td><code>scroll_to_top</code></td><td><code>super+up</code></td><td>Scrolls to the top</td></tr><tr><td><code>scroll_to_end</code></td><td><code>super+down</code></td><td>Scrolls to the end</td></tr></tbody></table></div>
+<h3 id="code">Code</h3>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>go_to_file</code></td><td><code>super+p</code></td><td>Opens Go to File; again while it is up, picks the next file</td></tr><tr><td><code>toggle_files</code></td><td><code>super+shift+e</code></td><td>Opens or shuts the file tree</td></tr><tr><td><code>next_change</code></td><td><code>]</code></td><td>Goes to the next change in the file</td></tr><tr><td><code>previous_change</code></td><td><code>[</code></td><td>Goes to the change before</td></tr><tr><td><code>toggle_viewed</code></td><td><code>v</code></td><td>Marks the open file viewed, or not viewed</td></tr><tr><td><code>next_unviewed</code></td><td><code>shift+]</code></td><td>Goes to the next file not yet viewed</td></tr><tr><td><code>previous_unviewed</code></td><td><code>shift+[</code></td><td>Goes to the file before not yet viewed</td></tr><tr><td><code>toggle_wrap</code></td><td>none</td><td>Turns Word wrap on or off</td></tr><tr><td><code>go_to_definition</code></td><td><code>f12</code></td><td>Goes to where the symbol at the caret is defined</td></tr><tr><td><code>go_to_type_definition</code></td><td>none</td><td>Goes to where the symbol's type is defined</td></tr><tr><td><code>go_to_implementations</code></td><td><code>super+f12</code></td><td>Lists what implements the symbol</td></tr><tr><td><code>find_references</code></td><td><code>shift+f12</code></td><td>Lists where the symbol is used</td></tr><tr><td><code>call_hierarchy</code></td><td><code>alt+shift+h</code></td><td>Shows what calls the function, and what it calls</td></tr></tbody></table></div>
+<h3 id="find">Find</h3>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>find</code></td><td><code>super+f</code></td><td>Opens the find bar on the code or Conversation</td></tr><tr><td><code>find_next</code></td><td><code>super+g</code></td><td>Goes to the next match</td></tr><tr><td><code>find_previous</code></td><td><code>super+shift+g</code></td><td>Goes to the match before</td></tr><tr><td><code>find_match_case</code></td><td><code>alt+super+c</code></td><td>Turns match case on or off, while the bar is up</td></tr><tr><td><code>find_whole_word</code></td><td><code>alt+super+w</code></td><td>Turns whole word on or off, while the bar is up</td></tr><tr><td><code>find_regex</code></td><td><code>alt+super+r</code></td><td>Turns regular expressions on or off, while the bar is up</td></tr></tbody></table></div>
+<h3 id="composer">Composer</h3>
+<p>Heard only in a composer:</p>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>bold</code></td><td><code>super+b</code></td><td>Makes the selection bold</td></tr><tr><td><code>italic</code></td><td><code>super+i</code></td><td>Makes the selection italic</td></tr><tr><td><code>code</code></td><td><code>super+e</code></td><td>Makes the selection code</td></tr><tr><td><code>link</code></td><td><code>super+k</code></td><td>Makes the selection a link</td></tr><tr><td><code>quote</code></td><td><code>super+shift+.</code></td><td>Quotes the selected lines</td></tr><tr><td><code>numbered_list</code></td><td><code>super+shift+7</code></td><td>Makes the selected lines a numbered list</td></tr><tr><td><code>bullet_list</code></td><td><code>super+shift+8</code></td><td>Makes the selected lines a list</td></tr><tr><td><code>task_list</code></td><td><code>super+shift+l</code></td><td>Makes the selected lines a task list</td></tr><tr><td><code>suggest</code></td><td><code>super+g</code></td><td>Adds a suggestion, in a comment on lines of code</td></tr><tr><td><code>toggle_preview</code></td><td><code>super+shift+p</code></td><td>Switches between Write and Preview</td></tr></tbody></table></div>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="configuration.html" rel="prev"><span>Previous</span>Configuration file (config.toml)</a>
+<a href="perchd.html" rel="next"><span>Next</span>perchd and engine lifecycle</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>

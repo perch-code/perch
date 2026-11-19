@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Posting and drafts · Perch Field Guide</title>
+<meta name="description" content="The unified timeline, reactions, @-mentions, offline review drafts, inline suggestions, and Perch-only replies.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html" aria-current="page">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html">Start work on an issue</a></li>
+<li><a href="starting-work.html">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Review a change</p>
+        <h1>Posting and drafts</h1>
+        <p class="lede">Read commits and events in time order, draft line comments offline, apply suggestions, and choose what reaches GitHub.</p>
+      </header>
+      <article class="prose">
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#timeline">Timeline</a></li><li><a href="#reactions">Reactions</a></li><li><a href="#composers--mentions-and-destinations">Composers, @-mentions, and destinations</a></li><li><a href="#offline-review-drafts">Offline review drafts</a></li><li><a href="#inline-suggestions">Inline suggestions</a></li><li><a href="#comments-and-closing-items">Comments and closing items</a></li><li><a href="#review-threads-and-perch-only-replies">Review threads and Perch-only replies</a></li></ul></details></nav>
+<h2 id="timeline">Timeline</h2>
+<p>Conversation is the item's description, what was said about it, and what was done to it, in one column in time order. The doing comes from GitHub's own timeline: commits, labels added and removed, assignments, review requests and dismissals, renames, milestones, force pushes, references from other issues and pull requests, and the opening, merge or close. Each is one line saying who did it and when, with a label in its own colours, a commit by its short sha and subject, and a reference by where it points. A commit is signed with the name git recorded, since it has no account behind it.</p>
+<p>What Perch already draws as a card — a comment, a review, a line comment — is not repeated as a line, and what GitHub sends but does not itself show, such as <code>mentioned</code> and <code>subscribed</code>, is left out. A kind Perch has no words for is dropped rather than guessed at. Ten pages are read for one item, a hundred lines to a page.</p>
+<h2 id="reactions">Reactions</h2>
+<p>Each GitHub entry on Conversation shows the reactions on it under its text: the description, every comment, and every review summary and line comment. A pill is one reaction and its count, blue when yours is among them. Hovering over a pill says who left it, as GitHub does: "You, octocat, and 3 more reacted with heart emoji", naming up to ten. Clicking a pill adds or removes yours. The face at the right of an entry's byline, and the one after its pills, open GitHub's picker: all eight in a row, yours washed blue, and picking one of yours takes it back. A reaction is shown as soon as it is clicked and put back if GitHub refuses it.</p>
+<p>Reactions are read with the discussion through GitHub's GraphQL API, a hundred entries to a request, and left the same way. An entry cached by an older build of Perch has no reactions until it is fetched again.</p>
+<h2 id="composers--mentions-and-destinations">Composers, @-mentions, and destinations</h2>
+<p>A composer's box opens five lines tall, the size GitHub gives a comment, and grows with what is typed. The grip at the foot of the box drags it taller or shorter, between two lines and about twenty-four; a box that has been dragged keeps that height whatever is typed into it, and every composer opens at it until Perch is restarted.</p>
+<p>Typing <code>@</code> in a composer, or in the review summary under <b>Review</b>, puts a list under it, as GitHub's comment box does. People come first: the item's author and whoever has written on it, then anyone else in the repository GitHub finds for the letters typed, never you. The worktree's files follow, ranked as <code>Cmd-P</code> ranks them. The arrows or <code>Ctrl-N</code> and <code>Ctrl-P</code> move the pick, <code>Enter</code> or <code>Tab</code> takes it, a click takes a row, and <code>Escape</code> puts the list away until the next <code>@</code>. A person goes in as <code>@login</code>. A file goes to an agent as <code>@path</code>, as Claude Code and Codex take one, and to GitHub as <code>`path`</code>, since <code>@</code> there mentions someone and a code span links to the file on Code.</p>
+<p>Every composer in Perch has a destination: Claude, Codex, or GitHub, picked from the same menu as the model. What goes to an agent stays in Perch. What goes to GitHub goes one of two ways.</p>
+<h2 id="offline-review-drafts">Offline review drafts</h2>
+<p>On a line of a file, or under a thread that is on GitHub, a message to GitHub is a draft: it is kept in Perch's cache the moment it is sent, drawn with a <code>Draft</code> pill, marked in the gutter in GitHub's blue, and can be edited in place or deleted on hover. Drafts survive a restart and being offline, and github.com does not show them. <b>Review</b>, in the bar, counts them on its button, lists them above the summary in its popover, and posts them with the verdict: a comment on the head rides in the review, a comment written against an older commit is posted against that commit, and a reply is posted under its thread. A <code>Comment</code> review with drafts needs no summary. A draft that GitHub refuses, or that cannot be matched to what GitHub returns, stays a draft and the form says so. GitHub's API takes a review comment only on the lines of the pull request's diff, a changed line or one of the three around it, though github.com takes one on any line, and one comment it refuses fails the whole review. So a comment on the head that is not inside one hunk of the diff, first line and last, is kept out of the review: the rest posts, and it stays a draft, named by its lines on the form.</p>
+<h2 id="inline-suggestions">Inline suggestions</h2>
+<p>A composer on lines has <b>Suggest</b>, which puts a <code>suggestion</code> fence in the box holding the lines as they are, to edit into what they should read. On a worktree with no pull request there is no one on GitHub to accept it, so a message that is a suggestion and nothing else goes straight into the file instead of to the agent, as Commit suggestion does on github.com. It goes in only while the file still reads those lines; otherwise the composer says they changed and keeps the text. The edit is uncommitted, so under a scope that shows a commit, such as Branch, the view moves to Uncommitted to show it. A suggestion with words beside it goes to the agent as any message does.</p>
+<p>On an open pull request, a suggestion in a comment on GitHub has <b>Apply suggestion</b> under it. It opens a popover with the commit message, <code>Update &lt;path&gt;</code> to start, and an optional description; <b>Commit changes</b> (or Enter in the message) commits the change on the pull request's head branch through GitHub, as github.com does, and resolves the thread where GitHub lets you. The file is read at the head GitHub has then, and the commit goes only while the lines still read as the suggestion was written against and the branch has not moved; otherwise the popover says why and stays. Your worktree is not touched: it is behind by that commit until you pull. The button is off on a resolved thread, offline, or when the suggestion changes nothing, and absent on an outdated thread, a draft, or a closed pull request.</p>
+<h2 id="comments-and-closing-items">Comments and closing items</h2>
+<p>At the foot of Conversation, a message to GitHub is an issue comment and posts at once, after one confirmation naming the pull request. Beside <b>Comment</b>, <b>Close with comment</b> posts it and closes the pull request, or reads <b>Close pull request</b> while the box is empty. It is there on an open pull request you opened or can write to, and asks once too. It is a split button, as on github.com: its arrow opens a menu of the ways to close. On a pull request those are <b>Close pull request</b> and <b>Close as issue…</b>. On an open issue you opened or can triage, the button reads <b>Close issue</b>, and the menu offers <b>Close as completed</b>, <b>Close as not planned</b> and <b>Close as duplicate</b>, the reason GitHub records for the close. A pick changes what the button says and does; it stays picked until the item changes. Close as duplicate searches the repository's issues, as a <code>#</code> does, and picking the original goes straight to the confirmation, which names it. GitHub has no threads under a comment, a review's summary or the description, so each offers <b>Quote reply</b> under the pointer, which opens that composer with the text quoted as github.com quotes it, below anything already typed there for GitHub. With words of it selected, it quotes just those.</p>
+<p><b>Close as issue…</b>, in that menu, is for a pull request that found a real bug but isn't worth merging. It unfolds a form above the composer: the issue's title and body, filled from the pull request with a closing <code>Found in #12.</code> that links the two, and the comment the pull request gets, where <code>{issue}</code> becomes the new issue's number. <b>Write with Claude</b>, or Codex, has the agent read the pull request's checkout and diff under Ask's rules and describe the bug as it stands on the base branch, in its own words rather than the pull request's. The answer fills the title and body for you to edit, asking first if you have typed there. Nothing goes to GitHub until <b>Open issue and close</b>, which opens the issue, comments and closes. Once the issue is open the form is spent, so a comment or close GitHub refuses after it is told as a notice, not retried.</p>
+<h2 id="review-threads-and-perch-only-replies">Review threads and Perch-only replies</h2>
+<p>GitHub's review threads are drawn beside Perch's own with the same cards, in both Code and Conversation, so one thread can hold a reviewer's comment, your reply to them, and an agent's private take on both. A thread looks as it does on github.com: on Conversation, a box headed by its file with the lines it is on under the header; in Code, a box under those lines headed "Comment on line R12", or L12 on a line of the old file. The split layout draws each box on its side: the old file's on the left, beside fillers on the right, and the new file's on the right. Each message sits under its author's face and name, with <b>Author</b> by whoever opened the pull request, and the thread ends in a <b>Follow up</b> box and a foot with <b>Resolve</b>. A reviewer's comment offers <b>Reply</b> and <b>Ask about this</b> under the pointer. In such a thread, what an agent said and what you asked it are labelled <b>Perch only</b>. An agent's answer never posts on its own: <b>Post to GitHub</b> under the pointer puts its text in a composer for you to edit and send, and nothing records where it came from. It goes the same two ways as anything else: a draft under a thread with lines or a place on GitHub, an issue comment under one of Perch's own, such as a question asked at the foot of Conversation. A review's findings on an open pull request arrive as drafts already (see Worktree reviews), and post only with the review. <b>Quote reply</b> on an answer quotes it, or the words of it you selected, into the thread's Follow up box, still bound for the agent.</p>
+<p>A thread ends in <b>Resolve</b>, or <b>Unresolve</b> once it is resolved. On a thread that is on GitHub the button is there wherever GitHub says you may use it, and the click changes github.com at once, with no confirmation, as the button there does. The thread shows the change before GitHub answers and goes back if GitHub refuses. On a thread of Perch's own, a question to an agent and its answers, the button is always there and the change stays in Perch. A review finding has <b>Dismiss</b> and <b>Reopen</b> instead, and once published it is on GitHub and has <b>Resolve</b> too. Resolved, a thread folds, in Code to one row and on Conversation to its header, as one resolved on github.com arrives; <b>Show resolved</b> opens it again and <b>Hide resolved</b> folds it. Conversation and Code each keep their own, as github.com's tabs do, and the chevron on a thread's header folds any thread.</p>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="code-navigation.html" rel="prev"><span>Previous</span>Code navigation</a>
+<a href="worktree-reviews.html" rel="next"><span>Next</span>Agent reviews of a worktree</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>

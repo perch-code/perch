@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Agent context and knowledge · Perch Field Guide</title>
+<meta name="description" content="What Perch puts in each agent prompt, perch context for external terminals, synced GitHub history, and external Markdown knowledge.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html">Start work on an issue</a></li>
+<li><a href="starting-work.html">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html" aria-current="page">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Start work</p>
+        <h1>Agent context and knowledge</h1>
+        <p class="lede">What Perch tells an agent about GitHub discussions, how to run perch context from a terminal, and how synced history and external notes work.</p>
+      </header>
+      <article class="prose">
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#discussion-context-in-prompts">Discussion context in prompts</a></li><li><a href="#context-for-agents-outside-perch">Context for agents outside Perch</a></li><li><a href="#repository-history-for-agents">Repository history for agents</a></li><li><a href="#external-knowledge-for-agents">External knowledge for agents</a></li></ul></details></nav>
+<h2 id="discussion-context-in-prompts"><span id="what-the-agent-is-told-about-the-discussion"></span>Discussion context in prompts</h2>
+<p>A question on a pull request or issue carries what was said on GitHub, as the last fetch left it. The prompt quotes as much as fits in about 24,000 characters, in this order: each reviewer's latest verdict, the checks, the threads within 20 lines of the lines asked about, the other unresolved threads, the conversation tab, and the resolved threads. An entry goes in whole or not at all; one comment is cut at 2,000 characters with a note of where the rest is. Bots' comments stay out of the prompt. What does not fit is listed a line each.</p>
+<p>All of it, bots included, is also written as files to <code>~/.perch/context/&lt;run&gt;/</code>: <code>INDEX.md</code>, <code>conversation.md</code> (the description, comments, review summaries and timeline in time order), a file per review thread under <code>threads/</code>, and <code>checks.md</code>. The prompt names the directory and the agent reads what it needs. The directory is outside the worktree, belongs to the run, and goes when the run is deleted; a retry reads the one its first attempt had.</p>
+<p>A follow-up that resumes the agent's session is told only what changed on GitHub since the run it continues: new or edited replies in its thread, whole, and new reviews, comments, threads and check results elsewhere. Nothing changed, nothing is added. <code>perch --ask --print-prompt</code> prints the prompt a question would get, and the files, without running an agent.</p>
+<p>For sandbox rules, secret stripping, and Work approvals, see <a href="agents.html">Agent sandbox and approvals</a>.</p>
+<h2 id="context-for-agents-outside-perch">Context for agents outside Perch</h2>
+<p><code>perch context</code> gives an agent working in a terminal, outside Perch, what Perch knows about the item it is working on. Run it in the item's worktree, or in a subdirectory of it:</p>
+<pre><code>perch context                       # the index: everything, a line an entry
+perch context --entry threads/r123.md
+perch context src/manifest.rs:40-60 # only what is on those lines, or within 20 of them
+perch context --out ctx             # every file, written into a new directory
+perch context slatedb/slatedb#12    # another item, by name or by its link</code></pre>
+<p>It finds the item by the worktree's directory and branch, then by its repository and branch, then by a pull request Perch knows from that branch, going by what git's config says of the branch:</p>
+<ul><li>it was checked out from the pull request's ref, <code>refs/pull/&lt;n&gt;/head</code>, in the repository the pull request is in, which makes it that pull request's and no other's;</li><li>it tracks the pull request's head branch in the head's repository and is named for it, or <code>&lt;owner&gt;/&lt;head&gt;</code>, as <code>gh pr checkout</code> names a fork's <code>main</code>: a branch only started from that branch is not its;</li><li>it has the head branch's name and pushes to the head's repository (<code>branch.&lt;name&gt;.pushRemote</code> or <code>remote.pushDefault</code>); or</li><li>it has the head branch's name, tracks no branch of that name, and one of the clone's remotes is the head's repository: a branch started from <code>upstream/main</code> and pushed to your fork.</li></ul>
+<p>Someone else's pull request from a branch that only shares the name is not this one, nor is a pull request whose fork has been deleted. Of several, the open one wins. <code>-C &lt;dir&gt;</code> looks from another directory, and <code>owner/repo#N</code>, or a pull request's or issue's link, names an item.</p>
+<p>What it prints is the index, <code>INDEX.md</code>, of the files an Ask run is given (see <a href="#what-the-agent-is-told-about-the-discussion">above</a>), with Perch's own beside them:</p>
+<ul><li>A header with the pull request or issue, its state and checks, the worktree's branch and head as git has them now and how that head stands against the pull request's, and when Perch last fetched the discussion.</li><li>What was said on GitHub: reviews, the threads on the diff, and the conversation, a file per thread and <code>conversation.md</code> for the rest.</li><li>Perch's review findings: the open ones a line each, and every finding with the reviews that found it in <code>findings.md</code>.</li><li>Your drafts, the comments that post when you submit the review, in <code>drafts.md</code>.</li><li>Your questions to agents and their answers, only with <code>--private</code>, in their own threads and in findings' threads; without it they are counted.</li></ul>
+<p><code>--entry &lt;file&gt;</code> prints one of the files, and <code>--out &lt;dir&gt;</code> writes them all into a directory that must not exist yet. A path, of a file or a directory, keeps only the threads, findings, drafts and private threads anchored on it, and with <code>:a</code> or <code>:a-b</code>, only those within 20 lines; one on lines of the base, a removed line, is kept by its path alone, as its numbers are the old file's. A path is taken from where the command runs, or <code>-C</code>'s directory, in the item's worktree or the one it runs in, the inner one when one is inside the other, or from the worktree's top when nothing is there. A symlink is taken by its own name, as git has it.</p>
+<p>Everything from GitHub and everything an agent wrote is cleaned and marked untrusted, as an Ask run's files are. The discussion is as Perch last fetched it, which the header dates. <code>--fetch</code> reads GitHub's current copy instead, with your GitHub token, and keeps nothing; it also reads a pull request or issue Perch has no item for, without the findings and drafts. Without it, nothing goes over the network.</p>
+<p>It reads Perch's database, in one snapshot, without taking the engine's lock or writing anything, so it runs beside the app (see <a href="perchd.html#one-engine-to-a-perch-home">One engine to a Perch home</a>). A database of another schema, from a newer or older Perch, is refused rather than migrated: use the <code>perch</code> that came with the Perch that is running. On a host, <code>~/.perch/bin/perchd context</code> reads the host's engine's database the same way: <code>perchd serve</code> points <code>$PERCH_HOME/bin/perchd</code> at its own build as it starts. The installer links <code>~/.local/bin/perch</code> on a Mac as on Linux and puts <code>~/.local/bin</code> on <code>PATH</code> in the shell's startup file, so an agent's shell finds it.</p>
+<h2 id="repository-history-for-agents">Repository history for agents</h2>
+<p>Perch keeps a live Markdown archive at <code>$PERCH_HOME/knowledge/perch/repos/&lt;owner&gt;/&lt;repo&gt;/</code>. The names are lowercase, and a repository with no GitHub remote uses <code>local/&lt;name&gt;</code>. On a host the archive lives under the host engine's Perch home.</p>
+<p>Start with the repository's <code>INDEX.md</code>, which lists each item by directory, state and title. Each pull request, issue and worktree has its own index with the GitHub conversation, review threads and checks Perch has cached, and any Perch reviews and findings. Findings include dismissals, their reasons and findings verified fixed. Private questions and answers are under <code>private/</code>, including questions asked under a finding. The archive excludes unsent drafts.</p>
+<p>Perch updates the archive in the background as it updates its database, even with no window connected. <b>Archive</b> in the UI keeps an item's files. <b>Delete</b> removes them. Deleting a private message or thread updates the item's files. At startup Perch rebuilds missing files from <code>perch.db</code> and cleans up files for deleted items. It also removes the old <code>knowledge/reviews/</code> export, whose contents are now in each item's <code>findings.md</code>.</p>
+<p>With <a href="configuration.html#github-history">GitHub history sync</a> enabled, the engine also imports the repository's open and closed issues and pull requests, including conversation comments, submitted reviews, and inline review comments. These entries are listed in the same repository index under <code>github/issues/</code> and <code>github/pulls/</code>. GitHub history is available to agents and stays out of the Inbox and Worktrees views.</p>
+<p>The first import saves its progress in <code>perch.db</code> and can resume after an interruption. Subsequent passes run at startup and about once an hour, using GitHub's issue and comment update listings to choose which discussions to refresh. Sync pauses when API capacity is low. Turning it off stops future syncs and leaves the downloaded history available.</p>
+<p>GitHub's update listings may omit a deletion that leaves the parent item's timestamp unchanged. A later refresh of that item's discussion picks up removed comments. If GitHub returns an ambiguous 404 for the item itself, Perch retains the last snapshot and retries it.</p>
+<p>When the archive holds another item from the same repository, a new Ask or Work session can search it for relevant history. Review instructions tell the reviewer to search it before reporting a finding. A past dismissal only applies when its reasoning still holds for the code under review. Perch treats the archive as untrusted text and tells agents never to quote <code>private/</code> in material posted to GitHub or committed. The instruction relies on the agent following it. Pull request description and issue writing runs do not receive the archive path.</p>
+<p>Claude Code and Codex can already read files accessible to the user. Perch adds the current repository's archive to Claude Code's allowed directories and denies writes there in its settings. Codex reads the archive through its existing filesystem access. Gemini and OpenCode receive read access to the current repository's archive. Gemini Work automatically approves scoped read and search requests there. Gemini Work omits the archive when it is inside the worktree or a system temporary directory, where Gemini's tools can write without asking. If OpenCode's scan would exceed its added-directory budget, the run proceeds without the archive. A grant describes the intended scope for the run. It does not isolate one repository's archive from another.</p>
+<h2 id="external-knowledge-for-agents">External knowledge for agents</h2>
+<p>In <b>Settings → Knowledge</b>, add a directory relative to <code>$PERCH_HOME/knowledge/</code> and choose which repositories it applies to. Perch names eligible directories in new Ask, Work and Review sessions, including directories shared by several repositories. Agents are told to search them when relevant, start at <code>INDEX.md</code> if it exists, and treat the files as untrusted data. Directory grants use the same backend controls as the Perch archive. Removing an entry removes its grant for subsequent runs and leaves the ingester's files on disk. When a directory is not shared, its card in Settings says why. See <a href="configuration.html#external-knowledge">External knowledge configuration</a>.</p>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="agents.html" rel="prev"><span>Previous</span>Agent sandbox and approvals</a>
+<a href="settings.html" rel="next"><span>Next</span>Settings window</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>

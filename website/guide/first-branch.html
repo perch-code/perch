@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
+<title>Start work on an issue · Perch Field Guide</title>
+<meta name="description" content="Cut an isolated git worktree from an issue or Cmd-N, let an agent edit in a sandbox, inspect the diff, and open a pull request.">
+<link rel="icon" href="../img/perch.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../site.css?v=32">
+<link rel="stylesheet" href="../guide.css?v=1">
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><img src="../img/wren.svg" alt="">Perch</a>
+    <nav aria-label="Main">
+      <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
+      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
+      </a>
+      <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
+    </nav>
+  </div>
+</header>
+
+<main id="main-content">
+  <div class="wrap guide-layout">
+    <details class="toc" open><summary>Guide contents</summary><nav aria-label="Guide contents">
+<h2>Get set up</h2><ul>
+<li><a href="install.html">Install Perch</a></li>
+<li><a href="authentication.html">Authentication</a></li>
+<li><a href="remote-engine.html">Remote hosts (SSH)</a></li>
+</ul>
+<h2>Review a change</h2><ul>
+<li><a href="first-review.html">Review your first pull request</a></li>
+<li><a href="inbox.html">The inbox</a></li>
+<li><a href="code-navigation.html">Code navigation</a></li>
+<li><a href="posting.html">Posting and drafts</a></li>
+<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+</ul>
+<h2>Start work</h2><ul>
+<li><a href="first-branch.html" aria-current="page">Start work on an issue</a></li>
+<li><a href="starting-work.html">Worktrees</a></li>
+<li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
+<li><a href="agents.html">Agent sandbox and approvals</a></li>
+<li><a href="agent-context.html">Agent context and knowledge</a></li>
+</ul>
+<h2>Preferences and shortcuts</h2><ul>
+<li><a href="settings.html">Settings window</a></li>
+<li><a href="configuration.html">Configuration file (config.toml)</a></li>
+<li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
+<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+</ul>
+</nav></details>
+    <div class="reading-column">
+      <header class="chapter-head">
+        <p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Start work</p>
+        <h1>Start work on an issue</h1>
+        <p class="lede">Cut an isolated branch worktree, let an agent make the change inside a sandbox, inspect the diff, and open a pull request.</p>
+      </header>
+      <article class="prose">
+<h2 id="cut">1. Cut a worktree</h2>
+<p>Open any issue (or pull request) and click <b>Start Work</b> in its details menu—or press <kbd>Cmd-N</kbd> (<kbd>Ctrl-N</kbd> on Linux) from anywhere to start from a blank prompt. Perch cuts a fresh branch (such as <code>perch/issue-2233</code>) into <code>~/.perch/worktrees/</code> without touching whatever you have checked out in your main clone. See <a href="starting-work.html">Worktrees</a> for branch naming and cleanup rules.</p>
+<figure>
+  <div class="plate-frame">
+    <picture>
+      <source srcset="../img/new-work-dark.png?v=7" media="(prefers-color-scheme: dark)">
+      <img src="../img/new-work-light.png?v=7" width="1794" height="820" loading="lazy" alt="Perch New worktree composer with repository, base branch, and agent model pickers">
+    </picture>
+  </div>
+  <figcaption>Pressing <kbd>Cmd-N</kbd> (or clicking <b>Start Work</b> on an issue) opens a fresh worktree composer.</figcaption>
+</figure>
+
+<h2 id="sandbox">2. Let the agent edit inside the sandbox</h2>
+<p>In a worktree of your own, the composer's permission picker defaults to <b>Auto-review</b> (with <b>Ask me</b>, <b>Read only</b>, and <b>Allow all</b> beside it). A Work run can edit files inside the worktree, while <code>.git</code>, repository agent configs, and your <code>GITHUB_TOKEN</code> stay locked out.</p>
+<p>When a run needs something outside its sandbox—such as reaching a package registry or running <code>git commit</code>—Perch shows an approval card right in the thread with <b>Allow once</b>, <b>Always allow here</b>, and <b>Deny</b>. See <a href="agents.html#approvals">Approvals and repository grants</a>.</p>
+
+<h2 id="inspect">3. Inspect the diff and commit the changes</h2>
+<p>Before and after every Work run, Perch snapshots the worktree under <code>refs/perch/runs/</code>. Switch to <b>Code</b> (or choose <b>Last run</b> in the file tree's scope menu) to review the exact diff with language-server navigation and <a href="worktree-reviews.html">agent reviews</a>.</p>
+<figure>
+  <div class="plate-frame">
+    <picture>
+      <source srcset="../img/work-dark.png?v=7" media="(prefers-color-scheme: dark)">
+      <img src="../img/work-light.png?v=7" width="1794" height="1365" loading="lazy" alt="Perch worktree conversation showing the Pull request status bar and completed Codex Astra 6.2 Work summary">
+    </picture>
+  </div>
+  <figcaption>After a Work run edits files, the <b>Pull request</b> bar reports uncommitted changes until the branch has commits ahead of its base.</figcaption>
+</figure>
+<p>Opening a pull request requires at least one commit ahead of the base branch—uncommitted files are named and left out. Ask the agent in the follow-up box to commit the change (approving <code>git commit</code> once or granting <b>Always let Work commit here</b>; Codex Work runs can run a plain <code>git commit</code> directly), or commit from a terminal in the worktree.</p>
+
+<h2 id="open-pr">4. Push and open the pull request</h2>
+<p>Once your branch has commits past its base, click <b>Open pull request…</b>, adjust the title or click <b>Write with Claude</b> / <b>Codex</b> to summarize the branch, and submit. Perch pushes the branch with your git credentials—never with force—and turns the worktree item into the live pull request in place. See <a href="opening-a-pull-request.html">Opening a pull request</a> for push credentials, SSH key passphrases, and failure handling.</p>
+<div class="next-steps">
+  <a href="index.html">
+    <b>Browse all guide topics →</b>
+    <span>Look up sandbox boundaries, external knowledge, SSH hosts, config.toml keys, and keyboard shortcuts.</span>
+  </a>
+</div>
+      </article>
+      <nav class="pager" aria-label="Chapter navigation"><a href="worktree-reviews.html" rel="prev"><span>Previous</span>Agent reviews of a worktree</a>
+<a href="starting-work.html" rel="next"><span>Next</span>Worktrees</a></nav>
+    </div>
+  </div>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div class="closing-spread">
+      <section class="install" id="footer-install" aria-labelledby="install-title">
+        <h2 id="install-title">Install <em>Perch</em></h2>
+        <p>For macOS and Linux.</p>
+        <div class="cmd">
+          <pre id="install-cmd"><code>curl https://perch.code/install.sh | sh</code></pre>
+          <button type="button" data-copy="install-cmd" aria-label="Copy install command" title="Copy install command">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <g class="copy-icon"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1"/></g>
+              <path class="copied-icon" d="m4 12 5 5L20 6"/>
+            </svg>
+          </button>
+        </div>
+        <span class="copy-status" role="status"></span>
+      </section>
+      <a id="field-guide" class="guide-cover" href="../guide/index.html">
+        <span class="cover-title">The Perch <em>Field Guide</em></span>
+        <img src="../img/wren.svg" alt="" width="128" height="128">
+      </a>
+    </div>
+  </div>
+</footer>
+<script src="../site.js?v=12"></script>
+
+</body></html>
