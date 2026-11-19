@@ -8,11 +8,11 @@
 <title>$title</title>
 <meta name="description" content="$description">
 $social$site_name
-<link rel="icon" href="${prefix}img/wren.svg?v=2" type="image/svg+xml" sizes="any">
+<link rel="icon" href="${prefix}img/wren-ink.svg?v=3" type="image/svg+xml" sizes="any">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="${prefix}site.css?v=33">
+<link rel="stylesheet" href="${prefix}site.css?v=39">
 $page_css
 </head>
 <body class="$page_class">
@@ -20,10 +20,10 @@ $page_css
 
 <header class="bar">
   <div class="wrap">
-    <a class="brand" href="${prefix}index.html"><img src="${prefix}img/wren.svg?v=2" alt="">Perch</a>
+    <a class="brand" href="${prefix}index.html"><img src="${prefix}img/wren-ink.svg?v=3" alt="">Perch</a>
     <nav aria-label="Main">
       <a class="nav-guide"$guide_current href="${prefix}guide/index.html" aria-label="Field guide" title="Field guide"></a>
-      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+      <a class="nav-download" href="#$install_id" aria-label="Install Perch" title="Install Perch">
         <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
       </a>
       <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
@@ -56,6 +56,6 @@ $content
     </div>
   </div>
 </footer>
-<script src="${prefix}site.js?v=12"></script>
+<script src="${prefix}site.js?v=13"></script>
 $page_scripts
 </body></html>

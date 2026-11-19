@@ -8,7 +8,7 @@
       <article class="tour-step" id="tour-overview" data-view="overview">
         <div class="tour-copy">
           <div class="tour-intro">
-            <h1>Agents PRs suck. <em>Perch helps you review them.</em></h1>
+            <h1>Agent PRs suck. <em>Perch helps you review them.</em></h1>
             <p>The best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance.</p>
             <a class="button" href="#install"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>Install Perch</a>
           </div>

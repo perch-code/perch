@@ -48,17 +48,21 @@ if (footer && "IntersectionObserver" in window) {
   const root = document.documentElement;
   const scheme = matchMedia("(prefers-color-scheme: dark)");
   const themeColors = document.querySelectorAll('meta[name="theme-color"]');
+  let footerVisible = false;
   function syncTheme() {
-    const property = root.classList.contains("at-footer") ? "--band-deep" : "--band";
+    const atFooter = footerVisible && window.scrollY > 0;
+    root.classList.toggle("at-footer", atFooter);
+    const property = atFooter ? "--band-deep" : "--band";
     const color = getComputedStyle(root).getPropertyValue(property).trim();
     for (const meta of themeColors) {
       if (matchMedia(meta.media).matches) meta.content = color;
     }
   }
   new IntersectionObserver(([entry]) => {
-    root.classList.toggle("at-footer", entry.isIntersecting);
+    footerVisible = entry.isIntersecting;
     syncTheme();
   }).observe(footer);
+  window.addEventListener("scroll", syncTheme, {passive: true});
   scheme.addEventListener("change", syncTheme);
 }
 

@@ -23,11 +23,11 @@
 <meta name="twitter:description" content="Open a file anywhere on the branch. From a changed line, you can find a definition, inspect its callers, or jump back to the discussion.">
 <meta name="twitter:image" content="https://perch.chat/img/social/guide/code-navigation.png">
 <meta name="twitter:image:alt" content="Field Guide cover with the Perch wren and the title “Code navigation”.">
-<link rel="icon" href="../img/wren.svg?v=2" type="image/svg+xml" sizes="any">
+<link rel="icon" href="../img/wren-ink.svg?v=3" type="image/svg+xml" sizes="any">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="../site.css?v=33">
+<link rel="stylesheet" href="../site.css?v=39">
 <link rel="stylesheet" href="../guide.css?v=1">
 </head>
 <body class="guide-page">
@@ -35,10 +35,10 @@
 
 <header class="bar">
   <div class="wrap">
-    <a class="brand" href="../index.html"><img src="../img/wren.svg?v=2" alt="">Perch</a>
+    <a class="brand" href="../index.html"><img src="../img/wren-ink.svg?v=3" alt="">Perch</a>
     <nav aria-label="Main">
       <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
-      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+      <a class="nav-download" href="#footer-install" aria-label="Install Perch" title="Install Perch">
         <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
       </a>
       <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
@@ -88,11 +88,11 @@
 <p>On an issue, <b>Code</b> shows a read-only checkout of the repository’s default branch. Perch creates it when you first open an issue in that repository. The file tree shows the branch, commit, and last fetch time. Use its refresh button to fetch now. Opening an issue also fetches, at most once per minute per repository.</p>
 <p>Issues in the same repository share this checkout. A fetch updates all their open files. Click a file mentioned in the issue or use <code>Cmd-P</code> to find it. To edit the code, choose <b>Start Work</b> for a <a href="agents.html#work">separate worktree</a>.</p>
 <p>New items open in Conversation. Until you quit, each item remembers its view and open tabs. Closing the last file leaves you in Code. Switch back to Conversation when you want to reply.</p>
-<div class="table"><table><thead><tr><th>Action</th><th>Key</th></tr></thead><tbody><tr><td>Conversation, Code</td><td><code>Cmd-Shift-1</code>, <code>Cmd-Shift-2</code></td></tr><tr><td>Next, previous file tab</td><td><code>Cmd-}</code>, <code>Cmd-{</code></td></tr><tr><td>Close the file</td><td><code>Cmd-W</code></td></tr><tr><td>The file tree</td><td><code>Cmd-Shift-E</code></td></tr><tr><td>Agents</td><td><code>Cmd-Shift-A</code></td></tr></tbody></table></div>
+<div class="table"><table><thead><tr><th>Action</th><th>Key</th></tr></thead><tbody><tr><td>Conversation, Code</td><td><code>Cmd-Shift-1</code>, <code>Cmd-Shift-2</code></td></tr><tr><td>Next, previous file tab</td><td><code>Cmd-}</code>, <code>Cmd-{</code></td></tr><tr><td>Close the file</td><td><code>Cmd-W</code></td></tr><tr><td>The file tree</td><td><code>Cmd-/</code> or <code>Cmd-Shift-E</code></td></tr><tr><td>Agents</td><td><code>Cmd-Shift-A</code></td></tr></tbody></table></div>
 <p>See <a href="keyboard-shortcuts.html#keyboard-shortcuts">Keyboard shortcuts</a> for the full list and how to change a binding.</p>
 <h2 id="the-file-tree">The file tree</h2>
 <p>In Code, the file tree opens beside the editor on the right. In a narrow window it slides over the editor. Opening and closing it keeps your file, scroll position, and draft comment in place.</p>
-<p>Open or close the tree with the folder button above the editor or <code>Cmd-Shift-E</code>. From Conversation, the shortcut also switches to Code. The tree opens on your first visit to an item’s Code view. Perch remembers its width and whether you left it open between launches.</p>
+<p>Open or close the tree with the folder button above the editor, <code>Cmd-/</code>, or <code>Cmd-Shift-E</code>. From Conversation, the shortcut also switches to Code. The tree opens on your first visit to an item’s Code view. Perch remembers its width and whether you left it open between launches.</p>
 <p>The tree initially shows changed files. Turn off the changed-files filter to browse the whole checkout. Above the tree, choose which changes to show and see how many files you’ve marked viewed. Perch remembers your last scope when the item has changes in it and otherwise shows <b>Branch</b>. Opening a single commit or an agent run from its card leaves that preference alone.</p>
 <p>Follow a definition or click a file link and the tree expands to that file, clearing the filter if needed. When you open a saved review snapshot, use the tab strip to return to current files. Scope and Viewed controls apply only to current files.</p>
 <h2 id="going-to-a-file">Going to a file</h2>
@@ -151,6 +151,6 @@
     </div>
   </div>
 </footer>
-<script src="../site.js?v=12"></script>
+<script src="../site.js?v=13"></script>
 
 </body></html>

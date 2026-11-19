@@ -23,11 +23,11 @@
 <meta name="twitter:description" content="Look up a shortcut by action, assign a different key, or remove a binding.">
 <meta name="twitter:image" content="https://perch.chat/img/social/guide/keyboard-shortcuts.png">
 <meta name="twitter:image:alt" content="Field Guide cover with the Perch wren and the title “Keyboard shortcuts”.">
-<link rel="icon" href="../img/wren.svg?v=2" type="image/svg+xml" sizes="any">
+<link rel="icon" href="../img/wren-ink.svg?v=3" type="image/svg+xml" sizes="any">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="../site.css?v=33">
+<link rel="stylesheet" href="../site.css?v=39">
 <link rel="stylesheet" href="../guide.css?v=1">
 </head>
 <body class="guide-page">
@@ -35,10 +35,10 @@
 
 <header class="bar">
   <div class="wrap">
-    <a class="brand" href="../index.html"><img src="../img/wren.svg?v=2" alt="">Perch</a>
+    <a class="brand" href="../index.html"><img src="../img/wren-ink.svg?v=3" alt="">Perch</a>
     <nav aria-label="Main">
       <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
-      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+      <a class="nav-download" href="#footer-install" aria-label="Install Perch" title="Install Perch">
         <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
       </a>
       <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
@@ -110,7 +110,7 @@ toggle_sidebar = &#x27;super+\&#x27;     # a backslash in single quotes, or &quo
 <h3 id="conversation-code">Conversation &amp; Code</h3>
 <div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>comment</code></td><td><code>a</code></td><td>Comments on the selected lines on Code, or on the item as a whole on Conversation</td></tr><tr><td><code>page_up</code></td><td><code>pageup</code></td><td>Scrolls up a page</td></tr><tr><td><code>page_down</code></td><td><code>pagedown</code></td><td>Scrolls down a page</td></tr><tr><td><code>scroll_to_top</code></td><td><code>super+up</code></td><td>Scrolls to the top</td></tr><tr><td><code>scroll_to_end</code></td><td><code>super+down</code></td><td>Scrolls to the end</td></tr></tbody></table></div>
 <h3 id="code">Code</h3>
-<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>go_to_file</code></td><td><code>super+p</code></td><td>Opens Go to File. Press again to select the next result.</td></tr><tr><td><code>toggle_files</code></td><td><code>super+shift+e</code></td><td>Shows or hides the file tree</td></tr><tr><td><code>next_change</code></td><td><code>]</code></td><td>Goes to the next change in the file</td></tr><tr><td><code>previous_change</code></td><td><code>[</code></td><td>Goes to the change before</td></tr><tr><td><code>toggle_viewed</code></td><td><code>v</code></td><td>Marks the active file viewed or unviewed</td></tr><tr><td><code>next_unviewed</code></td><td><code>shift+]</code></td><td>Goes to the next file not yet viewed</td></tr><tr><td><code>previous_unviewed</code></td><td><code>shift+[</code></td><td>Goes to the previous unviewed file</td></tr><tr><td><code>toggle_wrap</code></td><td>none</td><td>Turns Word wrap on or off</td></tr><tr><td><code>go_to_definition</code></td><td><code>f12</code></td><td>Goes to where the symbol at the caret is defined</td></tr><tr><td><code>go_to_type_definition</code></td><td>none</td><td>Goes to where the symbol's type is defined</td></tr><tr><td><code>go_to_implementations</code></td><td><code>super+f12</code></td><td>Lists what implements the symbol</td></tr><tr><td><code>find_references</code></td><td><code>shift+f12</code></td><td>Lists where the symbol is used</td></tr><tr><td><code>call_hierarchy</code></td><td><code>alt+shift+h</code></td><td>Shows what calls the function, and what it calls</td></tr></tbody></table></div>
+<div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>go_to_file</code></td><td><code>super+p</code></td><td>Opens Go to File. Press again to select the next result.</td></tr><tr><td><code>toggle_files</code></td><td><code>super+/</code>, <code>super+shift+e</code></td><td>Shows or hides the file tree</td></tr><tr><td><code>next_change</code></td><td><code>]</code></td><td>Goes to the next change in the file</td></tr><tr><td><code>previous_change</code></td><td><code>[</code></td><td>Goes to the change before</td></tr><tr><td><code>toggle_viewed</code></td><td><code>v</code></td><td>Marks the active file viewed or unviewed</td></tr><tr><td><code>next_unviewed</code></td><td><code>shift+]</code></td><td>Goes to the next file not yet viewed</td></tr><tr><td><code>previous_unviewed</code></td><td><code>shift+[</code></td><td>Goes to the previous unviewed file</td></tr><tr><td><code>toggle_wrap</code></td><td>none</td><td>Turns Word wrap on or off</td></tr><tr><td><code>go_to_definition</code></td><td><code>f12</code></td><td>Goes to where the symbol at the caret is defined</td></tr><tr><td><code>go_to_type_definition</code></td><td>none</td><td>Goes to where the symbol's type is defined</td></tr><tr><td><code>go_to_implementations</code></td><td><code>super+f12</code></td><td>Lists what implements the symbol</td></tr><tr><td><code>find_references</code></td><td><code>shift+f12</code></td><td>Lists where the symbol is used</td></tr><tr><td><code>call_hierarchy</code></td><td><code>alt+shift+h</code></td><td>Shows what calls the function, and what it calls</td></tr></tbody></table></div>
 <h3 id="find">Find</h3>
 <div class="table"><table><thead><tr><th>Action</th><th>Default</th><th>What it does</th></tr></thead><tbody><tr><td><code>find</code></td><td><code>super+f</code></td><td>Opens the find bar on the code or Conversation</td></tr><tr><td><code>find_next</code></td><td><code>super+g</code></td><td>Goes to the next match</td></tr><tr><td><code>find_previous</code></td><td><code>super+shift+g</code></td><td>Goes to the match before</td></tr><tr><td><code>find_match_case</code></td><td><code>alt+super+c</code></td><td>Turns match case on or off, while the bar is up</td></tr><tr><td><code>find_whole_word</code></td><td><code>alt+super+w</code></td><td>Turns whole word on or off, while the bar is up</td></tr><tr><td><code>find_regex</code></td><td><code>alt+super+r</code></td><td>Turns regular expressions on or off, while the bar is up</td></tr></tbody></table></div>
 <h3 id="composer">Composer</h3>
@@ -145,6 +145,6 @@ toggle_sidebar = &#x27;super+\&#x27;     # a backslash in single quotes, or &quo
     </div>
   </div>
 </footer>
-<script src="../site.js?v=12"></script>
+<script src="../site.js?v=13"></script>
 
 </body></html>

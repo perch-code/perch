@@ -23,11 +23,11 @@
 <meta name="twitter:description" content="Line comments wait in your review drafts. A comment at the bottom of Conversation goes to GitHub when you confirm. Questions to agents stay in Perch.">
 <meta name="twitter:image" content="https://perch.chat/img/social/guide/posting.png">
 <meta name="twitter:image:alt" content="Field Guide cover with the Perch wren and the title “Posting and drafts”.">
-<link rel="icon" href="../img/wren.svg?v=2" type="image/svg+xml" sizes="any">
+<link rel="icon" href="../img/wren-ink.svg?v=3" type="image/svg+xml" sizes="any">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="../site.css?v=33">
+<link rel="stylesheet" href="../site.css?v=39">
 <link rel="stylesheet" href="../guide.css?v=1">
 </head>
 <body class="guide-page">
@@ -35,10 +35,10 @@
 
 <header class="bar">
   <div class="wrap">
-    <a class="brand" href="../index.html"><img src="../img/wren.svg?v=2" alt="">Perch</a>
+    <a class="brand" href="../index.html"><img src="../img/wren-ink.svg?v=3" alt="">Perch</a>
     <nav aria-label="Main">
       <a class="nav-guide" aria-current="location" href="../guide/index.html" aria-label="Field guide" title="Field guide"></a>
-      <a class="nav-download" href="https://github.com/perch-code/perch/releases/latest" aria-label="Download the latest Perch release" title="Download Perch">
+      <a class="nav-download" href="#footer-install" aria-label="Install Perch" title="Install Perch">
         <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
       </a>
       <a class="nav-github" href="https://github.com/perch-code/perch"><span>GitHub</span></a>
@@ -108,7 +108,7 @@
 <h3 id="review-threads-and-perch-only-replies">Review threads and Perch-only replies</h3>
 <p>Hover over a GitHub comment and choose <b>Ask about this</b> for a private question or <b>Reply</b> for GitHub feedback. You can bring several agents into the same thread. Their replies carry the <b>Perch only</b> label.</p>
 <figure class="plate-frame"><picture><source media="(prefers-color-scheme: dark)" srcset="../img/guide/agent-thread-dark.png"><img src="../img/guide/agent-thread-light.png" width="790" height="345" loading="lazy" alt="One review thread with private replies from Claude and Codex and a Follow up box"></picture></figure>
-<p><b>Post to GitHub</b> lets you edit an answer and send it under your name. On a GitHub review thread it becomes a draft. Without a GitHub line or thread it posts as an issue comment. <b>Quote reply</b> copies all or part of an answer into a private follow-up. <a href="worktree-reviews.html#worktree-reviews">Agent review findings</a> start as drafts.</p>
+<p><b>Post to GitHub</b> lets you edit an answer and send it under your name. On a GitHub review thread it becomes a draft. Without a GitHub line or thread it posts as an issue comment. <b>Quote reply</b> copies all or part of an answer into a private follow-up. <b>Copy</b> puts an answer’s markdown on the clipboard, including while the agent is still answering or after a stopped or failed run. <a href="worktree-reviews.html#worktree-reviews">Agent review findings</a> start as drafts.</p>
 <p>In Code, the thread sits under the relevant lines. Conversation shows the file and line numbers. In a split diff, <code>L12</code> refers to the old file and <code>R12</code> to the new one.</p>
 <p><b>Resolve</b> and <b>Unresolve</b> take effect immediately on GitHub when you have permission. Perch restores the previous state if GitHub rejects the change. Resolving a Perch-only thread affects only Perch. Review findings use <b>Dismiss</b> and <b>Reopen</b>. A published finding can also be resolved on GitHub.</p>
 <p>Resolved threads collapse. Use <b>Show resolved</b> or <b>Hide resolved</b> separately in Code and Conversation, or use a thread’s chevron to collapse just that thread.</p>
@@ -142,6 +142,6 @@
     </div>
   </div>
 </footer>
-<script src="../site.js?v=12"></script>
+<script src="../site.js?v=13"></script>
 
 </body></html>
