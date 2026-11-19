@@ -68,6 +68,15 @@
 .prose h2 { margin-top: 2.9rem; font-size: clamp(2rem, 2.8vw, 2.7rem); line-height: 1.12; letter-spacing: -.03em; text-wrap: initial; }
 .prose h3 { margin-top: 1.9rem; font: 600 1.15rem/1.35 var(--body); text-wrap: initial; }
 .prose h4 { margin-top: 1.5rem; }
+.heading-link {
+  display: inline-block; margin-inline-start: .25em; padding-inline: .15em;
+  color: var(--muted); font: 500 1rem/1.5 var(--body); vertical-align: middle;
+  text-decoration: none;
+}
+@media (hover: hover) {
+  .heading-link { opacity: 0; }
+  :is(h1, h2, h3, h4):hover > .heading-link, .heading-link:focus { opacity: 1; }
+}
 .prose > :first-child { margin-top: 0; }
 .prose ul, .prose ol { padding-inline-start: 1.35rem; }
 .prose li + li { margin-top: .45rem; }

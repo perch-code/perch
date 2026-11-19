@@ -821,8 +821,8 @@ def render_page(
     guide = path.startswith("guide/")
     contents = path == "guide/index.html"
     prefix = "../" if guide else ""
-    stylesheet = "guide.css" if guide else "tour.css"
-    scripts = "" if guide else '<script src="tour.js?v=6"></script>'
+    stylesheet = "guide.css?v=2" if guide else "tour.css?v=1"
+    scripts = '<script src="heading-links.js"></script>' if guide else '<script src="tour.js?v=6"></script>'
     if contents:
         scripts = '<script src="search-index.js"></script>\n<script src="search.js"></script>'
     current = ""
@@ -838,7 +838,7 @@ def render_page(
         site_name=site_name,
         prefix=prefix, page_class="guide-page" if guide else "tour-page",
         guide_current=current, install_id="footer-install" if guide else "install",
-        page_css=f'<link rel="stylesheet" href="{prefix}{stylesheet}?v=1">',
+        page_css=f'<link rel="stylesheet" href="{prefix}{stylesheet}">',
         content=content.strip(), page_scripts=scripts,
     )
 
@@ -875,7 +875,7 @@ def wrap_guide_page(part_title: str, page: dict, body_html: str, pager_html: str
     <div class="reading-column">
       <header class="chapter-head">
         {aliases}<p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>{html.escape(part_title)}</p>
-        <h1>{html.escape(page["title"])}</h1>
+        <h1 id="chapter-title">{html.escape(page["title"])}</h1>
         <p class="lede">{html.escape(page["lede"])}</p>
       </header>
       <article class="prose">
