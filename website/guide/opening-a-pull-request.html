@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
 <title>Opening a pull request · Perch Field Guide</title>
-<meta name="description" content="Draft titles and descriptions from repository templates or an agent, push branches safely, and turn a worktree into a pull request.">
+<meta name="description" content="Open a GitHub pull request from the commits on your branch. Perch keeps the worktree’s discussion and agent runs with the PR.">
 <link rel="icon" href="../img/perch.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -43,39 +43,40 @@
 <li><a href="inbox.html">The inbox</a></li>
 <li><a href="code-navigation.html">Code navigation</a></li>
 <li><a href="posting.html">Posting and drafts</a></li>
-<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+<li><a href="worktree-reviews.html">Review a worktree with agents</a></li>
 </ul>
 <h2>Start work</h2><ul>
 <li><a href="first-branch.html">Start work on an issue</a></li>
 <li><a href="starting-work.html">Worktrees</a></li>
 <li><a href="opening-a-pull-request.html" aria-current="page">Opening a pull request</a></li>
 <li><a href="agents.html">Agent sandbox and approvals</a></li>
-<li><a href="agent-context.html">Agent context and knowledge</a></li>
+<li><a href="agent-context.html">Agent context and history</a></li>
 </ul>
 <h2>Preferences and shortcuts</h2><ul>
 <li><a href="settings.html">Settings window</a></li>
 <li><a href="configuration.html">Configuration file (config.toml)</a></li>
 <li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
-<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+<li><a href="perchd.html">The remote engine (perchd)</a></li>
 </ul>
 </nav></details>
     <div class="reading-column">
       <header class="chapter-head">
         <span id="opening-a-pull-request"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Start work</p>
         <h1>Opening a pull request</h1>
-        <p class="lede">Fill the title and description from templates or an agent, push with your own git credentials, and turn the worktree into a PR.</p>
+        <p class="lede">Open a GitHub pull request from the commits on your branch. Perch keeps the worktree’s discussion and agent runs with the PR.</p>
       </header>
       <article class="prose">
-<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#filling-the-pull-request-form">Filling the pull request form</a></li><li><a href="#pushing-and-creating-on-github">Pushing and creating on GitHub</a></li><li><a href="#pushing-new-commits-to-an-open-pr">Pushing new commits to an open PR</a></li></ul></details></nav>
-<h2 id="filling-the-pull-request-form">Filling the pull request form</h2>
-<p>A worktree of your own with commits past its base has a <b>Pull request</b> line at the foot of Conversation, where a pull request has its checks and Merge: <code>Pull request · 3 commits ahead of main</code>. <b>Open pull request…</b> unfolds it into a form:</p>
-<ul><li><b>Title</b>, filled in from the commit's subject when there is one commit, else from the item's name.</li><li><b>Description</b>, a composer's box going to GitHub, so <code>@</code> offers people and files as code spans. Filled in from the repository's pull request template (<code>.github/</code>, the root, then <code>docs/</code>), else the one commit's body, else the commits' subjects as a list. A branch Start work cut from an issue or a pull request ends it with <code>Closes #&lt;n&gt;</code>, as does a description the agent writes.</li><li><b>Base</b>, the branch it goes into: the one the branch was cut from, or any branch the repository has on GitHub.</li><li><b>Draft</b>, off.</li><li><b>Write with Claude</b>, or Codex, whichever the composer last used: the agent reads the branch under Ask's rules and writes a title and description into the form. Text you typed isn't written over; the form asks first. <b>Stop</b> ends it. The run isn't kept with the item's runs.</li></ul>
-<h2 id="pushing-and-creating-on-github">Pushing and creating on GitHub</h2>
-<p>The form fills itself once, and keeps what you typed until Perch quits, whether it's folded or another item is open. <code>Cmd-Enter</code> in the description, or <b>Open pull request</b>, sends it:</p>
-<ol><li>GitHub is asked whether the branch has a pull request open already, as one opened on github.com that no poll has found yet. If it has, the row takes that one, and nothing is pushed or created.</li><li>The branch is pushed, never with force. A worktree of one of your clones pushes with your own git credentials and SSH key, never Perch's token, and the branch then tracks what it was pushed to. A worktree of Perch's own clone pushes with Perch's token.</li><li>The pull request is created, and the row becomes it in place, with its threads and runs. The open item turns into the pull request.</li></ol>
-<p>Uncommitted files are named and left out. A Work run in the worktree, a worktree switched to another branch, or an empty title keep the button off. A push the remote refuses, because its branch has commits yours doesn't, says to pull or rebase in a terminal. A push your credentials can't make, such as with an SSH key that wants a passphrase, says to push from a terminal; after that, Open pull request skips the push. Neither agent can push or open a pull request: Perch does it when you press the button.</p>
-<h2 id="pushing-new-commits-to-an-open-pr">Pushing new commits to an open PR</h2>
-<p>On a pull request of yours whose worktree is ahead of it and not behind, the Branch row has <b>Push</b> beside <code>3 unpushed</code>. It pushes the same way, and the pull request is fetched again, so Submit review and Merge come back. The merge box at the foot of Conversation has it too, as <b>Push 3 commits</b> where Merge would be. Behind or diverged has no button, since that push would need force.</p>
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#fill-in-the-pull-request">Fill in the pull request</a></li><li><a href="#push-the-branch-and-open-the-pr">Push the branch and open the PR</a></li><li><a href="#add-commits-to-an-open-pr">Add commits to an open PR</a></li></ul></details></nav>
+<h2 id="fill-in-the-pull-request"><span id="filling-the-pull-request-form"></span>Fill in the pull request</h2>
+<p>When your branch has a commit ahead of its base, open <b>Conversation</b> and look for the <b>Pull request</b> row. Click <b>Open pull request…</b> and check the fields before sending.</p>
+<ul><li><b>Title</b> starts with the commit subject for a single commit or the item’s name for several.</li><li><b>Description</b> uses the repository’s PR template, looking in <code>.github/</code>, the root, then <code>docs/</code>. Without a template, it uses the single commit’s body or a list of commit subjects. <b>Start Work</b> adds <code>Closes #&lt;n&gt;</code> for the source issue or PR. You can mention people with <code>@</code> or insert file paths as inline code.</li><li><b>Base</b> starts with the branch you worked from. You can choose another GitHub branch.</li><li><b>Draft</b> is off by default. Turn it on to open a draft PR.</li><li><b>Write with Claude</b> or <b>Codex</b> drafts a title and description from a read-only inspection of the branch. Perch asks before replacing your edits. <b>Stop</b> cancels the request. These runs stay out of the item’s run history.</li></ul>
+<h2 id="push-the-branch-and-open-the-pr"><span id="pushing-and-creating-on-github"></span>Push the branch and open the PR</h2>
+<p>Perch keeps your edits when you collapse the form or switch items, until you quit. Click <b>Open pull request</b> or press <code>Cmd-Enter</code> in the description to submit.</p>
+<ol><li>Perch checks GitHub for an open PR from this branch. If one already exists, it opens that PR and skips the push.</li><li>Perch pushes the branch without force. In your clone, Git uses your credentials and sets the upstream branch. In a clone managed by Perch, it uses Perch’s token.</li><li>GitHub creates the PR. The worktree item becomes that PR in the same window, with its threads and agent runs intact.</li></ol>
+<p>Only commits go into a PR. Perch lists any uncommitted files it leaves out. Finish any active Work run, switch back to the worktree’s branch, and enter a title to enable the button.</p>
+<p>If the remote has commits you don’t have, pull or rebase in a terminal. If Git needs a password or SSH passphrase, push from the terminal, then click <b>Open pull request</b> again. Perch skips the completed push. The agent drafts text. You authorize the push and PR by submitting the form.</p>
+<h2 id="add-commits-to-an-open-pr"><span id="pushing-new-commits-to-an-open-pr"></span>Add commits to an open PR</h2>
+<p>When your PR branch is ahead of GitHub, click <b>Push</b> beside the unpushed commit count on the Branch row, or <b>Push 3 commits</b> in the merge box. Perch refreshes the PR afterwards so you can submit a review or merge. If the branches have diverged or you’re behind, update the branch first. Perch never force-pushes.</p>
       </article>
       <nav class="pager" aria-label="Chapter navigation"><a href="starting-work.html" rel="prev"><span>Previous</span>Worktrees</a>
 <a href="agents.html" rel="next"><span>Next</span>Agent sandbox and approvals</a></nav>

@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
-<title>Agent reviews of a worktree · Perch Field Guide</title>
-<meta name="description" content="Run Claude Code and Codex reviews on immutable snapshots, reconcile findings across runs, and turn findings into GitHub drafts.">
+<title>Review a worktree with agents · Perch Field Guide</title>
+<meta name="description" content="Choose which agents should read the diff. Check their findings and edit the draft comments before you send a review to GitHub.">
 <link rel="icon" href="../img/perch.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -43,44 +43,48 @@
 <li><a href="inbox.html">The inbox</a></li>
 <li><a href="code-navigation.html">Code navigation</a></li>
 <li><a href="posting.html">Posting and drafts</a></li>
-<li><a href="worktree-reviews.html" aria-current="page">Agent reviews of a worktree</a></li>
+<li><a href="worktree-reviews.html" aria-current="page">Review a worktree with agents</a></li>
 </ul>
 <h2>Start work</h2><ul>
 <li><a href="first-branch.html">Start work on an issue</a></li>
 <li><a href="starting-work.html">Worktrees</a></li>
 <li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
 <li><a href="agents.html">Agent sandbox and approvals</a></li>
-<li><a href="agent-context.html">Agent context and knowledge</a></li>
+<li><a href="agent-context.html">Agent context and history</a></li>
 </ul>
 <h2>Preferences and shortcuts</h2><ul>
 <li><a href="settings.html">Settings window</a></li>
 <li><a href="configuration.html">Configuration file (config.toml)</a></li>
 <li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
-<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+<li><a href="perchd.html">The remote engine (perchd)</a></li>
 </ul>
 </nav></details>
     <div class="reading-column">
       <header class="chapter-head">
         <span id="worktree-reviews"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Review a change</p>
-        <h1>Agent reviews of a worktree</h1>
-        <p class="lede">Run Claude Code and Codex against an immutable branch or working-tree snapshot and turn findings into review drafts.</p>
+        <h1>Review a worktree with agents</h1>
+        <p class="lede">Choose which agents should read the diff. Check their findings and edit the draft comments before you send a review to GitHub.</p>
       </header>
       <article class="prose">
-<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#the-review-popover">The Review popover</a></li><li><a href="#diff-scopes-and-instructions">Diff scopes and instructions</a></li><li><a href="#immutable-snapshots-and-reconciling-findings">Immutable snapshots and reconciling findings</a></li><li><a href="#publishing-findings-as-github-drafts">Publishing findings as GitHub drafts</a></li></ul></details></nav>
-<h2 id="the-review-popover">The Review popover</h2>
-<p><b>Review</b> in the bar opens one popover for the whole review. On top are the agents: on a pull request, one line naming the reviewers the next run starts, with <b>Run</b>, and <b>Settings</b> to choose them, the range and the instructions. Each reviewer is one line: a box to take it or leave it, its name, then its model and effort side by side; one that cannot run says why under its name. Under them is your own review for GitHub: the drafts, a summary, and a verdict to send them with. Unfolding the settings folds your review to a line, and <b>Open</b> brings it back. A worktree without a pull request has only the agents, their settings showing. The button is dark while there is a pull request to review, counts your drafts, and says how far a running review has got.</p>
-<h2 id="diff-scopes-and-instructions">Diff scopes and instructions</h2>
-<p>Running the agents starts Claude Code and/or Codex's native review workflow against the branch diff from the selected base's merge base to the head. It works for Perch-managed and registered external worktrees, with or without a pull request. <b>Changes</b> in the settings reads head → base, as a review's history does. The head says where the range ends: <b>Last commit</b> is <code>HEAD</code>, and <b>Working tree</b> adds the uncommitted work, staged, unstaged and untracked files alike, as a commit Perch makes over <code>HEAD</code> without touching the worktree, its index or its refs. Head starts on Working tree when the worktree is dirty and the branch has no commits yet, or the Files view shows an uncommitted scope; otherwise on Last commit, and under a dirty worktree's range Perch notes <code>Uncommitted work is left out</code>. Staged-only, individual-commit, and incremental-only review scopes are not supported. If the diff is empty, Perch records that result without launching an agent.</p>
-<p>Findings from a review of the working tree show in the Files view under Uncommitted and Branch while the checkout is still on the commit the work sat on, each where its lines read the same as what was reviewed: on the new side, in a file unchanged since; on the old side, when the view diffs from the review's merge base. The rest stay in Conversation.</p>
-<p>The instructions box in the settings tells the reviewers what to focus on, such as "review rfcs/multi_get.md only" on a branch that also carries a prototype. The range reviewed stays the same: Claude reads the instructions after the range in its <code>/code-review</code> argument, and Codex, which refuses a custom prompt beside <code>--base</code>, reads them as developer instructions. A review keeps its instructions, so <b>Retry</b> uses them again and its history card shows them.</p>
-<p>A review of a pull request also reads its discussion. When the snapshot is taken, Perch writes the discussion to <code>~/.perch/context/review-&lt;id&gt;/</code> in the same shape a question gets it, and tells each reviewer, ahead of the requester's instructions, where it is and what to do with it: not to report a problem a reviewer already raised in an unresolved thread, and to report a change a reviewer asked for that the range does not make, naming who asked. A review of a worktree with no pull request has no discussion to read.</p>
-<h2 id="immutable-snapshots-and-reconciling-findings">Immutable snapshots and reconciling findings</h2>
-<p>Every review uses a clean, read-only, immutable snapshot in Perch-owned storage. Perch retains its exact diff, manifest, commits, and anchored blobs so history remains readable after the branch moves or an external checkout is deleted. Opening a historical review never changes the current worktree.</p>
-<p>Perch currently supports Codex CLI 0.155.1 or newer through <code>codex exec review</code> and Claude Code 2.1.223 or newer through <code>/code-review</code>, when the installed CLI advertises the required local, noninteractive options. Missing, older, or incompatible CLIs are shown as unavailable with a reason; Perch does not fall back to a generic review prompt. Review mode excludes Claude's hosted <code>ultra</code> mode and never enables fix, comment, or permission-bypass options.</p>
-<p>Findings are durable local discussions, separate from the attempts that found them. Repeat reviews preserve every group, attempt, observation, failure, and valid zero-finding result while reconciling the same problem back to its existing thread. <b>Retry</b> creates another attempt with the original snapshot and settings. <b>Review latest</b> creates a new group and immutable snapshot from the branch's current state.</p>
-<h2 id="publishing-findings-as-github-drafts">Publishing findings as GitHub drafts</h2>
-<p>On an open pull request, a new finding on lines of its diff arrives as your draft on those lines, in place of the reviewer's message. It is a draft like one you write (see Posting): you edit or delete it, and it posts only when you submit the review. The card above it still gives the severity and the reviewer. Deleting the draft dismisses the finding, and dismissing the finding or linking it as a duplicate deletes the draft. GitHub takes a review comment only on a line its diff shows, a changed line or one of the three around it, so this needs the review to be of what GitHub has: the pull request's head, diffed from the same merge base. Any other finding stays in Perch as the reviewer's message, as does every finding on a worktree without an open pull request.</p>
-<p>Follow-ups stay local to Perch unless you post one yourself. Reviews do not resolve threads on GitHub, modify code, run automatically after a push, or use a hosted review service.</p>
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#choose-your-reviewers">Choose your reviewers</a></li><li><a href="#choose-what-to-review">Choose what to review</a></li><li><a href="#reopen-or-repeat-a-review">Reopen or repeat a review</a></li><li><a href="#check-drafts-before-posting">Check drafts before posting</a></li></ul></details></nav>
+<h2 id="choose-your-reviewers"><span id="the-review-popover"></span>Choose your reviewers</h2>
+<p>Open <b>Review</b> in the top bar. Choose <b>Settings</b>, select the agents you want, and pick a model and effort for each. If an agent is unavailable, the menu explains why. Click <b>Run</b> to start the selected agents.</p>
+<p>On a pull request, the same menu holds your drafts, summary, and verdict. Opening reviewer settings collapses your review. Click <b>Open</b> to return to it. The toolbar button shows progress during a run and counts drafts awaiting your review. On a worktree without a PR, the menu contains just the agent settings.</p>
+<h2 id="choose-what-to-review"><span id="diff-scopes-and-instructions"></span>Choose what to review</h2>
+<p>Each selected agent reviews the same diff. It starts at the last commit the branch shares with the base branch and ends at the version you choose. You can review a worktree Perch created or one you registered, with or without a PR. In <b>Changes</b>, choose where the comparison ends.</p>
+<ul><li><b>Last commit</b> reviews through <code>HEAD</code> and leaves out uncommitted files.</li><li><b>Working tree</b> includes staged, unstaged, and untracked files. Perch takes a temporary snapshot without changing your branch, files, or Git index.</li></ul>
+<p>Perch selects <b>Working tree</b> when the Files view shows uncommitted changes, or when a branch has uncommitted work and no new commits. Otherwise it selects <b>Last commit</b>. There’s no staged-only, single-commit, or incremental review. If the diff is empty, Perch records that and skips the agent run.</p>
+<p>Working-tree findings appear beside matching lines in <b>Uncommitted</b> and <b>Branch</b> while the checkout is still on the commit you reviewed. For new lines, the file must still match the snapshot. For old lines, the diff must start at the same merge base. You can read every finding in Conversation.</p>
+<p>Use the instructions box to narrow the reviewers’ attention, for example “Review rfcs/multi_get.md only.” The selected diff stays the same. Claude receives the instructions with <code>/code-review</code>. Codex receives them separately because <code>--base</code> does not accept a custom prompt. The review history shows the instructions, and <b>Retry</b> uses them again.</p>
+<p>For a PR, Perch also saves the discussion in <code>~/.perch/context/review-&lt;id&gt;/</code>. It asks reviewers to skip problems already raised in unresolved threads and to flag requested changes that are still missing, naming the person who asked.</p>
+<h2 id="reopen-or-repeat-a-review"><span id="immutable-snapshots-and-reconciling-findings"></span>Reopen or repeat a review</h2>
+<p>Perch saves a read-only copy of the diff, commits, and files used for each review. You can reopen the exact lines a reviewer saw after the branch moves or an external worktree is deleted. Opening an old review leaves your current checkout alone.</p>
+<p>Claude Code (2.1.223+) and Codex (0.155.1+) use their own review commands, <code>/code-review</code> and <code>codex exec review</code>. Claude’s hosted <code>ultra</code> review mode is unavailable in Perch. Gemini (Antigravity CLI 1.5.5+) and OpenCode (2.3.0+) use Perch’s review instructions. OpenCode reads the saved diff with file tools and no shell. The menu explains why a missing or incompatible CLI cannot run.</p>
+<p><b>Retry</b> runs the same review against the saved snapshot with the same settings. <b>Review latest</b> takes a new snapshot of the branch. When a reviewer finds the same problem again, Perch keeps the discussion in one thread. History includes each attempt, including failures and reviews that found nothing.</p>
+<h2 id="check-drafts-before-posting"><span id="publishing-findings-as-github-drafts"></span>Check drafts before posting</h2>
+<p>On an open PR, findings on lines GitHub accepts become draft comments. Read, edit, or delete them before submitting your review. The card shows the reviewer and severity. Deleting a draft dismisses the finding. Dismissing a finding or marking it as a duplicate removes its draft.</p>
+<p>A draft needs a line in the PR diff (a changed line or one of its three context lines), the same head commit, and the same merge base as GitHub. Other findings stay in Perch, including every finding on a worktree without an open PR. See <a href="posting.html#posting">Posting</a> for how drafts reach GitHub.</p>
+<p>You decide when to run a review and which findings to post. An agent review leaves your files and GitHub threads as they are. Follow-up questions stay in Perch until you post them.</p>
       </article>
       <nav class="pager" aria-label="Chapter navigation"><a href="posting.html" rel="prev"><span>Previous</span>Posting and drafts</a>
 <a href="first-branch.html" rel="next"><span>Next</span>Start work on an issue</a></nav>

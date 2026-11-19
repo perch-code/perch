@@ -3,51 +3,47 @@
 Perch reads `~/.perch/config.toml`, or `$PERCH_HOME/config.toml` when
 `PERCH_HOME` is set. Every setting is optional.
 
-`PERCH_HOME` is also where the cache and the logs live, and
-only one engine may use it at a time: a second Perch, or a `perchd`, on the
-same home refuses to start and says which process has it (see
-[One engine to a Perch home](reference.md#one-engine-to-a-perch-home)).
-`perchd` reads the config.toml of the machine it runs on.
+### Environment variables and settings on an SSH host
 
-`PERCH_SSH`, in the app's environment, names the ssh program the app runs
-to reach a host, send its `perchd` there and open a terminal on it, in
-place of `ssh`: a wrapper that adds `-F <config>`, for tests.
+`PERCH_HOME` contains the cache and logs. Only
+[one engine](reference.md#one-engine-to-a-perch-home) can use a home at a time.
+If another engine owns the directory, Perch reports its process ID. Each engine
+reads `config.toml` on the machine where it runs.
 
-`PERCH_IDLE_EXIT_SECS`, in a host's login environment, is how many seconds
-the engine the app starts there stays with no client and no agent run
-before it stops, in place of 900.
+`PERCH_SSH` selects the SSH program the desktop app uses for connections,
+engine uploads, and remote terminals. For example, it can name a wrapper that
+supplies `-F <config>`.
 
-With `[remote] host` set, the app uses the engine on that host (see
-[An engine on another machine](reference.md#an-engine-on-another-machine))
-and the settings split by whose they are. `[ui]`, `[display]`,
-`[keybindings]` and `[remote]` are the app's: they are read from and
-written to the Mac's config.toml. Everything else is the engine's, in the
-host's config.toml, and Settings writes it there through the engine. The
-Mac's file can still hold engine settings from before; they are not read
-while a host is set. The host's engine looks again at what the host lacks
-each time its config.toml changes, so a `[[repo]]` added there, or a
-`token`, clears its check (see
-[What the app checks](reference.md#what-the-app-checks)).
+Set `PERCH_IDLE_EXIT_SECS` in the host’s login environment to change how long
+the app-started engine waits with no clients or active or queued agent runs.
+The default is 900 seconds.
 
-Settings (`Cmd-,`, or the gear at the foot of the sidebar) edits this file.
-It changes only the keys you touch, so your comments and layout stay. Most
-edits you make by hand take effect within a couple of seconds.
-Changes to `[display]` and `[ui] code_font` apply when the app restarts.
-Changes to `worktrees_dir` apply when the engine restarts. Edit the file
-directly to change `token`, `worktrees_dir`, or a repository's `github`
-and `root`.
+In a [remote environment](reference.md#an-engine-on-another-machine), `[ui]`,
+`[display]`, `[keybindings]`, and `[remote]` belong to the desktop app and use
+its local file. The engine reads all other settings from the host. Settings
+saves each change on the appropriate machine. Adding a repository or fixing the
+host’s token triggers the [host checks](reference.md#what-the-app-checks)
+again.
+
+### All config.toml keys
+
+Settings changes only the keys you edit and preserves comments. Most edits
+apply within seconds. Restart the app for `[display]` or `[ui] code_font`
+changes, and restart the engine for `worktrees_dir`. Edit the file directly to
+change `token`, `worktrees_dir`, or an existing repository’s `github` and
+`root`.
 
 | Key | Default | What it does |
 |---|---|---|
-| `token` | none | GitHub token, used only when the env vars and `gh` have none; looked for again only when Perch has no token or GitHub refuses it |
+| `token` | none | GitHub token to use if the process environment and `gh` provide none. Perch checks again if the token is missing or GitHub rejects it. |
 | `poll_interval_secs` | `60` | Shortest time between inbox polls; GitHub can ask for longer |
 | `github_host` | none | A GitHub Enterprise host whose remotes count as GitHub |
 | `[agent] binary` | `"claude"` | Claude Code executable, a name on `PATH` or a path |
 | `[agent] model` | `"opus"` | Model the composer's picker starts on |
 | `[agent] effort` | `"high"` | Effort the picker starts on: `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
 | `[agent] models` | `["fable", "opus", "sonnet", "haiku"]` | Claude models the picker offers |
-| `[agent] max_concurrent_runs` | `4` | Agents running at once (`1` for Gemini); the rest queue |
-| `[agent] sandbox` | `true` | Claude Code's commands run in its sandbox (bubblewrap and socat on Linux). `false` turns it off, for a machine that is itself the boundary such as a throwaway VM: see [Without Claude Code's sandbox](reference.md#without-claude-codes-sandbox) |
+| `[agent] max_concurrent_runs` | `4` | Maximum simultaneous runs. Gemini runs one at a time. Other runs wait. |
+| `[agent] sandbox` | `true` | Run Claude Code commands in its sandbox. See [Without Claude Code’s sandbox](reference.md#without-claude-codes-sandbox) for what changes when you turn it off. |
 | `[agent.codex] binary` | `"codex"` | Codex executable, a name on `PATH` or a path |
 | `[agent.codex] models` | Codex's own list | Codex models the picker offers |
 | `[agent.gemini] binary` | `"agy"` | Antigravity CLI executable, a name on `PATH` or a path |
@@ -63,16 +59,16 @@ and `root`.
 | `[ui] code_font` | none | Code font off macOS; on macOS code is always SF Mono; applies after a restart |
 | `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |
 | `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |
-| `clone_root` | `~` | The folder a repository added by its name is cloned into, such as `"~/Code"`; read by an engine on a host, which is where repositories are added by name |
+| `clone_root` | `~` | Directory on the SSH host for repositories you add by name, such as `"~/Code"` |
 | `worktrees_dir` | `$PERCH_HOME/worktrees` (normally `~/.perch/worktrees`) | Base directory for new Perch-managed branch worktrees. Applies after an engine restart. |
 | `[remote] host` | none | SSH host to use when there is no saved window session (for example `"chris@devbox:2222"`). Perch subsequently reopens each window in its last environment. |
-| `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app sends the `perchd` it carries there, starts it, and replaces an engine of another build it finds running idle |
-| `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
+| `[remote] command` | none | Custom engine command for the host’s login shell, such as `"perchd bridge"`. By default the app uploads and starts its bundled engine. |
+| `[lsp] max_memory_mb` | `8192` | Combined memory budget for language servers. Perch stops idle servers first. |
 | `[[knowledge]] dir` | required per entry | External directory relative to `$PERCH_HOME/knowledge/` |
-| `[[knowledge]] repos` | every repository | Repository identities that get the directory |
+| `[[knowledge]] repos` | every repository | Repositories whose agents may read this directory |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |
-| `[[repo]] root` | none | Your local clone, where Perch finds branches and worktrees and cuts new ones |
+| `[[repo]] root` | none | Path to your local clone, where Perch finds branches and creates worktrees |
 | `[[repo]] base` | the remote's default | Base branch, when the remote doesn't say |
 | `[[repo]] sync_history` | `false` | Keep the repository's GitHub issues, pull requests and discussions available to agents |
 | `[repo.work] write` | `[]` | Extra directories Work runs may write, such as a package cache |
@@ -92,10 +88,10 @@ running the engine, then restart the engine.
 worktrees_dir = "~/.herdr/worktrees"
 ```
 
-`~` expands to the engine user's home directory. A relative path is
-resolved against `PERCH_HOME` (normally `~/.perch`). Existing worktrees
-keep their paths. Perch leaves unclaimed directories in a configured
-worktree directory alone.
+`~` expands to the engine user’s home. Relative paths start at `PERCH_HOME`
+(usually `~/.perch`). Changing this setting affects only new worktrees.
+Existing checkouts stay where they are, and Perch leaves unrelated directories
+alone.
 
 ## GitHub history
 
@@ -110,9 +106,10 @@ root = "~/Code/slatedb"
 sync_history = true
 ```
 
-The engine backfills open and closed items and their discussions into the
-[repository archive](reference.md#repository-history-for-agents). It catches
-up on startup and syncs hourly while running, even with the app closed.
+The engine downloads open and closed issues, PRs, and their discussions into
+the [repository archive](reference.md#repository-history-for-agents). It
+refreshes at startup and about once an hour while the engine runs. You can
+close the desktop app while a remote engine continues syncing.
 
 ## External knowledge
 
@@ -128,31 +125,26 @@ repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
 dir = "notes"
 ```
 
-Perch matches repository identities case-insensitively. Use `local/<name>`
-for a local-only repository. An omitted `repos` applies to every
-repository. An empty array applies to none. In Settings, the **All
-repositories** switch controls this. Turning it off starts from no
-repositories, and clearing the list leaves the directory shared with
-none.
+List GitHub repositories as `owner/repo` or local repositories as
+`local/<name>`. Names are case-insensitive. Omit `repos` to share the directory
+with every repository, or use an empty list to share it with none. In Settings,
+turning off **All repositories** starts with an empty list.
 
-Write Markdown into that directory on the engine's machine. Use
-`INDEX.md` as an optional entry point and include links back to original
-messages or documents where possible. Use ordinary directories and files
-with no symlinks or agent instruction files such as `AGENTS.md`,
-`CLAUDE.md` and `GEMINI.md`. The top-level names `perch` and `reviews`
-are reserved.
+Put Markdown on the machine running the engine. An optional `INDEX.md` gives
+agents a starting point. Links to original messages or documents let them check
+a source. Use regular files and directories without symlinks or instruction
+files such as `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`. Perch reserves the
+top-level names `perch` and `reviews`.
 
-Perch shares each configured directory and its contents with eligible
-Ask, Work and Review runs as untrusted context. An external ingester
-handles fetching, updates, deletions and scheduling. Start a new agent
-session to pick up newly configured directories.
+Start a new Ask, Work, or Review session to use a newly shared directory. Perch
+treats its contents as untrusted reference material. You or the tool that
+supplies the files must keep them up to date.
 
-Perch skips a directory that is missing, contains a symlink or an agent
-instruction file, or holds more than 200,000 files and directories. It
-also skips one the agent backend cannot add. Settings shows why a
-directory is not shared, and the engine log records each change.
-Perch reuses a directory's check for up to a minute, so a fix appears
-at the first run after that.
+Settings explains why a directory was skipped. Common reasons include a missing
+folder, a symlink or agent instruction file anywhere inside, more than 200,000
+entries, or an agent that cannot accept the directory. The engine logs changes
+and caches each check for up to a minute. After a fix, try a new run once that
+minute has passed.
 
 ## OpenCode
 
@@ -160,9 +152,9 @@ Perch discovers OpenCode models on the machine running the engine. Select one
 in the model picker for Ask or Work, or enable OpenCode in the Review dialog.
 You can pin a shorter list under **Settings → Agents → OpenCode**.
 
-Perch gives OpenCode a separate profile so saved terminal permissions cannot
-silently approve Work commands. To sign in to a provider for Perch, run this
-on the engine machine and restart Perch to refresh its model list.
+Perch uses a separate OpenCode profile so permissions saved in your terminal
+session cannot approve commands here. To sign in, run this command on the
+machine that runs the engine. Restart Perch to refresh the model list.
 
 ```sh
 perch_home="${PERCH_HOME:-$HOME/.perch}"

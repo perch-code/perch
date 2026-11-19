@@ -1,167 +1,115 @@
 # Perch reference
 
-Perch is a native macOS coding and review tool. It combines agent-driven
-worktrees, code browsing and LSP support, GitHub reviews and issues, and local
-human/agent conversations in a compact Rust application built with Floem.
+Perch is a native app for macOS and Linux. Use it to work on GitHub issues,
+browse code, and review pull requests with your team and coding agents.
 
 ## GitHub inbox
 
-Perch builds its inbox from GitHub's REST notifications list. It preserves the
-API's order and unread state, and caches the latest response locally so the
-sidebar can paint immediately. Perch requests `all=true` so read threads remain
-visible alongside unread ones. If the list cannot be written to the local
-database, the sidebar still shows it, leaving out what is Done or snoozed as
-the marks on disk say.
+### When the inbox refreshes
 
-Polling runs in the background, respects GitHub's `X-Poll-Interval`, and
-paginates the full response. Perch performs an unconditional reconciliation at
-startup and on the first scheduled poll after 15 minutes. Polls between
-reconciliations ask for the first page only if its `ETag` has changed, and read
-the whole list again when it has. New activity always changes the first page. A
-thread past the first fifty does not when it is read or marked Done on
-github.com, or when only its time moves (your own comment or review, a label),
-and the reconciliation picks that up. Without a token, each poll looks for
-one again, so a `gh auth login` after launch is picked up.
+Perch shows your GitHub notifications in the same order GitHub returns them. It
+caches them so the inbox opens immediately. Read threads stay in the list
+alongside unread ones. If the cache cannot be updated, you still see the latest
+list with your saved Done and Snooze choices applied.
 
-A poll never moves what is on screen. When it would add, remove, or reorder
-the rows the sidebar shows, the rows stay as they are and a pill over the list
-says how many are new, with Refresh to show them. Changes inside a row, such
-as read state, go straight in, and anything you do in the sidebar shows the
-latest list. When a notification arrives about the open pull request or
-issue, a pill over the pane offers to fetch it. A CI notification for the open
-pull request updates its checks directly, as long as the head on screen is
-still GitHub's.
+Perch checks for updates in the background at the interval GitHub requests
+(`X-Poll-Interval`). It fetches every page at startup and on the first poll
+after 15 minutes. Between full checks, it uses the first page’s `ETag` to see
+whether to fetch the list again. Reading or clearing an older thread on
+github.com can take until the next full check to appear here. If you sign in
+after opening Perch, the next poll picks up your token.
 
-- Viewing a pull request or an issue marks its GitHub thread read, from
-  whichever row it was opened: the notification's, or the item's in All or
-  Authored. Read threads remain in the inbox. While the thread is unread, the
-  item's row is bold with the unread dot, as the notification's row is.
-  GitHub's list can go on reporting a thread unread for a while after it has
-  taken the request, so a read made in Perch holds for that revision of the
-  thread until newer activity arrives or it is marked unread; a thread marked
-  unread on github.com for the same revision is not seen.
-- Opening an unread notification, from its row or from the item's in
-  Worktrees or Browse, goes to what it is about: Conversation
-  scrolls to the newest comment, review, reply or event no later than the
-  notification, and the card flashes. A resolved thread with the reply is
-  opened. The cached discussion paints first, so the page waits up to a
-  few seconds for GitHub's answer to bring the new activity, then settles
-  for the newest card it has. Scrolling first leaves the page where it
-  is, and a read notification opens where the page was left.
-- **Mark Unread**, on the notification's row or the item's, puts an unread
-  reminder on the thread in Perch. Viewing it in Perch clears the reminder,
-  and newer activity GitHub reports unread takes its place. A later update
-  GitHub reports read leaves it: your own comment or review moves the thread
-  too, and so does activity you have already read on github.com. GitHub's
-  public API has no mark-unread operation, so this does not change
-  github.com.
-- **Done** marks the thread done on GitHub and remembers that update in
-  Perch, so GitHub's `all=true` history cannot put it back. Newer unread
-  activity clears the local mark and lets the thread return. A later update
-  GitHub reports read does not: your own comment, review or merge moves the
-  thread too, and so does activity you have already read on github.com.
-  Done is for the update the row shows. Perch reads the thread from GitHub
-  just before marking it, one extra request per thread, and a thread with
-  newer unread activity is not marked Done. One the pill over the list was
-  holding back stays, with what arrived, and so does the pane showing it; one
-  that arrived since the last poll comes back behind the pill. A notice says
-  so either way. A comment that lands between that read and the Done still
-  goes with it: GitHub's Done takes whatever the thread holds.
-- **Unsubscribe** ignores future activity on the thread, marks its current
-  notification done, and remembers it the same way. Whatever has arrived on
-  the thread goes with it.
-- A thread whose pull request you merged or closed, or whose issue you
-  closed, with nothing on it since, is marked Done on its own, on GitHub
-  too. A merge or close by anyone else stays in the inbox, read or not, so
-  you see it. Perch waits a minute after the close first: GitHub sends the close's
-  own notification some twenty seconds late, and a Done before it would see
-  the thread come back. A comment more than a minute after the close keeps
-  the thread, or returns it; one inside that minute is taken for the close's
-  own notification. The thread is read first here too, and one with newer unread
-  activity waits for the poll that brings it.
-- **View › Done**, in the Inbox's filter menu, lists the threads marked Done
-  in Perch that GitHub still lists. **Move to Inbox**, on the row or its menu,
-  drops the local mark and puts the thread back. GitHub's public API has no
-  way to undo Done, so github.com keeps it under Done. A closed thread you
-  move back to the inbox stays; only a later merge or close, with nothing
-  after it, marks it Done again.
-- **Snooze**, the clock on a row or the Snooze submenu in its menu, hides the
-  thread until later today (6 PM), tomorrow, later this week, this weekend or
-  next week (8 AM), as Gmail offers them. It comes back sooner if newer
-  activity arrives that GitHub reports unread. When the time comes it
-  returns to its place in the inbox, as read or unread as it was snoozed. **View › Snoozed** lists the
-  snoozed threads with when each returns, and **Move to Inbox** ends a snooze
-  early. GitHub has no snooze, so the mark lives only in Perch and
-  github.com still lists the thread.
-- **State › Merged or Closed** narrows the inbox to threads whose pull
-  request has been merged or closed, or whose issue has been closed. A thread
-  whose subject Perch has not looked up yet counts as open, and so do kinds
-  with no state, such as releases and CI runs.
-- **Mark N Done**, at the foot of the filter menu, marks every thread the
-  inbox is showing Done, one GitHub request after another, each read first,
-  so a thread with new unread activity is left in the inbox, and reports any
-  failures in a single notice. Filtering to State › Merged or Closed first
-  clears the finished pull requests in one go. On View › Done and View ›
-  Snoozed the same item reads **Move N to Inbox**.
-- Pull requests and issues open inside Perch. Other notification types remain
-  first-class inbox rows and open on GitHub.
+New notifications wait behind **Refresh** so the list stays still while you
+read. Click it to show the new order. Read indicators update immediately. If the
+open item changes, Perch offers to refresh its discussion. CI results update
+automatically when you’re viewing the same commit GitHub checked.
+
+### Read state, Done, and snoozing
+
+- **Read.** Opening an issue or PR marks its GitHub thread read, whether you
+  open it from Inbox, Worktrees, or Browse. For an unread thread, Perch scrolls
+  to the latest comment or event covered by the notification and briefly
+  highlights it. It waits a few seconds for fresh activity and opens a resolved
+  thread if needed. Scroll yourself to keep your place. Read threads reopen
+  where you left them.
+- **Mark Unread** adds a reminder in Perch. Open the item to clear it. GitHub’s
+  API cannot mark a thread unread. Perch remembers a read for that version of
+  the thread even if GitHub still reports it unread. New unread activity takes
+  precedence.
+- **Done** clears the notification on GitHub and in Perch. New unread activity
+  brings it back. Your own comments or updates you’ve already read leave it
+  under Done. Perch checks GitHub before clearing the thread and tells you if a
+  newer unread update arrived. A comment that lands between that check and
+  GitHub accepting Done can still be cleared.
+- **Unsubscribe** clears the notification and tells GitHub to ignore future
+  activity on that thread.
+- When *you* merge or close a PR, or close an issue, Perch waits a minute for
+  GitHub’s close notification and marks the thread Done if there’s nothing
+  newer. It treats activity inside that minute as part of the close. A later
+  unread comment brings it back. Items someone else closes stay in your inbox.
+- **View › Done** shows threads cleared in Perch that GitHub still lists.
+  **Move to Inbox** restores one in Perch. GitHub’s API cannot undo Done. A
+  restored item stays until a later merge or close qualifies it for Done again.
+- **Snooze** hides a thread until the time you choose. Later today means 6 PM.
+  Tomorrow, later this week, this weekend, and next week use 8 AM. New unread
+  activity wakes it early. Otherwise it returns with the same read state. Find
+  it under **View › Snoozed** and use **Move to Inbox** to wake it yourself.
+  Snoozing affects Perch only.
+- **State › Merged or Closed** shows finished issues and PRs. Perch counts
+  unknown states, releases, and CI runs as open.
+- **Mark N Done** clears the threads in the current view. Perch checks each one
+  for newer unread activity, skips those with updates, and reports failures
+  together. Filter to **Merged or Closed** first to clear only finished work.
+  In Done and Snoozed, the action is **Move N to Inbox**.
+- Issues and pull requests open in Perch. Other notification types open on GitHub.
 
 ### The sidebar's filter menus
 
-Each tab has one filter menu, laid out the same way: View, then what the
-list is narrowed to, then Sort By, then display settings and actions. A
-section is left out only where it cannot apply. The button lights up while
-the tab's list differs from its defaults, and the search box names the view
-it searches.
+Each sidebar tab has a filter menu. Choose a view first, then narrow or sort the
+list. The filter button lights up when you change a default. The search box
+names the view it searches.
 
-- **Inbox**: View (Inbox, Snoozed, Done; then Review requested, Yours,
-  Assigned, Mentioned, All, from GitHub's reason, Yours also taking what you
-  opened), Repository, State, Sort By (Newest or Oldest first),
-  Unread Only, Mark N Done.
-- **Worktrees**: View (Worktrees, or Recent: everything opened, worktree or
-  not), Repository, State, Sort By (Last activity, Last opened, Created; each
-  view keeps its own), Unread Only.
-- **Browse**: View (Review requested, Yours, Assigned, Mentioned, All),
-  Repository, State, Sort By (Last activity or Created, sorted by GitHub's
-  search). Repository offers every repository on GitHub
-  that config, Worktrees or Inbox knows of. All searches the repository
-  picked, or every declared repository on GitHub.
+- **Inbox** shows active, snoozed, or done notifications. Narrow by GitHub’s
+  notification reason (review requested, yours, assigned, or mentioned),
+  repository, state, or unread status. **Yours** also includes items you
+  opened. Sort newest or oldest first.
+- **Worktrees** shows your worktrees. **Recent** shows everything you opened.
+  Filter either view by repository, state, or unread status. Each remembers its
+  own sort order (last activity, last opened, or created).
+- **Browse** searches GitHub for items you need to review, own, were assigned,
+  or were mentioned in. Pick **All** to search the selected repository or every
+  configured GitHub repository. The repository menu also includes repositories
+  known from Worktrees or Inbox. Sort by last activity or creation date.
 
-Repository is shared by all three tabs. State is Any,
-Open, or Merged or Closed everywhere; it defaults to Any on Inbox and
-Worktrees and to Open on Browse.
+Choosing a repository filters all three tabs. Each tab also lets you choose
+**Any**, **Open**, or **Merged or Closed**. Inbox and Worktrees start on
+**Any**. Browse starts on **Open**.
 
-GitHub's public REST notification payload does not expose whether a thread is
-currently in the web Inbox or Done, and `all=true` can include Done history.
-Perch can therefore keep its own Done actions stable, but cannot reliably
-mirror Done or Restore actions performed on github.com.
+GitHub’s notification API can include Done history without saying which threads
+are in the web inbox. Changes you make under Done on github.com may differ from
+what Perch shows.
 
-These actions affect only the notification or its local reminder. They do not
-archive or delete a Perch item, worktree, or local conversation.
+Clearing a notification keeps the item, its worktree, and its local
+conversation.
 
 ### Finished runs on your own work
 
-A worktree with no pull request has no one on GitHub to notify you, so Perch
-does. When an Ask or Work run, or a worktree review, ends on it, the item gets
-a row in the inbox: its glyph and title as Worktrees draws them, then the
-repository, the branch, and what happened: `Claude · Work · 3 files`,
-`Codex · Ask`, `Review · 2 findings`, in the failure colour when it failed. A
-run you stopped or cancelled, or that ended because Perch quit, doesn't count,
-and neither does one on the item open in a window that's in front: you watched
-it. A Claude Code or Codex session you started yourself, outside Perch, isn't
-seen.
+When an agent finishes an Ask, Work, or review run on a worktree without a pull
+request, Perch adds a local notification. The row names the repository, branch,
+and result, such as `Claude · Work · 3 files` or `Review · 2 findings`.
+Failures use the error color. Perch skips runs you were watching in the
+foreground, canceled runs, runs interrupted when you quit, and sessions started
+outside Perch.
 
-The item has one row, for the last run that ended there. It fits in among
-GitHub's rows by time, and waits behind the pill as a poll does. It is unread
-until you open the item, from any row, and the item's row in Worktrees is bold
-with the dot until then too. Opening it opens the item. **Mark Unread** puts
-the dot back. **Done** puts it away until the next run ends there; it never
-archives the item or touches its worktree. Local rows are under View › Inbox
-with Yours or All, not under GitHub's own reasons, and have no Snooze.
+Each worktree gets one inbox row for its most recent result. Open the item to
+mark it read, choose **Mark Unread** for a reminder, or choose **Done** to hide
+it until another run finishes. Look under **View › Inbox** with **Yours** or
+**All** selected. Local rows appear in time order alongside GitHub notifications
+and have no Snooze option.
 
-Once the item has a pull request, GitHub's notifications are its signal: its
-row goes, and a run that ends there makes none, only the notice a run leaves
-as it finishes.
+Once the worktree has a pull request, its local row disappears. GitHub supplies
+its inbox notifications from then on. Perch still shows a notice when a run
+finishes.
 
 Perch fetches a pull request or issue when you open a notification or open
 the item by repository and number. For agents, you can also enable
@@ -169,30 +117,23 @@ the item by repository and number. For agents, you can also enable
 
 ## Conversation and Code
 
-An item has two modes, the pills at the centre of its bar, as Codex has
-Summary and Code. **Conversation** is the item's summary, its timeline and its
-threads, with a composer at the foot. **Code** is the worktree: the open
-files as tabs over the editor, and the file tree in the drawer on the right
-(see [The file tree](#the-file-tree)). When the bar's controls take more
-than half of it, the pills give way to them rather than sit at the centre.
+At the top of an item, choose **Conversation** to read its description,
+timeline, and threads, or **Code** to open its files. In Code, file tabs sit
+above the editor and the [file tree](#the-file-tree) opens on the right.
 
-An issue's Code is the repository's default branch, read-only: the home
-checkout questions about its issues run in (see [Agents](#agents)).
-Its pills come once that checkout exists, which the first issue opened in a
-repository makes. The top of the file tree names the branch and its commit
-in place of the scope, says when Perch last fetched it, and has a refresh
-that fetches it again; opening an issue fetches it too, at most once a
-minute per repository. Files the issue names open there, and Cmd-P finds
-any file on the branch. There is no change to fold or split, so Code's
-tabs have Word wrap and the tree alone. Since every issue of a repository reads one checkout, a fetch
-moves the files under all of them, and open files reload. To change the
-code, Start work: see [Work](#work).
+On an issue, **Code** shows a read-only checkout of the repository’s default
+branch. Perch creates it when you first open an issue in that repository. The
+file tree shows the branch, commit, and last fetch time. Use its refresh button
+to fetch now. Opening an issue also fetches, at most once per minute per
+repository.
 
-Each item comes back on the mode it was left in, with its tabs, until Perch
-quits; it opens on Conversation the first time. Code with no file open says
-so, or says there are no changes, and an item's first visit to Code opens the
-tree beside it. Closing the last file's tab leaves Code showing. Conversation
-cannot be closed.
+Issues in the same repository share this checkout. A fetch updates all their
+open files. Click a file mentioned in the issue or use `Cmd-P` to find it. To
+edit the code, choose **Start Work** for a [separate worktree](#work).
+
+New items open in Conversation. Until you quit, each item remembers its view and
+open tabs. Closing the last file leaves you in Code. Switch back to Conversation
+when you want to reply.
 
 | Action | Key |
 |---|---|
@@ -202,176 +143,140 @@ cannot be closed.
 | The file tree | `Cmd-/` or `Cmd-Shift-E` |
 | Agents | `Cmd-Shift-A` |
 
-These are the default keys; [Keyboard shortcuts](#keyboard-shortcuts) has
-every key and how to change it.
+See [Keyboard shortcuts](#keyboard-shortcuts) for the full list and how to
+change a binding.
 
 ## Timeline
 
-Conversation is the item's description, what was said about it, and what was
-done to it, in one column in time order. The doing comes from GitHub's own
-timeline: commits, labels added and removed, assignments, review requests and
-dismissals, renames, milestones, force pushes, references from other issues
-and pull requests, and the opening, merge or close. Each is one line saying
-who did it and when, with a label in its own colours, a commit by its short
-sha and subject, and a reference by where it points. A commit is signed with
-the name git recorded, since it has no account behind it.
+Conversation shows the description, comments, reviews, and GitHub events in time
+order. Each event shows who acted and when. You can see commits, label and
+assignment changes, review requests and dismissals, renames, milestones,
+force-pushes, linked issues and PRs, and when an item opened, merged, or closed.
+A commit shows its short SHA, subject, and the author name Git recorded.
 
-What Perch already draws as a card — a comment, a review, a line comment — is
-not repeated as a line, and what GitHub sends but does not itself show, such
-as `mentioned` and `subscribed`, is left out. A kind Perch has no words for is
-dropped rather than guessed at. Ten pages are read for one item, a hundred
-lines to a page.
+Comments and reviews each appear once. Perch skips unknown events and events
+GitHub hides from its own timeline, such as `mentioned` and `subscribed`. It
+reads up to ten pages of 100 entries per item.
 
 ## Reactions
 
-Each GitHub entry on Conversation shows the reactions on it under its text:
-the description, every comment, and every review summary and line comment. A
-pill is one reaction and its count, blue when yours is among them. Hovering
-over a pill says who left it, as GitHub does: "You, octocat, and 3 more
-reacted with heart emoji", naming up to ten. Clicking a pill adds or removes
-yours. The face at the right of an entry's byline, and
-the one after its pills, open GitHub's picker: all eight in a row, yours
-washed blue, and picking one of yours takes it back. A reaction is shown as
-soon as it is clicked and put back if GitHub refuses it.
+Click a reaction below a description, comment, or review to add yours. Click it
+again to remove yours. Blue means you’ve reacted. Hover over the count to see
+who else reacted (up to ten names), or click the smiley to choose from all eight
+GitHub reactions. Perch updates the count right away and restores it if GitHub
+rejects the change.
 
-Reactions are read with the discussion through GitHub's GraphQL API, a
-hundred entries to a request, and left the same way. An entry cached by an
-older build of Perch has no reactions until it is fetched again.
+Perch fetches reactions with the discussion in batches of 100 through GitHub’s
+GraphQL API. Older cached discussions show reactions after their next refresh.
 
 ## Posting
 
-A composer's box opens five lines tall, the size GitHub gives a comment, and
-grows with what is typed. The grip at the foot of the box drags it taller or
-shorter, between two lines and about twenty-four; a box that has been dragged
-keeps that height whatever is typed into it, and every composer opens at it
-until Perch is restarted.
+The message box starts five lines tall and grows as you type. Drag its bottom
+edge to set a height between two and about 24 lines. Perch uses that height for
+every message box until you quit.
 
-Typing `@` in a composer, or in the review summary under **Review**, puts a list under
-it, as GitHub's comment box does. People come first: the item's author and
-whoever has written on it, then anyone else in the repository GitHub finds
-for the letters typed, never you. The worktree's files follow, ranked as
-`Cmd-P` ranks them. The arrows or `Ctrl-N` and `Ctrl-P` move the pick, `Enter`
-or `Tab` takes it, a click takes a row, and `Escape` puts the list away until
-the next `@`. A person goes in as `@login`. A file goes to an agent as
-`@path`, as Claude Code and Codex take one, and to GitHub as `` `path` ``,
-since `@` there mentions someone and a code span links to the file on Code.
+Type `@` in a message or review summary to mention a person or a file. The list
+starts with the author and participants, followed by other matching repository
+users and then files. Your own account is excluded. Use the arrow keys or
+`Ctrl-N` and `Ctrl-P` to move, Enter or Tab to select, and Escape to dismiss.
 
-Every composer in Perch has a destination: Claude, Codex, or GitHub, picked
-from the same menu as the model. What goes to an agent stays in Perch. What
-goes to GitHub goes one of two ways.
+Perch inserts people as `@login`. For a file it sends `@path` to an agent or a
+code-formatted path to GitHub, where readers can follow the link in Perch.
 
-On a line of a file, or under a thread that is on GitHub, a message to GitHub
-is a draft: it is kept in Perch's cache the moment it is sent, drawn with a
-`Draft` pill, marked in the gutter in GitHub's blue, and can be edited in
-place or deleted on hover. Drafts survive a restart and being offline, and
-github.com does not show them. **Review**, in the bar, counts them on its
-button, lists them above the summary in its popover, and posts them with the
-verdict: a comment on the
-head rides in the review, a comment written against an older commit is posted
-against that commit, and a reply is posted under its thread. A `Comment`
-review with drafts needs no summary. A draft that GitHub refuses, or that
-cannot be matched to what GitHub returns, stays a draft and the form says so.
-GitHub's API takes a review comment only on the lines of the pull request's
-diff, a changed line or one of the three around it, though github.com takes
-one on any line, and one comment it refuses fails the whole review. So a
-comment on the head that is not inside one hunk of the diff, first line and
-last, is kept out of the review: the rest posts, and it stays a draft, named
-by its lines on the form.
+Choose the recipient from the model dropdown. A question to an agent stays in
+Perch. To send feedback to the author, choose **GitHub**. A line comment becomes
+a review draft. A message at the bottom of Conversation posts after you confirm.
 
-A composer on lines has **Suggest**, which puts a `suggestion` fence in the
-box holding the lines as they are, to edit into what they should read. On a
-worktree with no pull request there is no one on GitHub to accept it, so a
-message that is a suggestion and nothing else goes straight into the file
-instead of to the agent, as Commit suggestion does on github.com. It goes in
-only while the file still reads those lines; otherwise the composer says they
-changed and keeps the text. The edit is uncommitted, so under a scope that
-shows a commit, such as Branch, the view moves to Uncommitted to show it. A
-suggestion with words beside it goes to the agent as any message does.
+### Offline review drafts
 
-On an open pull request, a suggestion in a comment on GitHub has **Apply
-suggestion** under it. It opens a popover with the commit message, `Update
-<path>` to start, and an optional description; **Commit changes** (or Enter in
-the message) commits the change on the pull request's head branch through
-GitHub, as github.com does, and resolves the thread where GitHub lets you. The
-file is read at the head GitHub has then, and the commit goes only while the
-lines still read as the suggestion was written against and the branch has not
-moved; otherwise the popover says why and stays. Your worktree is not touched:
-it is behind by that commit until you pull. The button is off on a resolved
-thread, offline, or when the suggestion changes nothing, and absent on an
-outdated thread, a draft, or a closed pull request.
+On a line of a file, or under a GitHub review thread, choose **GitHub** to save
+a draft. You can edit or delete it, close Perch, or work offline. The **Review**
+button counts your drafts. Open it to check the comments and choose a verdict. A
+**Comment** review with drafts can have an empty summary.
 
-At the foot of Conversation, a message to GitHub is an issue comment and
-posts at once, after one confirmation naming the pull request. Beside
-**Comment**, **Close with comment** posts it and closes the pull request, or
-reads **Close pull request** while the box is empty. It is there on an open
-pull request you opened or can write to, and asks once too. It is a split
-button, as on github.com: its arrow opens a menu of the ways to close. On a
-pull request those are **Close pull request** and **Close as issue…**. On an
-open issue you opened or can triage, the button reads **Close issue**, and the
-menu offers **Close as completed**, **Close as not planned** and **Close as
-duplicate**, the reason GitHub records for the close. A pick changes what the
-button says and does; it stays picked until the item changes. Close as
-duplicate searches the repository's issues, as a `#` does, and picking the
-original goes straight to the confirmation, which names it. GitHub has no
-threads under a comment, a review's summary or the description, so each offers
-**Quote reply** under the pointer, which opens that composer with the text
-quoted as github.com quotes it, below anything already typed there for GitHub.
-With words of it selected, it quotes just those.
+When you submit, replies go under their original threads and comments on an
+older commit stay on that commit. For a comment on the current commit, GitHub’s
+API requires the entire selection to fall within one diff hunk (changed lines or
+the three surrounding lines). Perch identifies out-of-range drafts and submits
+the rest. A draft stays local if GitHub rejects it or Perch cannot confirm it
+was posted.
 
-**Close as issue…**, in that menu, is for a pull request that found a real bug
-but isn't worth merging. It unfolds a form above the composer: the issue's
-title and body, filled from the pull request with a closing `Found in #12.`
-that links the two, and the comment the pull request gets, where `{issue}`
-becomes the new issue's number. **Write with Claude**, or Codex, has the agent
-read the pull request's checkout and diff under Ask's rules and describe the
-bug as it stands on the base branch, in its own words rather than the pull
-request's. The answer fills the title and body for you to edit, asking first
-if you have typed there. Nothing goes to GitHub until **Open issue and close**,
-which opens the issue, comments and closes. Once the issue is open the form is
-spent, so a comment or close GitHub refuses after it is told as a notice, not
-retried.
+### Inline suggestions
 
-GitHub's review threads are drawn beside Perch's own with the same cards, in
-both Code and Conversation, so one thread can hold a reviewer's comment, your
-reply to them, and an agent's private take on both. A thread looks as it does
-on github.com: on Conversation, a box headed by its file with the lines it is
-on under the header; in Code, a box under those lines headed "Comment on line
-R12", or L12 on a line of the old file. The split layout draws each box on its
-side: the old file's on the left, beside fillers on the right, and the new
-file's on the right. Each message sits under its author's face and name, with **Author** by
-whoever opened the pull request, and the thread ends in a **Follow up** box and
-a foot with **Resolve**. A reviewer's comment offers **Reply** and **Ask about
-this** under the pointer. In such a thread, what an agent said and what you
-asked it are labelled **Perch only**.
-An agent's answer never posts on its own: **Post to GitHub** under the pointer
-puts its text in a composer for you to edit and send, and nothing records
-where it came from. It goes the same two ways as anything else: a draft under
-a thread with lines or a place on GitHub, an issue comment under one of
-Perch's own, such as a question asked at the foot of Conversation. A review's
-findings on an open pull request arrive as drafts already (see Worktree
-reviews), and post only with the review. **Quote reply** on an answer quotes
-it, or the words of it you selected, into the thread's Follow up box, still
-bound for the agent. **Copy** puts an answer's markdown on the clipboard, and is
-there while the agent is still answering and after a run that stopped or
-failed too, with what it had said so far.
+Select lines and click **Suggest**. Edit the prefilled `suggestion` block to
+show what the lines should say. On a worktree without a PR, sending just that
+block applies your edit directly to the file. The edit appears under
+**Uncommitted**. If the original lines have changed, Perch keeps your draft and
+explains why it couldn’t apply it. Add text outside the block to send it to the
+agent as a message instead.
 
-A thread ends in **Resolve**, or **Unresolve** once it is resolved. On a
-thread that is on GitHub the button is there wherever GitHub says you may
-use it, and the click changes github.com at once, with no confirmation, as
-the button there does. The thread shows the change before GitHub answers
-and goes back if GitHub refuses. On a thread of Perch's own, a question to
-an agent and its answers, the button is always there and the change stays
-in Perch. A review finding has **Dismiss** and **Reopen** instead, and
-once published it is on GitHub and has **Resolve** too.
-Resolved, a thread folds, in Code to one row and on Conversation to its
-header, as one resolved on github.com arrives; **Show resolved** opens it
-again and **Hide resolved** folds it. Conversation and Code each keep their
-own, as github.com's tabs do, and the chevron on a thread's header folds any
+On an open PR, **Apply suggestion** lets you commit a GitHub suggestion to the
+PR branch. Edit the default message (`Update <path>`), optionally add a
+description, and click **Commit changes**. Perch checks that the branch and
+target lines still match and resolves the thread if GitHub permits. Pull to
+bring the commit into your local worktree.
+
+The button is disabled offline, on a resolved thread, or when the suggestion
+makes no change. It’s absent on drafts, outdated threads, and closed PRs.
+
+### Comments and closing items
+
+At the bottom of **Conversation**, choose **GitHub** and click **Comment** to
+post after confirmation. To quote the description, a review summary, or a
+comment, hover over it and choose **Quote reply**. Select a passage first to
+quote just that text. Perch appends the quote to anything you’ve already typed
+for GitHub.
+
+On an open PR you authored or can write to, **Close with comment** posts your
+comment and closes the PR. With an empty box it reads **Close pull request**. On
+an issue you authored or can triage, use the arrow beside **Close issue** to
+choose **Close as completed**, **Close as not planned**, or **Close as
+duplicate**. For a duplicate, pick the original issue and check its number in
+the confirmation. The button remembers your choice until you switch items.
+
+To keep track of a bug from a PR you’re closing, choose **Close as issue…**.
+Edit the proposed issue title and body and the closing comment. The body
+includes a reference such as `Found in #12.` and `{issue}` in the comment
+becomes the new issue number. **Write with Claude** or **Codex** can draft a
+description of the bug on the base branch. Perch asks before replacing your
+edits.
+
+Choose **Open issue and close** to create the issue, comment on the PR, and
+close it. If GitHub refuses the comment or close after creating the issue, Perch
+reports which step failed. It won’t create a second issue.
+
+### Review threads and Perch-only replies
+
+A thread can contain both public GitHub feedback and private agent replies. In
+Code it sits under the relevant lines. In Conversation its header shows the
+file and lines. In a split diff, `L12` means line 12 of the old file and `R12`
+means line 12 of the new file.
+
+Hover over a GitHub comment to **Reply** or **Ask about this**. Perch labels
+your questions and the agent’s replies **Perch only**. To share an answer,
+choose **Post to GitHub**, edit the text, and send it under your name. A reply
+on a GitHub review thread becomes a draft. A reply from a private conversation
+without a GitHub line or thread posts as an issue comment. **Quote reply** puts
+the answer or selected passage into a private follow-up to the agent. **Copy**
+puts an answer’s markdown on the clipboard, including while the agent is still
+answering or after a stopped or failed run. See
+[Worktree reviews](#worktree-reviews) for findings that start as drafts.
+
+**Resolve** and **Unresolve** take effect immediately on GitHub when you have
+permission. Perch restores the previous state if GitHub rejects the change.
+Resolving a Perch-only thread affects only Perch. Review findings use
+**Dismiss** and **Reopen**. A published finding can also be resolved on GitHub.
+
+Resolved threads collapse. Use **Show resolved** or **Hide resolved** separately
+in Code and Conversation, or use a thread’s chevron to collapse just that
 thread.
 
 ## Authentication
 
-Perch calls GitHub's API directly. It resolves credentials in this order:
+### Where Perch looks for a token
+
+Perch calls GitHub's API directly. It uses the first token it finds in this
+list.
 
 1. `GITHUB_TOKEN`
 2. `GH_TOKEN`
@@ -379,29 +284,34 @@ Perch calls GitHub's API directly. It resolves credentials in this order:
 4. `token` in `~/.perch/config.toml`
 5. `GITHUB_TOKEN`, then `GH_TOKEN`, as your login shell exports them
 
-Using `gh auth login` is the simplest setup for the desktop app because a GUI
-launch does not normally inherit shell environment variables: opened from
-Finder or the Dock, Perch never sees an `export` in `~/.zprofile` or
-`~/.zshrc`. The last step is for that. With no token from the first four,
-Perch starts `$SHELL` as a terminal does, as a login and interactive shell,
-and reads the two variables from the environment it ends up with. It does
-this once, the first time it finds no token, and gives the shell five seconds;
-so an export added while Perch runs is found the next time Perch starts,
-while a `gh auth login` or a `token` in the config is found on the next poll.
+### Signing in from the desktop
 
-The credential
-must be allowed to read and update notifications and to read the repositories
-you open. Merging a pull request also requires `Contents: write` permission on
-its repository, as does pushing a branch from Perch's own clone; opening a pull
-request requires `Pull requests: write`. Commenting on, approving, or requesting changes on a pull
-request requires `Pull requests: write` permission, as do resolving a thread
-and reacting to a pull request or anything said on it; reacting on an issue
-requires `Issues: write`, as do Close as issue and closing an issue.
+If you open Perch from Finder or the Dock, it may miss variables you export in
+your terminal. Run `gh auth login` once to sign in from both places. Perch
+picks up a new GitHub CLI login or a change to the `token` setting on its next
+poll.
+
+If the first four sources return nothing, Perch starts `$SHELL` as an
+interactive login shell and waits up to five seconds for the two variables. It
+tries this once per launch. Restart Perch after adding an export to your shell
+profile.
+
+### Required GitHub permissions
+
+Your token needs permission to read your repositories and to read and update
+notifications. Other actions need write access on the repository where you take
+the action.
+
+- `Contents: write` lets you merge a pull request or push a branch from a clone
+  Perch manages.
+- `Pull requests: write` lets you open a pull request, comment, approve,
+  request changes, resolve a thread, or add a reaction to a PR or its comments.
+- `Issues: write` lets you react to an issue, close it, or use **Close as issue**.
 
 ## Configuration
 
 Perch reads `~/.perch/config.toml` (or `$PERCH_HOME/config.toml`). A repository
-can have a GitHub identity, a local root, or both:
+entry can name a GitHub repository, a local clone, or both.
 
 ```toml
 poll_interval_secs = 60
@@ -412,27 +322,26 @@ name = "slatedb"
 root = "~/Code/slatedb"
 ```
 
-`name` is only the sidebar label. `root` lets Perch discover existing local
-branches and worktrees. Neither setting causes a repository-wide GitHub crawl.
-A worktree with no pull request is yours, so it is in **Authored**, whether Perch
-made it or found it under a root; the base branch never becomes a row. Once
-someone else's pull request attaches to it, the row goes by that author.
-Perch never removes a worktree it found under a root, so deleting its row
-lasts only until the next scan finds it again. A branch renamed with
-`git branch -m` keeps its row, with its threads, runs and name, and a hidden
-row stays hidden; the scan knows it by the rename in the branch's reflog.
-That is what T3 Code does to a thread's `t3/<hex>` branch once the thread
-has a title. A branch switched rather than renamed puts the old row away as
-before, even when the old branch is deleted before the next scan, and so
-does a rename onto a branch another row already has, or of a branch with a
-pull request, which GitHub still has on the old name.
-**Hide** in the row's menu
-keeps it out of Worktrees without touching it; it's listed under Recent,
-where **Unhide** brings it back.
-A repository with a root and no GitHub remote is `local/<name>`: it has no pull
-requests or issues, and everything else works.
+Set `name` for the sidebar label and `root` to the path of your clone. Perch
+scans that clone for local branches and worktrees. Scanning leaves GitHub
+history alone. A worktree without a PR appears under **Authored**. Once it has
+a PR, the PR author determines where it appears. The base branch has no row. A
+local-only repository appears as `local/<name>` and supports worktrees and
+agents.
 
-New work (see [Starting work](#starting-work)) reads two more tables:
+To keep a discovered worktree out of the sidebar, choose **Hide**. Find it under
+**Recent** and choose **Unhide** to bring it back. Deleting its row only hides
+it until the next scan because Perch leaves the checkout on disk.
+
+If you rename a branch with `git branch -m`, Perch uses Git’s reflog to keep
+its threads, runs, and hidden state together. Switching branches, renaming onto
+a branch with its own row, or renaming a branch attached to a PR leaves the
+history with the old row.
+
+### Work, language servers, and appearance
+
+Use `[work]` for [new worktree](#starting-work) defaults and `[repo.work]` for
+permissions on a particular repository.
 
 ```toml
 [work]
@@ -449,27 +358,26 @@ network = ["index.crates.io", "static.crates.io"]
 trust = false                  # true loads the repository's own agent config
 ```
 
-Both lists are empty unless given. A `write` entry is a place the agent can
-leave something for the next program that reads it, which is why the example
-names cargo's caches and not `~/.cargo`: `~/.cargo/config.toml` and
-`~/.cargo/bin` would let a run change what `cargo` does when you run it. An
-entry that is or holds the home directory or `~/.perch`, or that is in or
-holds a root's `.git`, is left out, with a notice at startup.
+The `write` and `network` lists start empty. Grant write access to the specific
+cache directories an agent needs. For example, granting the whole `~/.cargo`
+directory would also let it change your Cargo configuration and binaries. Perch
+skips entries that include your home directory or `~/.perch`, and paths in or
+containing a configured root’s `.git` directory. It reports skipped entries at
+startup.
 
-A language server is kept running for a while after its item is left, so
-going back to it doesn't wait for the workspace to load again: two at most,
-ten minutes each. On a large workspace each can hold several gigabytes, so
-`[lsp]` caps what every server uses between them:
+When you leave an item, Perch keeps up to two idle language servers for ten
+minutes so you can return without waiting for the workspace to load. Set the
+combined memory budget under `[lsp]`.
 
 ```toml
 [lsp]
 max_memory_mb = 8192           # the default
 ```
 
-Past it, the kept servers are stopped, oldest first. The ones on show never
-are, so their own total can go over.
+Over budget, Perch stops the oldest idle server first. Servers for open views
+can use more than the budget on their own.
 
-`[display]` sets how big Perch draws, read when Perch starts:
+Use `[display]` to change the size of the interface. Restart Perch to see the change.
 
 ```toml
 [display]
@@ -477,13 +385,12 @@ zoom = 1.0                     # the default; 0.75 to 2.0
 code_font_size = 12            # the default; 8 to 32
 ```
 
-`zoom` scales the whole window: text, code, icons and spacing. On a large
-monitor, 1.25 is the same layout a quarter bigger. `code_font_size` is the
-code in Code, sticky headers, hovers and references, before the zoom; the
-line height follows it. The UI's own text, and code inside a comment or an
-answer, change only with `zoom`.
+`zoom` scales the whole window. For example, `1.25` makes text, icons, and
+spacing 25% larger. `code_font_size` sets the editor text size before zoom,
+including headers, hovers, and references. Comments and agent replies follow
+the window zoom.
 
-`[ui]` sets the look:
+Use `[ui]` for the theme, light or dark appearance, and code font.
 
 ```toml
 [ui]
@@ -496,40 +403,34 @@ Choose a theme in Settings → Appearance to preview and apply its palette.
 Each theme has a light and a dark version. Perch starts with Warm Linen in a
 fresh Perch home and uses Perch Classic when `theme` is absent.
 
-Perch is light or dark as the system is unless `appearance` says otherwise.
-On Linux under X11 the system's setting doesn't reach Perch, so there it is
-light. A new `appearance` applies at once, but going back to `"system"`
-from light or dark takes the system's appearance as it is then, and Perch
-follows the system's later switches only after a restart. On macOS code is
-set in SF Mono. Elsewhere it is `code_font`, read when Perch starts, else
-the first installed of JetBrains Mono, DejaVu Sans Mono, Noto Sans Mono,
-Liberation Mono, Adwaita Mono and Droid Sans Mono.
+By default, Perch follows the system appearance. On Linux under X11 it starts
+light because X11 does not supply the setting. Choosing light or dark applies
+immediately. Choosing `"system"` applies the current system appearance
+immediately. Restart Perch to follow subsequent system changes.
 
-rust-analyzer and jdtls run a checkout's own code as they load it:
-rust-analyzer its build scripts and proc macros, following the checkout's
-`.cargo/config.toml` and `rust-toolchain.toml`, and jdtls its Gradle or Maven
-build. Perch starts them by itself only on your own work in a repository in
-your config: a branch, the default branch an issue reads, and a pull request
-you opened whose head is in that repository or your fork of it. A branch in
-your root counts as your own, so one you check out there from
-someone else's fork, as `gh pr checkout` does, starts them too. On anything
-else, such as someone else's pull request, a branch you cut from one, or a
-repository not in your config, they wait, and a toast names the item with
-**Trust and start**. Perch remembers that answer for the item, commits pushed
-to it later included; deleting the item forgets it. Under the toast's line
-each server held has a box, **Always trust rust-analyzer in
-slatedb/slatedb**: ticked when you press Trust and start, that server starts
-on every item in the repository from then on, anyone's pull requests
-included, and no toast asks for it there again. Leave it empty and the next
-pull request or worktree there asks again. While they wait, the Worktree row
-on Conversation has a warning, and its menu has **Trust and Start** and
-**Always Trust** for each server held, once the toast is closed. On any item
-in a repository, the menu has **Stop Trusting** for each server trusted on
-all of it, which stops that server wherever nothing else trusts the code and
-asks again. After upgrading, a branch you had already cut from a pull
-request, your own included, asks once. gopls and typescript-language-server
-start either way. To start every server on everything in a repository,
-anyone's pull requests included:
+On macOS, the code font is SF Mono. On Linux, set `code_font` and restart.
+Otherwise Perch uses the first installed font from JetBrains Mono, DejaVu Sans
+Mono, Noto Sans Mono, Liberation Mono, Adwaita Mono, and Droid Sans Mono.
+
+Loading a Rust or Java project can run code from the checkout. `rust-analyzer`
+runs build scripts and proc macros and reads `.cargo/config.toml` and
+`rust-toolchain.toml`. `jdtls` can run Gradle or Maven. On your own work in a
+configured repository, Perch starts these servers automatically. That includes
+branches in your local root, even if you checked one out from a fork, the
+default branch for an issue, and your PRs from the configured repository or
+your fork.
+
+On another person’s PR, a branch created from it, or an unconfigured repository,
+Perch asks first. Choose **Trust and start** to trust this item, including
+future commits pushed to it. Deleting the item clears that decision. Branches
+you created from PRs before upgrading may ask once.
+
+To trust one server throughout a repository, select its **Always trust**
+checkbox when you confirm. The Worktree row also offers **Trust and Start**,
+**Always Trust**, and **Stop Trusting**. Revoking repository trust stops that
+server on items with no other trust decision. Go and TypeScript servers can
+start without this prompt. To allow all language servers across a repository,
+including other people’s PRs, use the following setting.
 
 ```toml
 [[repo]]
@@ -539,57 +440,55 @@ github = "slatedb/slatedb"
 trust = true                   # false, the default, asks as above
 ```
 
-Perch's database, avatars, managed clones, worktrees, and agent state live
-under `~/.perch`. The database also holds local items, conversations, and
-review state, so it is not disposable. GitHub notifications and fetched
-remote data within it are refreshed on demand.
+`~/.perch` contains the database, avatars, managed clones, worktrees, and agent
+state. The database includes local conversations and review drafts. GitHub can
+supply fresh notifications, but it has no copy of those local records.
 
-Schema upgrades use preserving, transactional migrations: local discussions,
-agent attempts, session IDs, and activity history survive. Perch refuses an
-unsupported or newer schema without deleting it, and a failed migration leaves
-the original database in place.
+Database upgrades keep conversations, agent attempts, session IDs, and activity
+history. If an upgrade fails, the original database stays in place. Perch
+refuses to open a newer or unsupported format.
 
 ## Settings
 
-`Cmd-,` (`Ctrl-,` off macOS), **Settings…** in the Perch menu, or the gear
-at the foot of the sidebar opens Settings over the window: General,
-Environment, Appearance, Keyboard shortcuts, Agents, Work, Repositories,
-Knowledge and Language servers. The search box finds a setting in any
-section. `Escape` clears the search, then closes Settings, as do
-`Cmd-[` and `Cmd-W`, or the keys
-`back` and `close` are on. Keyboard shortcuts has a row for each action a
-key runs, where its keys can be changed: see
-[Keyboard shortcuts](#keyboard-shortcuts).
+### Sections and search
 
-The environment choice under **This window** lasts for that window.
-Preferences are saved in `config.toml`. Each preference writes its own key and leaves the rest of the file as it
-was, comments included. The arrow beside a setting's title shows the file
-sets it; clicking it takes the key out, back to the default. A text field
-writes on `Enter` or when you leave it, and `Escape` puts back what the file
-has. Repositories has a card for each `[[repo]]`, with **Remove
-repository** and, at the end, **Add repository…**. Knowledge lists
-configured directories and lets you add or remove entries and change
-their repository scope.
+Open **Settings** with the gear at the bottom of the sidebar, **Settings…** in
+the app menu, or `Cmd-,` (`Ctrl-,` on Linux). Search for a setting across all
+sections. Escape clears the search first, then closes Settings. Back and Close
+also dismiss it (`Cmd-[` and `Cmd-W` by default). To assign keys to actions,
+see [Keyboard shortcuts](#keyboard-shortcuts).
 
-Perch looks at the file every two seconds, so an edit you make by hand is
-taken up while it runs. A file that doesn't parse changes nothing: Settings
-says why and turns its controls off, and Perch goes on with what it read
-last until the file is fixed. **Open in editor** opens it.
+### Save or reset a setting
 
-Most settings apply at once. A new executable or models list makes Perch
-look for the agents again. Lowering **Runs at once** lets the runs going
-finish and holds new ones until there is room. Turning off **Start language
-servers without asking** sends servers on code no longer trusted back to
-asking. Zoom, code font size and the code font apply after a restart;
-Settings marks the ones waiting and offers to restart Perch.
+**This window** changes the environment for that window alone. Other
+preferences save to `config.toml`. Perch changes just the key you edit and
+preserves your comments. Press Enter or leave a text field to save. Escape
+restores the saved value. The reset arrow removes the key so its default
+applies again.
+
+Use **Repositories** to add or remove a clone. Under **Knowledge**, add or
+remove directories and choose which repositories can use them.
+
+You can also edit the file directly. Perch checks it every two seconds. If it
+finds invalid TOML, it keeps your last working settings and pauses edits in
+Settings. Choose **Open in editor** to fix the file.
+
+Most changes take effect immediately. Perch checks installed agents again when
+you change an executable or model list. Lowering **Runs at once** lets active
+runs finish before starting more. Turning off **Start language servers without
+asking** restores prompts for code that needs trust. Zoom, code size, and font
+changes take effect after a restart. Settings marks them and offers to restart
+Perch.
 
 ## Keyboard shortcuts
 
-Every key below can be changed, in `[keybindings]` in `config.toml` or in
-Settings' Keyboard shortcuts section. Each action has an id; give it a key
-as a string, several as a list, or none as `""` or `[]`. Keys you give an
-action take the place of its defaults, so a list that leaves a default out
-drops it.
+### Customizing keybindings
+
+Open **Settings → Keyboard shortcuts** to change a shortcut. To assign several
+keys to one action, edit `[keybindings]` in `config.toml`. Use the action ID
+from the tables below. A string assigns one key, a list assigns several, and
+`""` or `[]` clears them. Your assignment replaces all defaults for that
+action.
 
 ```toml
 [keybindings]
@@ -599,8 +498,7 @@ refresh = ["super+r", "f5"]     # two keys for one action
 toggle_sidebar = 'super+\'     # a backslash in single quotes, or "super+\\"
 ```
 
-A key is written as its modifiers, then the key, joined by `+`, in any
-case:
+Join the modifiers and the key with `+`. Capitalization doesn’t matter.
 
 - Modifiers: `super` (also `cmd`, `command` or `meta`), `ctrl` (or
   `control`), `alt` (or `option`) and `shift`. `super` is the command key:
@@ -616,29 +514,24 @@ case:
   `super+\` as `"super+\\"`, or as `'super+\'` in single quotes. `"super+\"`
   leaves the string open, and Perch can't read any of `config.toml` then.
 
-The modifiers must be the ones held, no more: `super+g` doesn't run on
-Cmd-Shift-G. An id Perch doesn't have, or a key it can't read, is left out
-with a notice, and the rest of the table still applies.
+Modifiers must match exactly. For example, `super+g` does not match
+Cmd-Shift-G. Perch reports unknown action IDs or invalid keys and applies the
+other entries.
 
-A key with no Cmd, Ctrl or Alt that types something, a letter, a digit,
-punctuation or the space bar, Shift or not, is a bare key. A bare key never
-runs an action while the keyboard is in a box: the sidebar's search, a
-composer, Review's form, a find bar or any other text field. There it types,
-so `/` searches the sidebar from anywhere else and is a `/` in a comment.
+A printable shortcut without Cmd, Ctrl, or Alt works only outside text fields.
+For example, `/` focuses sidebar search while reading a PR, but types a slash
+when you’re writing a comment.
 
-Two actions heard in the same place shouldn't share a key: only one of them
-would run. Settings says when they do. The composer's keys are heard only in
-a composer, so they can share a key with most of the window's: `super+g`
-suggests a change in a comment and finds the next match everywhere else. Not
-with the window keys that work from a composer too, such as New Work, Close,
-Go to File or Toggle Files: the window hears those first, so the composer's
-action would never run.
+Settings flags shortcuts that compete in the same place. Some can share a key.
+For example, `super+g` adds a suggestion while composing a line comment and
+finds the next match in the editor. Window actions such as **New Work**,
+**Close**, **Go to File**, and **Toggle Files** also work inside a message box
+and take priority there.
 
-On macOS, New Window, Open… and Settings… in the Perch menu show their
-action's first key, unless it is bare; the other keys work in the window.
-Menus that show keys, such as a worktree's menu in an item's details and the
-right-click menu in the code, show the first key of the action they do. A
-button with a key says it in its tip.
+Menus and tooltips show the first shortcut assigned to an action. On macOS, the
+application menu displays the first shortcut for **New Window**, **Open…**, and
+**Settings…** unless it’s a plain typing key. Additional bindings still work in
+the window.
 
 These stay as they are: `Escape`, `Enter`, the arrows and `Tab` inside
 menus, Go to File, pickers, dialogs and the find bar; the text keys of boxes
@@ -650,52 +543,46 @@ these macOS keys for an action. An action given `Cmd-Q`, `Cmd-H`,
 `Cmd-Opt-H` or `Cmd-Tab` by hand never runs, as macOS has them first, and
 Settings says so on its row.
 
-Settings' Keyboard shortcuts section has a row for each action, in the
-groups below. Click its keys, or press `Enter` or `Space` on them, then
-press the new key: it replaces every key the action had. `Escape` stops
-without a change, and a key macOS keeps is refused. macOS acts on `Cmd-Q`,
-`Cmd-H`, `Cmd-Opt-H` and `Cmd-Tab` before Perch hears them, so pressing one
-there does what it always does. The × beside the keys
-takes them all away, and the reset arrow puts the defaults back. Several
-keys for one action are written in the file.
+In Settings, click an action’s shortcut (or focus it and press Enter or Space),
+then press the new key. Escape cancels. Click × to clear all bindings for that
+action or the reset arrow to restore its defaults. Use the configuration file if
+you want several bindings for one action.
 
-Hold Command on macOS or Ctrl on Linux for a moment to see the current
-shortcuts: inline beside the sidebar tabs and the Conversation and Code
-tabs, and in the place of the icon on the sidebar toggle, New Work, and
-Back and Forward arrows. Narrow toolbars hide hints to keep the controls
-in reach.
-The Inbox, Worktrees, and Browse defaults yield to any shortcut you assign
-in Settings or in `[keybindings]`.
+Hold Command on macOS or Ctrl on Linux to see shortcuts on the sidebar and view
+tabs and on toolbar buttons. Narrow toolbars hide hints when space is tight.
+Custom shortcuts take priority over the default Inbox, Worktrees, and Browse
+keys.
 
-Each action's id, its default keys and what it does, grouped as Settings
-groups them:
+### Default shortcuts by view
+
+The tables use the same groups and action IDs as Settings.
 
 **General**
 
 | Action | Default | What it does |
 |---|---|---|
-| `new_work` | `super+n` | Opens New Work, to start an agent on a new branch |
+| `new_work` | `super+n` | Opens the new worktree form |
 | `new_window` | `super+shift+n` | Opens another window |
 | `open` | `super+o` | Opens a pull request or issue from its link or number |
 | `settings` | `super+,` | Opens Settings |
-| `close` | `super+w` | Closes the open file, else the open item, else the window; closes Settings too |
-| `back` | `super+[` | Closes the open item or New Work, back to the sidebar; closes Settings too |
+| `close` | `super+w` | Closes Settings, the active file, the item, or the window, in that order |
+| `back` | `super+[` | Closes Settings or returns to the sidebar from an item or New Work |
 | `history_back` | `ctrl+-` | Goes back to where you were |
 | `history_forward` | `ctrl+shift+-` | Goes forward again after going back |
-| `toggle_agents` | `super+shift+a` | Opens or shuts the agents running across Perch |
-| `send_feedback` | none | Opens or shuts Send Feedback |
+| `toggle_agents` | `super+shift+a` | Shows or hides the list of agent runs |
+| `send_feedback` | none | Opens or closes Send Feedback |
 
 **Sidebar**
 
 | Action | Default | What it does |
 |---|---|---|
 | `toggle_sidebar` | `super+\` | Shows or hides the sidebar |
-| `focus_search` | `super+1`, `/` | Puts the keyboard in the sidebar's search, opening the sidebar if it is shut |
-| `inbox` | `super+2` | Shows the Inbox, opening the sidebar if it is shut |
-| `worktrees` | `super+3` | Shows Worktrees, opening the sidebar if it is shut |
-| `browse` | `super+4` | Shows Browse, opening the sidebar if it is shut |
-| `next_item` | `j` | Opens the row after the open one in the sidebar's list, or the first; a notification that opens in the browser is passed over |
-| `previous_item` | `k` | Opens the row before the open one |
+| `focus_search` | `super+1`, `/` | Opens the sidebar and focuses its search box |
+| `inbox` | `super+2` | Shows the Inbox, opening the sidebar if needed |
+| `worktrees` | `super+3` | Shows Worktrees, opening the sidebar if needed |
+| `browse` | `super+4` | Shows Browse, opening the sidebar if needed |
+| `next_item` | `j` | Opens the next sidebar item, or the first if none is open. Skips browser-only notifications. |
+| `previous_item` | `k` | Opens the previous sidebar item |
 | `mark_done` | `e` | Marks the Inbox row under the pointer done, else the open item's row |
 | `mark_unread` | `shift+u` | Marks the Inbox row under the pointer unread, else the open item |
 | `pin` | `p` | Pins or unpins the row under the pointer, else the open one |
@@ -713,8 +600,8 @@ groups them:
 | `copy_link` | `super+shift+c` | Copies the open item's link |
 | `copy_branch_name` | none | Copies the open item's branch name |
 | `start_work` | none | Starts work on the open item |
-| `toggle_review` | `super+shift+r` | Opens or shuts the Review box, where the bar has Review |
-| `toggle_merge` | `super+shift+m` | Opens or shuts the Merge box, where the bar has Merge |
+| `toggle_review` | `super+shift+r` | Opens or closes Review when available |
+| `toggle_merge` | `super+shift+m` | Opens or closes Merge when available |
 
 **Conversation & Code**
 
@@ -730,13 +617,13 @@ groups them:
 
 | Action | Default | What it does |
 |---|---|---|
-| `go_to_file` | `super+p` | Opens Go to File; again while it is up, picks the next file |
-| `toggle_files` | `super+/`, `super+shift+e` | Opens or shuts the file tree |
+| `go_to_file` | `super+p` | Opens Go to File. Press again to select the next result. |
+| `toggle_files` | `super+/`, `super+shift+e` | Shows or hides the file tree |
 | `next_change` | `]` | Goes to the next change in the file |
 | `previous_change` | `[` | Goes to the change before |
-| `toggle_viewed` | `v` | Marks the open file viewed, or not viewed |
+| `toggle_viewed` | `v` | Marks the active file viewed or unviewed |
 | `next_unviewed` | `shift+]` | Goes to the next file not yet viewed |
-| `previous_unviewed` | `shift+[` | Goes to the file before not yet viewed |
+| `previous_unviewed` | `shift+[` | Goes to the previous unviewed file |
 | `toggle_wrap` | none | Turns Word wrap on or off |
 | `go_to_definition` | `f12` | Goes to where the symbol at the caret is defined |
 | `go_to_type_definition` | none | Goes to where the symbol's type is defined |
@@ -755,7 +642,7 @@ groups them:
 | `find_whole_word` | `alt+super+w` | Turns whole word on or off, while the bar is up |
 | `find_regex` | `alt+super+r` | Turns regular expressions on or off, while the bar is up |
 
-**Composer**, heard only in a composer:
+**Composer**
 
 | Action | Default | What it does |
 |---|---|---|
@@ -772,229 +659,202 @@ groups them:
 
 ## Starting work
 
-`+` at the top of the sidebar, or `Cmd-N` from anywhere, opens the new-work
-view, titled **New worktree** in the bar: a box for what the work is, and
-under it three chips.
+### Create a worktree
 
-- **Repository**: the `[[repo]]` entries in the file's order, a local one
-  marked `(local)`. It opens on the open item's repository, else the last
-  one picked. **Add repository…** picks a folder and appends a
-  `[[repo]]` naming its repository to `config.toml`, without rewriting the
-  file; Perch takes it up at once.
-- **Base**: the branch to start from. For a repository with a root, the
-  root's local branches and its remote's, with no network; for a GitHub
-  repository without one, GitHub's. It opens on the repository's base
-  branch.
-- **New branch**: the name of the branch to cut, filled in from the message
-  (`branch_prefix`, then its first five words) until you type in it. A name
-  you typed that is taken is an error; one Perch filled in gets `-2`.
+A worktree is a separate checkout of a branch. To create one, click `+` at the
+top of the sidebar or press `Cmd-N`. In **New worktree**, describe the task and
+check these three fields.
 
-With a message, **Start** makes the worktree, opens it named for the
-message's first line, and sends the message to the agent picked beside
-it as the item's first Work run.
-Without one, **Create worktree** makes the worktree alone. `Escape`, `Cmd-[`,
-or the bar's X leaves the view and keeps what was typed until Perch quits.
+- **Repository** lists your `[[repo]]` entries in configuration order. Perch
+  selects the current item’s repository or the one you last picked. **Add
+  repository…** adds a folder to config.toml. Repositories without a GitHub
+  remote are marked `(local)`.
+- **Base** selects the branch to start from. For a local clone, Perch lists its
+  local and remote-tracking branches without contacting the network. For a
+  repository without a local root, it gets the list from GitHub.
+- **New branch** starts with `branch_prefix` and the first five words of your
+  message. You can edit it. If a generated name already exists, Perch adds a
+  suffix such as `-2`. If you entered the name yourself, Perch asks for a
+  different one.
+
+Click **Start** to create the worktree and send your message to the selected
+agent. The first line becomes the item’s name. Leave the message empty and
+click **Create worktree** to create just the checkout. Escape, `Cmd-[`, or the
+close button leaves the form. Perch keeps your draft until you quit.
 
 Worktrees go under `~/.perch/worktrees/` by default, named for the
 repository and the branch. To put new worktrees elsewhere, set
 [`worktrees_dir`](configuration.md#worktree-directory).
 
-A repository with a root is cut in the root, your own clone: the
-branch is its branch, with your remotes and config, and `git worktree list`
-there shows the worktree. Perch writes exactly this much in a root: the new
-branch, git's record of the worktree, a fetch of the one base branch from its
-remote, on Delete that branch, and when you open a pull request or press Push,
-a push of the branch and the upstream it then tracks. The fetch uses your own credentials and
-never Perch's token, and cannot prompt: a key that wants a passphrase fails it,
-and the cut goes ahead from what the clone had, with a notice saying how old
-that is. A GitHub repository with no root is cut in Perch's own clone, as
-**Start work** on an issue or a pull request is. Start work on a worktree in a
-local repository cuts in that repository.
+When you choose a repository with a local root in **New worktree**, Perch
+creates the branch in your clone. Run `git worktree list` there to find the
+checkout. It shares your remotes and Git configuration. Perch fetches the base
+branch using your credentials. If Git needs an interactive password or
+passphrase, Perch uses the base already on disk and tells you its age.
+
+In your clone, Perch creates the branch and worktree record, fetches the base,
+deletes the branch when you choose **Delete**, and pushes and sets its upstream
+when you open a PR or choose **Push**. A GitHub repository without a local root
+uses a clone managed by Perch. **Start Work** on a GitHub issue or PR also uses
+Perch’s clone. Starting from a local worktree uses that repository.
 
 ### Start work from an item
 
-**Start Work** is on the Worktree row of an item's details, behind the list
-button in the bar: a button on an item with no worktree, and a row of the
-worktree's menu on one that has a worktree. It is also in an item row's menu
-and in the menu of a notification about a pull request or an issue. It cuts
-a new branch from the item into a worktree of your own and opens it:
+Open an item’s details and choose **Start Work** on the Worktree row or its
+menu. You can also use the sidebar row’s menu, including on an issue or PR
+notification. The starting branch depends on the item.
 
-- From an **issue**, `perch/issue-<n>` from the default branch.
-- From a **pull request**, anyone's and from any fork, `perch/pr-<n>-work`
-  from the head Code shows: the pull request's worktree when it has one,
-  commits not pushed yet and all, else its head on GitHub. The branch is
-  diffed against the pull request's base, so it shows the whole change, and
-  a pull request opened from it takes it over.
-- From a **worktree**, a new branch from its head, named for it with `-2`.
+- **Issue.** Perch creates `perch/issue-<n>` from the default branch.
+- **Pull request.** Perch creates `perch/pr-<n>-work` from the PR checkout,
+  including unpushed commits, or from the head on GitHub if there’s no
+  checkout. The diff uses the original PR’s base, so it includes the original
+  changes. This also works on forks and other people’s PRs.
+- **Worktree.** Perch starts from its current commit and adds a suffix such as
+  `-2` to the branch name.
 
-An issue or a pull request leaves a prompt to work on it in the new
-worktree's composer, and a second press opens the worktree the first made.
-The new worktree is listed under **In Perch** on the item it came from. A pull
-request opened from it says `Closes #<n>`, so merging it closes the issue or
-the pull request it came from. A merged pull request, and anything
-archived, has no Start work.
+For an issue or PR, Perch prepares a prompt in the new worktree. Click **Start
+Work** on the original item again to reopen the same worktree, or find it under
+**In Perch**. A PR opened from it includes `Closes #<n>` so merging closes the
+original issue or PR. Merged PRs and archived items have no **Start Work**
+action.
 
-From a notification, Start work cuts from the item Perch has for its pull
-request or issue, and makes that item first if there is none. It is greyed
-once Perch has seen the pull request merged or the issue closed. A pull request
-whose worktree was removed has to be opened first, which restores it. Other
-kinds of notification have no Start work.
+Starting from a notification opens or creates its Perch item first. The action
+is disabled once Perch sees that the PR merged or the issue closed. If you
+removed the PR’s worktree, open the PR to restore it first.
 
 ### Keeping work safe
 
-A worktree made for work can hold the only copy of it.
+Before removing or updating a worktree, check for files and commits that exist
+only there.
 
-- **Delete** asks again, naming the count, when the branch has commits no
-  other branch, tag, remote-tracking branch or ref of Perch's holds. A branch
-  pushed from Perch's own clone is not seen as pushed until a pull request
-  brings its head back.
-- **Archive** of a worktree asks first when the directory holds files git
-  ignores, such as a `.env`, and names them: archiving removes the
-  directory, and git keeps no copy of those. The branch and its commits stay.
-  Worktrees with no pull request are never archived for age; pull request
-  checkouts still are, after 14 days unopened.
-- A pull request's worktree follows its head when the head moves only if
-  the commit on disk is one the pull request had. A commit you made there
-  and have not pushed keeps the worktree where it is, reported stale, as
-  uncommitted changes do.
-- A worktree of your own is never moved to its pull request's head. When the
-  two are at different commits, the Branch row and the item's bylines say
-  how: `3 unpushed`, `2 behind PR`, both, or `PR head not fetched` when the
-  pull request's head isn't in the repository. Perch counts this in the
-  worktree's own repository at each scan and open and fetches nothing to do
-  it. **Submit review** and **Merge** are unavailable while the heads differ,
-  since what is on screen isn't what GitHub would review or merge.
-- **Update branch**, on the Branch row and in place of Merge, shows when the
-  pull request's head isn't fetched or the worktree is only behind it. It
-  fetches the pull request's branch, with your git credentials in one of your
-  clones and Perch's token in its own, and fast-forwards the worktree to its
-  head. A worktree with unpushed commits of its own isn't moved; the fetch
-  only lets the row count both sides. Uncommitted changes to files the pull
-  request changes stop the update.
+- **Delete** asks for confirmation and counts commits with no other branch,
+  tag, remote-tracking branch, or Perch ref pointing to them. For branches
+  pushed from Perch’s clone, Perch recognizes the push when the PR brings its
+  head commit back.
+- **Archive** keeps the branch and commits but removes the checkout. Perch
+  names ignored files such as `.env` and asks before removing them. It can
+  archive PR checkouts unopened for 14 days. Worktrees without PRs have no age
+  limit.
+- A PR checkout follows the PR head only when its current commit belonged to
+  the PR. Unpushed commits or uncommitted changes keep it in place. Perch marks
+  it stale.
+- Your own worktree stays at the commit you checked out. The Branch row shows
+  `3 unpushed`, `2 behind PR`, both, or `PR head not fetched`. Counts use local
+  Git data. **Submit review** and **Merge** become available when the checkout
+  matches GitHub.
+- **Update branch** fetches a missing PR head or fast-forwards a worktree that
+  is only behind. Perch uses your credentials in your clone and its token in a
+  managed clone. Unpushed commits stay in place. If the update would overwrite
+  a changed file, Perch stops.
 
 ## Opening a pull request
 
-A worktree of your own with commits past its base has a **Pull request** line at
-the foot of Conversation, where a pull request has its checks and Merge:
-`Pull request · 3 commits ahead of main`. **Open pull request…** unfolds it
-into a form:
+### Fill in the pull request
 
-- **Title**, filled in from the commit's subject when there is one commit, else
-  from the item's name.
-- **Description**, a composer's box going to GitHub, so `@` offers people and
-  files as code spans. Filled in from the repository's pull request template
-  (`.github/`, the root, then `docs/`), else the one commit's body, else the
-  commits' subjects as a list. A branch Start work cut from an issue or a
-  pull request ends it with `Closes #<n>`, as does a description the agent
-  writes.
-- **Base**, the branch it goes into: the one the branch was cut from, or any
-  branch the repository has on GitHub.
-- **Draft**, off.
-- **Write with Claude**, or Codex, whichever the composer last used: the agent
-  reads the branch under Ask's rules and writes a title and description into
-  the form. Text you typed isn't written over; the form asks first. **Stop**
-  ends it. The run isn't kept with the item's runs.
+When your branch has a commit ahead of its base, open **Conversation** and look
+for the **Pull request** row. Click **Open pull request…** and check the fields
+before sending.
 
-The form fills itself once, and keeps what you typed until Perch quits, whether
-it's folded or another item is open. `Cmd-Enter` in the description, or **Open
-pull request**, sends it:
+- **Title** starts with the commit subject for a single commit or the item’s
+  name for several.
+- **Description** uses the repository’s PR template, looking in `.github/`, the
+  root, then `docs/`. Without a template, it uses the single commit’s body or a
+  list of commit subjects. **Start Work** adds `Closes #<n>` for the source
+  issue or PR. You can mention people with `@` or insert file paths as inline
+  code.
+- **Base** starts with the branch you worked from. You can choose another GitHub branch.
+- **Draft** is off by default. Turn it on to open a draft PR.
+- **Write with Claude** or **Codex** drafts a title and description from a
+  read-only inspection of the branch. Perch asks before replacing your edits.
+  **Stop** cancels the request. These runs stay out of the item’s run history.
 
-1. GitHub is asked whether the branch has a pull request open already, as one
-   opened on github.com that no poll has found yet. If it has, the row takes
-   that one, and nothing is pushed or created.
-2. The branch is pushed, never with force. A worktree of one of your clones
-   pushes with your own git credentials and SSH key, never Perch's token, and
-   the branch then tracks what it was pushed to. A worktree of Perch's own
-   clone pushes with Perch's token.
-3. The pull request is created, and the row becomes it in place, with its
-   threads and runs. The open item turns into the pull request.
+### Push the branch and open the PR
 
-Uncommitted files are named and left out. A Work run in the worktree, a
-worktree switched to another branch, or an empty title keep the button off. A
-push the remote refuses, because its branch has commits yours doesn't, says to
-pull or rebase in a terminal. A push your credentials can't make, such as with
-an SSH key that wants a passphrase, says to push from a terminal; after that,
-Open pull request skips the push. Neither agent can push or open a pull
-request: Perch does it when you press the button.
+Perch keeps your edits when you collapse the form or switch items, until you
+quit. Click **Open pull request** or press `Cmd-Enter` in the description to
+submit.
 
-On a pull request of yours whose worktree is ahead of it and not behind, the
-Branch row has **Push** beside `3 unpushed`. It pushes the same way, and the
-pull request is fetched again, so Submit review and Merge come back. The merge
-box at the foot of Conversation has it too, as **Push 3 commits** where Merge
-would be. Behind or diverged has no button, since that push would need force.
+1. Perch checks GitHub for an open PR from this branch. If one already exists,
+   it opens that PR and skips the push.
+2. Perch pushes the branch without force. In your clone, Git uses your
+   credentials and sets the upstream branch. In a clone managed by Perch, it
+   uses Perch’s token.
+3. GitHub creates the PR. The worktree item becomes that PR in the same window,
+   with its threads and agent runs intact.
+
+Only commits go into a PR. Perch lists any uncommitted files it leaves out.
+Finish any active Work run, switch back to the worktree’s branch, and enter a
+title to enable the button.
+
+If the remote has commits you don’t have, pull or rebase in a terminal. If Git
+needs a password or SSH passphrase, push from the terminal, then click **Open
+pull request** again. Perch skips the completed push. The agent drafts text. You
+authorize the push and PR by submitting the form.
+
+### Add commits to an open PR
+
+When your PR branch is ahead of GitHub, click **Push** beside the unpushed
+commit count on the Branch row, or **Push 3 commits** in the merge box. Perch
+refreshes the PR afterwards so you can submit a review or merge. If the branches
+have diverged or you’re behind, update the branch first. Perch never
+force-pushes.
 
 ## Agents
 
-Questions about an item or selected lines in its Code view run through Claude
-Code or Codex in that item's worktree. The `+` in the gutter starts one on a
-line, a removed line included, whose question is about the old file's lines;
-so is a selection of nothing but removed lines, or one on the left of the
-split layout. A line that already has a thread still offers the `+` under
-the pointer, and the new thread's card stacks under the others. Follow-ups
-remain attached to the local
-conversation. A run is a question (**Ask**), which reads and answers, or, on
-your own work, **Work**, which changes the worktree (see [Work](#work)).
-Nothing an agent writes reaches GitHub unless you post it (see Posting).
+To ask about code, click `+` beside a line, select a model, and enter your
+question. You can start another thread on a line that already has one. For
+removed lines or the left side of a split diff, the agent reads the old
+version. Follow-ups stay in the same Perch thread. **Ask** reads and answers.
+On your own branch, [Work](#work) can also edit files. You choose which replies
+to [post to GitHub](#posting).
 
 ### What the agent is told about the discussion
 
-A question on a pull request or issue carries what was said on GitHub, as the
-last fetch left it. The prompt quotes as much as fits in about 24,000
-characters, in this order: each reviewer's latest verdict, the checks, the
-threads within 20 lines of the lines asked about, the other unresolved threads,
-the conversation tab, and the resolved threads. An entry goes in whole or not
-at all; one comment is cut at 2,000 characters with a note of where the rest
-is. Bots' comments stay out of the prompt. What does not fit is listed a line
-each.
+A question about an issue or PR includes the last discussion Perch fetched from
+GitHub. The prompt has room for about 24,000 characters. First come each
+reviewer’s latest verdict and the checks, then threads within 20 lines of your
+selection, other unresolved threads, the main conversation, and resolved
+threads. Perch lists entries that don’t fit. It trims individual comments at
+2,000 characters and points to the full text. Bot comments appear only in the
+files.
 
-All of it, bots included, is also written as files to
-`~/.perch/context/<run>/`: `INDEX.md`, `conversation.md` (the description,
-comments, review summaries and timeline in time order), a file per review
-thread under `threads/`, and `checks.md`. The prompt names the directory and
-the agent reads what it needs. The directory is outside the worktree, belongs
-to the run, and goes when the run is deleted; a retry reads the one its first
-attempt had.
+The agent can read the full discussion under `~/.perch/context/<run>/`. Start
+with `INDEX.md`. The description, comments, review summaries, and timeline are
+in `conversation.md`. Review threads have individual files under `threads/`,
+and checks are in `checks.md`. A retry uses the original files. Deleting the
+run removes them.
 
-A follow-up that resumes the agent's session is told only what changed on
-GitHub since the run it continues: new or edited replies in its thread, whole,
-and new reviews, comments, threads and check results elsewhere. Nothing
-changed, nothing is added. `perch --ask --print-prompt` prints the prompt a
-question would get, and the files, without running an agent.
+When you resume a session, Perch adds only GitHub updates since the previous
+run. It includes new or edited replies in the current thread and new comments,
+reviews, threads, or check results elsewhere. Use `perch --ask --print-prompt`
+to inspect the prompt and files without starting an agent.
 
-An item's runs are in the **Agents** row of its summary on Conversation, after
-Checks, once it has had one. The row's pill says what they are doing, the
-busiest first while any work goes (`1 running · 4 done`, with queued, waiting
-on an approval, and failed), and after, how many there were, or that the last
-one failed. A click unfolds the list under the rows: the working runs first,
-then the item's history, newest first, twenty at a time with **Load older
-runs**. A review's attempts are under a row for the review, which opens the
-snapshot it read. Each run shows the agent, model, effort, queue or execution
-time, and latest tool activity, and **Show in thread** goes to its thread. A
-click opens the run in place to its retained request, ordered activity,
-streamed response, usage and errors, scrolling inside a fixed height and
-following the end while it runs; more than one can be open. Active runs can be
-stopped, queued ones cancelled, and failed, stopped, or interrupted attempts
-retried without replacing their history. Whether the row is unfolded, and
-which runs are open, are kept with the item.
+#### Finding an agent run
 
-Every item's runs are behind the list button in the bar, before Review, under
-the item's details, and in the bar of the pane with nothing open. It counts
-the running and queued work, and has a dot while a run waits on you. Its
-dropdown lists the working runs under their items' titles, then the fifteen
-that finished last. A run there goes to its item on Conversation, with the
-Agents row unfolded and the run open at the top. `Cmd-Shift-A` opens and
-shuts the dropdown from anywhere, the arrows move through it, `Enter` goes,
-and `Escape` shuts it. The notice a run leaves as it finishes has a **View**
-that goes to it the same way, and **Show** in the Review popover, while a
-review runs, goes to it in the Agents row. Work continues while another item is open.
+Open **Conversation → Agents** on an item to see its runs. The row shows counts
+such as `1 running · 4 done` and flags runs waiting for approval. Expand it for
+active runs, followed by past runs, newest first. **Load older runs** shows 20
+more. Review attempts sit under the snapshot they reviewed.
 
-Perch executes at most four top-level agents by default and queues the rest in
-FIFO order; Gemini runs one at a time, and a waiting Gemini run does not hold a
-slot from Claude Code or Codex. Stopping a run terminates and reaps its process group. Closing
-Perch does the same for every process it owns; after an abnormal exit,
-nonterminal rows return as Interrupted and are not replayed automatically.
+Select a run to read its request, tool activity, response, usage, and errors.
+**Show in thread** returns to the discussion. You can stop an active run, cancel
+a queued one, or retry a failed, stopped, or interrupted attempt. A retry keeps
+the original history.
 
-Perch discovers the installed agent CLIs automatically. Their optional settings are:
+Press `Cmd-Shift-A` or open the list button in the top bar to see runs across
+all items. A dot means a run needs your answer. Active runs appear first,
+followed by the 15 most recent completions. Use the arrows and Enter to open a
+run, or Escape to dismiss the list. **View** in a completion notice and
+**Show** in Review also open the run. Switching items leaves it running.
+
+By default, Perch runs up to four agents at once and starts queued runs in
+order. Gemini runs one at a time. A queued Gemini run leaves slots available to
+other agents. Stopping a run ends its processes. Quitting the local engine ends
+the runs it owns. After an unexpected exit, unfinished runs appear as
+**Interrupted**. You can retry them yourself.
+
+Perch finds installed agent CLIs automatically. Set only the options you want to
+change.
 
 ```toml
 [agent]
@@ -1016,11 +876,13 @@ models = ["gemini-4-carbon"]   # omit to use agy's own model catalog
 binary = "opencode"           # omit models to use OpenCode's provider/model catalog
 ```
 
-Without Claude Code installed, a Claude `model` gives way to `gpt-6.1-sol`
-when Codex offers it, at the same effort, or to `agy`'s first Gemini model
-when only `agy` is installed. With only OpenCode installed, Perch selects its first model. See the [OpenCode profile setup](configuration.md#opencode) for provider sign-in. For heavy PR review usage with Gemini, prefer
-setting `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) over a personal subscription
-OAuth login in `agy`.
+If your configured model is a Claude model and Claude Code is missing, Perch
+uses `gpt-6.1-sol` at the same effort if Codex offers it. If you have only
+Gemini or only OpenCode, Perch uses that CLI’s first model.
+
+For OpenCode, [sign in to your model provider](configuration.md#opencode).
+If you run frequent PR reviews with Gemini, use `GEMINI_API_KEY` or
+`GOOGLE_API_KEY` for `agy` instead of your personal subscription.
 
 `perch --agents [limit]` prints active runs and retained history without
 launching an agent. `perch --ask owner/repo#N path:start-end "question"`
@@ -1029,9 +891,8 @@ whole item, and add `--print-prompt` to see the prompt without running it.
 
 ### Context for agents outside Perch
 
-`perch context` gives an agent working in a terminal, outside Perch, what
-Perch knows about the item it is working on. Run it in the item's worktree,
-or in a subdirectory of it:
+Run `perch context` inside a worktree or one of its subdirectories to give a
+terminal agent the same issue or PR discussion you see in Perch.
 
 ```sh
 perch context                       # the index: everything, a line an entry
@@ -1041,9 +902,9 @@ perch context --out ctx             # every file, written into a new directory
 perch context slatedb/slatedb#12    # another item, by name or by its link
 ```
 
-It finds the item by the worktree's directory and branch, then by its
-repository and branch, then by a pull request Perch knows from that branch,
-going by what git's config says of the branch:
+Perch first matches the worktree’s directory and branch, then the repository and
+branch. If neither identifies the item, it looks for a known pull request using
+Git’s branch configuration.
 
 - it was checked out from the pull request's ref, `refs/pull/<n>/head`, in
   the repository the pull request is in, which makes it that pull request's
@@ -1057,14 +918,14 @@ going by what git's config says of the branch:
   the clone's remotes is the head's repository: a branch started from
   `upstream/main` and pushed to your fork.
 
-Someone else's pull request from a branch that only shares the name is not
-this one, nor is a pull request whose fork has been deleted. Of several, the
-open one wins. `-C <dir>` looks from another directory, and `owner/repo#N`,
-or a pull request's or issue's link, names an item.
+A matching branch name alone cannot identify someone else’s PR. Perch skips
+deleted forks and prefers an open PR if several match. Pass `-C <dir>` to start
+in another directory, or give an issue or PR URL or `owner/repo#N` to select
+the item yourself.
 
-What it prints is the index, `INDEX.md`, of the files an Ask run is given
-(see [above](#what-the-agent-is-told-about-the-discussion)), with Perch's
-own beside them:
+By default the command prints `INDEX.md`. It lists the
+[files available to an Ask run](#what-the-agent-is-told-about-the-discussion)
+along with the item’s local Perch history.
 
 - A header with the pull request or issue, its state and checks, the
   worktree's branch and head as git has them now and how that head stands
@@ -1079,39 +940,36 @@ own beside them:
   in their own threads and in findings' threads; without it they are
   counted.
 
-`--entry <file>` prints one of the files, and `--out <dir>` writes them all
-into a directory that must not exist yet. A path, of a file or a directory,
-keeps only the threads, findings, drafts and private threads anchored on it,
-and with `:a` or `:a-b`, only those within 20 lines; one on lines of the
-base, a removed line, is kept by its path alone, as its numbers are the old
-file's. A path is taken from where the command runs, or `-C`'s directory,
-in the item's worktree or the one it runs in, the inner one when one is
-inside the other, or from the worktree's top when nothing is there. A symlink is taken by its own name, as git has it.
+Use `--entry <file>` for one entry or `--out <dir>` to write every file into a
+new directory. A file or directory argument limits results to threads,
+findings, and drafts there. Add `:a` or `:a-b` to keep entries within 20 lines.
+Comments on removed lines match by path because their line numbers refer to the
+old file.
 
-Everything from GitHub and everything an agent wrote is cleaned and marked
-untrusted, as an Ask run's files are. The discussion is as Perch last fetched
-it, which the header dates. `--fetch` reads GitHub's current copy instead,
-with your GitHub token, and keeps nothing; it also reads a pull request or
-issue Perch has no item for, without the findings and drafts. Without it,
-nothing goes over the network.
+Paths are relative to the current directory or `-C` within the worktree. For
+nested worktrees, the inner one wins. Outside a worktree, paths start at the
+item’s worktree root. A symlink matches by the name Git tracks.
 
-It reads Perch's database, in one snapshot, without taking the engine's lock
-or writing anything, so it runs beside the app (see
-[One engine to a Perch home](#one-engine-to-a-perch-home)). A database of
-another schema, from a newer or older Perch, is refused rather than migrated:
-use the `perch` that came with the Perch that is running. On a host,
-`~/.perch/bin/perchd context` reads the host's engine's database the same
-way: `perchd serve` points `$PERCH_HOME/bin/perchd` at its own build as it
-starts. The installer links `~/.local/bin/perch` on a Mac as on Linux and puts
-`~/.local/bin` on `PATH` in the shell's startup file, so an agent's shell
-finds it.
+The header gives the time of the last GitHub fetch. The default command reads
+cached data offline and labels GitHub and agent text as untrusted. Add
+`--fetch` to read GitHub’s current discussion with your token, without saving
+it. You can also fetch an issue or PR you’ve never opened in Perch. It won’t
+have local findings or drafts.
+
+The command takes one read-only snapshot of Perch’s database and can run
+alongside the app. Use the `perch` executable from the same build as the
+running app. A version with a different database format refuses to open it. On
+an SSH host, use `~/.perch/bin/perchd context`. When `perchd serve` starts, it
+points `$PERCH_HOME/bin/perchd` to its own build. On macOS and Linux the
+installer puts the `perch` launcher in `~/.local/bin`. See
+[One engine to a Perch home](#one-engine-to-a-perch-home).
 
 ### Repository history for agents
 
-Perch keeps a live Markdown archive at
-`$PERCH_HOME/knowledge/perch/repos/<owner>/<repo>/`. The names are lowercase,
-and a repository with no GitHub remote uses `local/<name>`. On a host the
-archive lives under the host engine's Perch home.
+Each repository has a Markdown archive at
+`$PERCH_HOME/knowledge/perch/repos/<owner>/<repo>/`. Names are lowercase. Local
+repositories use `local/<name>`. For a remote environment, look on the SSH
+host.
 
 Start with the repository's `INDEX.md`, which lists each item by directory,
 state and title. Each pull request, issue and worktree has its own index with
@@ -1145,236 +1003,188 @@ timestamp unchanged. A later refresh of that item's discussion picks up
 removed comments. If GitHub returns an ambiguous 404 for the item itself,
 Perch retains the last snapshot and retries it.
 
-When the archive holds another item from the same repository, a new Ask or
-Work session can search it for relevant history. Review instructions tell the
-reviewer to search it before reporting a finding. A past dismissal only
-applies when its reasoning still holds for the code under review. Perch
-treats the archive as untrusted text and tells agents never to quote
-`private/` in material posted to GitHub or committed. The instruction relies
-on the agent following it. Pull request description and issue writing runs
-do not receive the archive path.
+New Ask and Work sessions can search other items in the repository archive.
+Reviewers check past findings before raising a problem again. A past dismissal
+applies only if its reasoning still holds. Perch tells agents to treat the
+archive as untrusted and keep `private/` material out of commits and GitHub
+posts. That instruction depends on the agent following it. Runs that draft PR
+or issue descriptions do not receive the archive path.
 
-Claude Code and Codex can already read files accessible to the user. Perch
-adds the current repository's archive to Claude Code's allowed directories
-and denies writes there in its settings. Codex reads the archive through
-its existing filesystem access. Gemini and OpenCode receive read access to
-the current repository's archive. Gemini Work automatically approves scoped
-read and search requests there. Gemini Work omits the archive when it is
-inside the worktree or a system temporary directory, where Gemini's tools
-can write without asking. If OpenCode's scan would exceed its
-added-directory budget, the run proceeds without the archive. A grant
-describes the intended scope for the run. It does not isolate one
-repository's archive from another.
+Each agent reads the current repository’s archive a little differently.
+
+- **Claude Code** gets the archive as an allowed directory. Perch’s Claude
+  settings deny writes there. **Codex** uses its existing file access.
+- **Gemini** gets read access. Work runs can read and search the archive
+  without asking. If it sits inside the worktree or a system temporary
+  directory, Gemini Work skips it because its tools could write there.
+- **OpenCode** gets read access unless scanning the archive would exceed its
+  limit for extra directories. In that case the run continues without it.
+
+Other repositories’ archives may still be readable. Claude Code and Codex
+can already read files available to your account.
 
 ### External knowledge for agents
 
-In **Settings → Knowledge**, add a directory relative to
-`$PERCH_HOME/knowledge/` and choose which repositories it applies to.
-Perch names eligible directories in new Ask, Work and Review sessions,
-including directories shared by several repositories. Agents are told to
-search them when relevant, start at `INDEX.md` if it exists, and treat
-the files as untrusted data. Directory grants use the same backend
-controls as the Perch archive. Removing an entry removes its grant
-for subsequent runs and leaves the ingester's files on disk. When a
-directory is not shared, its card in Settings says why.
-See [External knowledge configuration](configuration.md#external-knowledge).
+In **Settings → Knowledge**, choose a folder under `$PERCH_HOME/knowledge/` and
+the repositories that can use it. New Ask, Work, and Review sessions get the
+eligible folders. Agents start with `INDEX.md` when available and treat the
+contents as reference material. Settings explains why a folder cannot be
+shared. Removing an entry revokes access for future runs and leaves the files
+on disk. See
+[External knowledge configuration](configuration.md#external-knowledge) for
+paths and permissions.
 
 ### What the agent can and cannot do
 
-An agent reads text nobody vetted: the pull request, its comments, and the
-repository itself. Any of it can contain instructions aimed at the agent.
-Perch does not try to detect them; it limits what following one could do.
+A PR description, comment, or file can contain instructions written for an
+agent. Perch treats this material as untrusted and limits the tools available
+during an Ask run.
 
-- **Read-only tools.** Claude Code gets `Read`, `Glob`, `Grep`, `LS`, and
-  `Bash` for `git diff`, `git log`, `git show`, and `git blame` only. `Edit`,
-  `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, and `WebSearch` are
-  denied by name, so no setting can allow them. Anything else is refused
-  without a prompt, and the refusal shows up as activity. Codex runs in its
-  `read-only` sandbox.
-- **A sandboxed shell.** Every Claude Code command runs inside Claude Code's
-  own sandbox with no network access and no write access anywhere, the
-  worktree included: `git diff --output=` fails like any other write. There
-  is no unsandboxed retry, and a machine that cannot start the sandbox
-  refuses to run rather than running without it, unless you turn the
-  sandbox off (see [Without Claude Code's sandbox](#without-claude-codes-sandbox)).
-- **No repository-supplied configuration.** Claude Code reads only
-  `~/.claude/settings.json`, never the repository's `.claude/settings*.json`
-  or `.mcp.json`, and starts no MCP server. Codex is told the worktree is
-  untrusted, so its `.codex/` config, hooks, and rules are not loaded even
-  when you have trusted the repository elsewhere, and it runs without
-  `~/.codex/config.toml`, plugins, or hooks, since the MCP servers named
-  there run outside its sandbox. Reviews run Claude Code in `--safe-mode`
-  as well.
-- **No secrets.** The agent does not inherit `GITHUB_TOKEN`, `GH_TOKEN`,
-  Perch's own git token, or any variable named `*_TOKEN`, `*_SECRET`,
-  `*_KEY`, `*_APIKEY`, `*_PASSWORD`, `*_PASSWD`, `*_PASS`, `*_PAT`, or
-  `*_CREDENTIALS`. The CLIs' own credentials (`ANTHROPIC_API_KEY`,
-  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
-  `CODEX_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`) are the exception, since without them there is no run.
-  Credentials for other providers, such as `AWS_SECRET_ACCESS_KEY`, fall
-  under the rule, so a CLI configured that way must be signed in instead.
-- **Cleaned quotes.** Text quoted into a prompt keeps the words a reader
-  sees and loses the rest: HTML tags and the comments GitHub renders as
-  nothing, link titles and image alt text, and invisible formatting
-  characters, however they were written. It is set between
-  `[BEGIN untrusted text: …]` and `[END untrusted text]` lines, a line
-  inside it that imitates a marker is spoiled, and your question comes
-  last. The discussion files under `context/`, which the prompt says are
-  untrusted like a marked block, are cleaned the same way.
-- **Inert links.** A link in an answer or a comment does nothing until it
-  is clicked. Hovering it shows the full destination; a click opens `http`
-  and `https` links in the browser and a file of the worktree in Code
-  (see [Links to code](#links-to-code)), and nothing else.
+- **Tools.** Claude Code may read and search files with `Read`, `Glob`, `Grep`,
+  and `LS`. It can use `Bash` for `git diff`, `git log`, `git show`, and
+  `git blame`. Perch explicitly denies `Edit`, `Write`, `MultiEdit`,
+  `NotebookEdit`, `WebFetch`, and `WebSearch`. Other unapproved tools are
+  refused and show up in the activity log. Codex uses its `read-only` sandbox.
+- **Shell commands.** By default, Claude’s sandbox blocks network access and
+  file writes, including writes inside the worktree. If the sandbox cannot
+  start, the run stops. Perch does not retry outside it. See
+  [Without Claude Code’s sandbox](#without-claude-codes-sandbox) for the
+  optional setting.
+- **Settings.** For Ask, Claude Code uses `~/.claude/settings.json` and skips
+  the repository’s `.claude/settings*.json`, `.mcp.json`, and MCP servers.
+  Claude reviews also use `--safe-mode`. Codex treats the checkout as
+  untrusted, skips `.codex/` settings, hooks, and rules, and runs without
+  `~/.codex/config.toml`, plugins, or hooks.
+- **Credentials.** Perch removes `GITHUB_TOKEN`, `GH_TOKEN`, its Git token, and
+  variables matching `*_TOKEN`, `*_SECRET`, `*_KEY`, `*_APIKEY`, `*_PASSWORD`,
+  `*_PASSWD`, `*_PASS`, `*_PAT`, or `*_CREDENTIALS`. The agent CLIs can receive
+  their own sign-in credentials (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`,
+  `GEMINI_API_KEY`, and `GOOGLE_API_KEY`). If your provider depends on a
+  stripped variable such as `AWS_SECRET_ACCESS_KEY`, sign in to the CLI.
+- **Quoted text.** Perch strips HTML tags and comments, link titles, image alt
+  text, and invisible formatting characters from quoted material. It places the
+  visible text between `[BEGIN untrusted text: …]` and `[END untrusted text]`,
+  neutralizes lookalike markers inside the quote, and puts your question last.
+  It cleans the supporting files under `context/` the same way.
+- **Links.** Hover to see a destination. Clicking a web link opens HTTP or
+  HTTPS in your browser. Clicking a [worktree file](#links-to-code) opens it in
+  Code.
 
-What remains: the CLIs still read the repository's `CLAUDE.md` and
-`AGENTS.md` as instructions, along with your own user-level configuration,
-and the agent can read any file your user can, not only the worktree. What
-it reads can reach you only through its answer.
+These controls limit writes and tool use. An agent can still read files
+accessible to your account outside the worktree. The CLIs may also read
+instructions in `CLAUDE.md`, `AGENTS.md`, and your user settings.
 
 ### Work
 
-A composer on your own work, a worktree with no pull request or a pull
-request you opened, has an access picker after the effort: **Read only**,
-which is Ask, then the Work levels under [Approvals](#approvals). Anything
-else, someone else's pull request, an issue, a review's snapshot, is Ask-only,
-and the backend refuses Work there whatever the picker says.
+Choose the access level beside the model’s effort setting. **Read only** asks a
+question. On your own worktree or a PR you opened, you can also choose a
+[Work permission level](#approvals) to let the agent edit. Other people’s PRs,
+issues, and saved review snapshots are read-only.
 
-On an issue the picker is there for a new question, with **Read only** and
-**New branch**, but Work does not run there: the default branch the issue
-reads is shared by every issue of the repository, and has no branch to commit
-to. New branch's send reads **Start work**,
-and cuts `perch/issue-<n>` as the item's Start Work does, with what you wrote
-in the new worktree's composer in place of the usual last line of the prompt
-(after the issue's number, title, link and body, and the lines you asked
-about, if any), to send or edit. The issue's next question starts on Ask
-again. A new question
-starts on what you last picked on the item, else Work on a worktree Perch made
-and Ask elsewhere; a follow-up starts on its thread's last run. A session is
-resumed only by a run of its own kind: a move between Read only and Work
-starts over with the thread folded in, as a switch of agent does.
+On an issue, choose **New branch** and click **Start work** to prepare an
+editable worktree (`perch/issue-<n>`). Perch puts the issue number, title,
+link, description, any selected lines, and your message into the new message
+box. Edit or send it there. The next question on the issue opens in Ask.
 
-A Work run edits files and runs commands in the worktree, and is told it may.
-It keeps everything under [What the agent can and cannot do](#what-the-agent-can-and-cannot-do)
-except the first two points, and it can ask for more (see
-[Approvals](#approvals)).
+Perch remembers your choice for new questions on each item. On first use, a
+Perch-created worktree defaults to Work and other items to Ask. A follow-up uses
+the previous run’s mode. Switching between Ask and Work, or changing agents,
+starts a new session with the thread included.
 
-- **Claude Code** runs with its prompt and Perch's answers on stdin
-  (`--input-format stream-json`, `--permission-prompt-tool stdio`). It may
-  use `Edit`, `Write`, `MultiEdit` and `NotebookEdit` under the worktree,
-  and every command runs in its sandbox without asking. `Bash` itself is
-  not on its allowed list, since there it would let a command leave the
-  sandbox without asking. The sandbox writes the worktree, the temporary
-  directory and `[repo.work] write`, never the worktree's `.git`, `.claude`,
-  `.codex` or `.mcp.json`, nor the git directories a linked worktree uses,
-  so `git commit` fails. It reaches `[repo.work] network` without asking.
-- **Codex** runs as `codex app-server`, the protocol its own app speaks,
-  with plugins, hooks and apps off and each MCP server in your Codex config
-  turned off by name, since the app-server has no way to ignore that
-  config. Its thread runs under a permission profile: everything readable,
-  the worktree, the temporary directory and `[repo.work] write` writable,
-  the same paths read-only, and no network until it asks. Codex lets a bare `git commit`
-  write the repository's objects and refs whatever the profile says, so a
-  Codex Work run can commit; it cannot change git's config or hooks, and it
-  cannot push.
+Work lets an agent edit project files and run commands in the worktree. The
+[rules for credentials and untrusted text](#what-the-agent-can-and-cannot-do)
+still apply. Commands that need more access follow your
+[approval settings](#approvals).
 
-Neither is given a token or a route to GitHub. A machine without the sandbox
-refuses the run. One Work run at a time runs in a worktree; another waits,
-saying so, without taking a slot, and questions go on beside it.
+- **Claude Code** can edit worktree files with `Edit`, `Write`, `MultiEdit`,
+  and `NotebookEdit`. Its sandbox allows writes in the worktree, the temporary
+  directory, and paths under `[repo.work] write`. It protects `.git`,
+  `.claude`, `.codex`, `.mcp.json`, and the Git metadata of a linked worktree.
+  By default, this stops `git commit`. Hosts in `[repo.work] network` are
+  reachable without another prompt. Perch handles permission requests over
+  standard input with `--input-format stream-json` and
+  `--permission-prompt-tool stdio`.
+- **Codex** runs through `codex app-server` with plugins, apps, hooks, and
+  configured MCP servers disabled. Its permissions allow reading files and
+  writing in the worktree, temporary directory, and configured write paths. The
+  same protected paths stay read-only. Network access requires permission.
+  Codex can make a plain `git commit`, but cannot change Git configuration or
+  hooks, or push.
 
-On Linux, Claude Code's sandbox is bubblewrap with socat for its network
-proxy. A Work run or a question on a machine without `bwrap` and `socat` on
-`PATH` is refused before it starts: "Claude Code's sandbox needs bwrap and
-socat on Linux…", unless the sandbox is turned off (see below). Claude Code on Linux also skips the glob that keeps a Work
-run from making a `.git` inside the worktree, and on any platform a run can
-move in a directory that already holds one, so Perch looks itself, as a Work
-run starts and again as it ends: a `.git` that appeared below the worktree's
-top during the run, or one there before whose `config`, `config.worktree`,
-`commondir`, `gitdir` or hooks changed, or whose `.git` file now points
-elsewhere or at a repository that changed, fails the run, with its path
-named. `.GIT` counts, as macOS doesn't tell it from `.git`. A submodule that
-`.gitmodules` named before the run, checked out by it with a `.git` file
-pointing into the repository's `modules/`, is left alone, and
-`node_modules`, `target`, `.venv` and `venv` are not looked through. The
-look follows no link out of the worktree and opens nothing but plain files,
-a link or a FIFO counting by what it is, `.gitmodules` included, and goes
-through at most 200,000 folders and hooks in nested repositories: a run that
-takes the worktree past that fails too.
+Perch gives neither agent its GitHub token. One Work run can edit a worktree at
+a time. Another Work run waits without using an agent slot. Ask runs can
+continue alongside it.
+
+On Linux, Claude Code needs `bwrap` and `socat` on `PATH` for its sandbox. If
+either is missing, Ask and Work refuse to start with the sandbox enabled.
+
+Perch checks nested Git repositories before and after a Work run. It fails the
+run and names the path if a new `.git` appears or an existing repository’s
+configuration, hooks, or Git directory changes. The check includes `.GIT`,
+`config.worktree`, `commondir`, and `gitdir`. It permits a submodule declared
+before the run whose Git file points into the repository’s `modules/`
+directory.
+
+The scan skips `node_modules`, `target`, `.venv`, and `venv`. It reads regular
+files, stays inside the worktree, and fails a run that exceeds its limit of
+200,000 directories and nested hooks.
 
 ### Without Claude Code's sandbox
 
-On a machine that is itself the boundary, such as a throwaway VM, Claude
-Code's sandbox can be turned off: the **Sandbox** switch under Claude Code in
-**Settings > Agents**, or `[agent] sandbox = false` in the engine's
-config.toml. It is on unless you turn it off, and Perch never turns it off
-by itself: with it on, a machine that cannot start it still refuses the run.
-Off, on any platform:
+Claude Code’s sandbox is on by default. If you use a separate machine as your
+security boundary, such as a disposable VM, **Settings > Agents > Claude Code >
+Sandbox** controls this setting. The corresponding engine setting is
+`[agent] sandbox = false`. Perch only disables the sandbox when you choose to
+do so. Turning it off changes the following behavior.
 
-- Claude Code is started with `sandbox.enabled` false, and Perch no longer
-  looks for `bwrap` and `socat` or refuses a run without them. The
-  **bubblewrap and socat** host check reads **Off** rather than **Needs
-  setup**.
-- A question, a native review and a verifier keep their tool lists, so the
-  shell runs `git diff`, `git log`, `git show` and `git blame`, and the
-  read-only commands Claude Code allows by itself, such as `ls` and `cat`,
-  but nothing stops what those can do as you. Perch denies the git
-  commands' `--output`, which would write a file anywhere you can; the
-  network is no longer shut off for them.
-- A Work run asks before every other command, since no sandbox lets one run
-  without asking: Claude Code's auto reviewer decides first under
-  Auto-review, you decide under Ask me, and Allow all allows each without
-  asking. The commit grant answers a `git commit` as it does for Gemini and
-  OpenCode. Edits stay scoped to the worktree, its protected paths (`.git`,
-  `.claude`, `.codex`, `.mcp.json` and the rest) stay denied to the editing
-  tools, and the `.git` check as a run starts and ends still runs, but a
-  command you allow can write anywhere you can, and reach any host. The run
-  is told so in its framing, as a Gemini or OpenCode run is.
-- `Bash` rules your own `~/.claude/settings.json` allows (and, for a Work
-  run in a repository you trust, its `.claude/settings.json` and
-  `.claude/settings.local.json`, including the main checkout's when running
-  in a linked worktree) would otherwise run their commands unsandboxed and
-  unasked. Perch passes each as an `ask` rule, which outranks an allow: a
-  Work run asks for it, and a question or review, with no one to ask, is
-  refused it. A settings file Perch can't read as JSON makes every command
-  ask. A bare `Bash` allow rule, or a broader prefix rule such as
-  `Bash(git *)`, therefore takes the git commands away from questions and
-  reviews.
+- The Linux host check for `bwrap` and `socat` reads **Off**. Claude starts
+  with `sandbox.enabled` set to false.
+- Ask runs, native reviews, and verifiers keep their tool restrictions. Allowed
+  read commands run with your account’s permissions and network access. Perch
+  denies Git’s `--output` option.
+- Work still restricts its editing tools to allowed paths and checks Git
+  metadata when a run starts and ends. A shell command you approve can write
+  anywhere your account can and reach any host. **Ask me** sends command
+  requests to you, **Auto-review** asks Claude’s reviewer first, and **Allow
+  all** approves them automatically. The repository commit grant applies to
+  eligible Git commits.
+- Perch turns shell allow rules in your Claude settings into ask rules. This
+  includes project and local settings for trusted Work runs, including the main
+  checkout’s settings for a linked worktree. An unreadable settings file makes
+  every command require approval. Ask runs and reviews refuse commands that
+  need approval. A broad rule such as `Bash(git *)` can therefore make Git
+  commands unavailable to them.
 
 Codex, Gemini and OpenCode are not affected.
 
 ### Approvals
 
-When a Work run needs something its sandbox refuses, it asks. By default
-(`[work] approvals = "auto"`) the CLI's own automatic reviewer answers first:
-Claude Code runs in its auto permission mode, and Codex with its `auto_review`
-reviewer. What the reviewer decides shows in the run's steps: Codex's as
-`Approved automatically: …` or `Refused automatically: …` with its reason,
-Claude Code's as the command itself, `Ran outside the sandbox: …` or `Ran …
-(network: example.com)`. Claude Code's auto mode needs a model that has it: Fable, Opus and Sonnet do
-(checked with Claude Code 2.1.280); Haiku does not, and with it every request
-comes to you. Anything the reviewer passes on comes to you, and so does everything when
-`approvals = "ask"`. A repository's `[repo.work] approvals` stands over
-`[work]`'s, and only there can it be `"never"`: Perch allows every request
-without asking, and each shows in the run's steps as `Allowed without asking:
-…`. The run still starts in its sandbox, and the protected paths (`.git`,
-`.claude`, `.codex`, `.mcp.json`) stay denied.
+The default, `[work] approvals = "auto"`, lets the CLI’s automatic reviewer
+decide requests first. Claude uses auto permission mode and Codex uses
+`auto_review`. The run’s activity shows the decision or which command ran
+outside the sandbox. If the reviewer defers, you get a request. Claude models
+with auto-review include Fable, Opus, and Sonnet (checked with Claude Code
+2.1.280). With Haiku, requests come to you.
 
-The access picker beside the effort shows who decides for the item, after
-Read only: **Ask me** (`"ask"`), **Auto-review** (`"auto"`) or **Allow all**
-(`"never"`, in red). It starts on config's level. A pick holds for that item
-until Perch quits and changes nothing in config.toml; picking Read only keeps
-it for the next Work. Allow all, on or
-off, applies to the next request, even one from a run already going; the
-switch between Ask me and Auto-review applies from the next run, since the
-CLI is started with it. An agent's byline says the level its run has, after
-the time: the same four.
+Set `approvals = "ask"` to decide each request yourself. A repository’s
+`[repo.work] approvals` overrides the global setting. Only the repository
+setting accepts `"never"`, which approves requests without asking and records
+each one in the run. The run still starts with its normal sandbox and protected
+paths.
 
-What comes to you: Claude Code asks
-for a host a command wants to reach, for a command it wants to run outside the
-sandbox, and for an edit outside the worktree. Codex asks to run a command
-outside its profile, naming the host when it knows the command needs one, and
-for file changes and permissions it lacks. The request is a card in the run's
-block, `Connect to example.com` or `Run outside the sandbox` with the command
-in the code font and the agent's reason, with three buttons:
+The access picker offers **Read only**, **Ask me**, **Auto-review**, and **Allow
+all**. It starts with your configured level. A change applies to this item until
+you quit. Choosing **Read only** preserves your previous Work level for next
+time.
+
+Changing **Allow all** affects the next request, including one from an active
+run. Switching between **Ask me** and **Auto-review** takes effect on the next
+run. The agent’s byline shows its run’s level.
+
+When a run needs your decision, a card in the thread shows the command or path,
+the agent’s reason, and the host if known. For example, you might see **Connect
+to example.com** or **Run outside the sandbox**. Choose how to handle it.
 
 - **Allow once** allows this request.
 - The **Always** button allows it now, and keeps a grant on the repository
@@ -1384,210 +1194,172 @@ in the code font and the agent's reason, with three buttons:
   command that writes the repository, **Always let Work commit here**.
 - **Deny** says no. The agent is told "The reader said no." and goes on.
 
-A request not answered in time is denied: fifteen minutes in the app, eight
-hours under `perchd`, where nobody may be connected, or
-`[work] approval_timeout_mins`. The agent is told how long it waited. A
-request waits in the engine, not in a window, so a window that opens or a Mac
-that connects while it waits shows the card, and the first answer from any
-of them settles it for all. A run that is stopped or ends settles whatever it
-was waiting on. The run's steps keep what was asked
-and what was answered. While it waits, its item's Agents row counts it as
-waiting and the bar's Agents button has a dot.
+An unanswered request expires after 15 minutes in the app or eight hours under
+`perchd`. Change the limit with `[work] approval_timeout_mins`. The engine
+keeps the request even if a window closes. Answer from any connected window.
+The first answer settles it for all windows. Ending the run clears pending
+requests. The activity log records the request and decision.
 
-Grants are Perch's own, kept in its database and keyed by repository. Perch
-never writes Claude Code's settings or Codex's rules to remember one. The
-summary of an item that takes Work runs lists its repository's grants in a
-**Work may** row, each with a × that takes it back from the next request on.
+**Always** saves a permission for the repository in Perch’s database. To revoke
+it, open **Work may** in the item’s summary and click × beside the permission.
+The change applies to the next request. Perch keeps these permissions separate
+from the agent CLI’s own settings.
 
-Without the commit grant, a Work run is told to commit only when you ask it
-to, and a Claude Code run then asks to run its `git commit` outside the
-sandbox; **Always let Work commit here** on that request is the grant. A
-request counts as a commit only when it is plain git: no option before the
-subcommand, such as `-c` or `-C`, and none after it that signs, runs a program
-or sets config, such as `-S`, `--exec` or `--template`. Anything else is asked
-for as its own command, and the grant does not answer it.
-The commit grant also changes the sandbox of later Claude Code Work runs: their
-worktree's git directories become writable, apart from each one's `config`,
-`config.worktree`, `commondir`, `hooks` and `modules/` (its submodules'
-repositories), and the repository's other worktrees' directories under
-`worktrees/` (and the `commondir` and `config.worktree` of any added while the
-run goes). On Linux, where that last rule can't be kept, a linked worktree's
-run gets only its own directory and the repository's `objects/`, `refs/` and
-`logs/`; git there prints that it can't lock `packed-refs` and commits anyway,
-and the run is told to expect that line. A command that rewrites `packed-refs`,
-such as deleting a packed branch, fails there, and the run can ask to run it
-outside the sandbox.
-The run is told it may commit but not push. A follow-up that resumes a
-session begun before the grant says so ahead of the question, since the
-session keeps what it was told when it began.
-The grant doesn't answer a Claude Code or Codex run's request to run git
-outside the sandbox: the run keeps working inside the sandbox while git runs,
-so it could move a repository into the worktree, and git outside the sandbox
-would run what that repository's config says. You're asked, and the card says
-why. Gemini, which has no sandbox and asks before every command, commits by
-the grant, except while a commit would run hooks, or once a `.git` has
-appeared, changed or gone out of sight below the worktree's top since the run
-started, or the worktree is too big to look through.
-With or without the grant, a Work run, Claude Code's or Codex's, can't write a
-`.git` below the top of its worktree: git would take a directory holding one
-for a submodule and, the next time it runs there outside the sandbox, use a
-config the run wrote. Codex can't read one there either, since its profile
-only denies a pattern outright. A run that needs a repository of its own makes
-it in the temporary directory. A worktree that `git worktree add` makes from
-the same repository below the top, as another Claude Code session does in
-`.claude/worktrees/`, is the repository's own and doesn't count. Neither
-sandbox stops a run moving in a directory that already holds a `.git`, so Perch's own `git status` and
-`git diff` never look inside a submodule for edits: one shows as changed only
-when its commit does, and one with a `.git` in it keeps its worktree from
-being reset or removed.
-`[repo.work] trust = true` loads the repository's own agent configuration for
-Work runs: Claude Code reads its project and local settings and its
-`.mcp.json`, and Codex treats the worktree as trusted, so its `.codex/` loads.
-What those files name runs as you, outside any sandbox, which is why trust is
-off unless you turn it on. Questions and reviews never read it.
+**Commit permission.** By default, Perch tells Work to commit only when you
+ask. Choose **Always let Work commit here** to allow plain Git commits for this
+repository. Commands with options that change configuration, run another
+program, or sign a commit need a separate decision. Examples include `-c`,
+`-C`, `-S`, `--exec`, and `--template`. The grant does not allow pushing.
 
-As a Work run starts and as it ends, however it ends, Perch records the
-worktree as a commit under `refs/perch/runs/<run>/` in the repository, without
-touching the worktree, its index or `HEAD`. The run's card says `Work` and how
-many files it changed; a click shows the change on Code as the **What the run
-changed** scope. The scope menu's **Last run** is the newest Work run that
-changed something, passing over runs that changed nothing, and moves on to the
-next such run as it finishes. Deleting the run's thread or item drops the refs.
+Later Claude Code Work runs can write the Git objects and refs needed for a
+commit. Git configuration, hooks, submodule repositories, and other worktrees
+remain protected. On Linux, a linked worktree gets its own Git directory plus
+`objects/`, `refs/`, and `logs/`. A normal commit there can succeed with a
+warning about locking `packed-refs`. An operation that needs to rewrite that
+file, such as deleting a packed branch, fails inside the sandbox.
+
+Claude Code and Codex still ask before running Git *outside* their sandbox, even
+with the commit grant. Gemini can use the grant for ordinary commits after Perch
+checks the worktree. Hooks, a new or changed nested repository, or an incomplete
+scan require a separate decision.
+
+**Nested repositories.** Work runs cannot create a nested `.git` in the
+worktree. Codex also cannot read one there. Use the temporary directory if the
+task needs its own repository. Linked worktrees of the same repository,
+including `.claude/worktrees/`, are recognized separately. Perch’s own Git
+status and diff check a submodule’s commit, not edits inside it. A submodule
+containing a `.git` directory prevents Perch from resetting or removing its
+worktree.
+
+**Repository settings.** Set `[repo.work] trust = true` only for repositories
+whose agent configuration you trust to run as your user. Claude Code then loads
+project and local settings and `.mcp.json`. Codex loads the checkout’s
+`.codex/` configuration. This setting applies to Work. Ask runs and reviews
+keep repository configuration disabled.
+
+Before and after each Work run, Perch saves the files as commits under
+`refs/perch/runs/<run>/`. This leaves your checkout, Git index, and `HEAD`
+alone. Click the run’s file count to see **What the run changed** in Code.
+**Last run** shows the latest Work run with changes and skips empty runs.
+Deleting the thread or item removes its saved refs.
 
 ## Worktree reviews
 
-**Review** in the bar opens one popover for the whole review. On top are the
-agents: on a pull request, one line naming the reviewers the next run starts,
-with **Run**, and **Settings** to choose them, the range and the
-instructions. Each reviewer is one line: a box to take it or leave it, its
-name, then its model and effort side by side; one that cannot run says why
-under its name. Under them is your own review for GitHub: the
-drafts, a summary, and a verdict to send them with. Unfolding the settings folds
-your review to a line, and **Open** brings it back. A worktree without a pull
-request has only the agents, their settings showing. The button is dark while
-there is a pull request to review, counts your drafts, and says how far a
-running review has got.
+### Choose your reviewers
 
-Running the agents starts Claude Code and/or Codex's native review workflow
-against the branch diff from the selected base's merge base to the head. It
-works for Perch-managed and registered external worktrees, with or without a
-pull request. **Changes** in the settings reads head → base, as a review's
-history does. The head says where the range ends: **Last
-commit** is `HEAD`, and **Working tree** adds the uncommitted work, staged,
-unstaged and untracked files alike, as a commit Perch makes over `HEAD`
-without touching the worktree, its index or its refs. Head starts on Working
-tree when the worktree is dirty and the branch has no commits yet, or the
-Files view shows an uncommitted scope; otherwise on Last commit, and under a
-dirty worktree's range Perch notes `Uncommitted work is left out`.
-Staged-only, individual-commit, and incremental-only review scopes are not
-supported. If the diff is empty, Perch records that result without launching
-an agent.
+Open **Review** in the top bar. Choose **Settings**, select the agents you
+want, and pick a model and effort for each. If an agent is unavailable, the
+menu explains why. Click **Run** to start the selected agents.
 
-Findings from a review of the working tree show in the Files view under
-Uncommitted and Branch while the checkout is still on the commit the work sat
-on, each where its lines read the same as what was reviewed: on the new side,
-in a file unchanged since; on the old side, when the view diffs from the
-review's merge base. The rest stay in Conversation.
+On a pull request, the same menu holds your drafts, summary, and verdict.
+Opening reviewer settings collapses your review. Click **Open** to return to it.
+The toolbar button shows progress during a run and counts drafts awaiting your
+review. On a worktree without a PR, the menu contains just the agent settings.
 
-The instructions box in the settings tells the reviewers what to focus on, such as
-"review rfcs/multi_get.md only" on a branch that also carries a prototype. The
-range reviewed stays the same: Claude reads the instructions after the range in
-its `/code-review` argument, and Codex, which refuses a custom prompt beside
-`--base`, reads them as developer instructions. A review keeps its
-instructions, so **Retry** uses them again and its history card shows them.
+### Choose what to review
 
-A review of a pull request also reads its discussion. When the snapshot is
-taken, Perch writes the discussion to `~/.perch/context/review-<id>/` in the
-same shape a question gets it, and tells each reviewer, ahead of the requester's
-instructions, where it is and what to do with it: not to report a problem a
-reviewer already raised in an unresolved thread, and to report a change a
-reviewer asked for that the range does not make, naming who asked. A review of
-a worktree with no pull request has no discussion to read.
+Each selected agent reviews the same diff. It starts at the last commit the
+branch shares with the base branch and ends at the version you choose. You can
+review a
+worktree Perch created or one you registered, with or without a PR. In
+**Changes**, choose where the comparison ends.
 
-Every review uses a clean, read-only, immutable snapshot in Perch-owned
-storage. Perch retains its exact diff, manifest, commits, and anchored blobs so
-history remains readable after the branch moves or an external checkout is
-deleted. Opening a historical review never changes the current worktree.
+- **Last commit** reviews through `HEAD` and leaves out uncommitted files.
+- **Working tree** includes staged, unstaged, and untracked files. Perch takes
+  a temporary snapshot without changing your branch, files, or Git index.
 
-Perch currently supports Codex CLI 0.155.1 or newer through `codex exec review`
-and Claude Code 2.1.223 or newer through `/code-review`, when the installed CLI
-advertises the required local, noninteractive options. Missing, older, or
-incompatible CLIs are shown as unavailable with a reason; Perch does not fall
-back to a generic review prompt. Review mode excludes Claude's hosted `ultra`
-mode and never enables fix, comment, or permission-bypass options.
+Perch selects **Working tree** when the Files view shows uncommitted changes, or
+when a branch has uncommitted work and no new commits. Otherwise it selects
+**Last commit**. There’s no staged-only, single-commit, or incremental review.
+If the diff is empty, Perch records that and skips the agent run.
 
-Findings are durable local discussions, separate from the attempts that found
-them. Repeat reviews preserve every group, attempt, observation, failure, and
-valid zero-finding result while reconciling the same problem back to its
-existing thread. **Retry** creates another attempt with the original snapshot
-and settings. **Review latest** creates a new group and immutable snapshot from
-the branch's current state.
+Working-tree findings appear beside matching lines in **Uncommitted** and
+**Branch** while the checkout is still on the commit you reviewed. For new
+lines, the file must still match the snapshot. For old lines, the diff must
+start at the same merge base. You can read every finding in Conversation.
 
-On an open pull request, a new finding on lines of its diff arrives as your
-draft on those lines, in place of the reviewer's message. It is a draft like
-one you write (see Posting): you edit or delete it, and it posts only when you
-submit the review. The card above it still gives the severity and the
-reviewer. Deleting the draft dismisses the finding, and dismissing the finding
-or linking it as a duplicate deletes the draft. GitHub takes a review comment
-only on a line its diff shows, a changed line or one of the three around it,
-so this needs the review to be of what GitHub has: the pull request's head,
-diffed from the same merge base. Any other finding stays in Perch as the
-reviewer's message, as does every finding on a worktree without an open pull
-request.
+Use the instructions box to narrow the reviewers’ attention, for example
+“Review rfcs/multi_get.md only.” The selected diff stays the same. Claude
+receives the instructions with `/code-review`. Codex receives them separately
+because `--base` does not accept a custom prompt. The review history shows the
+instructions, and **Retry** uses them again.
 
-Follow-ups stay local to Perch unless you post one yourself. Reviews do not
-resolve threads on GitHub, modify code, run automatically after a push, or use
-a hosted review service.
+For a PR, Perch also saves the discussion in `~/.perch/context/review-<id>/`.
+It asks reviewers to skip problems already raised in unresolved threads and to
+flag requested changes that are still missing, naming the person who asked.
+
+### Reopen or repeat a review
+
+Perch saves a read-only copy of the diff, commits, and files used for each
+review. You can reopen the exact lines a reviewer saw after the branch moves or
+an external worktree is deleted. Opening an old review leaves your current
+checkout alone.
+
+Claude Code (2.1.223+) and Codex (0.155.1+) use their own review commands,
+`/code-review` and `codex exec review`. Claude’s hosted `ultra` review mode is
+unavailable in Perch. Gemini (Antigravity CLI 1.5.5+) and OpenCode (2.3.0+) use
+Perch’s review instructions. OpenCode reads the saved diff with file tools and
+no shell. The menu explains why a missing or incompatible CLI cannot run.
+
+**Retry** runs the same review against the saved snapshot with the same
+settings. **Review latest** takes a new snapshot of the branch. When a reviewer
+finds the same problem again, Perch keeps the discussion in one thread. History
+includes each attempt, including failures and reviews that found nothing.
+
+### Check drafts before posting
+
+On an open PR, findings on lines GitHub accepts become draft comments. Read,
+edit, or delete them before submitting your review. The card shows the reviewer
+and severity. Deleting a draft dismisses the finding. Dismissing a finding or
+marking it as a duplicate removes its draft.
+
+A draft needs a line in the PR diff (a changed line or one of its three context
+lines), the same head commit, and the same merge base as GitHub. Other findings
+stay in Perch, including every finding on a worktree without an open PR. See
+[Posting](#posting) for how drafts reach GitHub.
+
+You decide when to run a review and which findings to post. An agent review
+leaves your files and GitHub threads as they are. Follow-up questions stay in
+Perch until you post them.
 
 ## The file tree
 
-The drawer on the right holds the open item's files as a tree, on Code. It is
-a column beside the editor, so opening it moves the file over rather than
-covering it, and the open file, its scroll and a composer are kept through it
-opening and shutting. When the window is too narrow for both the drawer and a
-usable pane, the drawer lies over the pane's right edge instead, from under
-the tabs to the status bar.
+In Code, the file tree opens beside the editor on the right. In a narrow window
+it slides over the editor. Opening and closing it keeps your file, scroll
+position, and draft comment in place.
 
-The tile at the right end of Code's tabs, after the layout tiles, opens and
-shuts it, as Codex has its folder there, and so do `Cmd-/` from anywhere
-and the drawer's own close button. From Conversation, `Cmd-/` goes to
-Code with the tree open. On Conversation the tree is hidden, and it comes back
-with Code. It waits for an opening item to be ready. It opens by itself on an
-item's first visit to Code, and after that stays as it was left. Whether it is
-open and how wide it is are remembered between launches.
+Open or close the tree with the folder button above the editor, `Cmd-/`, or
+`Cmd-Shift-E`. From Conversation, the shortcut also switches to Code. The tree
+opens on your first visit to an item’s Code view. Perch remembers its width and
+whether you left it open between launches.
 
-The tree is the changed files until its filter is turned off, with the scope
-button and the viewed count above it. An item opens on the scope last picked
-from that button, as Codex does, when the item has something under it, and on
-the branch otherwise; a single commit, or a run's changes opened from its card,
-is not remembered. A file opened from the tree opens on
-Code, and a file opened from anywhere else, a card or a definition, is shown
-in the tree: the way to it opens, the filter comes off when the file is not a
-change, and the tree scrolls to its row. During a retained snapshot the tree
-has no scope to pick and nothing to mark viewed, and the way back to the
-current files is in the tab strip.
+The tree initially shows changed files. Turn off the changed-files filter to
+browse the whole checkout. Above the tree, choose which changes to show and see
+how many files you’ve marked viewed. Perch remembers your last scope when the
+item has changes in it and otherwise shows **Branch**. Opening a single commit
+or an agent run from its card leaves that preference alone.
+
+Follow a definition or click a file link and the tree expands to that file,
+clearing the filter if needed. When you open a saved review snapshot, use the
+tab strip to return to current files. Scope and Viewed controls apply only to
+current files.
 
 ## Going to a file
 
-`Cmd-P` puts VS Code's Go to File over the top of the pane, from Code or
-Conversation, for any item with files. Before anything is typed it lists
-the files the item has had open, the most recent first, and then its
-changes. As you type, it lists the recently opened files that match and
-then every other file in the worktree that does, with the matched letters
-in blue and a change's status letter at the right.
+Press `Cmd-P` in Code or Conversation. **Go to File** first lists recently
+opened files for this item, then its changed files. Start typing to search the
+whole worktree. Matches show the matching letters and, for changed files, the
+Git status.
 
-The ranking is VS Code's own. The letters must come in order. A run of
-them beats the same letters spread out, a match in the name beats one
-that needs the directory, and a name that starts with the query comes
-first, shorter names before longer. A `/` in the query matches against
-the whole path, words separated by spaces must all match, and a query in
-double quotes must match as one run. A recently opened file is listed as
-recent only when the letters form one run in its name, or in its path for
-a query with a `/`; otherwise it is ranked with the other files.
+Type letters in order. Perch favors a match at the start of a filename,
+consecutive letters, and shorter names. Include `/` to match a path. Separate
+words with spaces to require all of them, or put a phrase in double quotes to
+match it exactly. A recent file stays at the top when the query matches
+consecutive characters in its name (or path for a query with `/`).
 
-`Enter` opens the file on Code, and `config.rs:42` opens it at line 42;
-`:42` alone goes to line 42 of the open file. The list of recently opened
-files is kept for each item until Perch quits.
+Press Enter to open a result. Type `config.rs:42` to open that file at line 42,
+or `:42` to go there in the current file. Perch keeps the recent list until you
+quit.
 
 | Action | Key |
 |---|---|
@@ -1596,27 +1368,23 @@ files is kept for each item until Perch quits.
 | Open | `Enter` |
 | Close | `Escape`, or a click outside it |
 
-`Cmd-P` is `go_to_file`, which can be put on another key: see
-[Keyboard shortcuts](#keyboard-shortcuts). The key it is on walks down the
-list. The others are the palette's own.
+To change `Cmd-P`, rebind `go_to_file` in
+[Keyboard shortcuts](#keyboard-shortcuts). Pressing the assigned shortcut again
+selects the next result.
 
 ## Code navigation
 
-Code reads like an IDE when rust-analyzer is installed. Rest the pointer on
-an identifier and a tooltip says what it is: the signature in the code font,
-then the first lines of its doc comment. The tooltip cannot be entered and has
-no scroll. It opens where the pointer is and goes away when the pointer does,
-so nothing has to be dismissed; the panel under the editor is where a list
-goes, and the tooltip is a glance. A reader who wants the whole doc comment
-goes to the definition.
+Hover over a name to see its signature and the first lines of its
+documentation. Use **Go to Definition** for the full comment. In Rust,
+`rust-analyzer` supplies this information.
 
-A definition in a dependency or the standard library opens as a tab like any
-other, with a chip naming where it is from (`tokio 1.40.0`, `std`, `git:
-floem`). Such a tab is a place to read: whole, with no diff, no Viewed and no
-threads, and it is not remembered when the item is closed.
+Definitions in a dependency or the standard library open in a read-only tab. A
+label such as `tokio 1.40.0`, `std`, or `git: floem` identifies the source. The
+tab shows the full file without review threads or Viewed controls. Closing the
+item clears these tabs.
 
-The keys are VS Code's. Right-click an identifier for the same entries, each
-naming the symbol it acts on; on whitespace the menu is Copy alone.
+Right-click a name for the navigation commands below. Right-clicking whitespace
+offers **Copy**.
 
 | Action | Key |
 |---|---|
@@ -1628,27 +1396,23 @@ naming the symbol it acts on; on whitespace the menu is Copy alone.
 | Back, Forward | `Ctrl--`, `Ctrl-Shift--` |
 | Close the panel | `Escape` |
 
-Each but `Cmd-click` and `Escape` can be put on another key, and Go to Type
-Definition given one: see [Keyboard shortcuts](#keyboard-shortcuts).
+You can [change these shortcuts](#keyboard-shortcuts) or assign one to **Go to
+Type Definition**. `Cmd-click` and `Escape` are fixed.
 
-One location opens; several open the panel and the reader picks. The call
-hierarchy is a tree: a chevron on a row asks for that row's callers, and a
-toggle in the panel's header turns it to callees. The caret resting on an
-identifier tints its other uses in the file. All of it is read-only, and all
-of it is rust-analyzer: while the server is absent, failed or waiting for you
-to trust the code, the status line says so and nothing opens. A goto over an
-absent server offers the install again, and one over a server waiting for
-trust offers **Trust and start** again.
+A single match opens immediately. For several matches, choose one in the panel
+below the editor. In **Show Call Hierarchy**, expand a function to see its
+callers. Switch to **Callees** to see what it calls. Putting the cursor on a
+name highlights its other uses in the file.
 
-`Cmd-F` puts a find bar over the top right of the code, as in VS Code: a box
-for the text, toggles for match case, whole word and regular expression, the
-count, and arrows. Every match in the open file is tinted, the current one
-darker and selected, and the editor scrolls to it; as the text is typed the
-bar moves to the nearest match from the caret, and a match inside a folded
-run reveals the run. `Cmd-F` with something selected on one line looks for
-that. The bar stays up from one file to the next, looking for the same text
-in each, and searches a diff's removed lines along with the rest in the
-stacked layout.
+If navigation does nothing, check the language server in the status bar. **Go to
+Definition** offers to install a missing server or **Trust and start** a server
+waiting for your approval.
+
+Press `Cmd-F` to search the open file. Select text on one line first to search
+for that text. Use the buttons for case, whole words, or regular expressions.
+Perch highlights matches, scrolls to the nearest one, and expands folded lines
+when needed. The search stays open as you switch files. In a stacked diff it
+also searches removed lines.
 
 | Action | Key |
 |---|---|
@@ -1660,186 +1424,149 @@ stacked layout.
 The bar's own `Enter`, `Shift-Enter` and `Escape` stay; the other keys can
 be changed: see [Keyboard shortcuts](#keyboard-shortcuts).
 
-`Page Up` and `Page Down` scroll the open file or Conversation by a page, keeping a line of the last in sight, and leave the
-caret where it is. They work from the code, the page or a composer. `Cmd-Up` and `Cmd-Down` go to the
-top and the end, the caret with them in the code; a composer keeps them for
-its own text. The find bar and the other boxes keep all four.
+`Page Up` and `Page Down` scroll a page while keeping one line in view and the
+cursor in place. `Cmd-Up` and `Cmd-Down` jump to the start or end. In a message
+box those two shortcuts move within your message. Search and other input fields
+handle their own keys.
 
-An SVG opens as the picture it draws rather than as its markup, fitted to the
-pane. A changed one shows before and after side by side, both at one scale,
-so a change of size shows as one; an added or deleted one says which it is.
-The status line gives the picture's size. The Source tile at the right end
-of the tab strip shows that file's markup instead, with its diff, gutter and
-threads, and the picture is back at the next click.
+SVG files open as images. For a changed SVG, Perch shows both versions at the
+same scale so you can see size changes. The status bar gives the image
+dimensions. Click **Source** above the editor to see the markup, diff, and line
+comments. Click it again to return to the image.
 
 ## Links to code
 
-A file, a line or a symbol of the worktree that a comment or an answer
-names is a link to it, on Conversation and in the cards over the code: in
-a code span, in a fenced block, or as a link's destination. A click goes to
-Code, opens the file with the caret on the line, and `Ctrl--` comes back.
-Hovering says where it goes. It is drawn as any link is, so the text reads
-as it did.
+Click a file, line, or recognized symbol in a comment or agent reply to open it
+in Code. Hover to check the destination first. Press `Ctrl--` to return to the
+discussion. Links work in inline code, code blocks, and Markdown link
+destinations.
 
-A file links when the worktree has it. A line follows the path as the
-compiler writes one, `src/db.rs:17` or `src/db.rs:17:5`, or as GitHub
-does, `src/db.rs#L17`; a range opens at its start, and the line is the
-head's, which is what an agent reads. A path can be written short,
-`wal/mod.rs:303` or `gc.rs`, and links when only one file ends with it, or
-only one of the changed files does. An absolute path links only inside the
-worktree: nothing outside it opens from a comment.
+Perch recognizes paths such as `src/db.rs:17`, `src/db.rs:17:5`, and
+`src/db.rs#L17`. A range opens at its first line in the head version of the
+file. Short paths such as `gc.rs` work when they identify one file in the
+worktree or one changed file. Absolute paths must stay inside the worktree.
 
-A symbol links through rust-analyzer's workspace symbol search: a name,
-`WalGcPolicy` or `list_wal_ssts`, or a name after what it belongs to,
-`Db::open`, `WalGcMode::Regular`. One definition opens and several open the
-panel as its definitions, generated code left out when there is code
-written by hand. Fields are not in the search, so `DbOptions.ttl` links
-`DbOptions`. A lone word in lower case, such as `inner`, is looked up only
-when it is called, `inner()`, since it is as often a field or a variable;
-and a name with more than ten definitions, such as `new`, links nothing.
-In a fenced block the paths link whatever the language, and the names that
-read as types do when the block is Rust, a diff, output or of no language
-named. A name links
-once rust-analyzer has answered, a moment after the text is drawn; while
-the server is absent, failed or waiting for trust, only files do.
+For Rust symbols, `rust-analyzer` looks up names such as `WalGcPolicy`,
+`list_wal_ssts`, and `Db::open`. One definition opens directly. For several,
+pick one in the results panel. Perch prefers handwritten definitions to
+generated ones and skips names with more than ten matches.
+
+For a field such as `DbOptions.ttl`, the link opens the type. Lowercase names
+like `inner` need call syntax (`inner()`) to count as functions. File paths
+work in any code block. Type names also link in Rust, diff, output, or
+unlabelled blocks. If the language server is unavailable or waiting for trust,
+file links still work.
 
 ## One engine to a Perch home
 
-Everything below the window, the GitHub client, the cache, the checkouts,
-the language servers and the agents, is Perch's engine. Whatever runs it,
-the app or `perchd`, holds an exclusive lock on `$PERCH_HOME/engine.lock`
-while it runs and writes its process id there. A second engine on the same
-home refuses to start and names the process that has it: the app opens its
-window and says "Perch could not start its engine: another Perch engine
-(process …) is running on …", and nothing runs behind it. The lock goes
-with the process however it ends. On a file system that has no locks, some
-network ones, the engine runs anyway, warns in the log, and nothing stops a
-second one. The commands that only read the cache,
-`perch context`, `perch --items`, `--agents`, `--timeline`, `--scope` and
-`--scan`, need no lock and run beside an engine.
+The engine runs GitHub requests, checkouts, language servers, and agents. The
+desktop app or `perchd` can run it. Only one engine can use a given
+`PERCH_HOME`. It locks `$PERCH_HOME/engine.lock` and writes its process ID
+there. If another engine owns the lock, Perch names the process and stops
+startup. When the process exits, the lock is released. On filesystems without
+locking, the engine logs a warning and cannot enforce this limit.
+
+Read-only commands can run alongside the engine. These include `perch context`,
+`perch --items`, `--agents`, `--timeline`, `--scope`, and `--scan`.
 
 ## perchd
 
-`perchd` runs the engine with no window, on a machine the Mac reaches over
-ssh. It is built from the same crates as the app, without a UI toolkit, so
-it needs no GTK. It is built for Linux and for a Mac, on x86_64 and arm64,
-as `perchd-linux-<arch>.tar.gz` and `perchd-macos-<arch>.tar.gz`. Linux's
-is built against musl and linked statically, so it runs on any Linux of
-its architecture, Alpine included, whatever its libc. Every app has all
-four built into it and brings the one a host needs to it (see [The app's
-own engine](#the-apps-own-engine)), so nothing is installed on a host first.
-Releases publish them too, with the SHA-256 of every asset in the release's
-`SHA256SUMS`: to run one by hand, put it in `~/.local/bin`.
+`perchd` runs Perch’s engine without a window. The desktop app normally
+[uploads the right executable](#the-apps-own-engine) for your SSH host. To
+install it yourself, download `perchd-linux-<arch>.tar.gz` or
+`perchd-macos-<arch>.tar.gz` for x86_64 or arm64. Releases include a
+`SHA256SUMS` file. Put the executable in `~/.local/bin`. The Linux build is
+statically linked with musl, works on Alpine, and does not need GTK.
 
-- `perchd serve` runs the engine and listens on
-  `$PERCH_HOME/run/perchd.sock` (the directory owner-only, the socket mode
-  0600). It keeps polling, sweeping and running agents with no client
-  connected. With `--exit-after-idle <seconds>` it stops by itself once it
-  has had no client connected and no agent run queued or under way for
-  that long: how a bridge starts one (below). Run by hand with no flag,
-  it stays until it is stopped. SIGTERM, SIGINT or SIGHUP stops it as quitting the app does:
-  running agents are stopped and recorded Interrupted, the socket is
-  removed and the home let go. A bridge of another build asking it to stop
-  over the socket stops it the same way. A second SIGTERM or SIGINT while
-  it stops ends it at once; another SIGHUP does not, as a dropped ssh
-  session sends two. It logs to stderr, in colour only on a terminal, and
-  to `$PERCH_HOME/logs`, never to stdout. With another engine on the home
-  it exits 75. It does not start on a `perch.db` a newer Perch has
-  migrated, which it would otherwise run without, its runs unrecorded.
-  When it can't start, it writes why to `$PERCH_HOME/run/serve-failed`
-  (mode 0600) as well as to its log, and removes the file when it next
-  starts.
-- The engine never keeps the ssh session's `SSH_AUTH_SOCK`,
-  `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`, whether a bridge started it
-  or it was run by hand in a login: it outlives the session, and every
-  agent it starts would get them. git over ssh on the host uses the
-  host's own keys. An engine run by hand outside an ssh session, from a
-  desktop login on the host say, keeps `SSH_AUTH_SOCK`, which is then the
-  host's own agent.
-- `perchd bridge` joins its stdin and stdout to the socket, byte for byte,
-  until either side closes. It is what the app has ssh run. With
-  no engine answering it starts `perchd serve --exit-after-idle 900` in a
-  session of its own, so the engine outlives the ssh connection, and waits
-  up to 10 seconds for it. That engine stops 15 minutes after its last
-  client has gone and its last run has ended (see [What runs
-  where](#what-runs-where)); `PERCH_IDLE_EXIT_SECS` in the host's login
-  environment sets another wait. An engine that failed to start for a reason it left in
-  `serve-failed` is not waited for: the bridge says that reason. When
-  something holds the home's lock without listening, an engine still
-  stopping or the Perch app running on the host, it names that process.
-  It writes nothing but the engine's messages to stdout. A bridge the app
-  put there, one run from `$PERCH_HOME/bin/perchd-<build>`, marks its own
-  file as used now, and removes the other `perchd-*` there that nothing
-  has used in a week, and the temporary files of uploads that stopped
-  over an hour ago. When a build was last used is its file's modification
-  time.
-- `perchd bridge --replace` makes way for its own build. An engine of
-  another build is asked over the socket to stop, and stops as SIGTERM
-  stops it. The bridge waits up to a minute for its socket to stop
-  answering and the home's lock to be free, then starts its own engine
-  and carries on as a bridge; if another bridge has started an engine
-  there meanwhile, it joins that one. An engine of its own build is
-  joined as it is. Builds are the same or they are not: which version is
-  the later is never asked. `--replace-if-idle` does the same only when the engine has no runs
-  and no clients; otherwise it writes `perch-busy: <version> <runs>
-  <clients>` to stderr and exits 98, leaving the engine running. Nothing
-  is ever signalled or killed by its pid. The Perch app running on the
-  host holds the home with no socket, and can't be replaced: quit it
-  there. A build is the `<build>` of the `perchd-<build>` it runs as, the
-  first 12 hex digits of the binary's SHA-256, or its version when no app
-  put it there.
-- `perchd status` connects without starting anything and prints whether
-  an engine is running, its version, protocol and build, its Perch home, how many
-  other clients are connected and how many agent runs are queued or under
-  way. It exits 0 when one answers and 3 when none does.
-- `perchd context` prints what Perch knows about the item a worktree on
-  the host is for, from the host's database, for an agent working there.
-  It takes what `perch context` takes (see
-  [Context for agents outside Perch](#context-for-agents-outside-perch)).
-  The engine, as it starts, links `$PERCH_HOME/bin/perchd` to its own
-  build, so `~/.perch/bin/perchd context` reads the database with the
-  build that has it; a file there that is not a link is left alone.
-- `perchd --version` prints the version and the wire protocol, as
-  `perchd 0.9.0 (protocol 6)`.
+**Start and stop the engine.** `perchd serve` listens on
+`$PERCH_HOME/run/perchd.sock`. The directory is accessible only to its owner
+and the socket uses mode 0600. The engine keeps polling GitHub and running
+agents after clients disconnect. When started by hand it runs until stopped.
+Add `--exit-after-idle <seconds>` to stop it after that long without clients or
+queued or active runs.
 
-A socket file left by an engine that was killed is removed when the next
-one starts, once nothing answers on it.
+SIGTERM, SIGINT, or SIGHUP shuts it down, marks unfinished runs Interrupted,
+removes the socket, and releases the lock. A second SIGTERM or SIGINT forces an
+immediate exit. Repeated SIGHUP does not. Logs go to standard error and
+`$PERCH_HOME/logs`. A conflicting engine lock gives exit code 75. The engine
+refuses a database from a newer build. On startup failure it also writes the
+reason to `$PERCH_HOME/run/serve-failed` (0600) and clears the file at its next
+successful start.
 
-A bridge is the only thing that starts an engine on a host. After the
-host boots, after an engine crashes, or once one has stopped for having
-nothing to do, nothing runs there until the app next connects. Stopping the engine while the app is connected does not
-keep it stopped: the app reconnects and its bridge starts another. Quit
-the app, or set it to This Mac, first. On Linux the engine needs logind's
-`KillUserProcesses=no`, the default on most distributions; with `yes`, it
-is killed when the ssh session that started it ends, its runs with it,
-unless the user is in `KillExcludeUsers`. A user `KillOnlyUsers` names is
-killed whatever `KillUserProcesses` says. The engine checks this (see
-[What the app checks](#what-the-app-checks)).
+When started from an SSH session, the engine discards `SSH_AUTH_SOCK`,
+`SSH_CONNECTION`, `SSH_CLIENT`, and `SSH_TTY`. Remote Git commands use the
+host’s own keys. An engine started from a desktop login on the host keeps that
+login’s SSH agent.
 
-The app says it is still there every 15 seconds it has nothing else to
-send, and the engine hangs up on a client it has heard nothing from in a
-minute: a Mac asleep, or off the network, would otherwise hold its windows'
-open items and language servers until TCP gave up on it, hours later. A
-client that connects and never says hello is hung up on after the same
-minute. The Mac's windows reconnect when it wakes. While the app is
-connected to a host it opts out of App Nap, which could hold its keepalives
-back while it is hidden.
+**Connect a client.** `perchd bridge` connects standard input and output to the
+engine socket. Perch runs this command over SSH. If nothing answers, the bridge
+starts `perchd serve --exit-after-idle 900` in a separate session and waits up
+to ten seconds. Set `PERCH_IDLE_EXIT_SECS` on the host to change that 15-minute
+idle period. The bridge reports a recorded startup failure or names the process
+holding the lock. Only engine messages go to standard output.
+
+A bundled bridge in `$PERCH_HOME/bin/perchd-<build>` updates its file’s
+modification time on use. It removes other builds unused for a week and
+incomplete uploads older than an hour.
+
+**Switch builds.** `perchd bridge --replace` asks a different build to shut
+down through the socket. It waits up to a minute for the lock and starts its
+own engine, or joins one that another bridge started in the meantime. It joins
+a matching build immediately. Build IDs distinguish executables, regardless of
+release order. For bundled engines the ID is the first 12 hex digits of the
+executable’s SHA-256. A manually installed engine can identify itself by
+version.
+
+Use `--replace-if-idle` to leave a busy engine running. With connected clients
+or active runs, the bridge prints `perch-busy: <version> <runs> <clients>` to
+standard error and exits 98. Neither command kills processes by PID. If a
+desktop app holds the lock on the host, quit that app there first.
+
+**Inspect the engine.** `perchd status` reports the running engine’s version,
+protocol, build, home, other clients, and queued or active runs. It starts
+nothing and exits 0 if an engine answers or 3 if none does. `perchd --version`
+prints the executable’s version and protocol, for example
+`perchd 0.9.0 (protocol 6)`.
+
+**Read a worktree’s context.** `perchd context` takes the same arguments as
+[perch context](#context-for-agents-outside-perch) and reads the host’s
+database. At startup, the engine points `$PERCH_HOME/bin/perchd` at its own
+build. Use `~/.perch/bin/perchd context` for the default home. The engine
+leaves an existing regular file at that path alone.
+
+If a crash leaves a socket file behind, the next engine checks that nothing
+answers before removing it.
+
+After a host restart, engine crash, or idle shutdown, the app starts the engine
+on its next connection. To keep an engine stopped, disconnect its windows or
+switch them to the local environment before stopping it.
+
+On Linux, logind can end processes at logout. If `KillUserProcesses=yes`, the
+SSH user needs to be in `KillExcludeUsers` to keep the engine running after
+disconnect. A user explicitly listed under `KillOnlyUsers` is also subject to
+cleanup. Perch checks the policy under [Host setup](#what-the-app-checks).
+
+An idle app sends a keepalive every 15 seconds. After a minute of silence the
+engine releases that client’s windows and language servers. The same timeout
+applies to a connection that never finishes its handshake. A Mac reconnects on
+waking and disables App Nap while connected so a hidden window can keep its
+connection.
 
 ## An engine on another machine
 
 ### Setting up a host
 
-The host is Linux or a Mac, on x86_64 or arm64, and reachable with `ssh
-<host>`. The app brings its own `perchd` and starts it there (see [The
-app's own engine](#the-apps-own-engine)), so nothing of Perch's has to be
-put on it first. On it:
+Use a Linux or macOS host (x86_64 or arm64) that you can reach with
+`ssh <host>`. Perch uploads and starts [its own engine](#the-apps-own-engine)
+on your first connection. Prepare the host under the account you use for SSH.
 
-1. On Linux, install bubblewrap and socat (`apt install bubblewrap socat`,
-   or your distribution's), which Claude Code's sandbox needs there, or
-   turn the sandbox off (see [Without Claude Code's sandbox](#without-claude-codes-sandbox)).
-2. Sign in to what the engine uses, as the user it runs as: `gh auth login`
-   (or `token` in its config.toml), and each agent CLI you run, `claude`,
-   `codex`, `agy` or `opencode`. Nothing is copied from the Mac.
+1. If you use Claude Code on Linux, install its sandbox dependencies with
+   `apt install bubblewrap socat` or your distribution’s equivalent. See
+   [Without Claude Code’s sandbox](#without-claude-codes-sandbox) if you run
+   Claude on a dedicated VM.
+2. Run `gh auth login` or set `token` in the host’s config.toml. Sign in to
+   each agent CLI you plan to use there (`claude`, `codex`, `agy`, or
+   `opencode`). The host uses its own credentials.
 
 Open **Settings > Environment** in the window you want to change. Enter
 the SSH host and select **Connect**. That window opens the host’s
@@ -1847,15 +1574,11 @@ repositories and agent runs. **Use local environment** brings it back to
 this machine. Switching closes the current item. Other windows keep their
 environment and open items.
 
-Your login at the foot of the sidebar is the one signed in to GitHub in
-the window’s environment, with the environment’s name under it. Click it
-for a menu of environments: this machine, each host a window has
-connected to and any host a window has open, with the window’s own
-checked. Choosing one switches the
-window to it. **Connect to SSH host…** opens **Settings > Environment**
-for a new host. The × on a host no window has open takes it out of the
-menu. The hosts connected to are kept in `hosts.json` in this machine’s
-Perch home.
+Click your GitHub name at the bottom of the sidebar to switch environments. The
+menu shows this computer, saved hosts, and hosts open in other windows. A check
+marks this window’s environment. Choose **Connect to SSH host…** to add a host.
+Click × beside an unused host to forget it. Perch saves the list in
+`hosts.json` in your local Perch home.
 
 Perch reopens the windows from your previous session, including each
 window’s environment, size and open item. A remote window reopens its item
@@ -1866,246 +1589,190 @@ Closing the last window keeps it for the next launch.
 launch with no saved windows, Perch uses the existing `[remote] host` in
 the local config if one is set, or opens locally.
 
-The host is named as ssh is given it: a name from `~/.ssh/config`, or
-`user@host`. A port goes after it, `chris@devbox:2222`, or the whole can be
-a URL, `ssh://chris@devbox:2222`; ssh itself takes a port only as an
-option, so Perch passes it as one, to the connection, the install and Open
-in Terminal alike, and Zed's link carries it. VS Code's does not: with a
-port, or an IPv6 address, Open in Editor needs Zed, or a name for the host
-in `~/.ssh/config`. An IPv6 address with a port is in brackets,
-`[fe80::1]:2222`. ssh must connect with no question asked, a
-password or a host key to accept: Perch runs it in batch mode.
+Enter an SSH config alias, `user@host`, or an SSH URL. For a custom port, use
+`chris@devbox:2222` or `ssh://chris@devbox:2222`. Put IPv6 addresses in
+brackets when specifying a port, as in `[fe80::1]:2222`. Perch uses the port
+for the engine, installation, and **Open in Terminal**. For **Open in Editor**
+with a custom port or IPv6 address, use Zed or give the host an alias in
+`~/.ssh/config`.
 
-A Mac that is a host is kept from idle sleep for as long as its engine
-runs (`perchd` holds `caffeinate -i` on itself), since its work is done
-with nobody at it. Shutting a laptop's lid still sleeps it.
+Connect once from a terminal to accept the host key. Perch connects in batch
+mode, so your SSH credentials must work without a prompt.
 
-Repositories are added from the app (see [Adding a repository on a
-host](#adding-a-repository-on-a-host)); nothing has to be cloned or
-written on the host first.
+On a Mac host, `perchd` runs `caffeinate -i` to prevent idle sleep while the
+engine runs. Closing a laptop’s lid still puts it to sleep.
+
+You can [add or clone a repository](#adding-a-repository-on-a-host) from Perch
+after you connect.
 
 ### What the app checks
 
-The engine on a host looks at the host as it starts, again whenever its
-config.toml changes or it takes up a new GitHub token, and tells every
-connected app what it found. **Settings > Environment > Host setup** shows
-required checks that need attention, with instructions you can copy.
-**Show details** lists passed checks and optional tools. A setup issue
-also appears at the foot of each window using that host, with an **Open
-Settings** button. `perch --connect` prints
-the same list. It checks:
+Open **Settings > Environment > Host setup** for failed checks and instructions
+you can copy. **Show details** includes passed checks and optional tools. Each
+affected window also offers **Open Settings**. To see the same list in a
+terminal, run `perch --connect`.
 
-- **GitHub token** (required): one is found, as the engine finds it:
-  `GITHUB_TOKEN`, `GH_TOKEN`, `gh auth token`, `token` in its
-  config.toml, then the two variables as the login shell there exports
-  them. Only whether there is one, and where it came from, is
-  said; the token never leaves the host. Fix: `gh auth login`.
-- **git** (required): `git --version` runs. Fix: the install command for
-  the host's package manager (apt-get, dnf, yum, pacman, zypper or apk).
-- **Repositories** (required): at least one `[[repo]]` has a `root` that is
-  a directory on the host. Roots that are not there are named. For a
-  github.com repository the fix is the `git clone` that puts it there.
-  While it fails, its row has an **Add repository…** button, which goes to
-  Settings > Repositories.
-- **Claude Code**, **Codex**, **agy (Gemini)**, **OpenCode**: each agent CLI as the
-  engine's agent discovery found it, with its path and version. None is
-  required while another is installed; with none at all, Claude Code is.
-  Fixes: `curl -fsSL https://claude.ai/install.sh | bash` and `npm install
-  -g @openai/codex`; agy points at its documentation.
-- **bubblewrap and socat** (required, on Linux with Claude Code): both on
-  `PATH`, for Claude Code's sandbox. Fix: the package manager's install.
-  With the sandbox turned off in config, it reads **Off**, on any platform,
-  and never needs setup.
-- **logind** (required, on Linux): `loginctl show-session` says logind
-  does not kill the user's processes at logout. Fix: a drop-in that adds
-  the user to `KillExcludeUsers`, then a restart of `systemd-logind`. With
-  no `loginctl`, or no logind to ask, as in a container, there is no
-  check.
+The remote engine checks the host at startup, after a configuration change, and
+when it receives a new GitHub token.
 
-Each command runs with a timeout of ten seconds, beside the engine's work,
-and one that runs out counts as missing. The app's own engine, on the Mac,
-checks nothing.
+- **GitHub token.** The engine checks `GITHUB_TOKEN`, `GH_TOKEN`,
+  `gh auth token`, `token` in its config.toml, then the two variables in the
+  host’s login shell. The app shows the source. The token stays on the host.
+  Run `gh auth login` if the check fails.
+- **Git.** The engine runs `git --version`. If Git is missing, Perch shows the
+  install command for the host’s package manager (apt-get, dnf, yum, pacman,
+  zypper, or apk).
+- **Repositories.** At least one `[[repo]]` entry needs a `root` directory on
+  the host. Perch lists missing directories, offers the clone command for
+  github.com repositories, and provides an **Add repository…** button.
+- **Coding agents.** Perch shows the path and version for Claude Code, Codex,
+  agy (Gemini), and OpenCode. Any one is enough. If all are missing, the panel
+  prompts you to install Claude Code. It offers
+  `curl -fsSL https://claude.ai/install.sh | bash` for Claude Code,
+  `npm install -g @openai/codex` for Codex, and a link to the agy
+  documentation.
+- **Claude Code’s sandbox.** On Linux, install `bubblewrap` and `socat` on the
+  host’s `PATH`. When you disable the sandbox in config, this check reads
+  **Off**.
+- **Linux login sessions.** Where logind is available, Perch uses
+  `loginctl show-session` to check whether logging out kills your processes. If
+  it does, add the SSH user to `KillExcludeUsers` in a logind drop-in and
+  restart `systemd-logind`. Perch skips this check on hosts without `loginctl`
+  or logind.
+
+Checks run in the background. Each command has ten seconds to respond before the
+engine reports it as missing. These checks run only on remote hosts.
 
 ### The app's own engine
 
-With no `[remote] command`, the app runs its own `perchd` on the host. It
-carries one for each system and processor inside its own binary, put there
-when the app was built (see [How an app gets its
-engines](#how-an-app-gets-its-engines)): nothing is downloaded, and nothing
-is read from beside the app. The host keeps the one it
-was sent as `${PERCH_HOME:-~/.perch}/bin/perchd-<build>`, where `<build>`
-is the first 12 hex digits of the binary's SHA-256, `1a2b3c4d5e6f`. So the
-same engine is never sent twice, whichever app has it, and a different one
-never takes its name. There are no versions in it: two apps carry the same
-engine or they do not.
+By default, the desktop app supplies the host’s engine. The host stores it as
+`${PERCH_HOME:-~/.perch}/bin/perchd-<build>`. The build ID is the first 12 hex
+digits of the executable’s SHA-256. Apps carrying the same executable reuse it.
+Different builds can sit side by side. See
+[How an app gets its engines](#how-an-app-gets-its-engines) for development
+builds.
 
-- The host's login shell runs a short `sh` script, which is given the
-  build of each engine the app carries. It starts the bridge of the one
-  for what the host is, which starts the engine if none is running and
-  joins it if one is. With that build not there, it writes
-  `perch-install: <uname -s> <uname -m>` to stderr and exits 97.
-- On that line the app sends the engine and connects again at once,
-  outside the waits between tries. The strip at the foot of the window
-  says "Sending perchd 0.9.0 to <host>…" meanwhile, with how far it has
-  got under it. Linux and macOS, on `x86_64` or on `aarch64` or `arm64`,
-  have a `perchd`; any other host says what it is and to put `perchd`
-  there by hand and set `[remote] command`.
-- A second ssh, with the same options, sends the binary to a script on the
-  host that writes it to a temporary file in `bin` (the directory and the
-  file owner-only), takes its SHA-256, and puts it in place only when
-  that is the one the app said: an upload cut short, or changed on the
-  way, is never run. The host needs `sha256sum`, `shasum` or `openssl`
-  for it. A build that is already there is left as it is, so two apps
-  sending the same one at once do not put a file under one another. The
-  temporary file is removed when anything fails, the ssh session ending
-  under it included.
-- A send that goes through, after which the host still says it has no
-  `perchd`, stops the tries and says so rather than sending again: most
-  often a login shell there that sets another `PERCH_HOME`. An upload
-  that fails is tried again with the next try.
-- An app with no `perchd` for the host, and no source to build one
-  from, says so and stops the tries.
+1. The host’s login shell runs a short `sh` script to find the engine for its
+   OS and processor. If the requested build exists, its bridge starts or joins
+   the engine. Otherwise the script prints
+   `perch-install: <uname -s> <uname -m>` to standard error and exits 97.
+2. Perch shows upload progress and uses a second SSH connection with the same
+   options to send the executable. The host writes an owner-only temporary file
+   and verifies its SHA-256 with `sha256sum`, `shasum`, or `openssl` before
+   installing it. Two clients can upload the same build safely. An incomplete
+   file is never run.
+3. After a successful upload, Perch reconnects immediately. A failed upload
+   retries with the next connection attempt. If the upload succeeded but the
+   host still reports the engine missing, retries stop. Check whether the login
+   shell changes `PERCH_HOME`.
+4. If the app lacks a build for the host and cannot build one from source, it
+   reports the missing platform. For a separately installed compatible engine,
+   set `[remote] command`.
 
 #### How an app gets its engines
 
-Building the app builds its engines: `crates/perch-app/build.rs` builds
-`perchd` for Linux and macOS, on x86_64 and arm64, with the app's own
-profile, gzips each into the app's binary and records its SHA-256, so the
-app can name its builds without unpacking them. The app itself is built
-for the machine it is built on only. This is so of every build, `cargo
-run` as much as a release's.
+When you build the app, `crates/perch-app/build.rs` builds the available Linux
+and macOS engines for x86_64 and arm64 using the app’s build profile. It
+compresses each executable, records its SHA-256, and embeds it in the app. This
+also happens with `cargo run`. The desktop app itself targets the build
+machine.
 
-- A Linux `perchd` is built against musl through `cargo zigbuild`, zig
-  being the C compiler and linker for it from any machine: it needs zig
-  and cargo-zigbuild (`brew install zig`, `cargo install cargo-zigbuild`).
-  On Linux with neither, this machine's own processor's is built with
-  `musl-gcc` when that is installed.
-- A macOS `perchd` is built by the Rust toolchain on a Mac, for either
-  processor. Anywhere else it needs Apple's SDK: it is built through zig
-  when `SDKROOT` names one, and is left out otherwise.
-- `rust-toolchain.toml` names the four targets, so rustup installs them.
-- One whose tools are missing is left out, with a warning from the build
-  that says what to install, and the app carries the rest. One that does
-  not compile fails the app's build.
-- They are built in `engines` under cargo's target directory, apart from
-  the app, and built again when anything `perchd` is made from changes.
-- With `PERCH_ENGINES` set to a directory, by its whole path, nothing is
-  built: the four `perchd-<linux|macos>-<x86_64|arm64>.tar.gz` there are
-  taken, and one missing fails the build. A release is built so, each
-  engine on a runner of its own system. With `PERCH_ENGINES=none` the app
-  carries none and nothing is built, for a quick build of the app alone.
-  Under clippy and rust-analyzer nothing is built either.
+- Linux engines use musl and `cargo zigbuild`. Install Zig and cargo-zigbuild
+  (for example `brew install zig` and `cargo install cargo-zigbuild`). On Linux
+  without those tools, `musl-gcc` can build for the local CPU.
+- On macOS, the Rust toolchain can build for either CPU. On other systems,
+  building a macOS engine also requires Zig and an Apple SDK specified by
+  `SDKROOT`.
+- Rustup installs the four targets listed in `rust-toolchain.toml`. Missing
+  tools skip that target with a warning. A compiler error fails the build.
+  Cargo keeps engines under `engines` in its target directory and rebuilds them
+  when their sources change.
+- Set `PERCH_ENGINES` to the absolute path of a directory containing all four
+  `perchd-<linux|macos>-<x86_64|arm64>.tar.gz` archives to embed prebuilt
+  engines. Release builds use this method and require all four files. Use
+  `PERCH_ENGINES=none` for an app-only build. Clippy and rust-analyzer also
+  skip engine builds.
 
-For a host the app carries no engine for, an app whose source is still
-where it was built builds `perchd` from it then: on the host's
-`perch-install` line it builds for what the host is, and uploads it as a
-carried one is, under its own hash. The strip says "Sending perchd 0.9.0
-(built from source) to <host>…" through both. A Linux host's is built with
-`cargo zigbuild` against musl, and a Mac's with `cargo build` from a Mac;
-when a tool is missing the strip says which, with the command. Each
-launch builds again, which cargo makes quick when nothing changed, and
-asks the host whether it has that build before uploading it.
+If a development build lacks the host’s engine but its original source tree is
+still available, Perch builds the missing executable on demand. For Linux it
+uses `cargo zigbuild` with musl. For macOS it uses `cargo build` on a Mac. The
+connection notice reports missing tools or shows upload progress. On each
+launch Cargo checks whether it needs to rebuild. Perch uploads the result only
+if the host lacks that build ID.
 
-`[remote] command`, when set, is run instead, and nothing is sent.
+With `[remote] command` set, Perch runs that command and skips the upload.
 
-Each bridge the app put there removes the builds beside it that nothing
-has used in a week (see [perchd](#perchd)). A build an app still connects
-with is used each time it does, so two apps of different builds each keep
-theirs on the host.
+A [bundled bridge](#perchd) keeps regularly used builds on the host and cleans
+up builds unused for a week.
 
 ### When the engine is another build
 
-The app on the Mac looks for its own updates, as it does with no host:
-Check for Updates… and Restart to update work while disconnected, and
-never go to the host's engine. It asks GitHub with no token, since the
-host has the token and the repository is public.
+**Check for Updates…** and **Restart to update** update the desktop app even
+when the host is disconnected. The update check uses the public GitHub
+repository and needs no token from the host.
 
-An updated app carries another engine, so its next connection sends the
-new `perchd`, which goes beside the old. The engine already running on the
-host may be the old build still, though one nobody has used for 15 minutes
-has stopped by then (see [What runs where](#what-runs-where)) and the new
-one simply starts. One still running is another build than the app's, as
-is a dev build rebuilt, or another Mac's app of another version. Builds
-are never ordered, only told apart, and the app wants its own:
+After an update, Perch uploads its new engine alongside the old one. If an
+engine is already running, Perch compares build IDs. What happens next depends
+on who’s using it.
 
-- No runs and no other client connected: the app hangs up and connects
-  again with `perchd bridge --replace-if-idle`, which stops that engine
-  and starts the app's. The strip says "Restarting the engine on <host>
-  to run perchd <build>…" meanwhile, and the log says so. It does
-  this once a connection: an engine still another build after it is left
-  running.
-- Busy, with runs or another Mac connected: the app leaves it running. When
-  it speaks the app's protocol, the app connects to it as usual and
-  the strip says "<host>'s engine is perchd 0.8.0 (1a2b3c4d5e6f); restart
-  it to run this app's, perchd 0.9.0 (2 agent runs would be stopped)",
-  with a Restart button. When it
-  doesn't, the strip says the same without a connection, with Restart and
-  Reconnect. Restart connects with `perchd bridge --replace`, which stops
-  the engine whatever it is doing: its runs are recorded Interrupted,
-  as when the app quits, and other Macs connected to it reconnect to the
-  new one. An engine that comes into use between the app's look and its
-  `--replace-if-idle` is left running, and the strip offers the restart;
-  the app connects to it when it speaks the app's protocol.
-  The counts the strip names are from when the app connected, and are not
-  brought up to date while it stays connected.
-- Two Macs with different builds, at the same host, take turns: the first
-  to connect has its engine, the second joins it while it speaks the
-  second's protocol, and each replaces the other's only when the other's
-  has nothing running and nobody connected. An app older than the engine
-  it replaces can find `perch.db` moved on by the newer one, which its
-  own `perchd` does not start on: the strip says so, and to update Perch
-  on that Mac.
+- **Idle engine.** With no runs or other clients, Perch reconnects with
+  `perchd bridge --replace-if-idle` to start its matching engine. It tries once
+  per connection. If someone starts using the engine in the meantime, Perch
+  leaves it running.
+- **Busy engine.** If the protocols match, Perch connects to the running build
+  and offers **Restart**. If they differ, it offers **Restart** and
+  **Reconnect**. The notice includes the run and client counts seen at
+  connection time. Restart uses `perchd bridge --replace`, interrupts active
+  runs, and makes other clients reconnect.
+- **Several app versions.** Two clients can share a build when their protocols
+  match. Each automatically replaces a different build only when it is idle. If
+  a newer engine has upgraded the database beyond what your build supports,
+  update your desktop app.
 
-With `[remote] command` set none of this happens: the app uses
-whatever engine the command reaches.
+If you configured `[remote] command`, Perch uses the engine that command
+reaches. You manage its updates.
 
-The app's first message, and the engine's answer, are frozen as of
-protocol 5: later versions only add fields that may be left out. So an
-engine of any later protocol still says who it is when it refuses the app,
-and still hears a request to stop. An engine from before protocol 5 says
-nothing of itself and can't be asked to stop; the strip says to stop its
-`perchd serve` on the host and reconnect.
+Starting with protocol 5, the app and engine can exchange version information
+and request a shutdown even if the rest of their protocols differ. Older
+engines cannot handle that request. Stop the old `perchd serve` on the host and
+reconnect.
 
-`perch --connect [host]` does what the app does to connect, with no
-window: it sends `perchd` if the host needs it, replaces an engine of
-another build with nothing running, prints the engine's version, protocol, build,
-host name, home and data folder, how many other clients it has and how
-many runs, and exits 0. An engine of another build left running for its
-runs is said after that, and then the host's checks, a line each,
-with the command to run under each that failed (see [What the app
-checks](#what-the-app-checks)). It waits up to 30 seconds for them, as an
-engine that has just started looks after it has found the agents. It reads `[remote]` from the Mac's
-config.toml, and `[remote] host` when no host is given. On failure it says
-why and exits 1.
+For a connection test without opening a window, run `perch --connect [host]`.
+It uses the app’s normal connection procedure, including uploading a missing
+engine or replacing an idle build. Omit the host to use `[remote] host` from
+the desktop configuration.
+
+The command prints the engine version, protocol, build, host, home, data
+folder, and client and run counts. If it joined a busy engine with a different
+build, it says so. It waits up to 30 seconds for the
+[host checks](#what-the-app-checks) and prints suggested fixes for failed
+checks. A successful connection exits 0. A connection failure prints the reason
+and exits 1.
 
 ### What runs where
 
-The host runs the engine: the GitHub client and its token, `perch.db`, the
-checkouts and worktrees, the language servers, the agents and their approvals,
-and its config.toml's settings. The Mac runs the windows, draws the code and
-pictures, and keeps its own `[ui]`, `[display]`, `[keybindings]` and
-`[remote]`, and where its windows were left, in its own Perch home.
+The host keeps the GitHub token, `perch.db`, repositories, worktrees, and
+engine settings. It runs Git, language servers, and agents, and records
+approvals. Your desktop draws the windows and keeps window positions and the
+`[ui]`, `[display]`, `[keybindings]`, and `[remote]` settings in its local
+Perch home.
 
-With the Mac closed or asleep, the engine goes on for as long as it has
-work: runs started from the Mac keep going, queued ones start as others
-finish, and meanwhile the inbox is polled and checks are watched. Once it
-has had no client connected and no run queued or under way for 15 minutes,
-the engine the app started stops, as SIGTERM stops it, and nothing of
-Perch's runs on the host. The app starts it again when it next connects:
-reopening the app, or waking the Mac, catches every window up with what
-happened, from GitHub and from what the engine recorded. A run counts
-until it has ended, one waiting on an answer included, and so does a
-repository still being cloned for Add repository. An engine started
-by hand with `perchd serve` stays until it is stopped. A Work run that asks something while no Mac is connected waits for
-an answer, up to eight hours by default; the card is there when a window
-connects, and is answered from there as on the Mac. Stopping `perchd`
-interrupts its runs, as quitting the app does.
+You can close Perch or put your laptop to sleep during a remote run. The host
+finishes active runs, starts queued ones, polls the inbox, and watches checks.
+If a Work run needs your answer, it waits up to eight hours by default. Answer
+in the window when you reconnect.
+
+An engine started by the app stops after 15 minutes with no connected clients,
+queued or active runs, or clones in progress. A run waiting for an answer still
+counts as active. Perch restarts the engine and refreshes your windows when you
+reconnect. An engine you start yourself with `perchd serve` runs until you stop
+it. Stopping the engine interrupts active runs.
 
 ### Connecting
 
-Windows using the same SSH host share a connection. Perch starts the
-local engine when a window first uses the local environment. To reach a
-remote environment, Perch runs
+Windows on the same host share one SSH connection. Perch starts its local engine
+only when a window uses the local environment. For a remote window it runs this
+command.
 
 ```sh
 ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
@@ -2113,65 +1780,50 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
     -o ClearAllForwardings=yes -- <host> <command>
 ```
 
-and talks to the engine on the host over ssh's stdin and stdout. The
-command runs `~/.perch/bin/perchd-<build> bridge` (see [The app's own
-engine](#the-apps-own-engine)), or `[remote] command` when the Mac's
-config.toml sets one for its default host, in your login shell either way. ssh's own
-config, keys and agent apply to logging in, but nothing is forwarded,
-whatever the config says: not the agent, not X11, no ports. Nothing is
-asked either, as there is no terminal: connect once with `ssh <host>` in a
-terminal to accept the host's key, and keep a key with a passphrase in the
-agent or the macOS keychain. The command is run in your login shell on the
-host, bash, zsh or fish, so the engine has the `PATH` your profile sets and
-finds `git`, `gh` and the agents where you do. What ssh says on stderr goes
-to the log. `PERCH_SSH` in the app's environment names another ssh program
-to run, everywhere the app runs one.
+Perch sends engine traffic over SSH’s standard input and output. The host runs
+`~/.perch/bin/perchd-<build> bridge` in your login shell, so it uses the `PATH`
+you set for Git, `gh`, and agents. You can override the command for your
+default host with `[remote] command`. See
+[The app’s own engine](#the-apps-own-engine).
 
-The host's engine keeps its items, runs and checkouts going with the app
-closed. Paths the app shows are the host's, and `~` in them is the host's
-home. What would open a path on the Mac reaches the host instead:
+SSH uses your usual configuration, keys, and agent to log in. Perch disables
+agent, X11, and port forwarding. If your key has a passphrase, load it into
+your SSH agent or macOS keychain first. SSH errors go to the log. To use a
+different SSH program, set `PERCH_SSH` in the app’s environment.
 
-- Open in Terminal opens Terminal with `ssh -t -- <host> 'cd -- <path> && exec $SHELL -l'`.
-- Reveal in Finder becomes Open in Editor: Zed, as `zed ssh://<host>/<path>`,
-  when its `zed` command or the app is installed, else VS Code, as
-  `code --remote ssh-remote+<host> <path>`. When neither can be run, the
-  window says so.
-- Only a full path is opened. Open in Terminal refuses a path with a
-  quote, a backslash, a `!` or a control character, since the Mac's login
-  shell reads the line and fish or csh quote differently from sh.
-- Copy Path copies the host's path.
+In a remote window, paths belong to the host. For example, `~` refers to your
+home directory on that host.
 
-While the host can't be reached, a strip along the foot of each window using it
-says so: "Disconnected from <host>. Reconnecting…", or "Can't connect to
-<host>" before the first connection, with ssh's last line under it (an
-unknown host, a refused key) and a Reconnect button. Perch tries again after
-a second, then two, doubling to every 30 seconds; Reconnect gives up a try
-under way and tries now. A try the engine has not answered in 30 seconds
-is given up. A connection that is lost within a minute of being made does
-not start the waits again from a second, so an engine that fails as it
-starts is not restarted every second. The windows keep what they showed. A
-command sent meanwhile, a click or a comment, is not done and not kept for
-later: the window says "Not connected to <host>, so that wasn't done." What
-a window asked for while the first try was under way is sent if it
-connects, and said not done if it fails. A window losing or gaining the
-keyboard, and a comment's picture, are not refused: the engine hears which
-window has the keyboard once connected, and pictures that never came are
-asked for again. When the connection is back, each window catches up on
-everything (the rows, the inbox, the runs, the settings) and reads its item
-again, or opens the one it was opening. An item showing is read again
-under what shows, so text typed into its composer or review is kept.
-Opening a notification, the Open box, a search result or Start work while
-disconnected puts "The connection to <host> was lost before this opened.
-Try it again." on the progress card. Losing the connection after asking,
-before the engine answers, says instead that it may have been done and to
-look for it in the list before trying again. Neither is done again by
-itself, since Start work done twice makes two branches.
+- **Open in Terminal** starts a shell in the remote directory with
+  `ssh -t -- <host> 'cd -- <path> && exec $SHELL -l'`. Use an absolute path.
+  Perch refuses paths with a quote, backslash, `!`, or control character
+  because shells interpret these differently.
+- **Open in Editor** replaces **Reveal in Finder**. For an absolute path,
+  Perch opens Zed with `zed ssh://<host>/<path>` if the command or app is
+  installed. Otherwise it tries Visual Studio Code with
+  `code --remote ssh-remote+<host> <path>` and tells you if neither can open.
+- **Copy Path** copies the path on the host.
 
-When the app and the engine speak different versions of the wire, the
-engine refuses the app and Perch stops trying until you press Reconnect.
-With the app's own `perchd`, the strip offers to restart the engine
-(see [When the engine is another build](#when-the-engine-is-another-build)); with
-`[remote] command`, it says which one to update.
+If the connection drops, the window keeps your place and shows the last SSH
+error. Click **Reconnect** to retry immediately. Perch also retries after one
+second, then two, doubling the delay up to 30 seconds. An attempt times out
+after 30 seconds. A connection that drops within a minute keeps its retry delay.
+
+While disconnected, Perch tells you when it cannot send a comment or command. If
+you ask to open an item during the first connection attempt, Perch opens it if
+that attempt succeeds. If you lose the connection *after* sending a request,
+check the list before trying again. The engine might already have created the
+worktree. Perch never repeats that request automatically.
+
+When you reconnect, Perch refreshes the inbox, runs, settings, and open item. It
+keeps text you typed into the composer or review, retries missing images, and
+updates which window has keyboard focus.
+
+If the app and engine use incompatible protocol versions, Perch pauses retries.
+For a bundled engine, the window offers to
+[restart it with a compatible build](#when-the-engine-is-another-build). For a
+custom `[remote] command`, it tells you which side needs an update. Click
+**Reconnect** when ready.
 
 In a remote window, repositories, agents and GitHub settings belong to the
 host. Appearance, display and keyboard shortcuts
@@ -2182,34 +1834,28 @@ window’s environment.
 
 ### Adding a repository on a host
 
-Add repository… would offer the Mac's folders, which the host has none
-of. With a host, wherever it is asked for, it opens Settings >
-Repositories, where the last row is a box and an **Add** button in place
-of the folder chooser. Type one of:
+In a remote window, choose **Add repository…** to open **Settings >
+Repositories**. Enter a repository name or a path on the host.
 
-- A repository on github.com, as `owner/name` or its URL. The engine
-  clones it on the host, with its own GitHub token, to `<name>` in the
-  folder the **Clone into** row beside it names (`clone_root` in the
-  host's config.toml, such as `"~/Code"`), or in the home directory
-  there with none, and adds it. A folder of that name that is already a
-  clone of it is used as it is; any other is left alone and named. The token is
-  given to that one `git clone` and is not written into the clone, whose
-  later fetches and pushes use the host's own git credentials, as `gh auth
-  login` sets them up.
-- A path on the host, starting with `/` or `~/`: a clone already there.
+- **GitHub repository.** Enter `owner/name` or a github.com URL. The engine
+  clones into the folder shown under **Clone into** (`clone_root` in the host’s
+  config.toml), or your home directory if unset. It reuses an existing clone of
+  the same repository. If another folder has that name, Perch reports the
+  conflict and leaves it alone. The engine supplies its GitHub token for that
+  clone operation only. Later fetches and pushes use the host’s Git
+  credentials.
+- **Existing clone.** Enter its path on the host, starting with `/` or `~/`.
 
-Enter or **Add** sends it; clicking away sends nothing. The app says a
-named repository is being added, and that it was added, since a clone
-can take a while. What was typed stays in the box until then, so a
-refusal, which the popup explains, can be put right. A repository on a
-GitHub Enterprise host is cloned by hand and added by its path.
+Press Enter or click **Add** to submit. Perch keeps your entry while the clone
+runs and shows any error so you can correct it. For GitHub Enterprise, clone the
+repository yourself and add its path.
 
 ### Limits
 
-- With `[remote] command` set, nothing updates `perchd` on the host. When
-  the app is updated and the wire changes, the strip says to update the
-  engine; install the new release's `perchd` and restart it.
-- Windows hosts are not supported.
+- If you set `[remote] command`, you manage engine updates. When Perch reports
+  an incompatible protocol version, install the matching `perchd` on the host
+  and restart it.
+- Use a Linux or macOS host. Windows hosts are unsupported.
 
 ## Development
 

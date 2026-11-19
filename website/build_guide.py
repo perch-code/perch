@@ -28,37 +28,33 @@ SEARCH_FORM = """<form class="guide-search" role="search" aria-label="Field guid
 PARTS = [
     {
         "title": "Get set up",
-        "blurb": "Install the app, sign in to GitHub, connect a repository, or attach an SSH host.",
+        "blurb": "Connect your GitHub account and tell Perch where your code lives.",
         "pages": [
             {
                 "slug": "install",
                 "title": "Install Perch",
                 "kind": "chapter",
-                "desc": "Install Perch on macOS or Linux, sign in to GitHub, and add your first repository.",
-                "lede": "Five minutes from a fresh terminal to your GitHub inbox in a native window.",
+                "lede": "Sign in to GitHub, install the desktop app, and open your first repository.",
                 "handwritten": True,
             },
             {
                 "slug": "authentication",
+                "heading_aliases": {
+                    "where-perch-looks-for-a-token": ["credential-lookup-order"],
+                    "signing-in-from-the-desktop": ["desktop-launches-and-login-shells"],
+                },
                 "title": "Authentication",
                 "kind": "reference",
-                "desc": "How Perch resolves a GitHub token from a GUI launch and which repository permissions each action needs.",
-                "lede": "How Perch finds a GitHub token from a desktop launch, and what permissions reviews, merges, and issues need.",
+                "lede": "Perch can use your GitHub CLI login or a token you provide. The permissions you need depend on what you do on GitHub.",
                 "sources": [("reference.md", ["Authentication"], False)],
                 "promote": True,
                 "aliases": ["authentication"],
-                "inject_headings": [
-                    ("Perch calls GitHub's API directly.", "## Credential lookup order"),
-                    ("Using `gh auth login` is the simplest", "## Desktop launches and login shells"),
-                    ("The credential\nmust be allowed", "## Required GitHub permissions"),
-                ],
             },
             {
                 "slug": "remote-engine",
                 "title": "Remote hosts (SSH)",
                 "kind": "reference",
-                "desc": "Run Perch's headless engine over SSH on a Linux or Mac machine while keeping native windows on your laptop.",
-                "lede": "Keep checkouts, language servers, and agent runs on an SSH host while driving native Perch windows locally.",
+                "lede": "Keep the Perch window on your desktop and run Git, language servers, and agents on the machine where your code lives.",
                 "custom_builder": "remote_engine",
                 "aliases": ["an-engine-on-another-machine"],
             },
@@ -66,36 +62,32 @@ PARTS = [
     },
     {
         "title": "Review a change",
-        "blurb": "Triage the inbox, follow a symbol, draft feedback, and submit a review.",
+        "blurb": "Read the diff, ask questions, and send feedback to the author.",
         "pages": [
             {
                 "slug": "first-review",
                 "title": "Review your first pull request",
                 "kind": "chapter",
-                "desc": "A walkthrough of reviewing a pull request in Perch: read the thread, follow a symbol, ask an agent, and post a review.",
-                "lede": "Trace a changed symbol through the codebase, ask an agent about it privately, and submit your review.",
+                "lede": "Read the discussion, follow a changed function to its callers, and decide what feedback to send the author.",
                 "handwritten": True,
             },
             {
                 "slug": "inbox",
+                "heading_aliases": {
+                    "when-the-inbox-refreshes": ["polling-and-screen-stability"],
+                },
                 "title": "The inbox",
                 "kind": "reference",
-                "desc": "How Perch polls GitHub notifications, keeps your sidebar list steady while you read, and surfaces finished local agent runs.",
-                "lede": "Notifications, read and Done state, snoozing, filter menus, and local inbox rows for finished agent runs.",
+                "lede": "Read GitHub notifications, set a reminder, or clear finished work from your inbox.",
                 "sources": [("reference.md", ["GitHub inbox"], False)],
                 "promote": True,
                 "aliases": ["github-inbox"],
-                "inject_headings": [
-                    ("Perch builds its inbox", "## Polling and screen stability"),
-                    ("- Viewing a pull request or an issue", "## Read state, Done, and snoozing"),
-                ],
             },
             {
                 "slug": "code-navigation",
                 "title": "Code navigation",
                 "kind": "reference",
-                "desc": "Conversation and Code modes, the file tree drawer, Go to File, language server navigation, and clickable code links.",
-                "lede": "Switch between Conversation and Code, filter the file tree, jump to symbols with a language server, and click symbols in comments.",
+                "lede": "Open a file anywhere on the branch. From a changed line, you can find a definition, inspect its callers, or jump back to the discussion.",
                 "sources": [
                     (
                         "reference.md",
@@ -120,109 +112,97 @@ PARTS = [
             },
             {
                 "slug": "posting",
+                "on_page_h3": True,
                 "title": "Posting and drafts",
                 "kind": "reference",
-                "desc": "The unified timeline, reactions, @-mentions, offline review drafts, inline suggestions, and Perch-only replies.",
-                "lede": "Read commits and events in time order, draft line comments offline, apply suggestions, and choose what reaches GitHub.",
+                "lede": "Line comments wait in your review drafts. A comment at the bottom of Conversation goes to GitHub when you confirm. Questions to agents stay in Perch.",
                 "sources": [
                     ("reference.md", ["Timeline", "Reactions", "Posting"], False)
                 ],
                 "rename_headings": [
-                    ("## Posting", "## Composers, @-mentions, and destinations"),
+                    ("## Posting", "## Choose who gets your message"),
                 ],
                 "heading_aliases": {
-                    "composers-mentions-and-destinations": ["posting"],
+                    "choose-who-gets-your-message": ["posting", "composers--mentions-and-destinations"],
                 },
-                "inject_headings": [
-                    ("On a line of a file, or under a thread", "## Offline review drafts"),
-                    ("A composer on lines has **Suggest**", "## Inline suggestions"),
-                    ("At the foot of Conversation, a message to GitHub", "## Comments and closing items"),
-                    ("GitHub's review threads are drawn beside", "## Review threads and Perch-only replies"),
-                ],
                 "promote": False,
                 "aliases": [],
             },
             {
                 "slug": "worktree-reviews",
-                "title": "Agent reviews of a worktree",
+                "heading_aliases": {
+                    "choose-your-reviewers": ["the-review-popover"],
+                    "choose-what-to-review": ["diff-scopes-and-instructions"],
+                    "reopen-or-repeat-a-review": ["immutable-snapshots-and-reconciling-findings"],
+                    "check-drafts-before-posting": ["publishing-findings-as-github-drafts"],
+                },
+                "title": "Review a worktree with agents",
                 "kind": "reference",
-                "desc": "Run Claude Code and Codex reviews on immutable snapshots, reconcile findings across runs, and turn findings into GitHub drafts.",
-                "lede": "Run Claude Code and Codex against an immutable branch or working-tree snapshot and turn findings into review drafts.",
+                "lede": "Choose which agents should read the diff. Check their findings and edit the draft comments before you send a review to GitHub.",
                 "sources": [("reference.md", ["Worktree reviews"], False)],
                 "promote": True,
                 "aliases": ["worktree-reviews"],
-                "inject_headings": [
-                    ("**Review** in the bar opens", "## The Review popover"),
-                    ("Running the agents starts", "## Diff scopes and instructions"),
-                    ("Every review uses a clean", "## Immutable snapshots and reconciling findings"),
-                    ("On an open pull request, a new finding", "## Publishing findings as GitHub drafts"),
-                ],
             },
         ],
     },
     {
         "title": "Start work",
-        "blurb": "Take an issue into a worktree, change it with an agent, and open a pull request.",
+        "blurb": "Give an agent a branch, check its changes, and open a pull request.",
         "pages": [
             {
                 "slug": "first-branch",
                 "title": "Start work on an issue",
                 "kind": "chapter",
-                "desc": "Cut an isolated git worktree from an issue or Cmd-N, let an agent edit in a sandbox, inspect the diff, and open a pull request.",
-                "lede": "Cut an isolated branch worktree, let an agent make the change inside a sandbox, inspect the diff, and open a pull request.",
+                "lede": "Give an agent an issue to work on, check its changes, and open a pull request.",
                 "handwritten": True,
             },
             {
                 "slug": "starting-work",
+                "heading_aliases": {
+                    "create-a-worktree": ["new-worktree-composer"],
+                },
                 "title": "Worktrees",
                 "kind": "reference",
-                "desc": "Create isolated git worktrees from Cmd-N, an issue, or a pull request, and keep uncommitted or unpushed work safe.",
-                "lede": "Cut a branch into its own worktree from a prompt, an issue, or any pull request without disturbing your main clone.",
+                "lede": "Give a branch its own checkout so an agent can make changes while you keep working in yours.",
                 "sources": [("reference.md", ["Starting work"], False)],
                 "promote": True,
                 "aliases": ["starting-work"],
-                "inject_headings": [
-                    ("`+` at the top of the sidebar", "## New worktree composer"),
-                ],
             },
             {
                 "slug": "opening-a-pull-request",
+                "heading_aliases": {
+                    "fill-in-the-pull-request": ["filling-the-pull-request-form"],
+                    "push-the-branch-and-open-the-pr": ["pushing-and-creating-on-github"],
+                    "add-commits-to-an-open-pr": ["pushing-new-commits-to-an-open-pr"],
+                },
                 "title": "Opening a pull request",
                 "kind": "reference",
-                "desc": "Draft titles and descriptions from repository templates or an agent, push branches safely, and turn a worktree into a pull request.",
-                "lede": "Fill the title and description from templates or an agent, push with your own git credentials, and turn the worktree into a PR.",
+                "lede": "Open a GitHub pull request from the commits on your branch. Perch keeps the worktree’s discussion and agent runs with the PR.",
                 "sources": [("reference.md", ["Opening a pull request"], False)],
                 "promote": True,
                 "aliases": ["opening-a-pull-request"],
-                "inject_headings": [
-                    ("A worktree of your own with commits", "## Filling the pull request form"),
-                    ("The form fills itself once", "## Pushing and creating on GitHub"),
-                    ("On a pull request of yours whose worktree", "## Pushing new commits to an open PR"),
-                ],
             },
             {
                 "slug": "agents",
                 "title": "Agent sandbox and approvals",
                 "kind": "reference",
-                "desc": "Ask and Work modes, read-only and worktree sandboxes, secret stripping, protected .git paths, and command approvals.",
-                "lede": "How Ask, Work, and Review runs are sandboxed, which secrets and paths stay off-limits, and how approvals and repository grants work.",
+                "lede": "Choose whether an agent can read or edit your checkout and who can approve a command that needs more access.",
                 "custom_builder": "agents_sandbox",
                 "heading_aliases": {
                     "read-only-sandbox-and-untrusted-text": ["what-the-agent-can-and-cannot-do"],
                     "work-mode": ["work"],
-                    "approvals-and-repository-grants": ["approvals"],
+                    "approve-commands-and-set-repository-permissions": ["approvals", "approvals-and-repository-grants"],
                 },
                 "aliases": ["agents"],
             },
             {
                 "slug": "agent-context",
-                "title": "Agent context and knowledge",
+                "title": "Agent context and history",
                 "kind": "reference",
-                "desc": "What Perch puts in each agent prompt, perch context for external terminals, synced GitHub history, and external Markdown knowledge.",
-                "lede": "What Perch tells an agent about GitHub discussions, how to run perch context from a terminal, and how synced history and external notes work.",
+                "lede": "See which comments, checks, drafts, and past reviews an agent can read. You can also look up the same discussion from a terminal.",
                 "custom_builder": "agent_context",
                 "heading_aliases": {
-                    "discussion-context-in-prompts": ["what-the-agent-is-told-about-the-discussion"],
+                    "what-an-agent-sees-in-the-discussion": ["what-the-agent-is-told-about-the-discussion", "discussion-context-in-prompts"],
                 },
                 "aliases": [],
             },
@@ -230,28 +210,28 @@ PARTS = [
     },
     {
         "title": "Preferences and shortcuts",
-        "blurb": "Settings, config.toml keys, keyboard bindings, and headless engine details.",
+        "blurb": "Look up settings, change a shortcut, or check the engine on an SSH host.",
         "pages": [
             {
                 "slug": "settings",
+                "heading_aliases": {
+                    "save-or-reset-a-setting": ["saving-and-live-reload"],
+                },
                 "title": "Settings window",
                 "kind": "reference",
-                "desc": "Live-reloading preferences in the Settings window, reset controls, and parse-error handling.",
-                "lede": "How the Settings window edits ~/.perch/config.toml in place while Perch runs.",
+                "lede": "Change preferences for your desktop or the machine running your agents. Settings shows which changes need a restart.",
                 "sources": [("reference.md", ["Settings"], False)],
                 "promote": True,
                 "aliases": ["settings"],
-                "inject_headings": [
-                    ("`Cmd-,` (`Ctrl-,` off macOS)", "## Sections and search"),
-                    ("The environment choice under **This window**", "## Saving and live reload"),
-                ],
             },
             {
                 "slug": "configuration",
+                "heading_aliases": {
+                    "environment-variables-and-settings-on-an-ssh-host": ["environment-variables-and-remote-split"],
+                },
                 "title": "Configuration file (config.toml)",
                 "kind": "reference",
-                "desc": "Repository roots, Work and LSP trust, every key in ~/.perch/config.toml, worktree directories, history sync, external knowledge, and OpenCode.",
-                "lede": "Perch reads ~/.perch/config.toml (or $PERCH_HOME/config.toml). Every key is optional, and most edits apply within seconds.",
+                "lede": "Edit config.toml to change where Perch finds your repositories, which agents it runs, and how the app looks. Every setting is optional.",
                 "custom_builder": "configuration",
                 "aliases": ["configuration"],
             },
@@ -259,26 +239,20 @@ PARTS = [
                 "slug": "keyboard-shortcuts",
                 "title": "Keyboard shortcuts",
                 "kind": "reference",
-                "desc": "Every default keyboard shortcut in Perch grouped by view, plus how to customize bindings in Settings or config.toml.",
-                "lede": "Every action ID and default shortcut in Perch, and how to rebind keys in Settings or ~/.perch/config.toml.",
+                "lede": "Look up a shortcut by action, assign a different key, or remove a binding.",
                 "sources": [("reference.md", ["Keyboard shortcuts"], False)],
                 "promote": True,
                 "on_page_h3": True,
                 "aliases": ["keyboard-shortcuts"],
-                "inject_headings": [
-                    ("Every key below can be changed", "## Customizing keybindings"),
-                    ("Each action's id, its default keys", "## Default shortcuts by view"),
-                ],
             },
             {
                 "slug": "perchd",
-                "title": "perchd and engine lifecycle",
+                "title": "The remote engine (perchd)",
                 "kind": "reference",
-                "desc": "Single-engine Perch home locks, headless perchd commands, bundled remote binaries, and replacing or sharing builds over SSH.",
-                "lede": "How one engine locks a Perch home, how headless perchd serves and bridges over SSH, and how the app manages remote builds.",
+                "lede": "The desktop app usually starts perchd for you. Use these commands to check which build is running on a host, connect to it, or stop it.",
                 "custom_builder": "perchd",
                 "heading_aliases": {
-                    "headless-perchd-commands": ["perchd"],
+                    "using-perchd-from-a-terminal": ["perchd", "headless-perchd-commands"],
                 },
                 "aliases": [],
             },
@@ -366,7 +340,7 @@ def build_custom_markdown(
         ]
         blocks = [promote_block(subs[name]) for name in order]
         blocks.append(
-            "For `perchd` CLI flags, socket locking, and how the app uploads and replaces remote engine binaries, see [perchd and engine lifecycle](perchd.html)."
+            "To check or restart the engine yourself, see [The remote engine (perchd)](perchd.html)."
         )
         return "\n\n".join(blocks)
 
@@ -374,7 +348,7 @@ def build_custom_markdown(
         _, remote_subs = split_subsections(ref_secs["An engine on another machine"])
         perchd_sec = re.sub(
             r"^## perchd\b",
-            "## Headless perchd commands",
+            "## Using perchd from a terminal",
             ref_secs["perchd"],
             count=1,
         )
@@ -391,21 +365,20 @@ def build_custom_markdown(
         agents_intro, subs = split_subsections(ref_secs["Agents"])
         disc_full = subs["What the agent is told about the discussion"]
         # Split discussion prompt details vs. managing runs in the UI/CLI
-        split_needle = "An item's runs are in the **Agents** row"
+        split_needle = "#### Finding an agent run"
         if split_needle not in disc_full:
-            raise ValueError("Expected Agents row needle in Agents section")
+            raise ValueError("Missing agent run section")
         disc_part, runs_part = disc_full.split(split_needle, 1)
         # Drop the `### What the agent is told about the discussion` line from disc_part
         disc_body = "\n".join(disc_part.splitlines()[1:]).strip()
-        runs_body = (split_needle + runs_part).strip()
+        runs_body = runs_part.strip()
 
         if builder == "agents_sandbox":
             overview = (
                 "## Overview\n\n"
-                "Perch runs your locally installed coding-agent CLIs (Claude Code, Codex, Antigravity, and OpenCode) in three modes: "
-                "**Ask** answers questions in a read-only sandbox with no network or secrets, **Work** edits files inside your own branch worktree "
-                "with explicit approvals for anything outside the sandbox, and **Review** checks a diff snapshot for bugs. "
-                "Nothing an agent produces reaches GitHub unless you post it. For prompt contents, `perch context`, and repository history, see [Agent context and knowledge](agent-context.html)."
+                "Choose **Ask** for a question about the code, **Work** to let an agent edit your branch, "
+                "or **Review** to check a diff for bugs. Perch runs the agent CLI on the machine "
+                "with your checkout. See [Agent context and history](agent-context.html) for what goes into its prompt."
             )
             asking = f"## Asking questions and managing runs\n\n{agents_intro}\n\n{runs_body}"
             readonly = re.sub(
@@ -422,7 +395,7 @@ def build_custom_markdown(
             )
             approvals = re.sub(
                 r"^### Approvals\b",
-                "## Approvals and repository grants",
+                "## Approve commands and set repository permissions",
                 subs["Approvals"],
                 count=1,
             )
@@ -431,9 +404,9 @@ def build_custom_markdown(
 
         # builder == "agent_context"
         disc_sec = (
-            "## Discussion context in prompts\n\n"
+            "## What an agent sees in the discussion\n\n"
             + disc_body
-            + "\n\nFor sandbox rules, secret stripping, and Work approvals, see [Agent sandbox and approvals](agents.html)."
+            + "\n\nFor tool permissions and how to approve a command, see [Agent sandbox and approvals](agents.html)."
         )
         return "\n\n".join(
             [
@@ -447,32 +420,13 @@ def build_custom_markdown(
     if builder == "configuration":
         # 1. Split reference.md Configuration into Repositories vs. Work/LSP/Display/Trust
         ref_cfg = ref_secs["Configuration"]
-        ref_cfg = re.sub(r"^## Configuration\s+", "", ref_cfg, count=1)
-        ref_cfg = ref_cfg.replace(
-            "Perch reads `~/.perch/config.toml` (or `$PERCH_HOME/config.toml`). ",
-            "",
-            1,
-        )
-        work_needle = "New work (see [Starting work](#starting-work)) reads two more tables:"
-        if work_needle not in ref_cfg:
-            raise ValueError("Expected New work needle in reference.md Configuration")
-        repos_part, rest_ref_cfg = ref_cfg.split(work_needle, 1)
-        repos_sec = "## Repositories and local roots\n\n" + repos_part.strip()
-        work_lsp_sec = (
-            "## Work, language servers, and appearance\n\n"
-            + work_needle
-            + rest_ref_cfg
-        ).strip()
+        repo_intro, ref_parts = split_subsections(ref_cfg)
+        repos_sec = "## Repositories and local roots\n\n" + repo_intro
+        work_lsp_sec = promote_block(ref_parts["Work, language servers, and appearance"])
 
-        # 2. Split configuration.md preamble into All keys table vs. Environment variables & remote split
-        settings_needle = "Settings (`Cmd-,`, or the gear at the foot of the sidebar)"
-        env_needle = "`PERCH_HOME` is also where the cache"
-        if settings_needle not in cfg_preamble or env_needle not in cfg_preamble:
-            raise ValueError("Expected needles in configuration.md preamble")
-        _, after_intro = cfg_preamble.split(env_needle, 1)
-        env_remote_part, keys_part = (env_needle + after_intro).split(settings_needle, 1)
-        keys_sec = "## All config.toml keys\n\n" + (settings_needle + keys_part).strip()
-        env_sec = "## Environment variables and remote split\n\n" + env_remote_part.strip()
+        _, cfg_parts = split_subsections(cfg_preamble)
+        keys_sec = promote_block(cfg_parts["All config.toml keys"])
+        env_sec = promote_block(cfg_parts["Environment variables and settings on an SSH host"])
 
         return "\n\n".join(
             [
@@ -525,11 +479,6 @@ def extract_page_markdown(page: dict, docs_cache: dict[str, tuple[str, dict[str,
         if old_h not in md:
             raise ValueError(f"Heading {old_h!r} not found in {page['slug']}")
         md = md.replace(old_h, new_h, 1)
-
-    for needle, heading in page.get("inject_headings", []):
-        if needle not in md:
-            raise ValueError(f"Needle {needle!r} not found in {page['slug']}")
-        md = md.replace(needle, f"{heading}\n\n{needle}", 1)
 
     if page.get("preamble_md"):
         md = page["preamble_md"] + "\n\n" + md
@@ -984,7 +933,7 @@ def main() -> None:
         content = wrap_guide_page(part_title, page, body_html, build_pager_html(flat_pages, idx))
         (GUIDE / f"{slug}.html").write_text(render_page(
             shell, guide=True, title=page["title"] + " · Perch Field Guide",
-            description=page["desc"], content=content,
+            description=page["lede"], content=content,
         ))
 
     (GUIDE / "index.html").write_text(render_page(

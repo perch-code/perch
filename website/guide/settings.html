@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
 <title>Settings window · Perch Field Guide</title>
-<meta name="description" content="Live-reloading preferences in the Settings window, reset controls, and parse-error handling.">
+<meta name="description" content="Change preferences for your desktop or the machine running your agents. Settings shows which changes need a restart.">
 <link rel="icon" href="../img/perch.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -43,38 +43,39 @@
 <li><a href="inbox.html">The inbox</a></li>
 <li><a href="code-navigation.html">Code navigation</a></li>
 <li><a href="posting.html">Posting and drafts</a></li>
-<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+<li><a href="worktree-reviews.html">Review a worktree with agents</a></li>
 </ul>
 <h2>Start work</h2><ul>
 <li><a href="first-branch.html">Start work on an issue</a></li>
 <li><a href="starting-work.html">Worktrees</a></li>
 <li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
 <li><a href="agents.html">Agent sandbox and approvals</a></li>
-<li><a href="agent-context.html">Agent context and knowledge</a></li>
+<li><a href="agent-context.html">Agent context and history</a></li>
 </ul>
 <h2>Preferences and shortcuts</h2><ul>
 <li><a href="settings.html" aria-current="page">Settings window</a></li>
 <li><a href="configuration.html">Configuration file (config.toml)</a></li>
 <li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
-<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+<li><a href="perchd.html">The remote engine (perchd)</a></li>
 </ul>
 </nav></details>
     <div class="reading-column">
       <header class="chapter-head">
         <span id="settings"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Preferences and shortcuts</p>
         <h1>Settings window</h1>
-        <p class="lede">How the Settings window edits ~/.perch/config.toml in place while Perch runs.</p>
+        <p class="lede">Change preferences for your desktop or the machine running your agents. Settings shows which changes need a restart.</p>
       </header>
       <article class="prose">
-<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#sections-and-search">Sections and search</a></li><li><a href="#saving-and-live-reload">Saving and live reload</a></li></ul></details></nav>
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#sections-and-search">Sections and search</a></li><li><a href="#save-or-reset-a-setting">Save or reset a setting</a></li></ul></details></nav>
 <h2 id="sections-and-search">Sections and search</h2>
-<p><code>Cmd-,</code> (<code>Ctrl-,</code> off macOS), <b>Settings…</b> in the Perch menu, or the gear at the foot of the sidebar opens Settings over the window: General, Environment, Appearance, Keyboard shortcuts, Agents, Work, Repositories, Knowledge and Language servers. The search box finds a setting in any section. <code>Escape</code> clears the search, then closes Settings, as do <code>Cmd-[</code> and <code>Cmd-W</code>, or the keys <code>back</code> and <code>close</code> are on. Keyboard shortcuts has a row for each action a key runs, where its keys can be changed: see <a href="keyboard-shortcuts.html#keyboard-shortcuts">Keyboard shortcuts</a>.</p>
-<h2 id="saving-and-live-reload">Saving and live reload</h2>
-<p>The environment choice under <b>This window</b> lasts for that window. Preferences are saved in <code>config.toml</code>. Each preference writes its own key and leaves the rest of the file as it was, comments included. The arrow beside a setting's title shows the file sets it; clicking it takes the key out, back to the default. A text field writes on <code>Enter</code> or when you leave it, and <code>Escape</code> puts back what the file has. Repositories has a card for each <code>[[repo]]</code>, with <b>Remove repository</b> and, at the end, <b>Add repository…</b>. Knowledge lists configured directories and lets you add or remove entries and change their repository scope.</p>
-<p>Perch looks at the file every two seconds, so an edit you make by hand is taken up while it runs. A file that doesn't parse changes nothing: Settings says why and turns its controls off, and Perch goes on with what it read last until the file is fixed. <b>Open in editor</b> opens it.</p>
-<p>Most settings apply at once. A new executable or models list makes Perch look for the agents again. Lowering <b>Runs at once</b> lets the runs going finish and holds new ones until there is room. Turning off <b>Start language servers without asking</b> sends servers on code no longer trusted back to asking. Zoom, code font size and the code font apply after a restart; Settings marks the ones waiting and offers to restart Perch.</p>
+<p>Open <b>Settings</b> with the gear at the bottom of the sidebar, <b>Settings…</b> in the app menu, or <code>Cmd-,</code> (<code>Ctrl-,</code> on Linux). Search for a setting across all sections. Escape clears the search first, then closes Settings. Back and Close also dismiss it (<code>Cmd-[</code> and <code>Cmd-W</code> by default). To assign keys to actions, see <a href="keyboard-shortcuts.html#keyboard-shortcuts">Keyboard shortcuts</a>.</p>
+<h2 id="save-or-reset-a-setting"><span id="saving-and-live-reload"></span>Save or reset a setting</h2>
+<p><b>This window</b> changes the environment for that window alone. Other preferences save to <code>config.toml</code>. Perch changes just the key you edit and preserves your comments. Press Enter or leave a text field to save. Escape restores the saved value. The reset arrow removes the key so its default applies again.</p>
+<p>Use <b>Repositories</b> to add or remove a clone. Under <b>Knowledge</b>, add or remove directories and choose which repositories can use them.</p>
+<p>You can also edit the file directly. Perch checks it every two seconds. If it finds invalid TOML, it keeps your last working settings and pauses edits in Settings. Choose <b>Open in editor</b> to fix the file.</p>
+<p>Most changes take effect immediately. Perch checks installed agents again when you change an executable or model list. Lowering <b>Runs at once</b> lets active runs finish before starting more. Turning off <b>Start language servers without asking</b> restores prompts for code that needs trust. Zoom, code size, and font changes take effect after a restart. Settings marks them and offers to restart Perch.</p>
       </article>
-      <nav class="pager" aria-label="Chapter navigation"><a href="agent-context.html" rel="prev"><span>Previous</span>Agent context and knowledge</a>
+      <nav class="pager" aria-label="Chapter navigation"><a href="agent-context.html" rel="prev"><span>Previous</span>Agent context and history</a>
 <a href="configuration.html" rel="next"><span>Next</span>Configuration file (config.toml)</a></nav>
     </div>
   </div>

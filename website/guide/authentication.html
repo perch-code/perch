@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#faf1d8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#24231f" media="(prefers-color-scheme: dark)">
 <title>Authentication · Perch Field Guide</title>
-<meta name="description" content="How Perch resolves a GitHub token from a GUI launch and which repository permissions each action needs.">
+<meta name="description" content="Perch can use your GitHub CLI login or a token you provide. The permissions you need depend on what you do on GitHub.">
 <link rel="icon" href="../img/perch.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -43,37 +43,39 @@
 <li><a href="inbox.html">The inbox</a></li>
 <li><a href="code-navigation.html">Code navigation</a></li>
 <li><a href="posting.html">Posting and drafts</a></li>
-<li><a href="worktree-reviews.html">Agent reviews of a worktree</a></li>
+<li><a href="worktree-reviews.html">Review a worktree with agents</a></li>
 </ul>
 <h2>Start work</h2><ul>
 <li><a href="first-branch.html">Start work on an issue</a></li>
 <li><a href="starting-work.html">Worktrees</a></li>
 <li><a href="opening-a-pull-request.html">Opening a pull request</a></li>
 <li><a href="agents.html">Agent sandbox and approvals</a></li>
-<li><a href="agent-context.html">Agent context and knowledge</a></li>
+<li><a href="agent-context.html">Agent context and history</a></li>
 </ul>
 <h2>Preferences and shortcuts</h2><ul>
 <li><a href="settings.html">Settings window</a></li>
 <li><a href="configuration.html">Configuration file (config.toml)</a></li>
 <li><a href="keyboard-shortcuts.html">Keyboard shortcuts</a></li>
-<li><a href="perchd.html">perchd and engine lifecycle</a></li>
+<li><a href="perchd.html">The remote engine (perchd)</a></li>
 </ul>
 </nav></details>
     <div class="reading-column">
       <header class="chapter-head">
         <span id="authentication"></span><p class="crumb"><a href="index.html">Field guide</a><span aria-hidden="true"> / </span>Get set up</p>
         <h1>Authentication</h1>
-        <p class="lede">How Perch finds a GitHub token from a desktop launch, and what permissions reviews, merges, and issues need.</p>
+        <p class="lede">Perch can use your GitHub CLI login or a token you provide. The permissions you need depend on what you do on GitHub.</p>
       </header>
       <article class="prose">
-<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#credential-lookup-order">Credential lookup order</a></li><li><a href="#desktop-launches-and-login-shells">Desktop launches and login shells</a></li><li><a href="#required-github-permissions">Required GitHub permissions</a></li></ul></details></nav>
-<h2 id="credential-lookup-order">Credential lookup order</h2>
-<p>Perch calls GitHub's API directly. It resolves credentials in this order:</p>
+<nav class="on-page" aria-label="On this page"><details><summary>On this page</summary><ul><li><a href="#where-perch-looks-for-a-token">Where Perch looks for a token</a></li><li><a href="#signing-in-from-the-desktop">Signing in from the desktop</a></li><li><a href="#required-github-permissions">Required GitHub permissions</a></li></ul></details></nav>
+<h2 id="where-perch-looks-for-a-token"><span id="credential-lookup-order"></span>Where Perch looks for a token</h2>
+<p>Perch calls GitHub's API directly. It uses the first token it finds in this list.</p>
 <ol><li><code>GITHUB_TOKEN</code></li><li><code>GH_TOKEN</code></li><li><code>gh auth token</code></li><li><code>token</code> in <code>~/.perch/config.toml</code></li><li><code>GITHUB_TOKEN</code>, then <code>GH_TOKEN</code>, as your login shell exports them</li></ol>
-<h2 id="desktop-launches-and-login-shells">Desktop launches and login shells</h2>
-<p>Using <code>gh auth login</code> is the simplest setup for the desktop app because a GUI launch does not normally inherit shell environment variables: opened from Finder or the Dock, Perch never sees an <code>export</code> in <code>~/.zprofile</code> or <code>~/.zshrc</code>. The last step is for that. With no token from the first four, Perch starts <code>$SHELL</code> as a terminal does, as a login and interactive shell, and reads the two variables from the environment it ends up with. It does this once, the first time it finds no token, and gives the shell five seconds; so an export added while Perch runs is found the next time Perch starts, while a <code>gh auth login</code> or a <code>token</code> in the config is found on the next poll.</p>
+<h2 id="signing-in-from-the-desktop"><span id="desktop-launches-and-login-shells"></span>Signing in from the desktop</h2>
+<p>If you open Perch from Finder or the Dock, it may miss variables you export in your terminal. Run <code>gh auth login</code> once to sign in from both places. Perch picks up a new GitHub CLI login or a change to the <code>token</code> setting on its next poll.</p>
+<p>If the first four sources return nothing, Perch starts <code>$SHELL</code> as an interactive login shell and waits up to five seconds for the two variables. It tries this once per launch. Restart Perch after adding an export to your shell profile.</p>
 <h2 id="required-github-permissions">Required GitHub permissions</h2>
-<p>The credential must be allowed to read and update notifications and to read the repositories you open. Merging a pull request also requires <code>Contents: write</code> permission on its repository, as does pushing a branch from Perch's own clone; opening a pull request requires <code>Pull requests: write</code>. Commenting on, approving, or requesting changes on a pull request requires <code>Pull requests: write</code> permission, as do resolving a thread and reacting to a pull request or anything said on it; reacting on an issue requires <code>Issues: write</code>, as do Close as issue and closing an issue.</p>
+<p>Your token needs permission to read your repositories and to read and update notifications. Other actions need write access on the repository where you take the action.</p>
+<ul><li><code>Contents: write</code> lets you merge a pull request or push a branch from a clone Perch manages.</li><li><code>Pull requests: write</code> lets you open a pull request, comment, approve, request changes, resolve a thread, or add a reaction to a PR or its comments.</li><li><code>Issues: write</code> lets you react to an issue, close it, or use <b>Close as issue</b>.</li></ul>
       </article>
       <nav class="pager" aria-label="Chapter navigation"><a href="install.html" rel="prev"><span>Previous</span>Install Perch</a>
 <a href="remote-engine.html" rel="next"><span>Next</span>Remote hosts (SSH)</a></nav>
