@@ -7,90 +7,74 @@ browse code, and review pull requests with your team and coding agents.
 
 ### When the inbox refreshes
 
-Perch shows your GitHub notifications in the same order GitHub returns them. It
-caches them so the inbox opens immediately. Read threads stay in the list
-alongside unread ones. If the cache cannot be updated, you still see the latest
-list with your saved Done and Snooze choices applied.
+Open **Inbox** for your GitHub notifications in GitHub’s order. Perch shows cached threads immediately, including ones you’ve read,
+and remembers Done and Snooze even if it can’t update the cache.
 
-Perch checks for updates in the background at the interval GitHub requests
-(`X-Poll-Interval`). It fetches every page at startup and on the first poll
-after 15 minutes. Between full checks, it uses the first page’s `ETag` to see
-whether to fetch the list again. Reading or clearing an older thread on
-github.com can take until the next full check to appear here. If you sign in
-after opening Perch, the next poll picks up your token.
+![Inbox with thread titles, unread dots, repositories, and diff counts](../website/img/guide/inbox-light.png)
 
-New notifications wait behind **Refresh** so the list stays still while you
-read. Click it to show the new order. Read indicators update immediately. If the
-open item changes, Perch offers to refresh its discussion. CI results update
-automatically when you’re viewing the same commit GitHub checked.
+Click **Refresh** to bring new notifications into the list. Read indicators
+update in place. If the open discussion changes, Perch offers to reload it.
+CI results update automatically for the commit you’re viewing.
+
+Perch polls at GitHub’s requested interval (`X-Poll-Interval`). It fetches all
+pages at startup and on the first poll after 15 minutes. Between full checks,
+it tests the first page’s `ETag`. Changes to older threads on github.com can
+take until the next full check to appear. A new login takes effect on the next poll.
 
 ### Read state, Done, and snoozing
 
-- **Read.** Opening an issue or PR marks its GitHub thread read, whether you
-  open it from Inbox, Worktrees, or Browse. For an unread thread, Perch scrolls
-  to the latest comment or event covered by the notification and briefly
-  highlights it. It waits a few seconds for fresh activity and opens a resolved
-  thread if needed. Scroll yourself to keep your place. Read threads reopen
-  where you left them.
-- **Mark Unread** adds a reminder in Perch. Open the item to clear it. GitHub’s
-  API cannot mark a thread unread. Perch remembers a read for that version of
-  the thread even if GitHub still reports it unread. New unread activity takes
-  precedence.
-- **Done** clears the notification on GitHub and in Perch. New unread activity
-  brings it back. Your own comments or updates you’ve already read leave it
-  under Done. Perch checks GitHub before clearing the thread and tells you if a
-  newer unread update arrived. A comment that lands between that check and
-  GitHub accepting Done can still be cleared.
-- **Unsubscribe** clears the notification and tells GitHub to ignore future
-  activity on that thread.
-- When *you* merge or close a PR, or close an issue, Perch waits a minute for
-  GitHub’s close notification and marks the thread Done if there’s nothing
-  newer. It treats activity inside that minute as part of the close. A later
-  unread comment brings it back. Items someone else closes stay in your inbox.
-- **View › Done** shows threads cleared in Perch that GitHub still lists.
-  **Move to Inbox** restores one in Perch. GitHub’s API cannot undo Done. A
-  restored item stays until a later merge or close qualifies it for Done again.
-- **Snooze** hides a thread until the time you choose. Later today means 6 PM.
-  Tomorrow, later this week, this weekend, and next week use 8 AM. New unread
-  activity wakes it early. Otherwise it returns with the same read state. Find
-  it under **View › Snoozed** and use **Move to Inbox** to wake it yourself.
-  Snoozing affects Perch only.
-- **State › Merged or Closed** shows finished issues and PRs. Perch counts
-  unknown states, releases, and CI runs as open.
-- **Mark N Done** clears the threads in the current view. Perch checks each one
-  for newer unread activity, skips those with updates, and reports failures
-  together. Filter to **Merged or Closed** first to clear only finished work.
-  In Done and Snoozed, the action is **Move N to Inbox**.
-- Issues and pull requests open in Perch. Other notification types open on GitHub.
+- **Read.** Opening an issue or PR from any sidebar tab marks it read on
+  GitHub. Perch highlights the latest activity covered by an unread
+  notification, opening a resolved thread if needed. Scroll to keep your
+  place. Read threads reopen where you left them.
+- **Mark Unread** sets a local reminder until you open the item. GitHub’s API
+  cannot mark a thread unread. Perch remembers which update you read until
+  new unread activity arrives.
+- **Done** clears the notification in Perch and on GitHub. New unread activity
+  brings it back. Your own comments and updates you’ve read leave it under
+  Done. Perch checks for newer activity before clearing, but a comment arriving
+  between that check and GitHub accepting Done can still be cleared.
+- **Unsubscribe** also tells GitHub to ignore future activity on that thread.
+- **Snooze** hides a thread in Perch until the time you choose or new unread
+  activity arrives. Later today means 6 PM. The other presets use 8 AM. If no
+  update arrives, the thread returns with its previous read state.
+
+**Move to Inbox** restores a thread from **View › Snoozed** or **View › Done**.
+Done lists cleared threads GitHub still returns. Restoring one affects Perch
+only, until it qualifies for Done again.
+
+When you merge or close a PR or close an issue, Perch treats the next minute’s
+activity as part of the close and marks the thread Done. Later unread comments
+bring it back. When someone else closes the item, its notification stays put.
+
+To clear finished items together, choose **State › Merged or Closed**, then
+**Mark N Done**. Perch skips threads with newer unread activity and reports
+failures together. Unknown states, releases, and CI runs count as open.
+In Done and Snoozed, the bulk action is **Move N to Inbox**.
+
+Issues and PRs open in Perch. Other notification types open on GitHub.
 
 ### The sidebar's filter menus
 
-Each sidebar tab has a filter menu. Choose a view first, then narrow or sort the
-list. The filter button lights up when you change a default. The search box
-names the view it searches.
+Use the filter beside the search box to choose a view, repository, state, or sort order.
 
-- **Inbox** shows active, snoozed, or done notifications. Narrow by GitHub’s
-  notification reason (review requested, yours, assigned, or mentioned),
-  repository, state, or unread status. **Yours** also includes items you
-  opened. Sort newest or oldest first.
-- **Worktrees** shows your worktrees. **Recent** shows everything you opened.
-  Filter either view by repository, state, or unread status. Each remembers its
-  own sort order (last activity, last opened, or created).
-- **Browse** searches GitHub for items you need to review, own, were assigned,
-  or were mentioned in. Pick **All** to search the selected repository or every
-  configured GitHub repository. The repository menu also includes repositories
-  known from Worktrees or Inbox. Sort by last activity or creation date.
+- **Inbox** shows active, snoozed, or done notifications. Filter by unread
+  status or reason (review requested, yours, assigned, or mentioned). **Yours**
+  includes items you opened. Sort newest or oldest first.
+- **Worktrees** lists your worktrees. **Recent** lists everything you’ve
+  opened. Each view remembers its sort order (last activity, last opened, or
+  created). Both have an unread filter.
+- **Browse** searches GitHub for items you own, need to review, were assigned,
+  or were mentioned in. **All** searches the selected repository or all
+  configured GitHub repositories. Sort by last activity or creation date.
 
-Choosing a repository filters all three tabs. Each tab also lets you choose
-**Any**, **Open**, or **Merged or Closed**. Inbox and Worktrees start on
-**Any**. Browse starts on **Open**.
+The repository filter applies across tabs and includes repositories known from
+Inbox or Worktrees. State defaults to **Any** in Inbox and Worktrees and
+**Open** in Browse. Choose **Merged or Closed** for finished items.
 
-GitHub’s notification API can include Done history without saying which threads
-are in the web inbox. Changes you make under Done on github.com may differ from
-what Perch shows.
-
-Clearing a notification keeps the item, its worktree, and its local
-conversation.
+Clearing a notification keeps its worktree and conversation. GitHub’s API can
+return Done history without identifying which threads are in its web inbox, so
+the two Done views can differ.
 
 ### Finished runs on your own work
 
@@ -171,21 +155,18 @@ GraphQL API. Older cached discussions show reactions after their next refresh.
 
 ## Posting
 
-The message box starts five lines tall and grows as you type. Drag its bottom
-edge to set a height between two and about 24 lines. Perch uses that height for
-every message box until you quit.
+Choose a model to ask a private question or **GitHub** to reach the author.
+A GitHub line comment becomes a review draft. At the bottom of Conversation,
+a GitHub comment posts when you confirm.
 
-Type `@` in a message or review summary to mention a person or a file. The list
-starts with the author and participants, followed by other matching repository
-users and then files. Your own account is excluded. Use the arrow keys or
-`Ctrl-N` and `Ctrl-P` to move, Enter or Tab to select, and Escape to dismiss.
+Type `@` to mention a participant, another repository user, or a file, in that
+order. Your own account is excluded. Move with the arrows or `Ctrl-N` and
+`Ctrl-P`, select with Enter or Tab, or dismiss with Escape. People appear as
+`@login`. Files appear as `@path` for agents or a code-formatted path on
+GitHub that opens in Perch.
 
-Perch inserts people as `@login`. For a file it sends `@path` to an agent or a
-code-formatted path to GitHub, where readers can follow the link in Perch.
-
-Choose the recipient from the model dropdown. A question to an agent stays in
-Perch. To send feedback to the author, choose **GitHub**. A line comment becomes
-a review draft. A message at the bottom of Conversation posts after you confirm.
+Message boxes start at five lines and grow as you type. Drag the bottom edge
+to set a height (about 2–24 lines) for all boxes until you quit.
 
 ### Offline review drafts
 
@@ -247,20 +228,22 @@ reports which step failed. It won’t create a second issue.
 
 ### Review threads and Perch-only replies
 
-A thread can contain both public GitHub feedback and private agent replies. In
-Code it sits under the relevant lines. In Conversation its header shows the
-file and lines. In a split diff, `L12` means line 12 of the old file and `R12`
-means line 12 of the new file.
+Hover over a GitHub comment and choose **Ask about this** for a private
+question or **Reply** for GitHub feedback. You can bring several agents into
+the same thread. Their replies carry the **Perch only** label.
 
-Hover over a GitHub comment to **Reply** or **Ask about this**. Perch labels
-your questions and the agent’s replies **Perch only**. To share an answer,
-choose **Post to GitHub**, edit the text, and send it under your name. A reply
-on a GitHub review thread becomes a draft. A reply from a private conversation
-without a GitHub line or thread posts as an issue comment. **Quote reply** puts
-the answer or selected passage into a private follow-up to the agent. **Copy**
-puts an answer’s markdown on the clipboard, including while the agent is still
-answering or after a stopped or failed run. See
-[Worktree reviews](#worktree-reviews) for findings that start as drafts.
+![One review thread with private replies from Claude and Codex and a Follow up box](../website/img/guide/agent-thread-light.png)
+
+**Post to GitHub** lets you edit an answer and send it under your name. On a
+GitHub review thread it becomes a draft. Without a GitHub line or thread it
+posts as an issue comment. **Quote reply** copies all or part of an answer into
+a private follow-up. **Copy** puts an answer’s markdown on the clipboard,
+including while the agent is still answering or after a stopped or failed run.
+[Agent review findings](#worktree-reviews) start as drafts.
+
+In Code, the thread sits under the relevant lines. Conversation shows the file
+and line numbers. In a split diff, `L12` refers to the old file and `R12` to
+the new one.
 
 **Resolve** and **Unresolve** take effect immediately on GitHub when you have
 permission. Perch restores the previous state if GitHub rejects the change.
@@ -452,11 +435,14 @@ refuses to open a newer or unsupported format.
 
 ### Sections and search
 
-Open **Settings** with the gear at the bottom of the sidebar, **Settings…** in
-the app menu, or `Cmd-,` (`Ctrl-,` on Linux). Search for a setting across all
-sections. Escape clears the search first, then closes Settings. Back and Close
-also dismiss it (`Cmd-[` and `Cmd-W` by default). To assign keys to actions,
-see [Keyboard shortcuts](#keyboard-shortcuts).
+Click the sidebar gear or press `Cmd-,` (`Ctrl-,` on Linux). Search across all
+settings or choose a section.
+
+![Settings sidebar with search and sections for Environment, Keyboard shortcuts, Agents, Repositories, and more](../website/img/guide/settings-menu-light.png)
+
+Escape clears a search, then closes Settings. Back and Close also dismiss it
+(`Cmd-[` and `Cmd-W` by default). See [Keyboard shortcuts](#keyboard-shortcuts)
+to change a binding.
 
 ### Save or reset a setting
 
@@ -661,26 +647,22 @@ The tables use the same groups and action IDs as Settings.
 
 ### Create a worktree
 
-A worktree is a separate checkout of a branch. To create one, click `+` at the
-top of the sidebar or press `Cmd-N`. In **New worktree**, describe the task and
-check these three fields.
+Click `+` in the sidebar or press `Cmd-N` to give a branch its own checkout.
+Choose a repository and base, then describe the task.
 
-- **Repository** lists your `[[repo]]` entries in configuration order. Perch
-  selects the current item’s repository or the one you last picked. **Add
-  repository…** adds a folder to config.toml. Repositories without a GitHub
-  remote are marked `(local)`.
-- **Base** selects the branch to start from. For a local clone, Perch lists its
-  local and remote-tracking branches without contacting the network. For a
-  repository without a local root, it gets the list from GitHub.
-- **New branch** starts with `branch_prefix` and the first five words of your
-  message. You can edit it. If a generated name already exists, Perch adds a
-  suffix such as `-2`. If you entered the name yourself, Perch asks for a
-  different one.
+![New worktree form with repository, base, new branch, task, and agent controls](../website/img/new-work-light.png)
 
-Click **Start** to create the worktree and send your message to the selected
-agent. The first line becomes the item’s name. Leave the message empty and
-click **Create worktree** to create just the checkout. Escape, `Cmd-[`, or the
-close button leaves the form. Perch keeps your draft until you quit.
+**Start** creates the worktree and sends your task to the agent. The first
+line names the item. For an empty checkout, leave the message blank and click
+**Create worktree**. Closing the form keeps your draft until you quit.
+
+- **Repository** defaults to the current or last-used repository. The menu
+  follows configuration order, marks local-only repositories, and lets you add a folder.
+- **Base** lists local and remote-tracking branches from your clone, or
+  branches from GitHub when there’s no local clone.
+- **New branch** combines `branch_prefix` and the first five words of your
+  task. Perch adds a suffix to resolve a generated name conflict. If you typed
+  the name, it asks you to choose another.
 
 Worktrees go under `~/.perch/worktrees/` by default, named for the
 repository and the branch. To put new worktrees elsewhere, set
@@ -751,9 +733,12 @@ only there.
 
 ### Fill in the pull request
 
-When your branch has a commit ahead of its base, open **Conversation** and look
-for the **Pull request** row. Click **Open pull request…** and check the fields
-before sending.
+Check the **Pull request** row in Conversation. If it shows uncommitted files
+and no commits past the base, commit the changes you want to publish.
+
+![Pull request status showing nine uncommitted files and no commits past main](../website/img/guide/branch-status-light.png)
+
+Once you have a commit ahead of the base, click **Open pull request…**.
 
 - **Title** starts with the commit subject for a single commit or the item’s
   name for several.
@@ -801,33 +786,33 @@ force-pushes.
 
 ## Agents
 
-To ask about code, click `+` beside a line, select a model, and enter your
-question. You can start another thread on a line that already has one. For
-removed lines or the left side of a split diff, the agent reads the old
-version. Follow-ups stay in the same Perch thread. **Ask** reads and answers.
-On your own branch, [Work](#work) can also edit files. You choose which replies
-to [post to GitHub](#posting).
+Click `+` beside a line, choose a model, and ask your question. Pick a different
+model for a follow-up or start another thread on the same line.
+
+![Line comment with the model picker open to the Claude submenu](../website/img/ask-light.png)
+
+**Ask** reads the code. On removed lines it reads the old version. On your own
+branch, [Work](#work) can edit files. Your conversation stays in Perch until
+you [post a reply to GitHub](#posting).
 
 ### What the agent is told about the discussion
 
-A question about an issue or PR includes the last discussion Perch fetched from
-GitHub. The prompt has room for about 24,000 characters. First come each
-reviewer’s latest verdict and the checks, then threads within 20 lines of your
-selection, other unresolved threads, the main conversation, and resolved
-threads. Perch lists entries that don’t fit. It trims individual comments at
-2,000 characters and points to the full text. Bot comments appear only in the
-files.
+When you ask about an issue or PR, Perch includes the latest discussion it
+fetched. It fits about 24,000 characters into the prompt, in the following order.
 
-The agent can read the full discussion under `~/.perch/context/<run>/`. Start
-with `INDEX.md`. The description, comments, review summaries, and timeline are
-in `conversation.md`. Review threads have individual files under `threads/`,
-and checks are in `checks.md`. A retry uses the original files. Deleting the
-run removes them.
+1. Each reviewer’s latest verdict and the checks.
+2. Threads within 20 lines of your selection, then other unresolved threads.
+3. The main conversation, then resolved threads.
 
-When you resume a session, Perch adds only GitHub updates since the previous
-run. It includes new or edited replies in the current thread and new comments,
-reviews, threads, or check results elsewhere. Use `perch --ask --print-prompt`
-to inspect the prompt and files without starting an agent.
+Comments are trimmed at 2,000 characters. Perch lists omitted entries. The full
+text, including bot comments, is in `~/.perch/context/<run>/`. Start at
+`INDEX.md`. Open `conversation.md` for the timeline and review summaries,
+`threads/` for individual threads, or `checks.md` for checks.
+
+Resuming adds new or edited replies and other GitHub updates since the last
+run. A retry reuses the original files. Deleting the run removes them. To
+inspect a prompt and its files without running an agent, use
+`perch --ask --print-prompt`.
 
 #### Finding an agent run
 
@@ -1247,46 +1232,42 @@ Deleting the thread or item removes its saved refs.
 
 ### Choose your reviewers
 
-Open **Review** in the top bar. Choose **Settings**, select the agents you
-want, and pick a model and effort for each. If an agent is unavailable, the
-menu explains why. Click **Run** to start the selected agents.
+Open **Review → Settings**. Check the agents you want, choose a model and
+effort for each, then click **Run review**. An unavailable agent shows the reason.
 
-On a pull request, the same menu holds your drafts, summary, and verdict.
-Opening reviewer settings collapses your review. Click **Open** to return to it.
-The toolbar button shows progress during a run and counts drafts awaiting your
-review. On a worktree without a PR, the menu contains just the agent settings.
+![Review menu with Claude and Codex selected, model and effort controls, a Changes selector, and Run review](../website/img/guide/reviewers-light.png)
+
+On a PR, click **Open** beside **Your review** to check drafts, edit the
+summary, and choose a verdict. The toolbar shows run progress and counts
+drafts. Worktrees without a PR show only agent settings.
 
 ### Choose what to review
 
-Each selected agent reviews the same diff. It starts at the last commit the
-branch shares with the base branch and ends at the version you choose. You can
-review a
-worktree Perch created or one you registered, with or without a PR. In
-**Changes**, choose where the comparison ends.
+All selected agents review the same diff, from the last commit shared with
+the base branch to the endpoint you choose in **Changes**. This works on
+Perch-created and registered worktrees, with or without a PR.
 
-- **Last commit** reviews through `HEAD` and leaves out uncommitted files.
+- **Last commit** ends at `HEAD` and excludes uncommitted files.
 - **Working tree** includes staged, unstaged, and untracked files. Perch takes
-  a temporary snapshot without changing your branch, files, or Git index.
+  a snapshot and leaves the branch, files, and Git index untouched.
 
-Perch selects **Working tree** when the Files view shows uncommitted changes, or
-when a branch has uncommitted work and no new commits. Otherwise it selects
-**Last commit**. There’s no staged-only, single-commit, or incremental review.
-If the diff is empty, Perch records that and skips the agent run.
+Perch defaults to **Working tree** if Files shows uncommitted changes, or
+your branch has edits but no new commits. Otherwise it selects **Last commit**.
+Perch skips empty diffs. Staged-only, single-commit, and incremental reviews
+are unavailable.
 
-Working-tree findings appear beside matching lines in **Uncommitted** and
-**Branch** while the checkout is still on the commit you reviewed. For new
-lines, the file must still match the snapshot. For old lines, the diff must
-start at the same merge base. You can read every finding in Conversation.
+Look in Conversation for all findings. They also appear in **Uncommitted**
+and **Branch** while you’re on the reviewed commit. For new lines the file
+must still match the snapshot. For old lines the merge base must match.
 
-Use the instructions box to narrow the reviewers’ attention, for example
-“Review rfcs/multi_get.md only.” The selected diff stays the same. Claude
-receives the instructions with `/code-review`. Codex receives them separately
-because `--base` does not accept a custom prompt. The review history shows the
-instructions, and **Retry** uses them again.
+Use the instructions box to focus the review, for example “Review
+rfcs/multi_get.md only.” This keeps the same diff. Claude gets the instructions
+with `/code-review`. Codex gets them separately because `--base` cannot take
+a custom prompt. **Retry** reuses the instructions saved in history.
 
-For a PR, Perch also saves the discussion in `~/.perch/context/review-<id>/`.
-It asks reviewers to skip problems already raised in unresolved threads and to
-flag requested changes that are still missing, naming the person who asked.
+On a PR, reviewers also read the discussion in
+`~/.perch/context/review-<id>/`. They’re asked to skip issues already raised
+in unresolved threads and identify whose requested changes are still missing.
 
 ### Reopen or repeat a review
 
@@ -1399,10 +1380,13 @@ offers **Copy**.
 You can [change these shortcuts](#keyboard-shortcuts) or assign one to **Go to
 Type Definition**. `Cmd-click` and `Escape` are fixed.
 
-A single match opens immediately. For several matches, choose one in the panel
-below the editor. In **Show Call Hierarchy**, expand a function to see its
-callers. Switch to **Callees** to see what it calls. Putting the cursor on a
-name highlights its other uses in the file.
+A single match opens immediately. Pick from the results when several match.
+In **Show Call Hierarchy**, expand a caller or switch to **Callees** to follow
+calls in the other direction.
+
+![Call hierarchy for start_compaction_job with an expanded caller and the Callers and Callees buttons](../website/img/guide/callers-light.png)
+
+Place the cursor on a name to highlight its other uses in the file.
 
 If navigation does nothing, check the language server in the status bar. **Go to
 Definition** offers to install a missing server or **Trust and start** a server
@@ -1568,17 +1552,17 @@ on your first connection. Prepare the host under the account you use for SSH.
    each agent CLI you plan to use there (`claude`, `codex`, `agy`, or
    `opencode`). The host uses its own credentials.
 
-Open **Settings > Environment** in the window you want to change. Enter
-the SSH host and select **Connect**. That window opens the host’s
-repositories and agent runs. **Use local environment** brings it back to
-this machine. Switching closes the current item. Other windows keep their
-environment and open items.
+Click your GitHub name at the bottom of the sidebar. Choose a saved host or
+**Connect to SSH host…**. You can also enter a host under **Settings →
+Environment** and click **Connect**.
 
-Click your GitHub name at the bottom of the sidebar to switch environments. The
-menu shows this computer, saved hosts, and hosts open in other windows. A check
-marks this window’s environment. Choose **Connect to SSH host…** to add a host.
-Click × beside an unused host to forget it. Perch saves the list in
-`hosts.json` in your local Perch home.
+![Account menu showing the current local environment, two saved SSH hosts, and Connect to SSH host](../website/img/guide/environment-light.png)
+
+Switching closes the current item in this window and opens the host’s
+repositories and agent runs. Other windows keep their place. Choose **Use
+local environment** in Settings to switch back. The menu includes hosts open
+in other windows. Click × beside an unused host to forget it. Perch saves the
+list in your local `hosts.json`.
 
 Perch reopens the windows from your previous session, including each
 window’s environment, size and open item. A remote window reopens its item

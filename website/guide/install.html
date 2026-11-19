@@ -82,7 +82,7 @@
         <p class="lede">Sign in to GitHub, install the desktop app, and open your first repository.</p>
       </header>
       <article class="prose">
-<p class="note"><b>Using a remote machine?</b><a href="#install">Install the desktop app</a> on your computer, then follow <a href="remote-engine.html#setting-up-a-host">Remote hosts (SSH)</a> to set up GitHub, repositories, and agents on the host. For local repositories, follow all four steps below.</p>
+<p class="note"><b>Using SSH?</b><a href="#install">Install Perch</a> on your desktop, then <a href="remote-engine.html#setting-up-a-host">set up the host</a> where your code lives.</p>
 
 <h2 id="sign-in">1. Sign in to the GitHub CLI</h2>
 <p>Perch runs on macOS (Apple Silicon or Intel) and Linux (<code>x86_64</code> or <code>arm64</code> with glibc 2.35+ and GTK 3). Install Git and the <a href="https://cli.github.com/">GitHub CLI</a>, then run this command.</p>
@@ -95,22 +95,24 @@
 <p>You can also download the archive for your platform from <a href="https://github.com/perch-code/perch/releases/latest">Releases</a>.</p>
 
 <h2 id="repositories">3. Launch Perch and connect a repository</h2>
-<p>Open Perch from Applications on macOS, or run <code>perch</code> in a Linux terminal. Your GitHub <b>Inbox</b> opens first. Look at the bottom of the sidebar to check your account and environment.</p>
-<p>Open <b>Settings → Repositories</b> with <kbd>Cmd-,</kbd> (<kbd>Ctrl-,</kbd> on Linux) and add a local clone. You can also add it to <code>~/.perch/config.toml</code>.</p>
-<pre><code>[[repo]]
-github = "slatedb/slatedb"
-root = "~/Code/slatedb"</code></pre>
-<p>Perch picks up <a href="configuration.html">configuration changes</a> within a few seconds. For a local repository without a GitHub remote, set just <code>root</code>.</p>
+<p>Launch Perch from Applications on macOS or run <code>perch</code> on Linux. Your GitHub inbox opens first.</p>
+<figure class="plate-frame">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../img/guide/inbox-dark.png">
+    <img src="../img/guide/inbox-light.png" width="318" height="330" loading="lazy" alt="Inbox tab selected beside Worktrees and Browse, above a list of GitHub notifications">
+  </picture>
+</figure>
+<p>Press <kbd>Cmd-,</kbd> (<kbd>Ctrl-,</kbd> on Linux), choose <b>Repositories</b>, and add your local clone. You can also add a repository in <a href="configuration.html#repositories-and-local-roots">config.toml</a>.</p>
 
 <h2 id="tools">4. Set up optional tools</h2>
-<p>You can read and review pull requests without an agent. To ask an agent a question, have it change code, or run an agent review, sign in to one of these tools on the machine where your code lives.</p>
+<p>Agents are optional. To use one, sign in on the machine with your checkout.</p>
 <ul>
 <li><a href="https://claude.com/claude-code">Claude Code</a> <code>2.1.223+</code> (on Linux, also install <code>bubblewrap</code> and <code>socat</code> for Claude Code's sandbox)</li>
 <li><a href="https://github.com/openai/codex">Codex CLI</a> <code>0.155.1+</code></li>
 <li><a href="https://antigravity.google/docs/cli/reference">Antigravity CLI</a> (<code>agy</code>) <code>1.5.5+</code></li>
 <li>OpenCode <code>2.3.0+</code> (uses a separate Perch profile. See <a href="configuration.html#opencode">OpenCode setup</a>)</li>
 </ul>
-<p>Perch can jump to definitions, find references, and show a function’s callers through a language server. It offers to install the server for the file you open. Supported servers are <code>rust-analyzer</code> for Rust, <code>gopls</code> for Go, <code>typescript-language-server</code> for TypeScript and JavaScript, <code>jdtls</code> for Java, and <code>ty</code> for Python. On external pull requests, Perch <a href="configuration.html#work-language-servers-and-appearance">asks for your permission</a> before starting the Rust or Java server.</p>
+<p>For <a href="code-navigation.html">code navigation</a>, Perch offers to install a language server when you need one. It supports Rust, Go, TypeScript, JavaScript, Java, and Python. On external PRs it <a href="configuration.html#work-language-servers-and-appearance">asks before starting a Rust or Java server</a>.</p>
 
 <h2 id="next">What to do next</h2>
 <p>Choose your repository under <b>Browse</b> (<kbd>Cmd-4</kbd> on macOS). Then try a walkthrough.</p>

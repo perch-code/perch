@@ -11,6 +11,7 @@ import json
 from html.parser import HTMLParser
 import pathlib
 import re
+import struct
 from string import Template
 from xml.etree import ElementTree as ET
 
@@ -623,6 +624,23 @@ def render_markdown(
     while i < n:
         line = lines[i]
         if not line.strip():
+            i += 1
+            continue
+
+        screenshot = re.fullmatch(r"!\[([^\]]+)\]\(\.\./website/img/([\w/-]+)-light\.png\)", line)
+        if screenshot:
+            alt, name = screenshot.groups()
+            # Perch screenshots are captured at 2x. Reserve the native UI size
+            # while the lazy image loads, and let CSS shrink it for narrow screens.
+            with (WEBSITE / "img" / f"{name}-light.png").open("rb") as image:
+                image.seek(16)
+                width, height = struct.unpack(">II", image.read(8))
+            out.append(
+                f'<figure class="plate-frame"><picture>'
+                f'<source media="(prefers-color-scheme: dark)" srcset="../img/{name}-dark.png">'
+                f'<img src="../img/{name}-light.png" width="{width // 2}" height="{height // 2}" '
+                f'loading="lazy" alt="{html.escape(alt)}"></picture></figure>'
+            )
             i += 1
             continue
 

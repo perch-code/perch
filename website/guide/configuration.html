@@ -164,8 +164,9 @@ dir = &quot;notes&quot;</code></pre>
 <p>Start a new Ask, Work, or Review session to use a newly shared directory. Perch treats its contents as untrusted reference material. You or the tool that supplies the files must keep them up to date.</p>
 <p>Settings explains why a directory was skipped. Common reasons include a missing folder, a symlink or agent instruction file anywhere inside, more than 200,000 entries, or an agent that cannot accept the directory. The engine logs changes and caches each check for up to a minute. After a fix, try a new run once that minute has passed.</p>
 <h2 id="opencode">OpenCode</h2>
-<p>Perch discovers OpenCode models on the machine running the engine. Select one in the model picker for Ask or Work, or enable OpenCode in the Review dialog. You can pin a shorter list under <b>Settings → Agents → OpenCode</b>.</p>
-<p>Perch uses a separate OpenCode profile so permissions saved in your terminal session cannot approve commands here. To sign in, run this command on the machine that runs the engine. Restart Perch to refresh the model list.</p>
+<p>In <b>Settings → Agents → OpenCode</b>, check that Perch found the executable on the machine with your checkout. Leave <b>Models</b> empty to use OpenCode’s catalog, or enter the models you want in the picker.</p>
+<figure class="plate-frame"><picture><source media="(prefers-color-scheme: dark)" srcset="../img/guide/opencode-settings-dark.png"><img src="../img/guide/opencode-settings-light.png" width="852" height="165" loading="lazy" alt="OpenCode settings with the detected executable and an empty Models field using OpenCode’s catalog"></picture></figure>
+<p>Sign in on that machine with the command below, then restart Perch to refresh the picker. Perch uses its own OpenCode profile so an “always allow” decision from your terminal can’t approve a command in Perch.</p>
 <pre><code>perch_home=&quot;${PERCH_HOME:-$HOME/.perch}&quot;
 OPENCODE_DB=&quot;$perch_home/opencode/opencode.db&quot; OPENCODE_CONFIG_DIR=&quot;$perch_home/opencode/config&quot; opencode auth login --standalone</code></pre>
 <p>Custom provider configuration goes in <code>$perch_home/opencode/config/opencode.json</code>. OpenCode Zen also accepts <code>OPENCODE_API_KEY</code> in the engine's environment.</p>

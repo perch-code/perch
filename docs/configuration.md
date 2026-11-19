@@ -148,13 +148,15 @@ minute has passed.
 
 ## OpenCode
 
-Perch discovers OpenCode models on the machine running the engine. Select one
-in the model picker for Ask or Work, or enable OpenCode in the Review dialog.
-You can pin a shorter list under **Settings → Agents → OpenCode**.
+In **Settings → Agents → OpenCode**, check that Perch found the executable
+on the machine with your checkout. Leave **Models** empty to use OpenCode’s
+catalog, or enter the models you want in the picker.
 
-Perch uses a separate OpenCode profile so permissions saved in your terminal
-session cannot approve commands here. To sign in, run this command on the
-machine that runs the engine. Restart Perch to refresh the model list.
+![OpenCode settings with the detected executable and an empty Models field using OpenCode’s catalog](../website/img/guide/opencode-settings-light.png)
+
+Sign in on that machine with the command below, then restart Perch to refresh
+the picker. Perch uses its own OpenCode profile so an “always allow” decision
+from your terminal can’t approve a command in Perch.
 
 ```sh
 perch_home="${PERCH_HOME:-$HOME/.perch}"
