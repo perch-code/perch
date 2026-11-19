@@ -7,7 +7,7 @@
 //! its scroll and a composer survive the drawer opening and shutting.
 //!
 //! The tile at the right end of Code's tabs opens the tree, where Codex
-//! has its folder, and Cmd-Shift-E does from anywhere, going to Code
+//! has its folder, and Cmd-/ does from anywhere, going to Code
 //! first from Conversation. Both are toggles on Code. On Conversation the
 //! drawer is hidden, and comes back with Code.
 

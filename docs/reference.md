@@ -199,7 +199,7 @@ cannot be closed.
 | Conversation, Code | `Cmd-Shift-1`, `Cmd-Shift-2` |
 | Next, previous file tab | `Cmd-}`, `Cmd-{` |
 | Close the file | `Cmd-W` |
-| The file tree | `Cmd-Shift-E` |
+| The file tree | `Cmd-/` or `Cmd-Shift-E` |
 | Agents | `Cmd-Shift-A` |
 
 These are the default keys; [Keyboard shortcuts](#keyboard-shortcuts) has
@@ -729,7 +729,7 @@ groups them:
 | Action | Default | What it does |
 |---|---|---|
 | `go_to_file` | `super+p` | Opens Go to File; again while it is up, picks the next file |
-| `toggle_files` | `super+shift+e` | Opens or shuts the file tree |
+| `toggle_files` | `super+/`, `super+shift+e` | Opens or shuts the file tree |
 | `next_change` | `]` | Goes to the next change in the file |
 | `previous_change` | `[` | Goes to the change before |
 | `toggle_viewed` | `v` | Marks the open file viewed, or not viewed |
@@ -1547,8 +1547,8 @@ usable pane, the drawer lies over the pane's right edge instead, from under
 the tabs to the status bar.
 
 The tile at the right end of Code's tabs, after the layout tiles, opens and
-shuts it, as Codex has its folder there, and so do `Cmd-Shift-E` from anywhere
-and the drawer's own close button. From Conversation, `Cmd-Shift-E` goes to
+shuts it, as Codex has its folder there, and so do `Cmd-/` from anywhere
+and the drawer's own close button. From Conversation, `Cmd-/` goes to
 Code with the tree open. On Conversation the tree is hidden, and it comes back
 with Code. It waits for an opening item to be ready. It opens by itself on an
 item's first visit to Code, and after that stays as it was left. Whether it is

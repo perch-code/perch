@@ -22,6 +22,7 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
+use crate::keymap::{self, Action};
 use crate::review::cards::tip_with;
 use crate::review::model::{ItemTab, Layout, Origin, ReviewState};
 use crate::review::timeline::count_of;
@@ -29,7 +30,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::drawer;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::widgets::icon_in;
+use crate::ui::widgets::{icon_in, with_shortcut_in_place};
 
 /// The open files' tabs, then, at the right end, what is about the open
 /// file while it shows: the way back from a retained snapshot, the notice
@@ -584,8 +585,10 @@ fn preview_group(state: ReviewState) -> impl IntoView {
 fn preview_tile(state: ReviewState) -> impl IntoView {
     let previewed = move || state.previewed();
     tip_with(
-        tile(SidebarIcon::File, previewed, move || state.toggle_preview())
-            .debug_name("preview tile"),
+        tile(SidebarIcon::File, None, previewed, move || {
+            state.toggle_preview()
+        })
+        .debug_name("preview tile"),
         move || {
             if previewed() {
                 "Shown rendered. Click to show the source.".to_string()
@@ -605,7 +608,7 @@ fn source_tile(state: ReviewState) -> impl IntoView {
             .with(|a| a.as_deref().is_some_and(|path| state.shows_source(path)))
     };
     tip_with(
-        tile(SidebarIcon::Source, shows_source, move || {
+        tile(SidebarIcon::Source, None, shows_source, move || {
             state.toggle_source()
         })
         .debug_name("source tile"),
@@ -718,23 +721,30 @@ fn set_layout(app: AppState, state: ReviewState, layout: Layout) {
 fn tree_tile(app: AppState, backend: std::rc::Rc<Backend>) -> impl IntoView {
     let active = move || app.tree_shown();
     tip_with(
-        tile(SidebarIcon::Folder, active, move || {
-            drawer::toggle(app, &backend, None)
-        })
+        tile(
+            SidebarIcon::Folder,
+            Some(Action::ToggleFiles),
+            active,
+            move || drawer::toggle(app, &backend, None),
+        )
         .debug_name("files tile"),
         move || {
-            if active() {
-                "Hide the files".to_string()
-            } else {
-                "Show the files".to_string()
-            }
+            keymap::tip(
+                if active() {
+                    "Hide the files"
+                } else {
+                    "Show the files"
+                },
+                Action::ToggleFiles,
+            )
         },
     )
 }
 
-/// One `LAYOUT_TILE` square: filled while `active`, a glyph otherwise.
+/// A tile can grow past its usual square to fit a visible key binding.
 fn tile(
     glyph: SidebarIcon,
+    shortcut: Option<Action>,
     active: impl Fn() -> bool + Copy + 'static,
     on_click: impl Fn() + 'static,
 ) -> impl IntoView {
@@ -746,14 +756,16 @@ fn tile(
         }
     };
 
-    Container::new(icon_in(
-        move || crate::icons::sidebar_icon(glyph, color()),
-        color,
-    ))
+    let icon = icon_in(move || crate::icons::sidebar_icon(glyph, color()), color);
+    Container::new(match shortcut {
+        Some(action) => with_shortcut_in_place(action, icon).into_any(),
+        None => icon.into_any(),
+    })
     .on_event_stop(el::Click, move |_, _| on_click())
     .style(move |s| {
         let base = crate::ui::widgets::clickable(s)
-            .size(theme::LAYOUT_TILE, theme::LAYOUT_TILE)
+            .min_width(theme::LAYOUT_TILE)
+            .height(theme::LAYOUT_TILE)
             .items_center()
             .justify_center()
             .border_radius(4.0);

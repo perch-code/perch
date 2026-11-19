@@ -652,7 +652,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     agents::dropdown::toggle(review, key_backend, opener);
                     return EventPropagation::Stop;
                 }
-                // Cmd-Shift-E is the tree in the drawer on the right, from
+                // Cmd-/ is the tree in the drawer on the right, from
                 // the editor or a composer too. On Code it opens and shuts;
                 // from Conversation it goes to Code with the tree open. An
                 // item without files has none. Whatever had the keyboard
@@ -2084,6 +2084,7 @@ mod tests {
         // An icon-only control shows its binding where the icon was.
         for (control, action) in [
             ("drawer toggle", Action::ToggleSidebar),
+            ("files tile", Action::ToggleFiles),
             ("new work", Action::NewWork),
             ("back tip", Action::HistoryBack),
             ("forward tip", Action::HistoryForward),
@@ -2351,7 +2352,7 @@ mod tests {
         key(Code::KeyW, Key::Character("w".into()), OS_MOD)
     }
 
-    /// Cmd-Shift-E opens the tree in the drawer on the right and shuts it,
+    /// Cmd-/ opens the tree in the drawer on the right and shuts it,
     /// and Cmd-Shift-A opens the Agents dropdown and shuts it, both from
     /// the editor. The pane keeps the open file and its editor through all
     /// of it, and the editor gets the keyboard back each time.
@@ -2375,11 +2376,7 @@ mod tests {
             "shut, it takes no room"
         );
 
-        let files = key(
-            Code::KeyE,
-            Key::Character("e".into()),
-            OS_MOD | Modifiers::SHIFT,
-        );
+        let files = key(Code::Slash, Key::Character("/".into()), OS_MOD);
         let agents = key(
             Code::KeyA,
             Key::Character("a".into()),
@@ -2390,7 +2387,7 @@ mod tests {
         harness.paint();
         assert!(
             named(harness.root_id(), "files-panel").is_some(),
-            "Cmd-Shift-E did not open the drawer on the files"
+            "Cmd-/ did not open the drawer on the files"
         );
         let drawer = named(harness.root_id(), "right-drawer")
             .unwrap()
@@ -2411,7 +2408,7 @@ mod tests {
         harness.paint();
         assert!(
             named(harness.root_id(), "files-panel").is_none(),
-            "Cmd-Shift-E did not shut it"
+            "Cmd-/ did not shut it"
         );
         assert_eq!(
             named(harness.root_id(), "right-drawer")
@@ -2463,7 +2460,7 @@ mod tests {
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
     }
 
-    /// Cmd-Shift-E from Conversation goes to Code with the tree open.
+    /// The alternate Cmd-Shift-E binding from Conversation goes to Code with the tree open.
     #[test]
     fn the_tree_key_from_conversation_goes_to_code_with_the_tree() {
         use crate::review::model::ItemTab;

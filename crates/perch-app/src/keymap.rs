@@ -163,7 +163,7 @@ actions! {
     ScrollToEnd { id: "scroll_to_end", title: "Scroll to End", group: ConversationAndCode, context: Window, keys: ["super+down"] },
 
     GoToFile { id: "go_to_file", title: "Go to File", group: Code, context: Window, keys: ["super+p"] },
-    ToggleFiles { id: "toggle_files", title: "Toggle Files", group: Code, context: Window, keys: ["super+shift+e"] },
+    ToggleFiles { id: "toggle_files", title: "Toggle Files", group: Code, context: Window, keys: ["super+/", "super+shift+e"] },
     NextChange { id: "next_change", title: "Next Change", group: Code, context: Window, keys: ["]"] },
     PreviousChange { id: "previous_change", title: "Previous Change", group: Code, context: Window, keys: ["["] },
     ToggleViewed { id: "toggle_viewed", title: "Toggle Viewed", group: Code, context: Window, keys: ["v"] },
