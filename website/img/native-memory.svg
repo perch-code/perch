@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 270" fill="none">
+  <rect width="600" height="270" rx="12" fill="#153c53"/>
+  <!-- A low-profile DIMM with a single offset key in its contact edge. -->
+  <g transform="rotate(-5 300 185)">
+    <path d="M120 153h360v19a8 8 0 0 0 0 16v22H120v-22a8 8 0 0 0 0-16z" fill="#265c69" stroke="#a3c8bd" stroke-width="2.5"/>
+    <path d="M135 210h124v6H135zm135 0h195v6H270z" fill="#f4bd58"/>
+    <path d="M140 212h114m22 0h184" stroke="#153c53" stroke-width="8" stroke-dasharray="2 7"/>
+    <g fill="#153c53" stroke="#9abaaf" stroke-width="1.5">
+      <rect x="149" y="166" width="53" height="30" rx="3"/><rect x="227" y="166" width="53" height="30" rx="3"/>
+      <rect x="305" y="166" width="53" height="30" rx="3"/><rect x="383" y="166" width="53" height="30" rx="3"/>
+    </g>
+  </g>
+  <!-- Wren flight feather, cut from a single shape. -->
+  <path d="M256 153c16-49 37-89 110-117-4 21-11 38-21 51l-19 7 12 1c-8 11-17 21-28 29l-22 2 13 4c-14 10-29 15-45 23Z" fill="#f6e6bd"/>
+  <path d="M250 163c26-45 54-75 99-111" stroke="#d69840" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

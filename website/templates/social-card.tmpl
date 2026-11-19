@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<base href="$base">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; width: 1200px; height: 630px; overflow: hidden; position: relative;
+    font-family: "Instrument Serif", Georgia, serif;
+  }
+  h1 { margin: 0; font-weight: 400; text-wrap: balance; }
+  .home { background: #faf1d8; color: #193c4b; color-scheme: light; }
+  .home::before, .plate::before {
+    content: ""; position: absolute; inset: 0;
+    background: url("img/end-grain.svg") right center / 1010px auto no-repeat;
+    mask-image: linear-gradient(to right, transparent 17%, black 65%); opacity: .23;
+  }
+  .brand { position: absolute; top: 53px; left: 65px; display: flex; align-items: center; gap: 8px; font-size: 48px; }
+  .brand img { width: 47px; }
+  .home-copy { position: absolute; top: 186px; left: 65px; width: 496px; }
+  .home h1 { color: #67522d; font-style: italic; font-size: 88px; line-height: .99; letter-spacing: -.038em; }
+  .home-copy p { margin: 25px 0 0; color: #455a61; font: 31px/1.35 system-ui, sans-serif; text-wrap: pretty; }
+  .screen {
+    position: absolute; left: 600px; top: 117px; width: 860px;
+    border: 1px solid #9f9b89; border-radius: 11px;
+    box-shadow: 0 20px 55px -22px #514b4170;
+  }
+  .guide { background: #1a3048; color: #faf1d8; color-scheme: dark; }
+  .plate {
+    position: absolute; inset: 37px 41px 49px;
+    background-color: #34535a;
+    background-image: repeating-linear-gradient(0deg, transparent 0 3px, #f7ecd107 3px 4px),
+                      repeating-linear-gradient(90deg, transparent 0 3px, #122d3d10 3px 4px);
+    border-radius: 4px 15px 13px 3px;
+    box-shadow: 1px 4px #ada893, 3px 8px #d8ceb3, 4px 11px #9e9a83, 7px 20px 23px -10px #091823;
+  }
+  .plate::before {
+    background-position: 345px center; mask-image: linear-gradient(to right, transparent 32%, black 74%);
+    border-radius: inherit; opacity: .36;
+  }
+  .plate::after {
+    content: ""; position: absolute; top: 100%; right: 84px; width: 24px; height: 29px;
+    background: #d5ae70; clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%);
+  }
+  .spine {
+    position: absolute; inset: 0 auto 0 0; width: 32px; border-right: 2px solid #a9ae9266;
+    background: linear-gradient(90deg, #142d3780, transparent 72%, #19353b66);
+  }
+  .book-copy { position: absolute; inset: 55px auto 54px 86px; width: 630px; display: flex; flex-direction: column; }
+  .series { margin: 0; font-size: 39px; }
+  .series em, .plate h1 em { color: #efcf91; }
+  .plate h1 { margin: auto 0; font-size: 86px; line-height: 1.03; letter-spacing: -.025em; }
+  .plate h1 em { display: block; font-size: 1.3em; }
+  .part { margin: 0; font: 25px/1.2 system-ui, sans-serif; color: #dddac7; }
+  .bird { position: absolute; right: 55px; top: 50%; width: 287px; transform: translateY(-50%); }
+</style>
+</head>
+<body class="$kind">$art</body>
+</html>

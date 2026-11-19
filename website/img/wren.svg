@@ -1,6 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1280" viewBox="200 210 950 810" fill="none">
   <title>Perch</title>
   <desc>The Perch wren perched on a curved twig with a leaf.</desc>
+  <style>
+    @media (prefers-color-scheme: light) {
+      #artwork { filter: brightness(0) saturate(100%) invert(19%) sepia(20%) saturate(1175%) hue-rotate(151deg); }
+    }
+  </style>
   <defs>
     <linearGradient id="blue" x1="220" y1="150" x2="1045" y2="1110" gradientUnits="userSpaceOnUse">
       <stop stop-color="#1e5eb4"/>

@@ -52,7 +52,6 @@ kbd {
 .nav-github::before { mask: url(img/github.svg) center / contain no-repeat; }
 .bar .nav-guide, .bar .nav-download { width: 44px; height: 44px; }
 .bar .nav-download:hover, .bar .nav-guide:hover, .bar .nav-guide[aria-current], .bar .nav-github:hover { color: var(--mark); }
-.brand img { filter: brightness(0) saturate(100%) invert(19%) sepia(20%) saturate(1175%) hue-rotate(151deg); }
 .nav-github span { position: absolute; clip-path: inset(50%); width: 1px; height: 1px; overflow: hidden; }
 .nav-github::before, .nav-guide::before, .bar svg { width: 19px; height: 19px; }
 body {
@@ -151,7 +150,7 @@ body::before, .bar::before {
 }
 .cover-title { font: 400 .95em/1.02 var(--display); }
 .cover-title em { display: block; font-size: 1.75em; letter-spacing: -.035em; }
-.guide-cover img { justify-self: end; width: 64%; height: auto; }
+.guide-cover img { justify-self: end; width: 64%; height: auto; color-scheme: dark; }
 .guide-cover:is(:hover,:focus-visible) em { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: .1em; }
 @media (prefers-reduced-motion: no-preference) {
   .guide-cover { transition: transform 180ms ease-out; }
@@ -167,7 +166,6 @@ body::before, .bar::before {
     --band-deep: #162332; --perch-blue: #23446a; --accent-ink: #dcc38f;
     --mark: #e1be79; --screen-paper: #24231f;
   }
-  .brand img { filter: none; }
   body { --grain-strength: .22; --grain-wash: #504936; }
   .guide-cover { background-color: #364a51; color: #efe4ca; }
 }

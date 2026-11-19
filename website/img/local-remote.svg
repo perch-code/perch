@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 270" fill="none">
+  <rect width="600" height="270" rx="12" fill="#153c53"/>
+  <!-- Side-by-side endpoints connected by a single SSH session. -->
+  <path d="M237 153h51q12 0 12-12v-14q0-12 12-12h56" stroke="#f4bd58" stroke-width="3" stroke-dasharray="5 7" stroke-linecap="round"/>
+  <g stroke="#b3cec1" stroke-width="3" stroke-linejoin="round">
+    <rect x="72" y="78" width="169" height="112" rx="7" fill="#265c69"/>
+    <rect x="81" y="87" width="151" height="93" rx="2" fill="#153c53" stroke-width="1.5"/>
+    <path d="M72 190h169l15 10q2 5-8 5H65q-10 0-8-5z" fill="#749d98"/>
+  </g>
+  <path d="m119 118 15 13-15 13m24 1h23" stroke="#f6e6bd" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#265c69" stroke="#b3cec1" stroke-width="2.5">
+    <rect x="370" y="72" width="135" height="127" rx="8"/>
+    <path d="M370 113h135m-135 43h135" stroke-width="1.5"/>
+  </g>
+  <g stroke="#a4bfb6" stroke-width="3" stroke-linecap="round"><path d="M387 93h46m-46 42h46m-46 42h46"/></g>
+  <g fill="#f4bd58"><circle cx="485" cy="93" r="3"/><circle cx="485" cy="135" r="3"/><circle cx="485" cy="177" r="3"/></g>
+  <path d="M383 202h12m85 0h12" stroke="#749d98" stroke-width="4" stroke-linecap="round"/>
+</svg>

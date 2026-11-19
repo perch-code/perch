@@ -18,6 +18,12 @@ DOCS = ROOT / "docs"
 WEBSITE = ROOT / "website"
 GUIDE = WEBSITE / "guide"
 TEMPLATES = WEBSITE / "templates"
+PUBLIC_ORIGIN = "https://perch.chat"
+HOME_TITLE = "Agents PRs suck. Perch helps you review them."
+HOME_DESCRIPTION = "The best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance."
+HOME_CARD_TITLE = "Agent PRs suck."
+HOME_CARD_DESCRIPTION = "Perch gives you the best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance."
+GUIDE_TITLE = "The Perch Field Guide"
 
 SEARCH_FORM = """<form class="guide-search" role="search" aria-label="Field guide" action="index.html" method="get">
       <input type="search" name="q" aria-label="Search guide" placeholder="Search the guide" autocomplete="off">
@@ -752,10 +758,33 @@ def render_markdown(
     return "\n".join(out)
 
 
+def social_metadata(path: str, title: str, description: str) -> str:
+    page = pathlib.PurePosixPath(path)
+    is_index = page.name == "index.html"
+    url = f"{PUBLIC_ORIGIN}/{path}"
+    image = pathlib.PurePosixPath("img/social") / page.with_suffix(".png")
+    if not (WEBSITE / image).is_file():
+        raise FileNotFoundError(f"Missing {image}. Run website/build_social_cards.py to generate it.")
+    if path == "index.html":
+        title, description = HOME_CARD_TITLE, HOME_CARD_DESCRIPTION
+        image_alt = f"{title} {description} Beside the text, Perch shows a pull request in Warm Linen."
+    else:
+        image_alt = f"Field Guide cover with the Perch wren and the title “{title.removesuffix(' · Perch Field Guide')}”."
+    template = Template((TEMPLATES / "social.tmpl").read_text())
+    return template.substitute(
+        url=url.removesuffix("index.html") if is_index else url,
+        kind="website" if is_index else "article",
+        title=html.escape(title), description=html.escape(description),
+        image=f"{PUBLIC_ORIGIN}/{image}",
+        image_alt=html.escape(image_alt),
+    ).strip()
+
+
 def render_page(
-    shell: Template, *, title: str, description: str, content: str,
-    guide: bool = False, contents: bool = False,
+    shell: Template, *, path: str, title: str, description: str, content: str,
 ) -> str:
+    guide = path.startswith("guide/")
+    contents = path == "guide/index.html"
     prefix = "../" if guide else ""
     stylesheet = "guide.css" if guide else "tour.css"
     scripts = "" if guide else '<script src="tour.js?v=6"></script>'
@@ -766,6 +795,7 @@ def render_page(
         current = ' aria-current="page"' if contents else ' aria-current="location"'
     return shell.substitute(
         title=html.escape(title), description=html.escape(description, quote=True),
+        social=social_metadata(path, title, description),
         prefix=prefix, page_class="guide-page" if guide else "tour-page",
         guide_current=current, install_id="footer-install" if guide else "install",
         page_css=f'<link rel="stylesheet" href="{prefix}{stylesheet}?v=1">',
@@ -932,19 +962,22 @@ def main() -> None:
             body_html = render_markdown(page_markdowns[slug], page, anchor_map)
         content = wrap_guide_page(part_title, page, body_html, build_pager_html(flat_pages, idx))
         (GUIDE / f"{slug}.html").write_text(render_page(
-            shell, guide=True, title=page["title"] + " · Perch Field Guide",
+            shell, path=f"guide/{slug}.html", title=page["title"] + " · Perch Field Guide",
             description=page["lede"], content=content,
         ))
 
     (GUIDE / "index.html").write_text(render_page(
-        shell, guide=True, contents=True, title="The Perch Field Guide",
+        shell, path="guide/index.html", title=GUIDE_TITLE,
         description="How to install Perch, review pull requests, work with agents, and configure your workspace.",
         content=build_guide_index(),
     ))
     (WEBSITE / "index.html").write_text(render_page(
-        shell, title="Agents PRs suck. Perch helps you review them.",
-        description="The best of GitHub, Visual Studio Code, and Claude Desktop in one native app. Human reviews with agentic assistance.",
+        shell, path="index.html", title=HOME_TITLE, description=HOME_DESCRIPTION,
         content=(TEMPLATES / "tour.inc").read_text(),
+    ))
+    redirect = Template((TEMPLATES / "redirect.tmpl").read_text())
+    (WEBSITE / "field-notes.html").write_text(redirect.substitute(
+        social=social_metadata("index.html", HOME_TITLE, HOME_DESCRIPTION),
     ))
     (WEBSITE / "install.sh").write_bytes((ROOT / "install.sh").read_bytes())
     build_search_index(flat_pages)

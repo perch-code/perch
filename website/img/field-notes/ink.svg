@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <filter id="ink" x="-1%" y="-1%" width="102%" height="102%" color-interpolation-filters="sRGB">
+    <feColorMatrix in="SourceGraphic" type="saturate" values="0" result="gray"/>
+    <!-- Separate the fine edges from the flat surfaces. -->
+    <feGaussianBlur in="gray" stdDeviation="1.5" result="soft"/>
+    <feComposite in="gray" in2="soft" operator="arithmetic" k2="2.1" k3="-1.1" result="detail"/>
+    <!-- Map dark strokes to navy. Keep whites clear on the ink layer. -->
+    <feComponentTransfer in="detail" result="printed">
+      <feFuncR type="table" tableValues=".066 .075 .09 .10 .12 .15 .18 .21 .25 .28 .30"/>
+      <feFuncG type="table" tableValues=".12 .14 .17 .18 .20 .22 .24 .26 .29 .31 .34"/>
+      <feFuncB type="table" tableValues=".30 .33 .36 .40 .43 .45 .47 .49 .52 .54 .55"/>
+    </feComponentTransfer>
+    <feColorMatrix in="detail" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  -1 0 0 0 1"/>
+    <feComponentTransfer><feFuncA type="gamma" amplitude="1.07" exponent=".63" offset="0"/></feComponentTransfer>
+    <feComposite in="printed" operator="in" result="ink"/>
+    <!-- Warm wash on pale filled controls, with transparent whites. -->
+    <feComponentTransfer in="gray">
+      <feFuncR type="table" tableValues="0 0 0 0 0 0 0 .06 .12 .17 0"/>
+    </feComponentTransfer>
+    <feColorMatrix type="matrix" values="0 0 0 0 .94  0 0 0 0 .71  0 0 0 0 .30  1 0 0 0 0" result="wash"/>
+    <feComposite in="ink" in2="wash" operator="over" result="tint"/>
+    <feTurbulence type="fractalNoise" baseFrequency=".66" numOctaves="2" seed="5"/>
+    <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 .22 0 .86"/>
+    <feComposite in="tint" operator="in" result="print"/>
+    <feTurbulence type="fractalNoise" baseFrequency=".045" numOctaves="2" seed="7" result="wobble"/>
+    <feDisplacementMap in="print" in2="wobble" scale="1.6" xChannelSelector="R" yChannelSelector="G" result="drawing"/>
+    <feFlood flood-color="white" result="paper"/>
+    <feComposite in="drawing" in2="paper" operator="over" result="onPaper"/>
+    <feComposite in="onPaper" in2="SourceAlpha" operator="in"/>
+  </filter>
+</svg>
