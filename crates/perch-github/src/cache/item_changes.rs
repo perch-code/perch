@@ -21,6 +21,7 @@ impl Cache {
         tx.execute_batch("CREATE TEMP TABLE item_changes (id TEXT PRIMARY KEY NOT NULL)")?;
         for (table, owner) in [
             ("items", "$.id"),
+            ("history_subjects", "$.id"),
             ("discussions", "$.item_id"),
             ("checks", "$.item_id"),
             ("comment_threads", "$.worktree_id"),

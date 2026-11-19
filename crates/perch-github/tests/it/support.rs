@@ -105,6 +105,7 @@ pub mod rest {
     pub struct Response {
         status: &'static str,
         location: Option<&'static str>,
+        link: Option<&'static str>,
         body: String,
     }
 
@@ -113,8 +114,14 @@ pub mod rest {
             Self {
                 status,
                 location: None,
+                link: None,
                 body: body.into(),
             }
+        }
+
+        pub fn with_link(mut self, link: &'static str) -> Self {
+            self.link = Some(link);
+            self
         }
 
         /// GitHub's answer to a write on a repository's old name.
@@ -166,8 +173,12 @@ pub mod rest {
             .location
             .map(|location| format!("Location: {location}\r\n"))
             .unwrap_or_default();
+        let link = response
+            .link
+            .map(|link| format!("Link: {link}\r\n"))
+            .unwrap_or_default();
         let wire = format!(
-            "HTTP/1.1 {status}\r\n{location}Content-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\n{location}{link}Content-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}",
             status = response.status,
             length = response.body.len(),
             body = response.body,

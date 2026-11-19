@@ -129,6 +129,7 @@ pub fn is_client_key(key: &str) -> bool {
 pub enum RepoSetting {
     Name(Option<String>),
     Base(Option<String>),
+    SyncHistory(bool),
     Approvals(Option<Approvals>),
     WorkTrust(bool),
     LspTrust(bool),
@@ -521,6 +522,7 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             let (tables, key, value): (&'static [&'static str], _, _) = match change {
                 RepoSetting::Name(name) => (&[], "name", string(name)),
                 RepoSetting::Base(base) => (&[], "base", string(base)),
+                RepoSetting::SyncHistory(on) => (&[], "sync_history", on.then(|| true.into())),
                 RepoSetting::Approvals(a) => (&["work"], "approvals", a.map(|a| a.name().into())),
                 RepoSetting::WorkTrust(on) => (&["work"], "trust", on.then(|| true.into())),
                 RepoSetting::LspTrust(on) => (&["lsp"], "trust", on.then(|| true.into())),
@@ -1559,6 +1561,35 @@ mod tests {
                 "github = \"a/one\"\nbase = \"dev\"\n"
             )
         );
+    }
+
+    #[test]
+    fn history_sync_is_opt_in_for_resolved_github_repositories() {
+        let text = "[[repo]]\ngithub = \"a/one\"\n\n[[repo]]\nroot = \"/srv/two\"\n\n[[repo]]\nroot = \"/srv/notes\"\nsync_history = true\n";
+        let mut config = Config::parse_text(text).unwrap();
+        config.repo[1].resolve(Some("a/two".into()));
+        config.repo[2].resolve(None);
+        assert_eq!(config.history_sync_repos().count(), 0);
+
+        let (edited, _) = edit_text(
+            text,
+            &[repo("A/Two", RepoSetting::SyncHistory(true))],
+            &config.repo,
+        )
+        .unwrap();
+        let mut enabled = Config::parse_text(&edited).unwrap();
+        enabled.repo[1].resolve(Some("a/two".into()));
+        enabled.repo[2].resolve(None);
+        assert_eq!(enabled.history_sync_repos().collect::<Vec<_>>(), ["a/two"]);
+        assert!(present_keys(&edited, &config.repo).contains("repo.a/two.sync_history"));
+
+        let (disabled, _) = edit_text(
+            &edited,
+            &[repo("a/two", RepoSetting::SyncHistory(false))],
+            &config.repo,
+        )
+        .unwrap();
+        assert_eq!(disabled, text);
     }
 
     #[test]

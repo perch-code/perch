@@ -163,10 +163,9 @@ Once the item has a pull request, GitHub's notifications are its signal: its
 row goes, and a run that ends there makes none, only the notice a run leaves
 as it finishes.
 
-Perch does not crawl a repository's open items or history. A pull request or
-issue is fetched when a notification is opened or when the user opens it by
-repository and number. Its current data and discussion may be cached locally;
-closed history is never backfilled.
+Perch fetches a pull request or issue when you open a notification or open
+the item by repository and number. For agents, you can also enable
+[GitHub history sync](configuration.md#github-history) per repository.
 
 ## Conversation and Code
 
@@ -1120,6 +1119,24 @@ with no window connected. **Archive** in the UI keeps an item's files.
 item's files. At startup Perch rebuilds missing files from `perch.db` and
 cleans up files for deleted items. It also removes the old `knowledge/reviews/`
 export, whose contents are now in each item's `findings.md`.
+
+With [GitHub history sync](configuration.md#github-history) enabled, the
+engine also imports the repository's open and closed issues and pull
+requests, including conversation comments, submitted reviews, and inline
+review comments. These entries are listed in the same repository index
+under `github/issues/` and `github/pulls/`. GitHub history is available to
+agents and stays out of the Inbox and Worktrees views.
+
+The first import saves its progress in `perch.db` and can resume after an
+interruption. Subsequent passes run at startup and about once an hour, using
+GitHub's issue and comment update listings to choose which discussions to
+refresh. Sync pauses when API capacity is low. Turning it off stops future
+syncs and leaves the downloaded history available.
+
+GitHub's update listings may omit a deletion that leaves the parent item's
+timestamp unchanged. A later refresh of that item's discussion picks up
+removed comments. If GitHub returns an ambiguous 404 for the item itself,
+Perch retains the last snapshot and retries it.
 
 When the archive holds another item from the same repository, a new Ask or
 Work session can search it for relevant history. Review instructions tell the

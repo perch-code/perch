@@ -127,6 +127,8 @@ pub(crate) struct IssuePayload {
     pub id: u64,
     pub number: u64,
     #[serde(default)]
+    pub repository_url: Option<String>,
+    #[serde(default)]
     pub node_id: String,
     #[serde(default)]
     pub title: String,

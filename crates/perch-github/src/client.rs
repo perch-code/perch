@@ -51,6 +51,10 @@ use crate::timeline::{
 use crate::users::Profile;
 use crate::workflow_runs::{Checks, WorkflowRunPayload, WorkflowRunsPayload};
 
+mod history;
+
+pub use history::{HistoryPage, HistoryStream, HistorySubject};
+
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
 const PER_PAGE: usize = 50;
 /// Fallback when the server sends no `X-Poll-Interval`.
@@ -63,6 +67,8 @@ const LIST_MAX_PAGES: usize = 100;
 /// an open waiting behind whatever the pollers had queued; GitHub asks
 /// for few concurrent requests, not none.
 const API_CONCURRENCY: usize = 4;
+/// Leave this many points in each API budget for interactive use.
+const HISTORY_RATE_RESERVE: i64 = 250;
 /// The log target for each request's rate-limit cost. Off unless asked
 /// for: `RUST_LOG=perch=info,perch_github::spend=debug,warn`.
 const SPEND: &str = "perch_github::spend";
@@ -101,6 +107,8 @@ pub enum Error {
     Decode(String),
     #[error("GitHub GraphQL returned errors: {0}")]
     Graphql(String),
+    #[error("GitHub history subject is currently unavailable")]
+    HistorySubjectUnavailable,
 }
 
 /// What asking after a branch's pull request gave back.
@@ -195,6 +203,11 @@ pub struct GitHub {
     /// Shared by every clone so one rate-limit response gates all later API
     /// calls, including item fetches spawned outside the poll loop.
     rate_limit_until: Arc<AtomicI64>,
+    /// History stops before exhausting the shared budget.
+    history_rate_limit_until: Arc<AtomicI64>,
+    /// At most one GitHub request at a time across history workers.
+    history_read: Arc<tokio::sync::Mutex<()>>,
+    history_request: bool,
     /// The search API's own window, thirty requests a minute. A search
     /// that spends it gates the next search, not the rest of the API.
     search_limit_until: Arc<AtomicI64>,
@@ -261,6 +274,9 @@ impl GitHub {
             http,
             api_requests: Arc::new(tokio::sync::Semaphore::new(API_CONCURRENCY)),
             rate_limit_until: Arc::new(AtomicI64::new(0)),
+            history_rate_limit_until: Arc::new(AtomicI64::new(0)),
+            history_read: Arc::default(),
+            history_request: false,
             search_limit_until: Arc::new(AtomicI64::new(0)),
             responses: Arc::new(std::sync::Mutex::new(Responses::new(BUDGET_BYTES))),
             spent: Arc::default(),
@@ -1094,21 +1110,7 @@ impl GitHub {
         let pull: PullSummary =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
 
-        let mut discussion = Discussion {
-            viewer_can_update: false,
-            events: pull.events(),
-            node_id: pull.node_id,
-            opened_at: pull.created_at,
-            body: pull.body.unwrap_or_default(),
-            reactions: Reactions::default(),
-            comments: comments.into_iter().map(IssueComment::from).collect(),
-            reviews: reviews.into_iter().map(Review::from).collect(),
-            review_comments: review_comments
-                .into_iter()
-                .map(ReviewComment::from)
-                .collect(),
-            review_threads: Vec::new(),
-        };
+        let mut discussion = pull.into_discussion(comments, reviews, review_comments);
         let thread_states = async {
             if discussion.review_comments.is_empty() {
                 return None;
@@ -2277,8 +2279,8 @@ impl GitHub {
     /// Every page of a list endpoint, concatenated.
     ///
     /// Stops at the first short page rather than following `Link` headers,
-    /// which is what `list_threads` does too. A hundred a page and a
-    /// hundred pages is more discussion than any pull request has.
+    /// which is what `list_threads` does too. Interactive reads are capped
+    /// at a hundred pages, while history keeps the complete conversation.
     async fn list_all<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Error> {
         let mut all = Vec::new();
         for page in 1..=LIST_MAX_PAGES {
@@ -2354,6 +2356,11 @@ impl GitHub {
     /// the caller alone: GitHub may have answered from before the change,
     /// and kept, the answer would count as current.
     async fn get_linked(&self, path: &str) -> Result<(String, Option<String>), Error> {
+        if self.history_request {
+            let fetched = self.get(path, None).await?;
+            let link = header_str(&fetched.headers, LINK.as_str());
+            return Ok((fetched.body, link));
+        }
         let (known, forgets) = {
             let mut responses = self.responses.lock().unwrap();
             (responses.get(path), responses.forgets())
@@ -2419,7 +2426,7 @@ impl GitHub {
         let status = response.status();
         let headers = response.headers().clone();
         let (remaining, reset, retry_after) = rate_headers(&headers);
-        self.remember_rate_headers(remaining, reset, retry_after);
+        self.remember_rate_headers(&headers, remaining, reset, retry_after);
         self.note_spend(&format!("GET {path}"), status, &headers, None);
 
         if status == StatusCode::NOT_MODIFIED {
@@ -2558,7 +2565,7 @@ impl GitHub {
         let status = response.status();
         let headers = response.headers().clone();
         let (remaining, reset, retry_after) = rate_headers(&headers);
-        self.remember_rate_headers(remaining, reset, retry_after);
+        self.remember_rate_headers(&headers, remaining, reset, retry_after);
         let body = body_text(response).await;
         if spend_logged() {
             self.note_spend(what, status, &headers, cost(&body));
@@ -2622,8 +2629,12 @@ impl GitHub {
     }
 
     fn check_rate_limit(&self) -> Result<(), Error> {
-        let until = self.rate_limit_until.load(Ordering::SeqCst);
-        if until > Timestamp::now().as_second() {
+        let until = if self.history_request {
+            self.history_rate_limited_until()
+        } else {
+            self.rate_limited_until()
+        };
+        if let Some(until) = until {
             return Err(Error::RateLimited {
                 reset_epoch: Some(until),
                 retry_after_secs: None,
@@ -2634,6 +2645,7 @@ impl GitHub {
 
     fn remember_rate_headers(
         &self,
+        headers: &HeaderMap,
         remaining: Option<i64>,
         reset_epoch: Option<i64>,
         retry_after_secs: Option<u64>,
@@ -2643,6 +2655,19 @@ impl GitHub {
                 reset_epoch,
                 retry_after_secs,
             });
+        }
+        if remaining.is_some_and(|remaining| remaining <= HISTORY_RATE_RESERVE)
+            && matches!(
+                headers
+                    .get("x-ratelimit-resource")
+                    .and_then(|value| value.to_str().ok()),
+                Some("core" | "graphql") | None
+            )
+        {
+            self.history_rate_limit_until.fetch_max(
+                rate_limit_deadline(reset_epoch, retry_after_secs),
+                Ordering::SeqCst,
+            );
         }
     }
 

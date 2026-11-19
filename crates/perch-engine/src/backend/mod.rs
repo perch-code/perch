@@ -39,6 +39,7 @@ mod check_watch;
 pub(crate) mod client;
 mod connections;
 mod feedback;
+mod history;
 mod issue_draft;
 mod kept_servers;
 mod knowledge;
@@ -4915,6 +4916,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
 
     let base = ctx;
     let mut archive_task: Option<tokio::task::JoinHandle<()>> = None;
+    let history_task = base.cache.is_some().then(|| history::start(base.clone()));
     loop {
         let (window, command, fenced) = tokio::select! {
             _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh, Fenced::default()),
@@ -4934,6 +4936,10 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                     tracing::info!("backend shutting down");
                     if let Some(task) = archive_task.take() {
                         task.abort();
+                    }
+                    if let Some(task) = history_task {
+                        task.abort();
+                        let _ = task.await;
                     }
                     base.runs.shutdown().await;
                     // Deferred archive waiters are detached tasks. Complete

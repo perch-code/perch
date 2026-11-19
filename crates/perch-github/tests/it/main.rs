@@ -8,6 +8,7 @@ mod concurrency;
 mod conditional_reads;
 mod description_edit;
 mod discussion;
+mod history;
 mod issues;
 mod notifications;
 mod pull_merge;

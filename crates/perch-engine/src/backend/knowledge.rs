@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use perch_github::{Cache, CacheError, Config, Item, ItemKind, SubjectState};
+use perch_github::{
+    Cache, CacheError, Config, Item, ItemKind, ItemSubject, SubjectState, HISTORY_SUBJECT_ID_PREFIX,
+};
 use perch_knowledge::sanitize::{clean, one_line};
 use perch_knowledge::{
     child_dirs, encode_component, ensure_dir, prune_temporary_files, remove_dir, remove_empty_dir,
@@ -17,9 +19,24 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use super::Ctx;
-use crate::context_cli::{gather_archive, render, Mode};
+use crate::context_cli::{gather_archive, gather_history, render, Mode};
 
-const ITEM_KINDS: [&str; 3] = ["pulls", "issues", "worktrees"];
+const ITEM_KINDS: [&str; 5] = [
+    "pulls",
+    "issues",
+    "worktrees",
+    "github/pulls",
+    "github/issues",
+];
+const HISTORY_EXPORT_BATCH: usize = 32;
+const HISTORY_INDEX_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportBatch {
+    Startup,
+    Interactive,
+    History,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Place {
@@ -62,6 +79,32 @@ fn place(root: &Path, item: &Item) -> Option<Place> {
     Some(Place { repo, item })
 }
 
+fn history_place(root: &Path, repo: &str, kind: ItemKind, number: u64) -> Option<Place> {
+    let repo = repo_place(root, repo)?;
+    let kind = match kind {
+        ItemKind::PullRequest => "pulls",
+        ItemKind::Issue => "issues",
+    };
+    let item = Path::new("github").join(kind).join(number.to_string());
+    Some(Place { repo, item })
+}
+
+fn stored_places(root: &Path, cache: &Cache) -> Result<Vec<Place>, CacheError> {
+    Ok(cache
+        .load_items()?
+        .iter()
+        .filter_map(|item| place(root, item))
+        .chain(
+            cache
+                .load_history_locations()?
+                .iter()
+                .filter_map(|(repo, subject)| {
+                    history_place(root, repo, subject.kind, subject.number)
+                }),
+        )
+        .collect())
+}
+
 #[derive(Clone)]
 pub(super) struct Archive {
     root: PathBuf,
@@ -92,16 +135,15 @@ struct Entry {
     line: String,
 }
 
-impl Catalog {
-    fn write_item(
-        &mut self,
-        place: Place,
-        item: &Item,
-        files: &BTreeMap<String, String>,
-    ) -> io::Result<()> {
-        sync(&place.path(), files)?;
-
-        let state = match item.subject.as_ref().map(|subject| subject.subject_state()) {
+impl Entry {
+    fn new(
+        place: &Place,
+        id: String,
+        title: &str,
+        state: Option<SubjectState>,
+        archived: bool,
+    ) -> Self {
+        let state = match state {
             Some(SubjectState::PrDraft) => "draft",
             Some(SubjectState::PrMerged) => "merged",
             Some(SubjectState::PrClosed | SubjectState::IssueClosed) => "closed",
@@ -109,32 +151,37 @@ impl Catalog {
             Some(SubjectState::PrOpen | SubjectState::IssueOpen) => "open",
             None => "worktree",
         };
-        let archived = if item.is_archived() {
-            "archived · "
-        } else {
-            ""
-        };
+        let archived = if archived { "archived · " } else { "" };
         let line = format!(
             "- `{}/` · {archived}{state} · {}",
             place.item.display(),
-            one_line(&clean(item.title()))
+            one_line(&clean(title))
         );
-        let entry = Entry {
-            id: item.id.clone(),
-            line,
-        };
+        Self { id, line }
+    }
+}
+
+impl Catalog {
+    fn write_entry(
+        &mut self,
+        place: Place,
+        entry: Entry,
+        files: &BTreeMap<String, String>,
+    ) -> io::Result<()> {
+        sync(&place.path(), files)?;
+        let id = entry.id.clone();
         let entries = self.repos.entry(place.repo.clone()).or_default();
         if entries.get(&place.item) != Some(&entry) {
             if let Some(old) = entries.insert(place.item.clone(), entry) {
-                if old.id != item.id {
+                if old.id != id {
                     self.places.remove(&old.id);
                 }
             }
             self.changed_repos.insert(place.repo.clone());
         }
-        if let Some(old) = self.places.insert(item.id.clone(), place.clone()) {
+        if let Some(old) = self.places.insert(id.clone(), place.clone()) {
             if old != place {
-                self.remove_at(&old, &item.id);
+                self.remove_at(&old, &id);
             }
         }
         Ok(())
@@ -185,8 +232,11 @@ impl Catalog {
         Ok(())
     }
 
-    fn write_indexes(&mut self) {
+    fn write_indexes(&mut self, missing_only: bool) {
         for repo in self.changed_repos.clone() {
+            if missing_only && repo.join("INDEX.md").is_file() {
+                continue;
+            }
             if let Err(error) = self.write_index(&repo) {
                 warn_path(&repo.join("INDEX.md"), error);
             }
@@ -237,23 +287,80 @@ impl Archive {
         // The full pass reads everything committed before this point.
         self.shared.marked.lock().expect("archive marks").clear();
         let db = self.db.clone();
-        let (mut cache, items) = tokio::task::spawn_blocking(move || {
+        let (mut cache, ids) = tokio::task::spawn_blocking(move || {
             let cache = Cache::open_read_only(&db)?;
-            let items = cache.load_items()?;
-            Ok::<_, CacheError>((cache, items))
+            let ids = cache
+                .load_items()?
+                .into_iter()
+                .map(|item| item.id)
+                .collect();
+            Ok::<_, CacheError>((cache, ids))
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
-        let ids = items.into_iter().map(|item| item.id).collect();
-        cache = self.write_batch(cache, &lifecycle, ids, true).await?;
+        cache = self
+            .write_batch(cache, &lifecycle, ids, ExportBatch::Startup)
+            .await?;
+        let (returned, ids) = tokio::task::spawn_blocking(move || {
+            let ids = cache.load_history_ids();
+            (cache, ids)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        cache = returned;
+        let mut history: BTreeSet<_> = ids.map_err(|e| e.to_string())?.into_iter().collect();
+        let mut rebuilding_history = !history.is_empty();
+        let mut index_pending = false;
+        let mut index_due = tokio::time::Instant::now() + HISTORY_INDEX_INTERVAL;
         loop {
-            self.shared.ready.notified().await;
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            if history.is_empty() {
+                tokio::select! {
+                    _ = self.shared.ready.notified() => {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                    }
+                    _ = tokio::time::sleep_until(index_due), if index_pending => {}
+                }
+            }
             let ids = std::mem::take(&mut *self.shared.marked.lock().expect("archive marks"));
-            if !ids.is_empty() {
-                cache = self.write_batch(cache, &lifecycle, ids, false).await?;
+            let (synced, interactive): (BTreeSet<_>, BTreeSet<_>) = ids
+                .into_iter()
+                .partition(|id| id.starts_with(HISTORY_SUBJECT_ID_PREFIX));
+            history.extend(synced);
+            if !interactive.is_empty() {
+                cache = self
+                    .write_batch(cache, &lifecycle, interactive, ExportBatch::Interactive)
+                    .await?;
+            }
+            if !history.is_empty() {
+                let batch = (0..HISTORY_EXPORT_BATCH)
+                    .map_while(|_| history.pop_first())
+                    .collect();
+                cache = self
+                    .write_batch(cache, &lifecycle, batch, ExportBatch::History)
+                    .await?;
+                index_pending = true;
+            }
+            if index_pending
+                && (tokio::time::Instant::now() >= index_due
+                    || (rebuilding_history && history.is_empty()))
+            {
+                let shared = self.shared.clone();
+                tokio::task::spawn_blocking(move || {
+                    shared
+                        .catalog
+                        .lock()
+                        .expect("archive catalog")
+                        .write_indexes(false);
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                index_pending = false;
+                index_due = tokio::time::Instant::now() + HISTORY_INDEX_INTERVAL;
+                if history.is_empty() {
+                    rebuilding_history = false;
+                }
             }
         }
     }
@@ -263,7 +370,7 @@ impl Archive {
         mut cache: Cache,
         lifecycle: &perch_git::KeyedMutex,
         ids: BTreeSet<String>,
-        startup: bool,
+        kind: ExportBatch,
     ) -> Result<Cache, String> {
         let mut missing = Vec::new();
         for id in ids {
@@ -296,12 +403,15 @@ impl Archive {
             for id in missing {
                 catalog.remove_item(&id, None);
             }
-            catalog.write_indexes();
-            if startup {
+            // History can arrive faster than each full repository index
+            // can be rewritten. Put a new repository on disk promptly,
+            // and let the outer loop batch updates to existing indexes.
+            catalog.write_indexes(kind == ExportBatch::History);
+            if kind == ExportBatch::Startup {
                 catalog.startup_complete = true;
-                match cache.load_items() {
-                    Ok(items) => archive.sweep(&catalog, &items),
-                    Err(error) => {
+                match cache.read_snapshot(|cache| stored_places(&archive.root, cache)) {
+                    Ok(Ok(places)) => archive.sweep(&catalog, places),
+                    Ok(Err(error)) | Err(error) => {
                         tracing::warn!(%error, "could not list items to sweep the archive")
                     }
                 }
@@ -317,6 +427,9 @@ impl Archive {
     }
 
     fn write_item(&self, cache: &Cache, id: &str) -> Result<bool, String> {
+        if id.starts_with(HISTORY_SUBJECT_ID_PREFIX) {
+            return self.write_history(cache, id);
+        }
         let gathered = cache
             .read_snapshot(|cache| {
                 cache
@@ -334,6 +447,13 @@ impl Archive {
         };
         let place = place(&self.root, &item)
             .ok_or_else(|| format!("invalid repository or branch for {}", item.repo_full_name))?;
+        let entry = Entry::new(
+            &place,
+            item.id.clone(),
+            item.title(),
+            item.subject.as_ref().map(ItemSubject::subject_state),
+            item.is_archived(),
+        );
         let files = render(&gathered, Mode::Archive);
         #[cfg(test)]
         if let Some(pause) = self.shared.after_gather.lock().unwrap().take() {
@@ -343,15 +463,44 @@ impl Archive {
             .catalog
             .lock()
             .expect("archive catalog")
-            .write_item(place, &item, &files)
+            .write_entry(place, entry, &files)
             .map_err(|error| error.to_string())?;
         Ok(true)
     }
 
-    fn sweep(&self, catalog: &Catalog, items: &[Item]) {
-        let keep: HashSet<_> = items
-            .iter()
-            .filter_map(|item| place(&self.root, item))
+    fn write_history(&self, cache: &Cache, id: &str) -> Result<bool, String> {
+        let Some((subject, discussion)) =
+            cache.load_history_subject(id).map_err(|e| e.to_string())?
+        else {
+            return Ok(false);
+        };
+        let place = history_place(
+            &self.root,
+            subject.repo_full_name(),
+            subject.kind(),
+            subject.number(),
+        )
+        .ok_or_else(|| format!("invalid repository for {id}"))?;
+        let entry = Entry::new(
+            &place,
+            id.into(),
+            subject.title(),
+            Some(subject.subject_state()),
+            false,
+        );
+        let files = render(&gather_history(id, subject, &discussion), Mode::Archive);
+        self.shared
+            .catalog
+            .lock()
+            .expect("archive catalog")
+            .write_entry(place, entry, &files)
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    fn sweep(&self, catalog: &Catalog, places: Vec<Place>) {
+        let keep: HashSet<_> = places
+            .into_iter()
             .chain(catalog.places.values().cloned())
             .map(|place| place.path())
             .collect();
@@ -415,7 +564,7 @@ impl Archive {
             }
             catalog.remove_item(&item.id, current);
             if catalog.startup_complete {
-                catalog.write_indexes();
+                catalog.write_indexes(false);
             }
         })
         .await
@@ -436,10 +585,12 @@ impl Ctx {
                 drop(catalog);
                 let cache = Cache::open_read_only(&archive.db).ok()?;
                 return existing_knowledge_dir(
-                    &archive.root,
                     &place.repo,
                     Some(&place),
-                    &cache.load_items().ok()?,
+                    cache
+                        .read_snapshot(|cache| stored_places(&archive.root, cache))
+                        .ok()?
+                        .ok()?,
                 );
             }
             let entries = catalog.repos.get(&place.repo)?;
@@ -452,9 +603,7 @@ impl Ctx {
                 return None;
             }
             if let Err(error) = ensure_dir(&place.repo).and_then(|()| {
-                if catalog.changed_repos.contains(&place.repo)
-                    || !place.repo.join("INDEX.md").is_file()
-                {
+                if !place.repo.join("INDEX.md").is_file() {
                     catalog.write_index(&place.repo)?;
                 }
                 Ok(())
@@ -480,11 +629,11 @@ pub fn cached_knowledge_dir(
 ) -> Option<PathBuf> {
     let root = canonical_home(root);
     let cache = Cache::open_read_only(&root.join("perch.db")).ok()?;
-    let (target, items) = cache
+    let (target, places) = cache
         .read_snapshot(|cache| {
             Ok::<_, CacheError>((
                 cache.find_item_by_subject(repo, kind, number)?,
-                cache.load_items()?,
+                stored_places(&root, cache)?,
             ))
         })
         .ok()?
@@ -494,7 +643,7 @@ pub fn cached_knowledge_dir(
         Some(place) => place.repo.clone(),
         None => repo_place(&root, repo)?,
     };
-    existing_knowledge_dir(&root, &repo_path, own.as_ref(), &items)
+    existing_knowledge_dir(&repo_path, own.as_ref(), places)
 }
 
 /// How many files and directories a configured source may hold. The check
@@ -605,12 +754,7 @@ pub fn external_knowledge_dirs(
     added.split_off(read_dirs.len())
 }
 
-fn existing_knowledge_dir(
-    root: &Path,
-    repo: &Path,
-    own: Option<&Place>,
-    items: &[Item],
-) -> Option<PathBuf> {
+fn existing_knowledge_dir(repo: &Path, own: Option<&Place>, places: Vec<Place>) -> Option<PathBuf> {
     child_dirs(repo).ok()?;
     let has_index = |dir: &Path| {
         std::fs::symlink_metadata(dir.join("INDEX.md")).is_ok_and(|meta| meta.is_file())
@@ -618,9 +762,8 @@ fn existing_knowledge_dir(
     if !has_index(repo) {
         return None;
     }
-    items
-        .iter()
-        .filter_map(|item| place(root, item))
+    places
+        .into_iter()
         .any(|place| {
             place.repo == repo
                 && Some(&place) != own
@@ -645,6 +788,7 @@ fn prune_repo(repo: &Path) -> io::Result<()> {
     for kind in ITEM_KINDS {
         remove_empty_dir(&repo.join(kind))?;
     }
+    remove_empty_dir(&repo.join("github"))?;
     // The only file at this level is the generated index. Keep it when
     // any item directories (including ones still being rebuilt) remain.
     let index = repo.join("INDEX.md");
@@ -824,7 +968,16 @@ dir = "missing"
             std::mem::take(&mut *archive.shared.marked.lock().unwrap())
         };
         archive
-            .write_batch(cache, &ctx.item_lifecycle, ids, startup)
+            .write_batch(
+                cache,
+                &ctx.item_lifecycle,
+                ids,
+                if startup {
+                    ExportBatch::Startup
+                } else {
+                    ExportBatch::Interactive
+                },
+            )
             .await
             .unwrap();
     }

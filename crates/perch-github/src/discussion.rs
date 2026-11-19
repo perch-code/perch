@@ -430,7 +430,7 @@ pub(crate) struct IssueCommentPayload {
     #[serde(default)]
     pub user: Option<UserRef>,
     #[serde(default)]
-    pub body: String,
+    pub body: Option<String>,
     pub created_at: Timestamp,
     #[serde(default)]
     pub updated_at: Option<Timestamp>,
@@ -446,7 +446,7 @@ impl From<IssueCommentPayload> for IssueComment {
             node_id: p.node_id,
             user,
             user_avatar_url,
-            body: p.body,
+            body: p.body.unwrap_or_default(),
             created_at: p.created_at,
             updated_at: p.updated_at,
             html_url: p.html_url,
@@ -781,6 +781,27 @@ pub(crate) struct PullSummary {
 }
 
 impl PullSummary {
+    pub(crate) fn into_discussion(
+        self,
+        comments: Vec<IssueCommentPayload>,
+        reviews: Vec<ReviewPayload>,
+        review_comments: Vec<ReviewCommentPayload>,
+    ) -> Discussion {
+        Discussion {
+            events: self.events(),
+            node_id: self.node_id,
+            opened_at: self.created_at,
+            body: self.body.unwrap_or_default(),
+            comments: comments.into_iter().map(IssueComment::from).collect(),
+            reviews: reviews.into_iter().map(Review::from).collect(),
+            review_comments: review_comments
+                .into_iter()
+                .map(ReviewComment::from)
+                .collect(),
+            ..Discussion::default()
+        }
+    }
+
     /// The events the payload carries, in time order: opened, then merged
     /// or closed. A merged pull request has a `closed_at` too, and that is
     /// the same moment, so it is not a second event.

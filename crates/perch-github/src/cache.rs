@@ -23,8 +23,11 @@ use crate::model::Thread;
 use crate::reactions::Reactions;
 use crate::workflow_runs::Checks;
 
+mod history_store;
 mod item_changes;
 mod review_store;
+
+pub use history_store::{history_subject_id, HISTORY_SUBJECT_ID_PREFIX};
 
 /// The shape of the tables. Version 18 adds durable worktree-review history
 /// and repeat-review reconciliation records on top of the run schema. Version
@@ -46,10 +49,11 @@ mod review_store;
 /// copies of tool calls an update wrote into a run's history as legacy
 /// steps. Version 37 clears the activity the inbox stopped showing, so
 /// what comes back to it starts empty. Version 38 keeps who approved a
-/// Work run's requests as it was admitted. Schemas 13 through 23
+/// Work run's requests as it was admitted. Version 39 stores GitHub
+/// history snapshots for the archive. Schemas 13 through 23
 /// migrate in place so local conversations and agent history are never
 /// discarded.
-pub const SCHEMA_VERSION: u32 = 38;
+pub const SCHEMA_VERSION: u32 = 39;
 
 /// The meta key for what the notification poll asks with. It holds the
 /// first page's ETag; the name is from the Last-Modified date it held
@@ -489,6 +493,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         tx.execute_batch(ACTIVITY_SCHEMA)?;
         tx.execute_batch(LSP_TRUST_SCHEMA)?;
         tx.execute_batch(REPO_LSP_TRUST_SCHEMA)?;
+        tx.execute_batch(history_store::HISTORY_SCHEMA)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -559,6 +564,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             // Old enough that none of it is news.
             36 => tx.execute_batch("DELETE FROM item_activity")?,
             37 => add_run_approvals_column(&tx)?,
+            38 => tx.execute_batch(history_store::HISTORY_SCHEMA)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -6598,6 +6604,84 @@ mod tests {
             c.meta("schema_version").unwrap().as_deref(),
             Some(&*SCHEMA_VERSION.to_string())
         );
+    }
+
+    #[test]
+    fn schema_39_adds_github_history_without_changing_interactive_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = pr_item(7);
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache
+                .conn
+                .execute("DROP TABLE history_subjects", [])
+                .unwrap();
+            cache.set_meta("schema_version", "38").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 38,
+                to: SCHEMA_VERSION,
+            }
+        );
+        let subject = item.subject.clone().unwrap();
+        let discussion = discussion();
+        cache.store_history_subject(&subject, &discussion).unwrap();
+        drop(cache);
+
+        let cache = Cache::open_read_only(&path).unwrap();
+        assert_eq!(cache.load_items().unwrap(), vec![item.clone()]);
+        assert!(cache.load_discussion(&item.id).unwrap().is_none());
+        assert_eq!(
+            cache.load_history_ids().unwrap(),
+            [history_subject_id("acme/widgets", 7)]
+        );
+        assert_eq!(
+            cache
+                .load_history_subject(&history_subject_id("ACME/Widgets", 7))
+                .unwrap(),
+            Some((subject, discussion))
+        );
+    }
+
+    #[test]
+    fn github_history_marks_changed_conversations_for_export() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        let (publish, marks) = std::sync::mpsc::channel();
+        cache
+            .watch_item_changes(move |ids| publish.send(ids).unwrap())
+            .unwrap();
+        let subject = pr_item(7).subject.unwrap();
+        let id = history_subject_id("acme/widgets", 7);
+        let mut discussion = discussion();
+
+        cache.store_history_subject(&subject, &discussion).unwrap();
+        cache.publish_item_changes();
+        assert_eq!(marks.try_recv().unwrap(), vec![id.clone()]);
+        assert!(cache.load_items().unwrap().is_empty());
+
+        cache.store_history_subject(&subject, &discussion).unwrap();
+        cache.publish_item_changes();
+        assert!(marks.try_recv().is_err());
+
+        discussion.body = "Updated description".into();
+        cache.store_history_subject(&subject, &discussion).unwrap();
+        cache.publish_item_changes();
+        assert_eq!(marks.try_recv().unwrap(), vec![id.clone()]);
+        assert_eq!(
+            cache.load_history_subject(&id).unwrap(),
+            Some((subject, discussion))
+        );
+
+        cache.delete_history_subject(&id).unwrap();
+        cache.publish_item_changes();
+        assert!(cache.load_history_subject(&id).unwrap().is_none());
+        assert_eq!(marks.try_recv().unwrap(), vec![id]);
     }
 
     fn write_schema_13(path: &Path, status: &str) {

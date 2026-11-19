@@ -889,6 +889,9 @@ pub struct RepoConfig {
     /// The base branch, used when no remote HEAD says which it is.
     #[serde(default)]
     pub base: Option<String>,
+    /// Keep a local archive of this repository's GitHub issues and pull requests.
+    #[serde(default)]
+    pub sync_history: bool,
     /// `[repo.work]`: what a Work run in this repository may reach beyond
     /// its worktree.
     #[serde(default)]
@@ -1046,6 +1049,15 @@ impl Config {
             .iter()
             .filter_map(|r| r.identity().map(str::to_string))
             .collect()
+    }
+
+    /// GitHub repositories that opted into background history sync.
+    pub fn history_sync_repos(&self) -> impl Iterator<Item = &str> {
+        self.repo
+            .iter()
+            .filter(|r| r.sync_history)
+            .filter_map(RepoConfig::identity)
+            .filter(|identity| !is_local(identity))
     }
 
     /// The resolved entries as the sidebar needs them, in config order.

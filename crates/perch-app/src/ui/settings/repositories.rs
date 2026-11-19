@@ -23,9 +23,11 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
         .map(|repo| {
             let identity = identity_of(repo);
             let mut rows = vec![name(page, repo, &identity)];
+            rows.extend([root(page, &identity), base(page, &identity)]);
+            if !perch_github::is_local(&identity) {
+                rows.push(sync_history(page, &identity));
+            }
             rows.extend([
-                root(page, &identity),
-                base(page, &identity),
                 approvals(page, &identity),
                 work_trust(page, &identity),
                 lsp_trust(page, &identity),
@@ -411,6 +413,25 @@ fn work_trust(page: &Page, identity: &str) -> Row {
     .keywords(&["trust", "mcp", "claude", "agents", "work.trust"])
 }
 
+fn sync_history(page: &Page, identity: &str) -> Row {
+    Row::new(
+        row_name(identity, "sync-history"),
+        "Sync GitHub history",
+        || {
+            "Keep issues, pull requests and their discussions available for agents to search."
+                .into()
+        },
+        switch(
+            page,
+            identity,
+            "sync-history",
+            |r| r.sync_history,
+            RepoSetting::SyncHistory,
+        ),
+    )
+    .keywords(&["github", "history", "knowledge", "archive", "sync_history"])
+}
+
 fn lsp_trust(page: &Page, identity: &str) -> Row {
     Row::new(
         row_name(identity, "lsp-trust"),
@@ -744,6 +765,8 @@ mod tests {
             }
         }
         assert!(shown(&harness, "settings-add-repository"));
+        assert!(shown(&harness, "settings-repo:acme/widgets:sync-history"));
+        assert!(!shown(&harness, "settings-repo:local/notes:sync-history"));
         assert!(shown(&harness, "settings-reset:repo:acme/widgets:base"));
         assert!(shown(&harness, "settings-reset:repo:acme/widgets:network"));
         assert!(!shown(&harness, "settings-reset:repo:acme/widgets:write"));
@@ -809,6 +832,7 @@ mod tests {
         let (mut harness, state, mut commands) = window(1400.0, 2600.0, FILE);
         open_on(&mut harness, state, Section::Repositories);
 
+        click(&mut harness, "settings-repo:acme/widgets:sync-history");
         click(&mut harness, "settings-repo:acme/widgets:work-trust");
         click(&mut harness, "settings-repo:local/notes:lsp-trust");
         pick(
@@ -826,6 +850,7 @@ mod tests {
         assert_eq!(
             written(&mut commands),
             vec![
+                repo_change("acme/widgets", RepoSetting::SyncHistory(true)),
                 repo_change("acme/widgets", RepoSetting::WorkTrust(true)),
                 repo_change("local/notes", RepoSetting::LspTrust(true)),
                 repo_change(

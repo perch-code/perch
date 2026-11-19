@@ -72,6 +72,7 @@ and `root`.
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |
 | `[[repo]] root` | none | Your local clone, where Perch finds branches and worktrees and cuts new ones |
 | `[[repo]] base` | the remote's default | Base branch, when the remote doesn't say |
+| `[[repo]] sync_history` | `false` | Keep the repository's GitHub issues, pull requests and discussions available to agents |
 | `[repo.work] write` | `[]` | Extra directories Work runs may write, such as a package cache |
 | `[repo.work] network` | `[]` | Hosts Work runs may reach, such as `index.crates.io` |
 | `[repo.work] approvals` | `[work] approvals` | Overrides it for this repository; also takes `"never"`, which allows every request |
@@ -93,6 +94,23 @@ worktrees_dir = "~/.herdr/worktrees"
 resolved against `PERCH_HOME` (normally `~/.perch`). Existing worktrees
 keep their paths. Perch leaves unclaimed directories in a configured
 worktree directory alone.
+
+## GitHub history
+
+Turn on **Sync GitHub history** in a GitHub repository's card under
+**Settings → Repositories**, or set `sync_history = true` in its `[[repo]]`
+entry on the engine's machine.
+
+```toml
+[[repo]]
+github = "slatedb/slatedb"
+root = "~/Code/slatedb"
+sync_history = true
+```
+
+The engine backfills open and closed items and their discussions into the
+[repository archive](reference.md#repository-history-for-agents). It catches
+up on startup and syncs hourly while running, even with the app closed.
 
 ## External knowledge
 

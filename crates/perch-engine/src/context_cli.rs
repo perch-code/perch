@@ -838,6 +838,14 @@ pub(crate) fn gather_archive(
     gather_item(cache, item, true)
 }
 
+pub(crate) fn gather_history(id: &str, subject: Subject, discussion: &Discussion) -> Gathered {
+    Gathered {
+        discussion: Some(archive_of(id, &subject, discussion, None)),
+        subject: Some(subject),
+        ..Gathered::default()
+    }
+}
+
 fn gather_item(
     cache: &Cache,
     item: &Item,
@@ -1180,6 +1188,7 @@ fn header(gathered: &Gathered, mode: Mode<'_>) -> String {
             }
         )
         .unwrap(),
+        None if archive => {}
         None => writeln!(
             out,
             "- Not in Perch: read from GitHub alone, so there are no findings or drafts"
@@ -1215,14 +1224,16 @@ fn header(gathered: &Gathered, mode: Mode<'_>) -> String {
             )
             .unwrap();
         }
-        Some(Subject::Issue(issue)) => writeln!(
-            out,
-            "- Issue: {}#{} · {}",
-            text_line(&issue.repo_full_name),
-            issue.number,
-            if issue.is_open() { "open" } else { "closed" }
-        )
-        .unwrap(),
+        Some(Subject::Issue(issue)) => {
+            let repo = text_line(&issue.repo_full_name);
+            let number = issue.number;
+            let state = if issue.is_open() { "open" } else { "closed" };
+            if archive && gathered.item.is_none() {
+                writeln!(out, "- Issue: {repo}#{number} · {state} · https://github.com/{repo}/issues/{number}").unwrap();
+            } else {
+                writeln!(out, "- Issue: {repo}#{number} · {state}").unwrap();
+            }
+        }
         None => writeln!(
             out,
             "- No pull request or issue: a branch with nothing on GitHub for Perch to show"
