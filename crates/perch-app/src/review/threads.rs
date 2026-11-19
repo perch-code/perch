@@ -2018,11 +2018,10 @@ pub fn thread_card(
             })
             .border(1.0)
             .border_radius(theme::RADIUS);
-        // White and framed is GitHub's; grey and framed a step quieter
-        // is Perch's own, as on Conversation.
+        // The two surfaces distinguish GitHub's threads from local threads.
         let (background, border) = match origin {
             ThreadOrigin::Local => (theme::perch_bg(), theme::border_muted()),
-            ThreadOrigin::GitHub => (theme::canvas(), theme::border()),
+            ThreadOrigin::GitHub => (theme::review_comment_bg(), theme::border()),
         };
         base.background(background).border_color(if flashing.get() {
             theme::accent()

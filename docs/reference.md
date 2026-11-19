@@ -486,8 +486,13 @@ answer, change only with `zoom`.
 ```toml
 [ui]
 appearance = "dark"            # "light", "dark" or "system", the default
+theme = "warm-linen"           # "classic", "warm-linen" or "blue-mist"
 code_font = "Fira Code"        # off macOS only
 ```
+
+Choose a theme in Settings → Appearance to preview and apply its palette.
+Each theme has a light and a dark version. Perch starts with Warm Linen in a
+fresh Perch home and uses Perch Classic when `theme` is absent.
 
 Perch is light or dark as the system is unless `appearance` says otherwise.
 On Linux under X11 the system's setting doesn't reach Perch, so there it is

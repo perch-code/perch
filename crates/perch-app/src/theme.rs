@@ -1,14 +1,16 @@
 //! Every colour, size, and type choice in one place.
 //!
-//! The palette follows the warm, quiet neutrals of Codex's desktop UI, and
-//! each colour has a light and a dark value. The dark ones are Codex's dark
-//! surfaces and text, and GitHub's dark Primer for what GitHub colours: a
-//! diff, the syntax, a state, a link.
+//! Each palette has light and dark variants. GitHub states, links, and
+//! most syntax colors keep their familiar meaning across themes.
 
 use floem::peniko::Color;
 use floem::reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use floem::text::{FontWeight, FONT_CONTEXT};
 use fontique::{FallbackKey, FamilyId, FontInfoOverride, Script};
+use perch_github::config::Theme;
+
+mod palette;
+pub use palette::*;
 
 /// Light or dark, as macOS has it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,11 +178,16 @@ fn pick(light: Color, dark: Color) -> Color {
     }
 }
 
-/// A text editor's styling id, with the appearance in it. The id keys the
-/// editor's cache of laid-out lines, and the lines carry their colours, so
-/// a change of appearance lays them out again.
+/// A text editor's laid-out lines carry their colors. Key the cache on
+/// the theme and appearance so a palette change redraws those lines.
 pub fn styling_id(id: u64) -> u64 {
-    id.wrapping_mul(2) + u64::from(appearance() == Appearance::Dark)
+    let (theme, appearance) = current_palette();
+    let palette = match theme {
+        Theme::Classic => 0,
+        Theme::WarmLinen => 1,
+        Theme::BlueMist => 2,
+    };
+    id.wrapping_mul(8) + palette * 2 + u64::from(appearance == Appearance::Dark)
 }
 
 const fn rgb(hex: u32) -> Color {
@@ -193,94 +200,6 @@ const fn rgba(hex: u32, alpha: u8) -> Color {
 
 pub use perch_engine::backend::APP_AVATAR_CORNER;
 
-/// Surfaces.
-pub fn canvas() -> Color {
-    pick(rgb(0xffffff), rgb(0x181818))
-}
-pub fn canvas_subtle() -> Color {
-    pick(rgb(0xf7f7f5), rgb(0x1f1f1f))
-}
-pub fn canvas_hover() -> Color {
-    pick(rgb(0xeeeeeb), rgb(0x282828))
-}
-/// What only Perch has, set off from GitHub's white as Codex sets off
-/// its own: the reader's asks and an agent's answers, a local thread,
-/// the Agents and Reviews sections. White is what GitHub has.
-pub fn perch_bg() -> Color {
-    pick(rgb(0xf4f4f2), rgb(0x212121))
-}
-
-/// The left navigation uses Codex's quieter, neutral surface treatment.
-/// These stay separate from the shared app palette so the dock can keep its
-/// precise contrast and interaction states.
-pub fn nav_canvas() -> Color {
-    pick(rgb(0xffffff), rgb(0x181818))
-}
-pub fn nav_control_border() -> Color {
-    pick(rgb(0xe5e4e5), rgb(0x333333))
-}
-pub fn nav_divider() -> Color {
-    pick(rgb(0xededed), rgb(0x2b2b2b))
-}
-pub fn nav_hover() -> Color {
-    pick(rgb(0xf8f8f8), rgb(0x1f1f1f))
-}
-pub fn nav_selected() -> Color {
-    pick(rgb(0xf4f4f4), rgb(0x242424))
-}
-pub fn nav_selected_pressed() -> Color {
-    pick(rgb(0xeeeeee), rgb(0x2b2b2b))
-}
-pub fn nav_fg() -> Color {
-    pick(rgb(0x191a1c), rgb(0xdfdfdf))
-}
-/// The title of a row whose notification has been read. GitHub's own
-/// inbox greys a read row, and so does this: far enough off `nav_fg()` to
-/// tell at a glance, not as far as an archived row's `nav_subtle()`. The
-/// weight axis cannot carry this on its own, since Regular against
-/// Medium at 14px is a tenth of a pixel of stem.
-pub fn nav_read() -> Color {
-    pick(rgb(0x5b5b5e), rgb(0xbababa))
-}
-pub fn nav_muted() -> Color {
-    pick(rgb(0x88888a), rgb(0x8c8c8c))
-}
-pub fn nav_subtle() -> Color {
-    pick(rgb(0xa3a3a5), rgb(0x747474))
-}
-/// A row's churn: the additions and the deletions, in the quiet green and
-/// red Codex tints its figures with, softer than the diff's own colours so
-/// they sit beside the muted byline rather than shouting over it.
-pub fn nav_added() -> Color {
-    pick(rgb(0x3b8f55), rgb(0x5cb877))
-}
-pub fn nav_deleted() -> Color {
-    pick(rgb(0xc94a4f), rgb(0xe5676c))
-}
-
-/// Lines.
-pub fn border() -> Color {
-    pick(rgb(0xddddd9), rgb(0x3a3a3a))
-}
-pub fn border_muted() -> Color {
-    pick(rgb(0xebebe8), rgb(0x2b2b2b))
-}
-
-/// Text.
-pub fn fg() -> Color {
-    pick(rgb(0x252523), rgb(0xdcdcd9))
-}
-pub fn fg_muted() -> Color {
-    pick(rgb(0x686863), rgb(0xa9a9a4))
-}
-pub fn fg_subtle() -> Color {
-    pick(rgb(0x989892), rgb(0x7c7c78))
-}
-
-/// Accents.
-pub fn accent() -> Color {
-    pick(rgb(0x32322f), rgb(0xdcdcd9))
-}
 /// The dot on an unread notification: the blue GitHub's own inbox marks
 /// one with, so it reads as the same mark here.
 pub fn unread() -> Color {
@@ -301,14 +220,8 @@ pub fn link() -> Color {
 pub fn github_bg() -> Color {
     pick(rgb(0xddf4ff), rgb(0x1c2635))
 }
-pub fn accent_subtle() -> Color {
-    pick(rgb(0xe9e9e6), rgb(0x2e2e2c))
-}
 pub fn accent_ring() -> Color {
     pick(rgba(0x32322f, 0x4d), rgba(0xdcdcd9, 0x4d))
-}
-pub fn action_hover() -> Color {
-    pick(rgb(0x43433f), rgb(0xf0f0ed))
 }
 
 /// Subject states.
@@ -379,9 +292,6 @@ pub fn alert_caution() -> Color {
     pick(rgb(0xcf222e), rgb(0xf85149))
 }
 
-pub fn badge_bg() -> Color {
-    pick(rgb(0xededea), rgb(0x2e2e2c))
-}
 /// A reaction pill the reader is among: the blue wash and rule GitHub
 /// draws its own with, so it reads as the same mark here.
 pub fn reacted_bg() -> Color {
@@ -413,12 +323,6 @@ pub fn shadow() -> Color {
     pick(rgba(0x20201e, 0x12), rgba(0x000000, 0x40))
 }
 
-/// Menus, as Codex draws its dropdowns: a white panel in a faint ring
-/// with a soft shadow under it, a grey wash on the row under the pointer
-/// or the keyboard, and hairlines between groups.
-pub fn menu_bg() -> Color {
-    pick(rgb(0xffffff), rgb(0x212121))
-}
 pub fn menu_ring() -> Color {
     pick(rgba(0x000000, 0x17), rgba(0xffffff, 0x1a))
 }
@@ -428,16 +332,6 @@ pub fn menu_shadow() -> Color {
 /// A panel's deeper shadow, Codex's `shadow-2xl`.
 pub fn panel_shadow() -> Color {
     pick(rgba(0x000000, 0x30), rgba(0x000000, 0x80))
-}
-/// A list row under the pointer, lighter than the one the keyboard is on.
-pub fn menu_pointed() -> Color {
-    pick(rgb(0xf7f7f7), rgb(0x2a2a2a))
-}
-pub fn menu_hover() -> Color {
-    pick(rgb(0xf2f2f2), rgb(0x2f2f2f))
-}
-pub fn menu_separator() -> Color {
-    pick(rgb(0xededed), rgb(0x333333))
 }
 
 /// Avatar placeholders, cycled by name so a row is stable between launches.
@@ -510,6 +404,9 @@ pub fn text_width(text: &str, size: f32) -> f64 {
 /// Line heights, as a multiple of the size. Prose runs at 1.625, Codex's
 /// relaxed leading, which is what its description and comments read at.
 pub const PROSE_LINE_HEIGHT: f32 = 1.625;
+
+/// The rule between two panes or between a toolbar and its contents.
+pub const DIVIDER_WIDTH: f64 = 0.75;
 
 /// Layout constants.
 /// The navigation panel, matching the roomy Codex dock at its default size.
@@ -588,46 +485,12 @@ pub fn tint_for(seed: &str) -> Color {
 // Review view
 // ---------------------------------------------------------------------------
 
-/// Code surfaces.
-pub fn code_bg() -> Color {
-    pick(rgb(0xffffff), rgb(0x181818))
-}
-pub fn gutter_bg() -> Color {
-    pick(rgb(0xfcfdfd), rgb(0x1a1a1a))
-}
-pub fn gutter_fg() -> Color {
-    pick(rgb(0x8c959f), rgb(0x6e7681))
-}
-pub fn rail_bg() -> Color {
-    pick(rgb(0xfafbfc), rgb(0x1b1b1b))
-}
-
-/// Diff line backgrounds, from GitHub's light diff.
-pub fn diff_added_bg() -> Color {
-    pick(rgb(0xe6ffec), rgb(0x1b2c1e))
-}
 pub fn diff_modified_bg() -> Color {
-    pick(rgb(0xe6ffec), rgb(0x1b2c1e))
-}
-pub fn diff_deleted_bg() -> Color {
-    pick(rgb(0xffebe9), rgb(0x3a2120))
+    diff_added_bg()
 }
 
-/// The bars drawn in the gutter beside a changed line.
-pub fn diff_added_bar() -> Color {
-    pick(rgb(0x2da44e), rgb(0x3fb950))
-}
 pub fn diff_modified_bar() -> Color {
     pick(rgb(0xbf8700), rgb(0xd29922))
-}
-pub fn diff_deleted_bar() -> Color {
-    pick(rgb(0xcf222e), rgb(0xf85149))
-}
-
-/// Deleted code is dimmed, since it is context rather than the thing under
-/// review.
-pub fn diff_deleted_fg() -> Color {
-    pick(rgb(0x825a57), rgb(0xa8908d))
 }
 
 /// Status letters in the changed-files rail.
@@ -644,13 +507,6 @@ pub fn status_renamed() -> Color {
     pick(rgb(0x8250df), rgb(0xab7df8))
 }
 
-/// Syntax colours, indexed to match `perch_syntax::CAPTURES`.
-///
-/// GitHub's light theme, so code in Perch looks like code on the site the
-/// pull request came from.
-pub fn syntax_default() -> Color {
-    pick(rgb(0x1f2328), rgb(0xe6edf3))
-}
 fn syntax_keyword() -> Color {
     pick(rgb(0xcf222e), rgb(0xff7b72))
 }
@@ -670,7 +526,7 @@ fn syntax_number() -> Color {
     pick(rgb(0x0550ae), rgb(0x79c0ff))
 }
 fn syntax_variable() -> Color {
-    pick(rgb(0x1f2328), rgb(0xe6edf3))
+    syntax_default()
 }
 fn syntax_punct() -> Color {
     pick(rgb(0x57606a), rgb(0xb1bac4))
@@ -1211,28 +1067,10 @@ pub const SCOPE_BUTTON_HEIGHT: f64 = 34.0;
 pub const VIEWED_ROW_HEIGHT: f64 = 28.0;
 /// A row of the rail's tree. The Viewed check is 26 high and sits inside it.
 pub const TREE_ROW_HEIGHT: f64 = 28.0;
-/// A split's filler row: a blank on the side that has no line where the
-/// other side does. Grey rather than a diff tint, because nothing is there.
-pub fn diff_filler_bg() -> Color {
-    pick(rgb(0xf1f3f5), rgb(0x212121))
-}
-/// A divider row, standing for a run of unchanged lines folded away: the
-/// blue github.com paints its hunk rows in, Primer's accent subtle.
-pub fn diff_divider_bg() -> Color {
-    pick(rgb(0xddf4ff), rgb(0x1b2533))
-}
 /// The divider's hunk header, muted as github.com sets it, so the row
 /// reads as a seam in the file and not as a line of it.
 pub fn diff_divider_fg() -> Color {
     fg_muted()
-}
-/// A divider's expanders, in the gutter beside its row: the stronger
-/// blue of github.com's hunk number cell (Primer's blue 1, which its
-/// diff blob tokens give the cell), the glyph muted as GitHub draws it,
-/// and while the pointer is on one, GitHub's own blue under a white glyph
-/// (Primer's accent emphasis and on-emphasis), as its expanders light up.
-pub fn diff_expander_bg() -> Color {
-    pick(rgb(0xb6e3ff), rgb(0x254674))
 }
 pub fn diff_expander_fg() -> Color {
     fg_muted()

@@ -443,11 +443,12 @@ fn deliver_as_is(app: &Environment, window: WindowId, event: Event) {
     if let Event::Link(link) = &event {
         linked(app, link);
     }
-    // `[ui] appearance` and `[keybindings]` are the whole app's, so they
+    // Appearance, theme and keybindings are the whole app's, so they
     // are taken up once here rather than by each window's state.
     if let Event::Settings(file) = &event {
         if let Some(config) = &file.config {
             crate::theme::choose(config.ui.appearance);
+            crate::theme::set_theme(config.ui.theme);
             crate::keymap::take_up(&config.keybindings);
         }
     }

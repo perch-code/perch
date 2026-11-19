@@ -332,7 +332,7 @@ pub(crate) fn panel_frame(
                 .items_center()
                 .padding_horiz(12.0)
                 .background(theme::canvas_subtle())
-                .border_bottom(1.0)
+                .border_bottom(theme::DIVIDER_WIDTH)
                 .border_color(theme::border())
         }),
         content,
@@ -345,7 +345,7 @@ pub(crate) fn panel_frame(
             .flex_col()
             .position(Position::Relative)
             .background(theme::canvas())
-            .border_top(1.0)
+            .border_top(theme::DIVIDER_WIDTH)
             .border_color(theme::border())
     })
 }

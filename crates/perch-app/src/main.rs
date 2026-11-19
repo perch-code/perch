@@ -109,7 +109,11 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--connect") {
         std::process::exit(connect_cli::run(&args[2..]));
     }
+    let seeded_theme = client_settings::seed_theme(&perch_github::config::perch_home());
     init_logging();
+    if let Err(error) = seeded_theme {
+        tracing::warn!(%error, "couldn't set the initial theme");
+    }
     tracing::info!("perch starting");
     let config = perch_github::Config::load();
     theme::set_display(config.display);
@@ -118,6 +122,7 @@ fn main() {
     theme::install_symbol_fallbacks();
     let preferred = theme::Appearance::chosen(ui.appearance);
     theme::prefer(preferred);
+    theme::set_theme(ui.theme);
     keymap::take_up(&config.keybindings);
 
     windows::load_frame();

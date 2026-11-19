@@ -30,6 +30,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 jiff.workspace = true
 toml.workspace = true
+tempfile = "3"
 # vger, floem's default renderer, named so the choice is on record: vello
 # was tried and dropped because it holds 165 MB of GPU scratch buffers sized
 # for its benchmark scenes before it draws anything, most of Perch's memory.
@@ -82,4 +83,3 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [dev-dependencies]
 perch-engine = { path = "../perch-engine", features = ["test-support"] }
-tempfile = "3"

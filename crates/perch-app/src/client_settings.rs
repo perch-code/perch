@@ -7,11 +7,30 @@
 //! from this one.
 
 use std::cell::RefCell;
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 
+use perch_github::config::Theme;
 use perch_github::{is_client_key, Config, Setting};
 
 use crate::backend::SettingsFile;
+
+/// Give a fresh Perch home a theme before logging or the engine creates
+/// any state there. Existing homes continue to use the config's default.
+pub fn seed_theme(home: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(home)?;
+    if std::fs::read_dir(home)?.next().is_some() {
+        return Ok(());
+    }
+    let mut file = tempfile::NamedTempFile::new_in(home)?;
+    writeln!(file, "[ui]\ntheme = \"{}\"", Theme::WarmLinen.name())?;
+    match file.persist_noclobber(home.join("config.toml")) {
+        Ok(_) => Ok(()),
+        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.error),
+    }
+}
 
 /// `changes` split by whose they are: those this machine's file takes,
 /// then those the engine's does. In process the engine takes them all.
@@ -183,6 +202,23 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    #[test]
+    fn only_a_fresh_home_gets_the_seed_theme() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        seed_theme(home.path()).unwrap();
+        assert_eq!(Config::read(&config).unwrap().ui.theme, Theme::WarmLinen);
+
+        std::fs::write(&config, "[ui]\nappearance = \"dark\"\n").unwrap();
+        seed_theme(home.path()).unwrap();
+        assert_eq!(Config::read(&config).unwrap().ui.theme, Theme::Classic);
+
+        std::fs::remove_file(&config).unwrap();
+        std::fs::create_dir(home.path().join("logs")).unwrap();
+        seed_theme(home.path()).unwrap();
+        assert!(!config.exists());
+    }
+
     /// A file that stops parsing keeps the client's settings it had, and
     /// says what is wrong.
     #[test]
@@ -212,8 +248,10 @@ mod tests {
     /// host's error kept for the engine's rows.
     #[test]
     fn a_broken_file_on_the_host_keeps_this_machine_s_tables() {
-        let local =
-            Local::of("[remote]\nhost = \"halo\"\n[ui]\nappearance = \"dark\"\n".to_string());
+        let local = Local::of(
+            "[remote]\nhost = \"halo\"\n[ui]\nappearance = \"dark\"\ntheme = \"blue-mist\"\n"
+                .to_string(),
+        );
         let engine = SettingsFile {
             path: "/home/chris/.perch/config.toml".into(),
             config: None,
@@ -227,13 +265,16 @@ mod tests {
         let config = merged.config.unwrap();
         assert_eq!(config.remote.host(), Some("halo"));
         assert_eq!(config.ui.appearance, perch_github::config::Appearance::Dark);
+        assert_eq!(config.ui.theme, Theme::BlueMist);
         assert!(merged.present.contains("remote.host"));
+        assert!(merged.present.contains("ui.theme"));
     }
 
     #[test]
     fn with_the_engine_on_a_host_the_client_s_settings_stay_here() {
         let changes = vec![
             Setting::Zoom(Some(1.2)),
+            Setting::Theme(Some(Theme::BlueMist)),
             Setting::PollIntervalSecs(Some(30)),
             Setting::Keybinding {
                 action: "go-to-file".into(),
@@ -247,6 +288,7 @@ mod tests {
             here,
             [
                 Setting::Zoom(Some(1.2)),
+                Setting::Theme(Some(Theme::BlueMist)),
                 Setting::Keybinding {
                     action: "go-to-file".into(),
                     keys: None,

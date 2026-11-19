@@ -154,7 +154,7 @@ fn tiles(svg: &str) -> Option<(Size, Vec<(Rect, Drawing)>)> {
 /// One shrunk to fit opens at its own size on a click. One that can't be
 /// laid out is what `broken` makes of mermaid-svg's reason.
 pub fn view(source: String, broken: impl Fn(String) -> AnyView + 'static) -> impl IntoView {
-    dyn_container(theme::appearance, move |_| {
+    dyn_container(theme::current_palette, move |_| {
         let laid_out = markup(&source).and_then(|svg| Ok((Drawing::parse(&svg)?, svg)));
         match laid_out {
             Ok((drawing, svg)) => figure(drawing, svg).into_any(),

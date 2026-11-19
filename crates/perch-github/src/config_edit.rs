@@ -11,7 +11,9 @@ use std::path::Path;
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
-use crate::config::{toml_error_line, Appearance, Approvals, Config, KnowledgeSource, RepoConfig};
+use crate::config::{
+    toml_error_line, Appearance, Approvals, Config, KnowledgeSource, RepoConfig, Theme,
+};
 
 /// Remote windows write app preferences on the UI thread while the local
 /// engine can edit the same file from its worker thread.
@@ -72,6 +74,7 @@ pub enum Setting {
     WorkBranchPrefix(Option<String>),
     WorkApprovals(Option<Approvals>),
     Appearance(Option<Appearance>),
+    Theme(Option<Theme>),
     CodeFont(Option<String>),
     Zoom(Option<f64>),
     CodeFontSize(Option<f32>),
@@ -110,6 +113,7 @@ impl Setting {
         matches!(
             self,
             Setting::Appearance(_)
+                | Setting::Theme(_)
                 | Setting::CodeFont(_)
                 | Setting::Zoom(_)
                 | Setting::CodeFontSize(_)
@@ -501,6 +505,10 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
         Setting::Appearance(appearance) => (
             top(&["ui"], "appearance".into()),
             appearance.map(|a| Value::from(a.name())),
+        ),
+        Setting::Theme(theme) => (
+            top(&["ui"], "theme".into()),
+            theme.map(|theme| Value::from(theme.name())),
         ),
         Setting::CodeFont(font) => (top(&["ui"], "code_font".into()), string(font)),
         Setting::Zoom(zoom) => (top(&["display"], "zoom".into()), float(*zoom, "zoom")?),
@@ -1308,15 +1316,15 @@ mod tests {
 
     #[test]
     fn removing_a_key_resets_it() {
-        let text =
-            "poll_interval_secs = 30\n\n[ui]\nappearance = \"dark\"\ncode_font = \"Iosevka\"\n";
-        let out = edit(text, &[Setting::Appearance(None)]);
+        let text = "poll_interval_secs = 30\n\n[ui]\nappearance = \"dark\"\ntheme = \"warm-linen\"\ncode_font = \"Iosevka\"\n";
+        let out = edit(text, &[Setting::Appearance(None), Setting::Theme(None)]);
         assert_eq!(
             out,
             "poll_interval_secs = 30\n\n[ui]\ncode_font = \"Iosevka\"\n"
         );
         let c = Config::parse_text(&out).unwrap();
         assert_eq!(c.ui.appearance, Appearance::System);
+        assert_eq!(c.ui.theme, Theme::Classic);
 
         let out = edit(
             &out,
@@ -1451,6 +1459,7 @@ mod tests {
             Setting::WorkBranchPrefix(Some("me/".into())),
             Setting::WorkApprovals(Some(Approvals::Ask)),
             Setting::Appearance(Some(Appearance::Light)),
+            Setting::Theme(Some(Theme::BlueMist)),
             Setting::CodeFont(Some("Fira Code".into())),
             Setting::Zoom(Some(0.9)),
             Setting::CodeFontSize(Some(11.0)),
@@ -1474,6 +1483,7 @@ mod tests {
         assert_eq!(c.work.branch_prefix, "me/");
         assert_eq!(c.work.approvals, Approvals::Ask);
         assert_eq!(c.ui.appearance, Appearance::Light);
+        assert_eq!(c.ui.theme, Theme::BlueMist);
         assert_eq!(c.ui.code_font.as_deref(), Some("Fira Code"));
         assert_eq!(c.display.zoom, 0.9);
         assert_eq!(c.display.code_font_size, 11.0);
@@ -1494,6 +1504,7 @@ mod tests {
             "work.branch_prefix",
             "work.approvals",
             "ui.appearance",
+            "ui.theme",
             "ui.code_font",
             "display.zoom",
             "display.code_font_size",
@@ -1502,7 +1513,7 @@ mod tests {
         ] {
             assert!(keys.contains(key), "{key} missing from {keys:?}");
         }
-        assert_eq!(keys.len(), 17, "{keys:?}");
+        assert_eq!(keys.len(), 18, "{keys:?}");
     }
 
     fn keybinding(action: &'static str, keys: Option<&[&str]>) -> Setting {

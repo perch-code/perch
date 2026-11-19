@@ -43,31 +43,31 @@ pub fn state_icon(state: SubjectState) -> String {
     let body = match state {
         SubjectState::IssueOpen => issue_body(&c),
         SubjectState::IssueClosed => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.2"/>
                <path d="M5.1 8.2 L7.1 10.2 L11 5.9" fill="none" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SubjectState::IssueNotPlanned => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M3.9 12.1 L12.1 3.9" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <path d="M3.9 12.1 L12.1 3.9" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         SubjectState::PrOpen | SubjectState::PrDraft => pull_request_body(&c),
         SubjectState::PrMerged => format!(
-            r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <circle cx="11.6" cy="8" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+            r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <circle cx="11.6" cy="8" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <path d="M4.9 5.9 C5.4 7.4 6.9 8 9.6 8" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         SubjectState::PrClosed => format!(
-            r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
-               <circle cx="11.6" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M11.6 10.7 V8.4" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+            r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
+               <circle cx="11.6" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <path d="M11.6 10.7 V8.4" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <path d="M9.9 3.0 L13.3 6.4 M13.3 3.0 L9.9 6.4" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
     };
     svg16(&body)
@@ -78,14 +78,14 @@ pub fn state_icon(state: SubjectState) -> String {
 /// caller's colour.
 fn pull_request_body(c: &str) -> String {
     format!(
-        r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-           <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-           <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
-           <circle cx="11.6" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
+        r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+           <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
+           <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
+           <circle cx="11.6" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.2"/>
            <path d="M11.6 10.7 V6.6 A2 2 0 0 0 9.6 4.6 H7.9" fill="none" stroke="{c}"
-                 stroke-width="1.5" stroke-linecap="round"/>
+                 stroke-width="1.2" stroke-linecap="round"/>
            <path d="M9.4 3.1 L7.7 4.6 L9.4 6.1" fill="none" stroke="{c}"
-                 stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+                 stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
     )
 }
 
@@ -93,7 +93,7 @@ fn pull_request_body(c: &str) -> String {
 /// summary's Closes glyph in the caller's colour.
 fn issue_body(c: &str) -> String {
     format!(
-        r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
+        r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.2"/>
            <circle cx="8" cy="8" r="2" fill="{c}"/>"#
     )
 }
@@ -102,7 +102,7 @@ fn issue_body(c: &str) -> String {
 /// the arrow's head: the SVG's, and the ones a turning arrow draws.
 pub const REFRESH_PATHS: [&str; 2] = ["M13.2 8 a5.2 5.2 0 1 1 -1.6 -3.7", "M13.4 1.8 v3.1 h-3.1"];
 /// How wide Refresh's strokes are in that box.
-pub const REFRESH_STROKE: f64 = 1.5;
+pub const REFRESH_STROKE: f64 = 1.2;
 
 /// Sidebar glyphs. Drawn at 16px, tinted by the caller's colour.
 pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
@@ -110,26 +110,26 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
     let body = match name {
         SidebarIcon::Bookmark => format!(
             r#"<path d="M4 2.2 h8 v11.6 l-4-3.1 -4 3.1 z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>"#
+                     stroke-width="1.15" stroke-linejoin="round"/>"#
         ),
         // Refresh, mirrored: the same gesture running the other way.
         SidebarIcon::Undo => format!(
             r#"<path d="M2.8 8 a5.2 5.2 0 1 0 1.6 -3.7" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>
-               <path d="M2.6 1.8 v3.1 h3.1" fill="none" stroke="{c}" stroke-width="1.5"
+                     stroke-width="1.2" stroke-linecap="round"/>
+               <path d="M2.6 1.8 v3.1 h3.1" fill="none" stroke="{c}" stroke-width="1.2"
                      stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Check => format!(
             r#"<path d="M3.2 8.4 L6.4 11.6 L12.8 4.6" fill="none" stroke="{c}"
-                     stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Comment => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>"#
+                     stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Search => format!(
-            r#"<circle cx="7" cy="7" r="4.4" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M10.4 10.4 L14 14" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
+            r#"<circle cx="7" cy="7" r="4.4" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <path d="M10.4 10.4 L14 14" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Refresh => {
             let [arc, head] = REFRESH_PATHS;
@@ -142,52 +142,52 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         }
         // Close, smaller and ringed: empty a field.
         SidebarIcon::Clear => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"/>
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.15"/>
                <path d="M5.8 5.8 L10.2 10.2 M10.2 5.8 L5.8 10.2" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Close => format!(
             r#"<path d="M4.4 4.4 L11.6 11.6 M11.6 4.4 L4.4 11.6" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         SidebarIcon::ChevronRight => format!(
             r#"<path d="M6.2 3.6 L10.6 8 L6.2 12.4" fill="none" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::ChevronUp => format!(
             r#"<path d="M3.6 9.8 L8 5.4 L12.4 9.8" fill="none" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::ChevronDown => format!(
             r#"<path d="M3.6 6.2 L8 10.6 L12.4 6.2" fill="none" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         // A Mac pop-up button's mark: a chevron up over a chevron down.
         SidebarIcon::ChevronUpDown => format!(
             r#"<path d="M5 6 L8 3 L11 6 M5 10 L8 13 L11 10" fill="none" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Branch => format!(
-            r#"<circle cx="4.5" cy="3.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="4.5" cy="12.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="11.5" cy="5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M4.5 5.2 V10.8" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
+            r#"<circle cx="4.5" cy="3.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <circle cx="4.5" cy="12.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <circle cx="11.5" cy="5" r="1.7" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <path d="M4.5 5.2 V10.8" stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>
                <path d="M11.5 6.7 C11.5 9.6 4.5 8.3 4.5 10.8" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         // An arrow curling back to the left: a reply under someone's comment.
         SidebarIcon::Reply => format!(
-            r#"<path d="M6.6 3.4 L2.6 7.2 L6.6 11" fill="none" stroke="{c}" stroke-width="1.5"
+            r#"<path d="M6.6 3.4 L2.6 7.2 L6.6 11" fill="none" stroke="{c}" stroke-width="1.2"
                      stroke-linecap="round" stroke-linejoin="round"/>
                <path d="M2.8 7.2 H9.2 a4 4 0 0 1 4 4 V13" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         // The text styles over a composer, drawn after GitHub's: a letter
         // for each of the three that change a word, and for the rest a
         // few lines with what starts each one.
         SidebarIcon::Heading => format!(
             r#"<path d="M3.8 2.8 V13.2 M12.2 2.8 V13.2 M3.8 8 H12.2" fill="none" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round"/>"#
+                     stroke-width="1.25" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Bold => format!(
             r#"<path d="M4.5 2.9 H8.7 a2.55 2.55 0 0 1 0 5.1 H4.5 Z M4.5 8 H9.4 a2.55 2.55 0 0 1 0 5.1 H4.5 Z"
@@ -195,15 +195,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         ),
         SidebarIcon::Italic => format!(
             r#"<path d="M7 2.8 H12.2 M3.8 13.2 H9 M9.6 2.8 L6.4 13.2" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Quote => format!(
             r#"<path d="M2.8 4 V12 M6.2 4 H13.2 M6.2 8 H13.2 M6.2 12 H11" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         SidebarIcon::NumberedList => format!(
             r#"<path d="M7 4 H13.5 M7 8 H13.5 M7 12 H13.5" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>
+                     stroke-width="1.2" stroke-linecap="round"/>
                <path d="M2.7 3.1 L3.7 2.5 V6.4" fill="none" stroke="{c}" stroke-width="1.1"
                      stroke-linecap="round" stroke-linejoin="round"/>
                <path d="M2.5 10.1 a1.05 1.05 0 0 1 2.1 0.1 c0 0.8 -2.1 1.6 -2.1 3 H4.7" fill="none"
@@ -214,15 +214,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <circle cx="3.3" cy="8" r="1.05" fill="{c}"/>
                <circle cx="3.3" cy="12" r="1.05" fill="{c}"/>
                <path d="M6.5 4 H13.5 M6.5 8 H13.5 M6.5 12 H13.5" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         // A page with a plus over a minus: suggest a change to the lines,
         // after GitHub's file-diff.
         SidebarIcon::Suggest => format!(
             r#"<path d="M3.2 2.8 a1 1 0 0 1 1 -1 H9.6 L12.8 5 V13.2 a1 1 0 0 1 -1 1 H4.2 a1 1 0 0 1 -1 -1 Z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
                <path d="M8 4.8 V9 M5.9 6.9 H10.1 M5.9 11.3 H10.1" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         SidebarIcon::TaskList => format!(
             r#"<path d="M2.2 2.4 H6.2 V6.4 H2.2 Z M2.2 9.6 H6.2 V13.6 H2.2 Z" fill="none" stroke="{c}"
@@ -230,28 +230,28 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M3.1 4.4 L3.9 5.2 L5.4 3.5" fill="none" stroke="{c}" stroke-width="1.1"
                      stroke-linecap="round" stroke-linejoin="round"/>
                <path d="M8.5 4.4 H13.8 M8.5 11.6 H13.8" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         // A pencil at a slant: edit.
         SidebarIcon::Pencil => format!(
             r#"<path d="M3 13 l0.9 -3.4 l7.2 -7.2 a1.2 1.2 0 0 1 1.7 0 l0.8 0.8 a1.2 1.2 0 0 1 0 1.7 l-7.2 7.2 z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M9.9 3.6 l2.5 2.5" fill="none" stroke="{c}" stroke-width="1.4"/>"#
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M9.9 3.6 l2.5 2.5" fill="none" stroke="{c}" stroke-width="1.15"/>"#
         ),
         // Two pages, one behind the other: copy.
         SidebarIcon::Copy => format!(
             r#"<rect x="5.7" y="5.7" width="7.6" height="7.6" rx="1.3" fill="none" stroke="{c}"
-                     stroke-width="1.4"/>
+                     stroke-width="1.15"/>
                <path d="M10.3 4.2 V3.7 a1 1 0 0 0 -1 -1 H3.7 a1 1 0 0 0 -1 1 V9.3 a1 1 0 0 0 1 1 H4.2"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Trash => format!(
-            r#"<path d="M2.8 4.3 H13.2" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
+            r#"<path d="M2.8 4.3 H13.2" stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>
                <path d="M6.2 4.3 V2.9 a0.7 0.7 0 0 1 0.7 -0.7 H9.1 a0.7 0.7 0 0 1 0.7 0.7 V4.3"
-                     fill="none" stroke="{c}" stroke-width="1.4"/>
+                     fill="none" stroke="{c}" stroke-width="1.15"/>
                <path d="M4 4.3 L4.7 12.6 a1 1 0 0 0 1 0.9 H10.3 a1 1 0 0 0 1 -0.9 L12 4.3"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M6.7 6.8 V11 M9.3 6.8 V11" stroke="{c}" stroke-width="1.3"
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M6.7 6.8 V11 M9.3 6.8 V11" stroke="{c}" stroke-width="1.1"
                      stroke-linecap="round"/>"#
         ),
         SidebarIcon::Ellipsis => format!(
@@ -261,7 +261,7 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         ),
         SidebarIcon::ArrowUpRight => format!(
             r#"<path d="M4.5 11.5 L11.5 4.5 M5.8 4.5 H11.5 V10.2" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         // A cog round a hub: one outline, six flat-topped teeth on the rim
         // (tips on r6.9, roots on r4.9). Separate spokes on a ring read as a
@@ -275,15 +275,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                        A4.9 4.9 0 0 1 4.79 11.7 L2.87 12.62 A6.9 6.9 0 0 1 1.44 10.13
                        L3.19 8.93 A4.9 4.9 0 0 1 3.19 7.07 L1.44 5.87
                        A6.9 6.9 0 0 1 2.87 3.38 L4.79 4.3 A4.9 4.9 0 0 1 6.4 3.37 Z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <circle cx="8" cy="8" r="1.9" fill="none" stroke="{c}" stroke-width="1.4"/>"#
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <circle cx="8" cy="8" r="1.9" fill="none" stroke="{c}" stroke-width="1.15"/>"#
         ),
         // A painter's palette with its thumb notch and three dabs of paint:
         // how Perch looks.
         SidebarIcon::Palette => format!(
             r#"<path d="M8 2 A6 6 0 1 0 8 14 C9.1 14 9.5 13.2 9.1 12.4 C8.6 11.4 9.2 10.4 10.4 10.4
                        H11.8 A2.2 2.2 0 0 0 14 8.2 C14 4.7 11.3 2 8 2 Z" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+                     stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
                <circle cx="5" cy="7.6" r="1" fill="{c}"/>
                <circle cx="7.2" cy="4.9" r="1" fill="{c}"/>
                <circle cx="10.4" cy="5.4" r="1" fill="{c}"/>"#
@@ -292,86 +292,86 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         // server is.
         SidebarIcon::Server => format!(
             r#"<rect x="2.3" y="2.5" width="11.4" height="4.7" rx="1.3" fill="none" stroke="{c}"
-                     stroke-width="1.4"/>
+                     stroke-width="1.15"/>
                <rect x="2.3" y="8.8" width="11.4" height="4.7" rx="1.3" fill="none" stroke="{c}"
-                     stroke-width="1.4"/>
+                     stroke-width="1.15"/>
                <circle cx="5" cy="4.85" r="0.9" fill="{c}"/>
                <circle cx="5" cy="11.15" r="0.9" fill="{c}"/>"#
         ),
         // A keyboard: its outline, two rows of keys and the space bar.
         SidebarIcon::Keyboard => format!(
             r#"<rect x="1.6" y="3.8" width="12.8" height="8.4" rx="1.6" fill="none" stroke="{c}"
-                     stroke-width="1.4"/>
+                     stroke-width="1.15"/>
                <circle cx="4.4" cy="6.4" r="0.8" fill="{c}"/>
                <circle cx="6.8" cy="6.4" r="0.8" fill="{c}"/>
                <circle cx="9.2" cy="6.4" r="0.8" fill="{c}"/>
                <circle cx="11.6" cy="6.4" r="0.8" fill="{c}"/>
-               <path d="M5.4 9.6 H10.6" stroke="{c}" stroke-width="1.4"
+               <path d="M5.4 9.6 H10.6" stroke="{c}" stroke-width="1.15"
                      stroke-linecap="round"/>"#
         ),
         // Two rules, a knob on each: the settings of a view.
         SidebarIcon::View => format!(
             r#"<path d="M2.5 5 H7.6 M12 5 H13.5 M2.5 11 H4 M8.4 11 H13.5" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>
-               <circle cx="9.8" cy="5" r="1.9" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="6.2" cy="11" r="1.9" fill="none" stroke="{c}" stroke-width="1.4"/>"#
+                     stroke-width="1.15" stroke-linecap="round"/>
+               <circle cx="9.8" cy="5" r="1.9" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <circle cx="6.2" cy="11" r="1.9" fill="none" stroke="{c}" stroke-width="1.15"/>"#
         ),
         SidebarIcon::Terminal => format!(
             r#"<rect x="2" y="2.8" width="12" height="10.4" rx="2" fill="none" stroke="{c}"
-                     stroke-width="1.4"/>
+                     stroke-width="1.15"/>
                <path d="M4.8 6.2 L6.8 8 L4.8 9.8 M8.2 10 H11" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Unread => format!(
             r#"<path d="M1.6 8 C3 5.2 5.3 3.7 8 3.7 S13 5.2 14.4 8 C13 10.8 10.7 12.3 8 12.3
-                       S3 10.8 1.6 8 Z" fill="none" stroke="{c}" stroke-width="1.4"
+                       S3 10.8 1.6 8 Z" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linejoin="round"/>
-               <circle cx="8" cy="8" r="2" fill="none" stroke="{c}" stroke-width="1.4"/>"#
+               <circle cx="8" cy="8" r="2" fill="none" stroke="{c}" stroke-width="1.15"/>"#
         ),
         SidebarIcon::Archive => format!(
             r#"<rect x="2" y="2.8" width="12" height="3.2" rx="1" fill="none" stroke="{c}"
-                     stroke-width="1.4"/>
+                     stroke-width="1.15"/>
                <path d="M3.2 6 V12 a1.2 1.2 0 0 0 1.2 1.2 H11.6 a1.2 1.2 0 0 0 1.2 -1.2 V6
-                       M6.5 8.6 H9.5" fill="none" stroke="{c}" stroke-width="1.4"
+                       M6.5 8.6 H9.5" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::BellOff => format!(
             r#"<path d="M4.2 10.8 V7.2 a3.8 3.8 0 0 1 6.4 -2.8 M11.8 7.2 V10.8 L12.8 11.8 H5"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linecap="round"
                      stroke-linejoin="round"/>
                <path d="M6.6 13.6 H9.4 M2.5 13.5 L13.5 2.5" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Inbox => format!(
             r#"<path d="M2 8.6 L3.8 3.6 a1 1 0 0 1 0.9 -0.6 H11.3 a1 1 0 0 1 0.9 0.6 L14 8.6 V12
                        a1 1 0 0 1 -1 1 H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>
+                     stroke-width="1.15" stroke-linejoin="round"/>
                <path d="M2 8.6 H5.4 L6.4 10.2 H9.6 L10.6 8.6 H14" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>"#
+                     stroke-width="1.15" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Clock => format!(
-            r#"<circle cx="8" cy="8" r="6.2" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M8 4.6 V8 L10.4 9.6" fill="none" stroke="{c}" stroke-width="1.4"
+            r#"<circle cx="8" cy="8" r="6.2" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <path d="M8 4.6 V8 L10.4 9.6" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Sort => format!(
             r#"<path d="M5 13 V3 M2.6 5.4 L5 3 L7.4 5.4 M11 3 V13 M8.6 10.6 L11 13 L13.4 10.6"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linecap="round"
                      stroke-linejoin="round"/>"#
         ),
         SidebarIcon::File => format!(
             r#"<path d="M4.2 2 H9.4 L12.6 5.2 V13 a1 1 0 0 1 -1 1 H4.2 a1 1 0 0 1 -1 -1 V3 a1 1 0 0 1 1 -1 Z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M9.2 2.2 V5.4 H12.4" fill="none" stroke="{c}" stroke-width="1.4"
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M9.2 2.2 V5.4 H12.4" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Folder => format!(
             r#"<path d="M2 4.2 a1 1 0 0 1 1 -1 H6.2 L7.6 4.8 H13 a1 1 0 0 1 1 1 V12 a1 1 0 0 1 -1 1
-                       H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}" stroke-width="1.4"
+                       H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Plus => format!(
-            r#"<path d="M8 3.2 V12.8 M3.2 8 H12.8" stroke="{c}" stroke-width="1.7"
+            r#"<path d="M8 3.2 V12.8 M3.2 8 H12.8" stroke="{c}" stroke-width="1.4"
                      stroke-linecap="round"/>"#
         ),
         SidebarIcon::Stop => format!(
@@ -383,7 +383,7 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         SidebarIcon::Agents => format!(
             r#"<path d="M7 4.2 C7.5 7.3 8.9 8.7 12 9.2 C8.9 9.7 7.5 11.1 7 14.2
                        C6.5 11.1 5.1 9.7 2 9.2 C5.1 8.7 6.5 7.3 7 4.2 Z" fill="none"
-                     stroke="{c}" stroke-width="1.3" stroke-linejoin="round"/>
+                     stroke="{c}" stroke-width="1.1" stroke-linejoin="round"/>
                <path d="M12.2 1.6 C12.4 3 13 3.6 14.4 3.8 C13 4 12.4 4.6 12.2 6
                        C12 4.6 11.4 4 10 3.8 C11.4 3.6 12 3 12.2 1.6 Z" fill="{c}"/>"#
         ),
@@ -391,14 +391,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         // low so the drawing's box, caps included, is centred on 8,8.
         SidebarIcon::Gauge => format!(
             r#"<path d="M2.98 12.35 A5.8 5.8 0 1 1 13.02 12.35" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>
-               <path d="M8 9.45 L10.5 6.95" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-width="1.15" stroke-linecap="round"/>
+               <path d="M8 9.45 L10.5 6.95" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linecap="round"/>
                <circle cx="8" cy="9.45" r="1.3" fill="{c}"/>"#
         ),
         SidebarIcon::BarChart => format!(
             r#"<path d="M3 13 V3 M8 13 V8 M13 13 V5" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         // A bug with antennae, six legs, and a split shell.
         SidebarIcon::Feedback => format!(
@@ -406,10 +406,10 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                        M6.2 2.8 L4.8 1.5 M9.8 2.8 L11.2 1.5
                        M4.5 6 L2.5 4.5 M4.5 9 H1.5 M4.5 11.5 L2.5 13
                        M11.5 6 L13.5 4.5 M11.5 9 H14.5 M11.5 11.5 L13.5 13"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linecap="round"
                      stroke-linejoin="round"/>
                <path d="M4.5 5 H11.5 V10.5 A3.5 3.5 0 0 1 4.5 10.5 Z M8 5 V14"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linecap="round"
                      stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Thread => format!(
@@ -420,127 +420,127 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         // the reader's own.
         SidebarIcon::ThreadHollow => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="none"
-                     stroke="{c}" stroke-width="1.3" stroke-linejoin="round"/>"#
+                     stroke="{c}" stroke-width="1.1" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Pin => format!(
             r#"<path d="M6 2.5 H10 L9.3 6.2 L11.6 8.6 V9.6 H8.6 V13.8 L8 14.4 L7.4 13.8 V9.6 H4.4 V8.6
-                       L6.7 6.2 Z" fill="none" stroke="{c}" stroke-width="1.3" stroke-linejoin="round"/>"#
+                       L6.7 6.2 Z" fill="none" stroke="{c}" stroke-width="1.1" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Filter => format!(
-            r#"<path d="M2.5 4 H13.5 M4.5 8 H11.5 M6.5 12 H9.5" stroke="{c}" stroke-width="1.6"
+            r#"<path d="M2.5 4 H13.5 M4.5 8 H11.5 M6.5 12 H9.5" stroke="{c}" stroke-width="1.25"
                      stroke-linecap="round"/>"#
         ),
         SidebarIcon::Warning => format!(
-            r#"<path d="M8 2.2 L14.6 13.4 H1.4 Z" fill="none" stroke="{c}" stroke-width="1.4"
+            r#"<path d="M8 2.2 L14.6 13.4 H1.4 Z" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linejoin="round"/>
-               <path d="M8 6.2 V9.3" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+               <path d="M8 6.2 V9.3" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <circle cx="8" cy="11.3" r="0.95" fill="{c}"/>"#
         ),
         // A circle with an i in it: a note alert.
         SidebarIcon::Note => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M8 7.2 V11.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <path d="M8 7.2 V11.2" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <circle cx="8" cy="4.9" r="0.95" fill="{c}"/>"#
         ),
         // A bulb on a stem: a tip alert.
         SidebarIcon::Tip => format!(
             r#"<path d="M5.2 9.6 a4 4 0 1 1 5.6 0 L10.2 10.6 V11.6 H5.8 V10.6 Z" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M6.4 13.6 H9.6" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M6.4 13.6 H9.6" stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         // A speech bubble with a mark in it: an important alert.
         SidebarIcon::Important => format!(
             r#"<path d="M2.4 2.6 h11.2 v8.2 h-4.6 l-3.1 2.8 v-2.8 h-3.5 z" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M8 4.8 V7.4" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+                     stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M8 4.8 V7.4" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <circle cx="8" cy="9.2" r="0.95" fill="{c}"/>"#
         ),
         // An octagon with a mark in it: a caution alert.
         SidebarIcon::Caution => format!(
             r#"<path d="M5.5 1.8 H10.5 L14.2 5.5 V10.5 L10.5 14.2 H5.5 L1.8 10.5 V5.5 Z" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M8 4.8 V8.4" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+                     stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M8 4.8 V8.4" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <circle cx="8" cy="10.9" r="0.95" fill="{c}"/>"#
         ),
         // An empty circle: a job not started yet, as GitHub draws one.
         SidebarIcon::Waiting => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>"#
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.2"/>"#
         ),
         // A circle with a slash through it: a run that was called off, as
         // GitHub draws a skipped check.
         SidebarIcon::Skip => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M3.9 12.1 L12.1 3.9" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.2"/>
+               <path d="M3.9 12.1 L12.1 3.9" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         // Two links of a chain, on the diagonal: a permalink.
         SidebarIcon::Link => format!(
             r#"<path d="M6.3 5.5 L8.4 3.4 a3 3 0 0 1 4.2 4.2 L10.5 9.7" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
                <path d="M9.7 10.5 L7.6 12.6 a3 3 0 0 1 -4.2 -4.2 L5.5 6.3" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-               <path d="M6.2 9.8 L9.8 6.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M6.2 9.8 L9.8 6.2" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>"#
         ),
         // A page with a plus and a minus on it: a review that asked for
         // changes.
         SidebarIcon::ChangesRequested => format!(
             r#"<path d="M3.8 2.4 H9.6 L12.2 5 V13.6 H3.8 Z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M8 5.6 V8.4 M6.6 7 H9.4" stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>
-               <path d="M6.6 10.9 H9.4" stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>"#
+                     stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M8 5.6 V8.4 M6.6 7 H9.4" stroke="{c}" stroke-width="1.1" stroke-linecap="round"/>
+               <path d="M6.6 10.9 H9.4" stroke="{c}" stroke-width="1.1" stroke-linecap="round"/>"#
         ),
         // A signpost: a milestone.
         SidebarIcon::Milestone => format!(
             r#"<path d="M2.4 4.4 H11.2 L13.8 7 L11.2 9.6 H2.4 Z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M6.6 2 V4.4 M6.6 9.6 V14" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke-width="1.15" stroke-linejoin="round"/>
+               <path d="M6.6 2 V4.4 M6.6 9.6 V14" stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         // The two layouts are the same frame, cut across or cut down.
         SidebarIcon::Stacked => format!(
             r#"<path d="M3.7 2.7 H12.3 a1.5 1.5 0 0 1 1.5 1.5 V11.8 a1.5 1.5 0 0 1 -1.5 1.5 H3.7
                        a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z" fill="none"
-                     stroke="{c}" stroke-width="1.4"/>
-               <path d="M2.2 8 H13.8" stroke="{c}" stroke-width="1.4"/>"#
+                     stroke="{c}" stroke-width="1.15"/>
+               <path d="M2.2 8 H13.8" stroke="{c}" stroke-width="1.15"/>"#
         ),
         SidebarIcon::Split => format!(
             r#"<path d="M3.7 2.7 H12.3 a1.5 1.5 0 0 1 1.5 1.5 V11.8 a1.5 1.5 0 0 1 -1.5 1.5 H3.7
                        a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z" fill="none"
-                     stroke="{c}" stroke-width="1.4"/>
-               <path d="M8 2.7 V13.3" stroke="{c}" stroke-width="1.4"/>"#
+                     stroke="{c}" stroke-width="1.15"/>
+               <path d="M8 2.7 V13.3" stroke="{c}" stroke-width="1.15"/>"#
         ),
         // Two angle brackets, as github.com's code glyph: the markup
         // behind a picture.
         SidebarIcon::Source => format!(
             r#"<path d="M5.6 4.4 L2.2 8 L5.6 11.6 M10.4 4.4 L13.8 8 L10.4 11.6" fill="none"
-                     stroke="{c}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke="{c}" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         // A rule with a chevron pointing at it from each side: the diff
         // folded to its changes, the shape github.com folds with.
         SidebarIcon::Fold => format!(
-            r#"<path d="M2.5 8 H13.5" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+            r#"<path d="M2.5 8 H13.5" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <path d="M8 2 V5.6 M5.9 3.7 L8 5.8 L10.1 3.7" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
                <path d="M8 14 V10.4 M5.9 12.3 L8 10.2 L10.1 12.3" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         // A line, then one that runs to the edge and turns back under
         // itself, an arrow at its end, onto a short third: word wrap, as
         // editors draw it.
         SidebarIcon::Wrap => format!(
-            r#"<path d="M2.5 4 H13.5 M2.5 12 H5.5" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+            r#"<path d="M2.5 4 H13.5 M2.5 12 H5.5" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/>
                <path d="M2.5 8 H11.2 a2 2 0 0 1 0 4 H8.6" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>
+                     stroke-width="1.2" stroke-linecap="round"/>
                <path d="M10.2 10.4 L8.6 12 L10.2 13.6" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         // The fold opened: the rule dotted, and the chevrons pointing away
         // from it, as github.com draws Show resolved.
         SidebarIcon::Unfold => format!(
-            r#"<path d="M2.5 8 H3.7 M6.4 8 H9.6 M12.3 8 H13.5" stroke="{c}" stroke-width="1.5"
+            r#"<path d="M2.5 8 H3.7 M6.4 8 H9.6 M12.3 8 H13.5" stroke="{c}" stroke-width="1.2"
                      stroke-linecap="round"/>
                <path d="M8 5.6 V2.2 M5.9 4.1 L8 2 L10.1 4.1" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
                <path d="M8 10.4 V13.8 M5.9 11.9 L8 14 L10.1 11.9" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         // github.com's expanders in a diff's hunk rows: a dotted rule for
         // the code already shown, and an arrow away from it, stem and a
@@ -568,79 +568,79 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         SidebarIcon::Drawer => format!(
             r#"<path d="M3.7 2.7 H12.3 a1.5 1.5 0 0 1 1.5 1.5 V11.8 a1.5 1.5 0 0 1 -1.5 1.5 H3.7
                        a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z" fill="none"
-                     stroke="{c}" stroke-width="1.4"/>
-               <path d="M6.3 2.7 V13.3" stroke="{c}" stroke-width="1.4"/>"#
+                     stroke="{c}" stroke-width="1.15"/>
+               <path d="M6.3 2.7 V13.3" stroke="{c}" stroke-width="1.15"/>"#
         ),
         SidebarIcon::Back => format!(
             r#"<path d="M13 8 H3.4 M7.2 4.2 L3.4 8 L7.2 11.8" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Forward => format!(
             r#"<path d="M3 8 H12.6 M8.8 4.2 L12.6 8 L8.8 11.8" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         // A box with an arrow leaving its top right corner: open elsewhere.
         SidebarIcon::External => format!(
             r#"<path d="M7 3.5 H4.2 a1.5 1.5 0 0 0 -1.5 1.5 V11.8 a1.5 1.5 0 0 0 1.5 1.5 H10.5
-                       a1.5 1.5 0 0 0 1.5 -1.5 V9" fill="none" stroke="{c}" stroke-width="1.4"
+                       a1.5 1.5 0 0 0 1.5 -1.5 V9" fill="none" stroke="{c}" stroke-width="1.15"
                      stroke-linecap="round" stroke-linejoin="round"/>
                <path d="M9.4 2.5 H13.5 V6.6 M13.5 2.5 L7.6 8.4" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Person => format!(
-            r#"<circle cx="8" cy="5.3" r="2.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+            r#"<circle cx="8" cy="5.3" r="2.7" fill="none" stroke="{c}" stroke-width="1.15"/>
                <path d="M2.8 13.6 C2.8 10.6 5.1 9.1 8 9.1 S13.2 10.6 13.2 13.6" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Organization => format!(
             r#"<path d="M2.8 13.8 V2.6 H9.6 V13.8 M9.6 6.6 H13.2 V13.8 M1.8 13.8 H14.2" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-               <path d="M5.2 5.3 H7.2 M5.2 7.9 H7.2 M5.2 10.5 H7.2" stroke="{c}" stroke-width="1.4"
+                     stroke="{c}" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M5.2 5.3 H7.2 M5.2 7.9 H7.2 M5.2 10.5 H7.2" stroke="{c}" stroke-width="1.15"
                      stroke-linecap="round"/>"#
         ),
         SidebarIcon::Location => format!(
             r#"<path d="M8 14.2 C8 14.2 3.4 10 3.4 6.4 A4.6 4.6 0 0 1 12.6 6.4 C12.6 10 8 14.2 8 14.2 Z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <circle cx="8" cy="6.4" r="1.6" fill="none" stroke="{c}" stroke-width="1.3"/>"#
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>
+               <circle cx="8" cy="6.4" r="1.6" fill="none" stroke="{c}" stroke-width="1.1"/>"#
         ),
         SidebarIcon::Shield => format!(
             r#"<path d="M8 1.8 L13 3.7 V7.6 C13 10.7 10.9 13 8 14.2 C5.1 13 3 10.7 3 7.6 V3.7 Z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>"#
+                     fill="none" stroke="{c}" stroke-width="1.15" stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Coins => format!(
-            r#"<ellipse cx="8" cy="4.3" rx="5" ry="2" fill="none" stroke="{c}" stroke-width="1.3"/>
+            r#"<ellipse cx="8" cy="4.3" rx="5" ry="2" fill="none" stroke="{c}" stroke-width="1.1"/>
                <path d="M3 4.3 V11.7 C3 12.8 5.2 13.7 8 13.7 S13 12.8 13 11.7 V4.3
                         M3 8 C3 9.1 5.2 10 8 10 S13 9.1 13 8" fill="none" stroke="{c}"
-                     stroke-width="1.3"/>"#
+                     stroke-width="1.1"/>"#
         ),
         SidebarIcon::Tag => format!(
             r#"<path d="M2.2 2.2 H7.6 L13.8 8.4 L8.4 13.8 L2.2 7.6 Z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>
+                     stroke-width="1.15" stroke-linejoin="round"/>
                <circle cx="5.4" cy="5.4" r="1.1" fill="{c}"/>"#
         ),
         // A face: leave a reaction.
         SidebarIcon::Smiley => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"/>
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.15"/>
                <circle cx="5.7" cy="6.3" r="0.95" fill="{c}"/>
                <circle cx="10.3" cy="6.3" r="0.95" fill="{c}"/>
                <path d="M5.1 9.5 C5.7 11 6.9 11.7 8 11.7 C9.1 11.7 10.3 11 10.9 9.5" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         SidebarIcon::PullRequest => pull_request_body(&c),
         SidebarIcon::Issue => issue_body(&c),
         // GitHub's merge glyph: a line between two commits, and a third
         // off to the side joining it.
         SidebarIcon::Merge => format!(
-            r#"<circle cx="4.5" cy="3.6" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="4.5" cy="12.4" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="11.6" cy="8.6" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+            r#"<circle cx="4.5" cy="3.6" r="1.7" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <circle cx="4.5" cy="12.4" r="1.7" fill="none" stroke="{c}" stroke-width="1.15"/>
+               <circle cx="11.6" cy="8.6" r="1.7" fill="none" stroke="{c}" stroke-width="1.15"/>
                <path d="M4.5 5.3 V10.7 M4.5 5.3 C4.5 7.6 6.6 8.6 9.9 8.6" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+                     stroke="{c}" stroke-width="1.15" stroke-linecap="round"/>"#
         ),
         SidebarIcon::Repository => format!(
             r#"<path d="M4.6 1.9 H13 V11.6 H4.8 a1.6 1.6 0 0 0 0 3.2 H13 M3.2 13.2 V3.3
                        A1.4 1.4 0 0 1 4.6 1.9 M13 11.6 V14.8" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+                     stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
     };
     svg16(&body)

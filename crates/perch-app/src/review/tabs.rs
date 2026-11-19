@@ -83,7 +83,7 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             s.items_center()
                 .min_width(0.0)
                 .height_full()
-                .border_bottom(1.0)
+                .border_bottom(theme::DIVIDER_WIDTH)
                 .border_color(theme::border())
         }),
         change_nav(state),
@@ -259,7 +259,7 @@ fn strip_rule() -> Empty {
     Empty::new().style(|s| {
         s.flex_grow(1.0_f32)
             .height_full()
-            .border_bottom(1.0)
+            .border_bottom(theme::DIVIDER_WIDTH)
             .border_color(theme::border())
     })
 }
@@ -276,7 +276,7 @@ fn tab_style(s: Style, active: bool) -> Style {
         .max_width(theme::TAB_MAX_WIDTH)
         .flex_shrink(0.0_f32)
         .selectable(false)
-        .border_bottom(1.0)
+        .border_bottom(theme::DIVIDER_WIDTH)
         .border_color(theme::border())
         .hover(|s| s.cursor(CursorStyle::Pointer));
 
@@ -405,7 +405,7 @@ fn change_nav(state: ReviewState) -> impl IntoView {
         s.flex_shrink(0.0_f32)
             .height_full()
             .items_center()
-            .border_bottom(1.0)
+            .border_bottom(theme::DIVIDER_WIDTH)
             .border_color(theme::border())
     })
 }
@@ -518,7 +518,7 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
             .items_center()
             .gap(TILE_GAP)
             .padding_horiz(8.0)
-            .border_bottom(1.0)
+            .border_bottom(theme::DIVIDER_WIDTH)
             .border_color(theme::border())
     })
 }

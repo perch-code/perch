@@ -453,6 +453,9 @@ pub struct UiConfig {
     /// changes.
     #[serde(default)]
     pub appearance: Appearance,
+    /// The app's palette, in either appearance.
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 /// `[ui] appearance`.
@@ -476,6 +479,36 @@ impl Appearance {
             Self::System => "system",
             Self::Light => "light",
             Self::Dark => "dark",
+        }
+    }
+}
+
+/// `[ui] theme`.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Theme {
+    #[default]
+    Classic,
+    WarmLinen,
+    BlueMist,
+}
+
+impl Theme {
+    pub const ALL: [Self; 3] = [Self::Classic, Self::WarmLinen, Self::BlueMist];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::WarmLinen => "warm-linen",
+            Self::BlueMist => "blue-mist",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Perch Classic",
+            Self::WarmLinen => "Warm Linen",
+            Self::BlueMist => "Blue Mist",
         }
     }
 }

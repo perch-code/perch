@@ -470,13 +470,13 @@ fn linked(
         leaves.retain(|_, leaf| leaf.strong_count() > 0);
         leaves.insert(id, Rc::downgrade(&leaf));
     });
-    // The first run has what was just built; it reads the appearance so
-    // that a change runs it again.
+    // The first run has what was just built. Subscribe to palette changes
+    // before skipping that first restyle.
     let restyle = {
         let leaf = leaf.clone();
         let built = Cell::new(true);
         move || {
-            theme::appearance();
+            theme::current_palette();
             if !built.replace(false) {
                 let (attrs, strikes) = styled();
                 *leaf.attrs.borrow_mut() = attrs;

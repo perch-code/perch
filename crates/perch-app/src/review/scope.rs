@@ -389,7 +389,7 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             .flex_shrink(0.0_f32)
             .items_center()
             .padding_horiz(10.0)
-            .border_bottom(1.0)
+            .border_bottom(theme::DIVIDER_WIDTH)
             .border_color(theme::border())
             .selectable(false)
             .hover(|s| {

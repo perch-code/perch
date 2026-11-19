@@ -381,6 +381,8 @@ pub(crate) struct Row {
     /// starts again. `None` for a row that applies at once.
     pub restart: Option<Rc<dyn Fn() -> bool>>,
     pub control: Rc<dyn Fn() -> AnyView>,
+    /// A full-width preview below the row's control.
+    preview: Option<Rc<dyn Fn() -> AnyView>>,
 }
 
 #[derive(Clone)]
@@ -404,6 +406,7 @@ impl Row {
             reset: None,
             restart: None,
             control: Rc::new(control),
+            preview: None,
         }
     }
 
@@ -423,6 +426,11 @@ impl Row {
 
     pub(crate) fn restart(mut self, pending: impl Fn() -> bool + 'static) -> Self {
         self.restart = Some(Rc::new(pending));
+        self
+    }
+
+    fn preview(mut self, preview: impl Fn() -> AnyView + 'static) -> Self {
+        self.preview = Some(Rc::new(preview));
         self
     }
 
@@ -1644,6 +1652,47 @@ mod tests {
 
         click(&mut harness, "settings-nav:Language servers");
         assert!(shown(&harness, "settings-row:lsp-memory"));
+    }
+
+    #[test]
+    fn the_theme_picker_writes_previews_and_resets_the_palette() {
+        use floem::style::Background;
+        use perch_github::config::Theme;
+
+        let (mut harness, state, mut commands) =
+            window(1400.0, 900.0, "[ui]\ntheme = \"classic\"\n");
+        open_on(&mut harness, state, Section::Appearance);
+        assert!(shown(&harness, "settings-theme-preview"));
+        let preview = named(harness.root_id(), "settings-theme-preview").unwrap();
+        let appearance = theme::appearance();
+        assert_eq!(
+            harness.get_computed_style(preview).get(Background),
+            Some(Brush::Solid(
+                theme::colors(Theme::Classic, appearance).canvas
+            ))
+        );
+
+        pick(&mut harness, "settings-theme", Theme::WarmLinen.label());
+        assert!(matches!(
+            written(&mut commands).as_slice(),
+            [Setting::Theme(Some(Theme::WarmLinen))]
+        ));
+        state
+            .settings_file
+            .set(Some(file("[ui]\ntheme = \"warm-linen\"\n")));
+        settle(&mut harness);
+        assert_eq!(
+            harness.get_computed_style(preview).get(Background),
+            Some(Brush::Solid(
+                theme::colors(Theme::WarmLinen, appearance).canvas
+            ))
+        );
+
+        click(&mut harness, "settings-reset:theme");
+        assert!(matches!(
+            written(&mut commands).as_slice(),
+            [Setting::Theme(None)]
+        ));
     }
 
     /// The search glyph sits inside the box, clear of its border and

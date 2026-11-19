@@ -59,6 +59,7 @@ and `root`.
 | `[work] approval_timeout_mins` | `15` in the app, `480` under `perchd` | Minutes a request to you waits before it is denied |
 | `[keybindings]` *action* | the action's keys | Keys for an action by its id: a string such as `"super+t"`, a list of them, or `""` for none; see [Keyboard shortcuts](reference.md#keyboard-shortcuts) |
 | `[ui] appearance` | `"system"` | `"light"`, `"dark"` or `"system"` |
+| `[ui] theme` | `"classic"` | `"classic"`, `"warm-linen"` or `"blue-mist"`. A fresh Perch home starts with `"warm-linen"`. |
 | `[ui] code_font` | none | Code font off macOS; on macOS code is always SF Mono; applies after a restart |
 | `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |
 | `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |

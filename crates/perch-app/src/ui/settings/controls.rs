@@ -42,7 +42,8 @@ pub(crate) fn group(title: &str, subtitle: Option<&str>, rows: Vec<AnyView>) -> 
             Container::new(row)
                 .style(move |s| {
                     s.width_full().apply_if(index > 0, |s| {
-                        s.border_top(1.0).border_color(theme::border_muted())
+                        s.border_top(theme::DIVIDER_WIDTH)
+                            .border_color(theme::border_muted())
                     })
                 })
                 .into_any()
@@ -131,16 +132,27 @@ pub(crate) fn row(page: &Page, row: &Row) -> AnyView {
             .items_center()
             .max_width_pct(55.0)
     });
-    Stack::horizontal((words, control))
-        .debug_name(format!("settings-row:{}", row.name))
-        .style(|s| {
-            s.items_center()
-                .width_full()
-                .min_height(60.0)
-                .padding_horiz(theme::CARD_PADDING)
-                .padding_vert(12.0)
-        })
-        .into_any()
+    let main = Stack::horizontal((words, control)).style(|s| {
+        s.items_center()
+            .width_full()
+            .min_height(60.0)
+            .padding_horiz(theme::CARD_PADDING)
+            .padding_vert(12.0)
+    });
+    let content = match &row.preview {
+        Some(preview) => Stack::vertical((
+            main,
+            Container::new(preview()).style(|s| {
+                s.width_full()
+                    .padding_horiz(theme::CARD_PADDING)
+                    .padding_bottom(12.0)
+            }),
+        ))
+        .style(|s| s.width_full())
+        .into_any(),
+        None => main.into_any(),
+    };
+    content.debug_name(format!("settings-row:{}", row.name))
 }
 
 /// The arrow beside a title that takes the key out of the file, so the

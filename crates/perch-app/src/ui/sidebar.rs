@@ -256,7 +256,7 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .padding_left(theme::NAV_GUTTER - SWITCH_PADDING)
             .padding_right(theme::NAV_GUTTER)
             .flex_shrink(0.0_f32)
-            .border_top(1.0)
+            .border_top(theme::DIVIDER_WIDTH)
             .border_color(theme::nav_divider())
     })
 }

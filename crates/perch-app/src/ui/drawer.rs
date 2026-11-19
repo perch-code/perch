@@ -176,7 +176,7 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
             .width(width)
             .background(theme::canvas())
             .border_left(1.0)
-            .border_color(theme::border())
+            .border_color(theme::border_muted())
             .position(Position::Relative)
             .apply_if(sliding, |s| s.overflow_x(floem::taffy::Overflow::Hidden));
         match placement {
@@ -228,7 +228,7 @@ pub fn header_bar(
             .padding_left(12.0)
             .padding_right(8.0)
             .background(theme::canvas())
-            .border_bottom(1.0)
+            .border_bottom(theme::DIVIDER_WIDTH)
             .border_color(theme::border_muted())
     })
 }
