@@ -281,8 +281,8 @@ pub(crate) struct More {
     pub(crate) quote: Option<Quote>,
     /// Post to GitHub, on an agent's answer.
     pub(crate) post: Option<Offered>,
-    /// Copy, of an agent's answer, which has no link to copy.
-    pub(crate) copy: Option<Rc<dyn Fn()>>,
+    /// Copy, of what an agent said, which has no link to copy.
+    pub(crate) copy: Option<Offered>,
     pub(crate) ask: Option<Rc<dyn Fn()>>,
     /// The entry on GitHub; empty for one with no page of its own.
     pub(crate) url: String,
@@ -375,13 +375,19 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
         Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
     };
     let (may_edit, may_delete, may_post) = (offered(&edit), offered(&delete), offered(&post));
+    let may_copy = offered(&copy);
     let may_quote = {
         let may = quote.as_ref().map(|quote| quote.may.clone());
         Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
     };
-    let always = ask.is_some() || copy.is_some() || !url.is_empty();
+    let always = ask.is_some() || !url.is_empty();
     let any = Memo::new(move |_| {
-        always || may_quote.get() || may_post.get() || may_edit.get() || may_delete.get()
+        always
+            || may_quote.get()
+            || may_post.get()
+            || may_copy.get()
+            || may_edit.get()
+            || may_delete.get()
     });
     let up = RwSignal::new(false);
     let scope = quote.as_ref().map(|quote| quote.scope);
@@ -441,7 +447,8 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
                 item.icon(SidebarIcon::PullRequest).action(move || post())
             });
         }
-        if let Some(copy) = copy.clone() {
+        if let Some(copy) = copy.as_ref().filter(|_| may_copy.get_untracked()) {
+            let copy = copy.action.clone();
             menu = menu.item("Copy", |item| {
                 item.icon(SidebarIcon::Copy).action(move || copy())
             });
@@ -573,6 +580,22 @@ pub(crate) fn edit_action(may: impl Fn() -> bool + 'static, edit: Rc<dyn Fn()>) 
     Offered {
         may: Rc::new(may),
         action: edit,
+        asks: false,
+    }
+}
+
+/// Copy in the `⋯` menu, which puts the markdown `text` gives on the
+/// clipboard; there while it gives any.
+pub(crate) fn copy_action(text: impl Fn() -> Option<String> + 'static) -> Offered {
+    let text = Rc::new(text);
+    let has = text.clone();
+    Offered {
+        may: Rc::new(move || has().is_some()),
+        action: Rc::new(move || {
+            if let Some(text) = text() {
+                copy_to_clipboard(text);
+            }
+        }),
         asks: false,
     }
 }

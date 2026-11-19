@@ -351,7 +351,9 @@ Perch's own, such as a question asked at the foot of Conversation. A review's
 findings on an open pull request arrive as drafts already (see Worktree
 reviews), and post only with the review. **Quote reply** on an answer quotes
 it, or the words of it you selected, into the thread's Follow up box, still
-bound for the agent.
+bound for the agent. **Copy** puts an answer's markdown on the clipboard, and is
+there while the agent is still answering and after a run that stopped or
+failed too, with what it had said so far.
 
 A thread ends in **Resolve**, or **Unresolve** once it is resolved. On a
 thread that is on GitHub the button is there wherever GitHub says you may

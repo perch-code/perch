@@ -3397,7 +3397,10 @@ fn local_message_view(
             hovered,
         )
     } else {
-        Empty::new().into_any()
+        match message.run.clone().filter(|_| is_agent) {
+            Some(run) => unsettled_actions(state, run, body.clone(), hovered),
+            None => Empty::new().into_any(),
+        }
     };
     // A run on the reader's question is the answer on its way: it takes a
     // comment of its own under the question, as the answer will.
@@ -3484,6 +3487,7 @@ fn pending_answer_view(
     place: Place,
     private: bool,
 ) -> floem::AnyView {
+    let hovered = RwSignal::new(false);
     let at = run.started_at.unwrap_or(run.queued_at);
     // The model the CLI reports can land after the run starts.
     let live = live_run(state, run.clone());
@@ -3501,15 +3505,61 @@ fn pending_answer_view(
         )
         .into_any(),
         after,
-        Empty::new().into_any(),
+        unsettled_actions(state, run.clone(), String::new(), hovered),
     );
-    comment_frame(
+    let frame = comment_frame(
         face,
         place,
         with_agent_card(agent_avatar(face.avatar()), app, state, live).into_any(),
         byline,
         run_block(app, state, backend, run).into_any(),
-    )
+    );
+    cards::track_hover(frame, hovered).into_any()
+}
+
+/// The `⋯` at the end of an agent's byline while its run goes, or after
+/// it failed or was stopped: Copy alone, of the markdown it has said so
+/// far, there once it has said anything. `body` is the message's own
+/// text where it has any; the run's words otherwise.
+fn unsettled_actions(
+    state: ReviewState,
+    run: RunRecord,
+    body: String,
+    hovered: RwSignal<bool>,
+) -> floem::AnyView {
+    let live = live_run(state, run);
+    let said = Memo::new(move |_| {
+        if !body.trim().is_empty() {
+            return Some(body.clone());
+        }
+        // Finished, its words are the answer's, which has its own Copy.
+        live.with(|run| {
+            run.final_result
+                .clone()
+                .filter(|text| run.status != RunStatus::Completed && !text.trim().is_empty())
+        })
+    });
+    // Absent, not empty, until there is something to copy.
+    let any = Memo::new(move |_| said.with(Option::is_some));
+    let button = dyn_container(
+        move || any.get(),
+        move |any| {
+            if !any {
+                return Empty::new().into_any();
+            }
+            let more = cards::More {
+                copy: Some(cards::copy_action(move || said.get())),
+                ..cards::More::default()
+            };
+            cards::more_button(hovered, more)
+                .style(|s| s.margin_right(-4.0))
+                .into_any()
+        },
+    );
+    Container::new(button)
+        .debug_name("agent-actions")
+        .style(|s| s.items_center().flex_shrink(0.0_f32))
+        .into_any()
 }
 
 /// The `⋯` at the end of an agent's byline, under the pointer only, as a
@@ -3562,7 +3612,7 @@ fn agent_actions(
             None,
         );
     });
-    let copy: Rc<dyn Fn()> = Rc::new(move || crate::ui::widgets::copy_to_clipboard(body.clone()));
+    let copy = cards::copy_action(move || Some(body.clone()));
     // Absent, not greyed, where the message has nowhere to go: a branch,
     // an issue thread with lines, or a closed pull request under a thread
     // whose draft would need a review. The pull request lands after the
@@ -5019,6 +5069,54 @@ mod tests {
     /// turns its line red, and the agent's words show, as they arrive and
     /// not with the next step; and the message holding them is kept, not
     /// built again for each.
+    /// An answer still on its way, or one whose run never finished, has a
+    /// `⋯` with Copy alone once the agent has said anything: the markdown
+    /// it has said so far.
+    #[test]
+    fn an_unfinished_answer_offers_copy_of_what_the_agent_has_said() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages[2].body = String::new();
+        thread.messages[2].run = Some(RunRecord {
+            id: "run-1".into(),
+            status: RunStatus::Running,
+            ..RunRecord::default()
+        });
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let answer = find(harness.root_id(), "agent-actions").expect("the answer has actions");
+        assert!(
+            !cards::more::open(&mut harness, answer),
+            "nothing to copy before the agent says anything"
+        );
+
+        for text in ["**No.**", "It is `not` exposed."] {
+            state.apply_run_event("run-1", &perch_agent::RunEvent::Text(text.into()));
+        }
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(cards::more::rows(&mut harness, answer), ["Copy"]);
+        let _ = crate::ui::widgets::copied();
+        cards::more::pick(&mut harness, answer, "Copy");
+        assert_eq!(
+            crate::ui::widgets::copied(),
+            vec!["**No.**\n\nIt is `not` exposed.".to_string()]
+        );
+    }
+
     #[test]
     fn a_running_run_s_lines_follow_each_event_in_the_message_they_are_in() {
         let root = TestRoot::new();
