@@ -46,8 +46,9 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// sends its host checks. 7: Add repository from what was typed, a path
 /// or a repository to clone. 8: the `clone_root` setting. 9:
 /// `[[knowledge]]` directories, their settings and why one isn't shared.
-/// 10: the per-repository GitHub history setting.
-pub const PROTOCOL: u32 = 10;
+/// 10: the per-repository GitHub history setting. 11: the `[agent] sandbox`
+/// setting.
+pub const PROTOCOL: u32 = 11;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

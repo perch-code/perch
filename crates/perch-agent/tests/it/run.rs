@@ -52,6 +52,7 @@ fn spec(binary: PathBuf, cwd: PathBuf) -> RunSpec {
         resume: None,
         mode: perch_agent::Mode::Ask,
         read_dirs: Vec::new(),
+        sandbox: true,
     }
 }
 
@@ -177,6 +178,7 @@ async fn a_review_keeps_the_raw_stream_and_stderr_when_asked() {
         knowledge_dir: None,
         external_knowledge_dirs: Vec::new(),
         transcript: Some(transcript.clone()),
+        sandbox: true,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let run = Run::spawn_review(spec, tx).unwrap();

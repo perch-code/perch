@@ -47,6 +47,7 @@ and `root`.
 | `[agent] effort` | `"high"` | Effort the picker starts on: `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
 | `[agent] models` | `["fable", "opus", "sonnet", "haiku"]` | Claude models the picker offers |
 | `[agent] max_concurrent_runs` | `4` | Agents running at once (`1` for Gemini); the rest queue |
+| `[agent] sandbox` | `true` | Claude Code's commands run in its sandbox (bubblewrap and socat on Linux). `false` turns it off, for a machine that is itself the boundary such as a throwaway VM: see [Without Claude Code's sandbox](reference.md#without-claude-codes-sandbox) |
 | `[agent.codex] binary` | `"codex"` | Codex executable, a name on `PATH` or a path |
 | `[agent.codex] models` | Codex's own list | Codex models the picker offers |
 | `[agent.gemini] binary` | `"agy"` | Antigravity CLI executable, a name on `PATH` or a path |

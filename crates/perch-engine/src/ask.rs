@@ -412,10 +412,15 @@ pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
 
 /// Why this machine cannot run `backend` at all, said before a run
 /// starts rather than left to the agent's exit: Claude Code on Linux
-/// without bubblewrap and socat for its sandbox. Not in this crate's
-/// tests, whose fake agents need no sandbox and whose CI has neither.
-pub fn host_refusal(backend: perch_agent::Backend) -> Option<String> {
-    if backend == perch_agent::Backend::ClaudeCode && cfg!(target_os = "linux") && !cfg!(test) {
+/// without bubblewrap and socat for its sandbox, unless config turns the
+/// sandbox off (`sandbox` false). Not in this crate's tests, whose fake
+/// agents need no sandbox and whose CI has neither.
+pub fn host_refusal(backend: perch_agent::Backend, sandbox: bool) -> Option<String> {
+    if backend == perch_agent::Backend::ClaudeCode
+        && sandbox
+        && cfg!(target_os = "linux")
+        && !cfg!(test)
+    {
         return perch_agent::linux_sandbox_refusal(std::env::var_os("PATH").as_deref());
     }
     None
@@ -458,6 +463,7 @@ pub fn run_spec(
         // Every discussion's directory is under here, and a question is
         // pointed at its own.
         read_dirs: vec![crate::context::root(&perch_github::config::perch_home())],
+        sandbox: agent.sandbox,
     }
 }
 
@@ -596,8 +602,9 @@ commits when the session began.",
     )
 }
 
-/// [`resumed_commit_note`] for ACP agents (Gemini and OpenCode), which
-/// have no sandbox and ask before each command.
+/// [`resumed_commit_note`] for a run with no sandbox, which asks before
+/// each command: Gemini and OpenCode over ACP, and Claude Code with
+/// `[agent] sandbox = false`.
 pub fn acp_resumed_commit_note() -> String {
     format!(
         "Note from the tool, not the reader: the reader lets Work commit in this repository. {} \
@@ -606,18 +613,25 @@ This replaces what you were told about commits when the session began.",
     )
 }
 
-/// [`work_framing`] for Gemini, whose Work runs through `agy acp` with no
-/// sandbox Perch can shape. Edits inside the worktree go without asking;
-/// every command, every edit elsewhere and every web or MCP call is a
-/// request, decided as `approvals` says.
+/// [`work_framing`] for a Work run with no sandbox: Gemini and OpenCode,
+/// which run over ACP with none Perch can shape, and Claude Code with
+/// `[agent] sandbox = false`. Edits inside the worktree go without
+/// asking; every command, every edit elsewhere and every web or MCP call
+/// is a request, decided as `approvals` says. `auto_reviewer` is whether
+/// the CLI has its own automatic reviewer to decide first under `Auto`,
+/// as Claude Code's auto mode does; the ACP agents have none.
 pub fn acp_work_framing(
     repository: &str,
     branch: &str,
     base: &str,
     commit: bool,
     approvals: perch_github::Approvals,
+    auto_reviewer: bool,
 ) -> String {
     let who = match approvals {
+        perch_github::Approvals::Auto if auto_reviewer => {
+            "an automatic reviewer decides each, and passes to the reader what it will not"
+        }
         perch_github::Approvals::Ask | perch_github::Approvals::Auto => {
             "the reader sees each request and answers it"
         }
@@ -1148,6 +1162,29 @@ mod tests {
         assert!(resumed.starts_with("Note from the tool, not the reader"));
         assert!(resumed.contains("packed-refs.lock"), "{resumed}");
         assert!(!resumed_commit_note(false).contains("packed-refs"));
+    }
+
+    /// A Work run with no sandbox is told every command is a request, and
+    /// who decides it: under Auto, Claude Code's own reviewer first, and
+    /// the reader for an ACP agent, which has none.
+    #[test]
+    fn an_unsandboxed_run_is_told_who_decides_each_command() {
+        let framing = |approvals, reviewer| {
+            acp_work_framing("acme/widgets", "fix", "main", false, approvals, reviewer)
+        };
+        let claude = framing(perch_github::Approvals::Auto, true);
+        assert!(claude.contains("every command you run"), "{claude}");
+        assert!(
+            claude.contains("an automatic reviewer decides each"),
+            "{claude}"
+        );
+        assert!(!claude.contains("sandbox"), "{claude}");
+        let agy = framing(perch_github::Approvals::Auto, false);
+        assert!(agy.contains("the reader sees each request"), "{agy}");
+        assert_eq!(
+            framing(perch_github::Approvals::Ask, true),
+            framing(perch_github::Approvals::Ask, false)
+        );
     }
 
     #[test]

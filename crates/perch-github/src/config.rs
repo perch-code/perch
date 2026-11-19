@@ -145,6 +145,14 @@ pub struct AgentConfig {
     /// remain part of their parent.
     #[serde(default = "default_max_concurrent_runs")]
     pub max_concurrent_runs: usize,
+    /// Whether Claude Code's shell runs in its sandbox: bubblewrap and
+    /// socat on Linux, the system's own on a Mac. On unless the file
+    /// says `false`, for a machine that is itself the boundary, such as
+    /// a throwaway VM. Off, a read-only run keeps its git commands but
+    /// loses the backstop under them, and every command a Work run wants
+    /// is a request.
+    #[serde(default = "default_sandbox")]
+    pub sandbox: bool,
     #[serde(default)]
     pub codex: CodexConfig,
     #[serde(default)]
@@ -254,6 +262,9 @@ fn default_models() -> Vec<String> {
 fn default_max_concurrent_runs() -> usize {
     4
 }
+fn default_sandbox() -> bool {
+    true
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -264,6 +275,7 @@ impl Default for AgentConfig {
             effort: default_effort(),
             models: default_models(),
             max_concurrent_runs: default_max_concurrent_runs(),
+            sandbox: default_sandbox(),
             codex: CodexConfig::default(),
             gemini: GeminiConfig::default(),
             opencode: OpenCodeConfig::default(),

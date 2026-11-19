@@ -1,5 +1,6 @@
 //! Agents: the default model, effort and how many runs at once, then a
-//! card for each CLI with its executable and its models.
+//! card for each CLI with its executable and its models, and for Claude
+//! Code whether its shell runs in its sandbox.
 //!
 //! Two configs meet here. What the file says (`Page::with_config`) is what
 //! the boxes hold, binaries as typed. What Perch found on this machine
@@ -11,7 +12,7 @@ use std::path::Path;
 use floem::prelude::*;
 use perch_github::{AgentBackend, AgentConfig, Setting};
 
-use super::controls::{dropdown, list_line, select, setting_text, split_list};
+use super::controls::{dropdown, list_line, select, setting_text, split_list, toggle};
 use super::{Group, Page, Row};
 use crate::review::threads::{model_groups, model_label};
 use crate::ui::menu::Menu;
@@ -25,10 +26,11 @@ pub(super) fn groups(page: &Page) -> Vec<Group> {
         vec![model(page), effort(page), concurrent_runs(page)],
     )];
     groups.extend(AgentBackend::ALL.into_iter().map(|backend| {
-        Group::new(
-            title(backend),
-            vec![binary(page, backend), models(page, backend)],
-        )
+        let mut rows = vec![binary(page, backend), models(page, backend)];
+        if backend == AgentBackend::Claude {
+            rows.push(sandbox(page));
+        }
+        Group::new(title(backend), rows)
     }));
     groups
 }
@@ -311,6 +313,45 @@ fn binary(page: &Page, backend: AgentBackend) -> Row {
     )
 }
 
+/// `[agent] sandbox`: on unless the file says `false`. Turned back on, the
+/// key comes out of the file.
+fn sandbox(page: &Page) -> Row {
+    let control = {
+        let page = page.clone();
+        move || {
+            let (on_page, enabled, write) = (page.clone(), page.clone(), page.clone());
+            toggle(
+                move || on_page.with_config(|c| c.agent.sandbox),
+                move || enabled.writable(),
+                move |on| write.write(Setting::AgentSandbox((!on).then_some(false))),
+                "settings-claude-sandbox",
+            )
+            .into_any()
+        }
+    };
+    Row::new(
+        "claude-sandbox",
+        "Sandbox",
+        || {
+            "Run Claude Code's commands in its sandbox: bubblewrap and socat on Linux. Turn \
+             it off only where the machine is itself the boundary, such as a throwaway VM. \
+             Off, Work asks before every command, and questions and reviews run their git \
+             commands without that backstop."
+                .to_string()
+        },
+        control,
+    )
+    .keywords(&[
+        "sandbox",
+        "bubblewrap",
+        "bwrap",
+        "socat",
+        "vm",
+        "agent.sandbox",
+    ])
+    .reset("agent.sandbox", Setting::AgentSandbox(None))
+}
+
 fn default_binary(backend: AgentBackend) -> &'static str {
     match backend {
         AgentBackend::Claude => "claude",
@@ -423,6 +464,7 @@ mod tests {
             "agent-runs",
             "claude-binary",
             "claude-models",
+            "claude-sandbox",
             "codex-binary",
             "codex-models",
             "gemini-binary",
@@ -484,6 +526,15 @@ mod tests {
             vec![Setting::AgentMaxConcurrentRuns(Some(6))]
         );
 
+        // The sandbox is on while the file says nothing, and turning it
+        // off writes `false`.
+        assert!(!shown(&harness, "settings-reset:claude-sandbox"));
+        click(&mut harness, "settings-claude-sandbox");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::AgentSandbox(Some(false))]
+        );
+
         // An executable box is blank while the file names none.
         enter_in(&mut harness, "settings-claude-binary", "claudex");
         assert_eq!(
@@ -523,6 +574,20 @@ mod tests {
         let outline = model_menu(&page).outline();
         assert_eq!(outline.last().map(String::as_str), Some("✓ (Mystery)"));
         assert!(outline.iter().any(|row| row.contains("Sol 6.1")));
+    }
+
+    /// Off in the file, the switch is off with a reset, and turning it
+    /// back on takes the key out.
+    #[test]
+    fn a_sandbox_turned_off_is_turned_on_by_taking_the_key_out() {
+        let (mut harness, state, mut commands) =
+            window(1400.0, 1400.0, "[agent]\nsandbox = false\n");
+        state.agent.set(discovered());
+        open_on(&mut harness, state, Section::Agents);
+        assert!(shown(&harness, "settings-reset:claude-sandbox"));
+        click(&mut harness, "settings-claude-sandbox");
+        assert_eq!(written(&mut commands), vec![Setting::AgentSandbox(None)]);
+        settle(&mut harness);
     }
 
     #[test]

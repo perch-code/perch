@@ -1188,7 +1188,8 @@ Perch does not try to detect them; it limits what following one could do.
   own sandbox with no network access and no write access anywhere, the
   worktree included: `git diff --output=` fails like any other write. There
   is no unsandboxed retry, and a machine that cannot start the sandbox
-  refuses to run rather than running without it.
+  refuses to run rather than running without it, unless you turn the
+  sandbox off (see [Without Claude Code's sandbox](#without-claude-codes-sandbox)).
 - **No repository-supplied configuration.** Claude Code reads only
   `~/.claude/settings.json`, never the repository's `.claude/settings*.json`
   or `.mcp.json`, and starts no MCP server. Codex is told the worktree is
@@ -1276,7 +1277,7 @@ saying so, without taking a slot, and questions go on beside it.
 On Linux, Claude Code's sandbox is bubblewrap with socat for its network
 proxy. A Work run or a question on a machine without `bwrap` and `socat` on
 `PATH` is refused before it starts: "Claude Code's sandbox needs bwrap and
-socat on Linux…". Claude Code on Linux also skips the glob that keeps a Work
+socat on Linux…", unless the sandbox is turned off (see below). Claude Code on Linux also skips the glob that keeps a Work
 run from making a `.git` inside the worktree, and on any platform a run can
 move in a directory that already holds one, so Perch looks itself, as a Work
 run starts and again as it ends: a `.git` that appeared below the worktree's
@@ -1291,6 +1292,47 @@ look follows no link out of the worktree and opens nothing but plain files,
 a link or a FIFO counting by what it is, `.gitmodules` included, and goes
 through at most 200,000 folders and hooks in nested repositories: a run that
 takes the worktree past that fails too.
+
+### Without Claude Code's sandbox
+
+On a machine that is itself the boundary, such as a throwaway VM, Claude
+Code's sandbox can be turned off: the **Sandbox** switch under Claude Code in
+**Settings > Agents**, or `[agent] sandbox = false` in the engine's
+config.toml. It is on unless you turn it off, and Perch never turns it off
+by itself: with it on, a machine that cannot start it still refuses the run.
+Off, on any platform:
+
+- Claude Code is started with `sandbox.enabled` false, and Perch no longer
+  looks for `bwrap` and `socat` or refuses a run without them. The
+  **bubblewrap and socat** host check reads **Off** rather than **Needs
+  setup**.
+- A question, a native review and a verifier keep their tool lists, so the
+  shell runs `git diff`, `git log`, `git show` and `git blame`, and the
+  read-only commands Claude Code allows by itself, such as `ls` and `cat`,
+  but nothing stops what those can do as you. Perch denies the git
+  commands' `--output`, which would write a file anywhere you can; the
+  network is no longer shut off for them.
+- A Work run asks before every other command, since no sandbox lets one run
+  without asking: Claude Code's auto reviewer decides first under
+  Auto-review, you decide under Ask me, and Allow all allows each without
+  asking. The commit grant answers a `git commit` as it does for Gemini and
+  OpenCode. Edits stay scoped to the worktree, its protected paths (`.git`,
+  `.claude`, `.codex`, `.mcp.json` and the rest) stay denied to the editing
+  tools, and the `.git` check as a run starts and ends still runs, but a
+  command you allow can write anywhere you can, and reach any host. The run
+  is told so in its framing, as a Gemini or OpenCode run is.
+- `Bash` rules your own `~/.claude/settings.json` allows (and, for a Work
+  run in a repository you trust, its `.claude/settings.json` and
+  `.claude/settings.local.json`, including the main checkout's when running
+  in a linked worktree) would otherwise run their commands unsandboxed and
+  unasked. Perch passes each as an `ask` rule, which outranks an allow: a
+  Work run asks for it, and a question or review, with no one to ask, is
+  refused it. A settings file Perch can't read as JSON makes every command
+  ask. A bare `Bash` allow rule, or a broader prefix rule such as
+  `Bash(git *)`, therefore takes the git commands away from questions and
+  reviews.
+
+Codex, Gemini and OpenCode are not affected.
 
 ### Approvals
 
@@ -1786,7 +1828,8 @@ app's own engine](#the-apps-own-engine)), so nothing of Perch's has to be
 put on it first. On it:
 
 1. On Linux, install bubblewrap and socat (`apt install bubblewrap socat`,
-   or your distribution's), which Claude Code's sandbox needs there.
+   or your distribution's), which Claude Code's sandbox needs there, or
+   turn the sandbox off (see [Without Claude Code's sandbox](#without-claude-codes-sandbox)).
 2. Sign in to what the engine uses, as the user it runs as: `gh auth login`
    (or `token` in its config.toml), and each agent CLI you run, `claude`,
    `codex`, `agy` or `opencode`. Nothing is copied from the Mac.
@@ -1864,6 +1907,8 @@ the same list. It checks:
   -g @openai/codex`; agy points at its documentation.
 - **bubblewrap and socat** (required, on Linux with Claude Code): both on
   `PATH`, for Claude Code's sandbox. Fix: the package manager's install.
+  With the sandbox turned off in config, it reads **Off**, on any platform,
+  and never needs setup.
 - **logind** (required, on Linux): `loginctl show-session` says logind
   does not kill the user's processes at logout. Fix: a drop-in that adds
   the user to `KillExcludeUsers`, then a restart of `systemd-logind`. With

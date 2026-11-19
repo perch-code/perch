@@ -265,8 +265,8 @@ impl Held {
 }
 
 /// Whether discovery has to run again between two of the file's `[agent]`
-/// tables: a binary or a model list changed. The model, effort and run
-/// limit are patched onto what discovery found instead.
+/// tables: a binary or a model list changed. The model, effort, run
+/// limit and sandbox are patched onto what discovery found instead.
 fn needs_discovery(before: &AgentConfig, after: &AgentConfig) -> bool {
     before.binary != after.binary
         || before.models != after.models
@@ -278,12 +278,14 @@ fn needs_discovery(before: &AgentConfig, after: &AgentConfig) -> bool {
         || before.opencode.models != after.opencode.models
 }
 
-/// What discovery found, with the file's own model, effort and run limit.
+/// What discovery found, with the file's own model, effort, run limit
+/// and sandbox.
 fn patched(discovered: &AgentConfig, file: &AgentConfig) -> AgentConfig {
     let mut agent = discovered.clone();
     agent.model = file.model.clone();
     agent.effort = file.effort.clone();
     agent.max_concurrent_runs = file.max_concurrent_runs;
+    agent.sandbox = file.sandbox;
     crate::ask::settle_model(&mut agent);
     agent
 }

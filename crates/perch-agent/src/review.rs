@@ -15,8 +15,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    claude_settings_with_dirs, denied_tools, toml_string, Backend, Transcript, ORCHESTRATION_TOOLS,
-    READ_ONLY_TOOLS,
+    claude_settings_with_dirs, claude_unsandboxed_settings_for, read_only_denied, toml_string,
+    Backend, Transcript, ORCHESTRATION_TOOLS, READ_ONLY_BASH_RULES, READ_ONLY_TOOLS,
 };
 
 /// Bumped when the extractor learns a format. 2 reads the report Claude
@@ -362,6 +362,9 @@ pub struct ReviewSpec {
     pub external_knowledge_dirs: Vec<PathBuf>,
     /// Where to keep the CLI's raw output for diagnosis, if anywhere.
     pub transcript: Option<Transcript>,
+    /// Whether Claude Code's shell runs in its sandbox: `[agent]
+    /// sandbox`. Claude Code only.
+    pub sandbox: bool,
 }
 
 /// What a review of a pull request is told to do with its discussion.
@@ -575,6 +578,7 @@ impl ReviewSpec {
         claude_isolation_args(
             &self.cwd,
             &dirs,
+            self.sandbox,
             &self.model,
             self.effort,
             ORCHESTRATION_TOOLS,
@@ -600,6 +604,9 @@ pub struct ReviewVerificationSpec {
     pub prompt: String,
     /// Where to keep the CLI's raw output for diagnosis, if anywhere.
     pub transcript: Option<Transcript>,
+    /// Whether Claude Code's shell runs in its sandbox: `[agent]
+    /// sandbox`. Claude Code only.
+    pub sandbox: bool,
 }
 
 impl ReviewVerificationSpec {
@@ -705,6 +712,7 @@ impl ReviewVerificationSpec {
         claude_isolation_args(
             &self.cwd,
             &[],
+            self.sandbox,
             &self.model,
             self.effort,
             &[],
@@ -771,10 +779,14 @@ fn codex_isolation_args(
 
 /// The whole Claude Code argv for a native review or a verifier: read-only
 /// tools, plus `extra_tools`, then the prompt. `dirs` are readable beside
-/// `cwd`, and no more writable than it.
+/// `cwd`, and no more writable than it. Without the sandbox (`sandbox`
+/// false, from `[agent] sandbox`), the git commands lose `--output`
+/// instead (see [`crate::UNSANDBOXED_READ_DENIED`]).
+#[allow(clippy::too_many_arguments)]
 fn claude_isolation_args(
     cwd: &Path,
     dirs: &[PathBuf],
+    sandbox: bool,
     model: &str,
     effort: ReviewEffort,
     extra_tools: &[&str],
@@ -785,7 +797,8 @@ fn claude_isolation_args(
         // Safe mode disables CLAUDE.md, skills, plugins, hooks, MCP,
         // commands, and agents from the repository. The strict MCP flag
         // provides a second fail-closed boundary for process spawning,
-        // and the sandbox settings keep the shell offline and read-only.
+        // and the sandbox settings keep the shell offline and read-only,
+        // unless config turns the sandbox off.
         "--safe-mode".into(),
         // Safe mode still merges the repository's own settings files
         // (`permissions`, `env`, sandbox exclusions) beside `--settings`,
@@ -795,7 +808,23 @@ fn claude_isolation_args(
         "--strict-mcp-config".into(),
         "--no-session-persistence".into(),
         "--settings".into(),
-        claude_settings_with_dirs(cwd, dirs),
+        if sandbox {
+            claude_settings_with_dirs(cwd, dirs)
+        } else {
+            // The user's own `Bash` rules would run unsandboxed and
+            // unasked; as `ask` rules they are refused, as `dontAsk`
+            // refuses what it would ask about.
+            claude_unsandboxed_settings_for(
+                &crate::claude_user_settings_file()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                &READ_ONLY_BASH_RULES
+                    .iter()
+                    .chain(extra_tools)
+                    .copied()
+                    .collect::<Vec<_>>(),
+            )
+        },
     ];
     // `--add-dir` takes every value up to the next option, so an option
     // follows it.
@@ -824,7 +853,7 @@ fn claude_isolation_args(
             .map(|tool| (*tool).to_string()),
     );
     args.push("--disallowedTools".into());
-    args.extend(denied_tools());
+    args.extend(read_only_denied(sandbox));
     args.push("--".into());
     args.push(prompt);
     args
@@ -2125,6 +2154,7 @@ mod tests {
             knowledge_dir: None,
             external_knowledge_dirs: Vec::new(),
             transcript: None,
+            sandbox: true,
         }
     }
 
@@ -2143,6 +2173,7 @@ mod tests {
             diff_path: None,
             prompt: "--structured verifier prompt".into(),
             transcript: None,
+            sandbox: true,
         }
     }
 
@@ -2456,7 +2487,7 @@ mod tests {
         ];
         expected.extend(READ_ONLY_TOOLS.iter().map(|tool| (*tool).to_string()));
         expected.push("--disallowedTools".into());
-        expected.extend(denied_tools());
+        expected.extend(crate::denied_tools());
         expected.extend(["--".into(), "--structured verifier prompt".into()]);
         assert_eq!(args, expected);
         assert!(!args.iter().any(|arg| {
@@ -2464,6 +2495,34 @@ mod tests {
                 .iter()
                 .any(|orchestration| arg == orchestration)
         }));
+    }
+
+    /// With `[agent] sandbox = false`, a review and a verifier name the
+    /// sandbox off rather than failing without it, and keep their git
+    /// commands from writing with `--output`. Everything else stays.
+    #[test]
+    fn claude_review_without_the_sandbox_denies_git_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut review = review_spec(Backend::ClaudeCode, dir.path().into());
+        review.output_schema = None;
+        let mut verifier = verification_spec(Backend::ClaudeCode);
+        let sandboxed = [review.args(), verifier.args()];
+        review.sandbox = false;
+        verifier.sandbox = false;
+        for (args, before) in [review.args(), verifier.args()].iter().zip(&sandboxed) {
+            let settings = args.iter().position(|a| a == "--settings").unwrap() + 1;
+            let settings: serde_json::Value = serde_json::from_str(&args[settings]).unwrap();
+            assert_eq!(settings["sandbox"]["enabled"], false);
+            assert!(args.iter().any(|a| a == "--safe-mode"));
+            let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            for rule in crate::UNSANDBOXED_READ_DENIED {
+                assert!(args[denied..].iter().any(|a| a == rule), "{rule}");
+                assert!(!before.iter().any(|a| a == rule), "{rule}");
+            }
+            for tool in READ_ONLY_TOOLS {
+                assert!(args[..denied].iter().any(|a| a == tool), "{tool}");
+            }
+        }
     }
 
     #[test]

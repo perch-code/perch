@@ -1226,6 +1226,7 @@ async fn execute_attempt(
         knowledge_dir,
         external_knowledge_dirs,
         transcript: Some(transcript(captured.root(), &attempt.id, "review")),
+        sandbox: ctx.config().agent.sandbox,
     };
 
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Reviewing);
@@ -2127,6 +2128,7 @@ async fn run_verification(
         diff_path: Some(snapshot.diff_path()),
         prompt,
         transcript: Some(transcript(snapshot.root(), &attempt.id, "verification")),
+        sandbox: ctx.config().agent.sandbox,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = match perch_agent::Run::spawn_review_verification(spec, tx) {

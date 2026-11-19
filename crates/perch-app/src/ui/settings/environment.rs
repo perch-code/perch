@@ -154,7 +154,10 @@ fn check_description(check: &HostCheck) -> String {
         None if check.ok && check.what == "logind" => {
             "The host keeps agent runs alive after SSH disconnects.".into()
         }
-        None if check.ok && check.what == "bubblewrap and socat" => {
+        None if check.ok
+            && check.what == perch_engine::host::SANDBOX
+            && check.detail != perch_engine::host::SANDBOX_OFF =>
+        {
             "bubblewrap and socat are available.".into()
         }
         None => check.detail.clone(),
@@ -163,6 +166,10 @@ fn check_description(check: &HostCheck) -> String {
 
 /// How a check stands, in a word.
 fn check_mark(check: &HostCheck) -> &'static str {
+    if check.what == perch_engine::host::SANDBOX && check.detail == perch_engine::host::SANDBOX_OFF
+    {
+        return "Off";
+    }
     match (check.ok, check.required) {
         (true, _) => "Ready",
         (false, true) => "Needs setup",
@@ -252,7 +259,7 @@ fn host_check(page: &Page, check: &HostCheck) -> Row {
             "git" => "Git",
             "GitHub token" => "GitHub authentication",
             "agy (Gemini)" => "Gemini (Antigravity CLI)",
-            "bubblewrap and socat" => "Claude Code sandbox",
+            perch_engine::host::SANDBOX => "Claude Code sandbox",
             "logind" => "Keep running after SSH disconnects",
             other => other,
         }
@@ -268,6 +275,7 @@ fn host_check(page: &Page, check: &HostCheck) -> Row {
         "logind" => &["logind", "systemd"],
         "GitHub token" => &["token"],
         "agy (Gemini)" => &["agy"],
+        perch_engine::host::SANDBOX => &["bubblewrap", "bwrap", "socat", "sandbox"],
         _ => &[],
     })
     .keywords(&["host", "setup", "check", "missing", "install", "perchd"])
@@ -297,6 +305,27 @@ mod tests {
         check.detail = "git version 2.43.0.".into();
         assert_eq!(check_description(&check), "git version 2.43.0.");
         assert_eq!(check_mark(&check), "Ready");
+    }
+
+    /// A sandbox turned off in config says so, marked Off, not Ready.
+    #[test]
+    fn a_sandbox_turned_off_is_marked_off() {
+        let mut check = HostCheck {
+            what: perch_engine::host::SANDBOX.into(),
+            ok: true,
+            required: false,
+            detail: perch_engine::host::SANDBOX_OFF.into(),
+            fix: None,
+        };
+        assert_eq!(check_mark(&check), "Off");
+        assert_eq!(check_description(&check), perch_engine::host::SANDBOX_OFF);
+        check.required = true;
+        check.detail = "On PATH, for Claude Code's sandbox.".into();
+        assert_eq!(check_mark(&check), "Ready");
+        assert_eq!(
+            check_description(&check),
+            "bubblewrap and socat are available."
+        );
     }
 
     /// The check for a repository, failing, has a button to the page that

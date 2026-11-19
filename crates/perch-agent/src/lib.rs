@@ -162,7 +162,9 @@ impl std::fmt::Display for Effort {
 /// The tools a read-only run may use. In print mode anything not on the
 /// list is denied without asking, and the denial arrives as an event. The
 /// shell commands run inside Claude Code's sandbox as well, see
-/// [`claude_settings`]. `rg` is not here: `rg --pre` runs any program.
+/// [`claude_settings`], unless config turns it off, when
+/// [`UNSANDBOXED_READ_DENIED`] takes its place for what they could
+/// write. `rg` is not here: `rg --pre` runs any program.
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "Read",
     "Glob",
@@ -174,6 +176,25 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "Bash(git blame:*)",
 ];
 
+/// The `Bash` rules a read-only run allows itself, in both the legacy `:*`
+/// spelling and Claude Code 2.x's space-wildcard and exact forms, so a
+/// user's own settings allowing them are not turned into `ask` rules when
+/// the sandbox is off.
+pub const READ_ONLY_BASH_RULES: &[&str] = &[
+    "Bash(git diff:*)",
+    "Bash(git diff *)",
+    "Bash(git diff)",
+    "Bash(git log:*)",
+    "Bash(git log *)",
+    "Bash(git log)",
+    "Bash(git show:*)",
+    "Bash(git show *)",
+    "Bash(git show)",
+    "Bash(git blame:*)",
+    "Bash(git blame *)",
+    "Bash(git blame)",
+];
+
 /// Tools that change files, named so that no setting of the user's can let
 /// them through.
 const WRITING_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
@@ -181,6 +202,31 @@ const WRITING_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// Tools that reach the network from inside Claude Code itself, where the
 /// shell sandbox does not apply. Denied by name for the same reason.
 const NETWORK_TOOLS: &[&str] = &["WebFetch", "WebSearch"];
+
+/// What a read-only run without Claude Code's sandbox is denied as well
+/// as [`denied_tools`]: the allowed git commands with `--output`, which
+/// writes the output to any path the user can write. The sandbox refuses
+/// that write; without it `Bash(git diff:*)` lets it through, and these
+/// rules stop it (both checked with Claude Code 2.1.327, the option
+/// right after the subcommand or later, with `=` or a space). Git takes
+/// no abbreviation of `--output` for these. `git blame` has no such
+/// option.
+pub const UNSANDBOXED_READ_DENIED: &[&str] = &[
+    "Bash(git diff *--output*)",
+    "Bash(git log *--output*)",
+    "Bash(git show *--output*)",
+];
+
+/// What a read-only run is denied: [`denied_tools`], and without the
+/// sandbox [`UNSANDBOXED_READ_DENIED`] too.
+pub fn read_only_denied(sandbox: bool) -> impl Iterator<Item = String> {
+    denied_tools().chain(
+        UNSANDBOXED_READ_DENIED
+            .iter()
+            .filter(move |_| !sandbox)
+            .map(|rule| (*rule).to_string()),
+    )
+}
 
 /// Everything a run is denied, whatever the user's settings allow.
 pub fn denied_tools() -> impl Iterator<Item = String> {
@@ -234,6 +280,110 @@ pub fn claude_settings_with_dirs(cwd: &std::path::Path, dirs: &[PathBuf]) -> Str
         },
     })
     .to_string()
+}
+
+/// The `--settings` a Claude Code run starts with when config turns its
+/// sandbox off (`[agent] sandbox = false`): the sandbox named off, so a
+/// user's own `~/.claude/settings.json` that turns it on, and refuses
+/// without it, does not stop the run. What a command may do is then the
+/// tool lists' and the reader's to say: a read-only run's git commands
+/// lose `--output` (see [`read_only_denied`]), and every command a Work
+/// run wants is a request, as no sandbox lets it run without asking.
+///
+/// `ask` is the `Bash` rules the settings files the run reads allow
+/// beyond Perch's own (see [`settings_bash_allows`]). With the sandbox
+/// on, a command one of them lets through still runs in the sandbox;
+/// without it, it would run as the user, unasked. An `ask` rule outranks
+/// an `allow` from another source (checked with Claude Code 2.1.327), so the
+/// command comes to Perch in a Work run and is refused in a read-only
+/// one, which has no one to ask.
+pub fn claude_unsandboxed_settings(ask: &[String]) -> String {
+    let mut settings = serde_json::json!({
+        "sandbox": {
+            "enabled": false,
+        },
+    });
+    if !ask.is_empty() {
+        settings["permissions"] = serde_json::json!({ "ask": ask });
+    }
+    settings.to_string()
+}
+
+/// Claude Code's own settings file, which every run reads
+/// (`--setting-sources user`): `$CLAUDE_CONFIG_DIR/settings.json`, else
+/// `~/.claude/settings.json`.
+pub fn claude_user_settings_file() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir).join("settings.json")),
+        None => {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude/settings.json"))
+        }
+    }
+}
+
+/// The settings files a Claude Code run reads: the user's, and for a
+/// Work run in a repository the reader trusts, the repository's own
+/// (including the main checkout's `.claude/settings.local.json` when `cwd`
+/// is a linked worktree, which Claude Code canonicalizes `localSettings`
+/// to).
+fn claude_settings_files(cwd: &std::path::Path, trusted: bool) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = claude_user_settings_file().into_iter().collect();
+    if trusted {
+        files.push(cwd.join(".claude/settings.json"));
+        files.push(cwd.join(".claude/settings.local.json"));
+        if let Some(common) = linked_git_dirs(cwd).into_iter().last() {
+            if common.file_name().is_some_and(|name| name == ".git") {
+                if let Some(main_root) = common.parent() {
+                    let main_local = main_root.join(".claude/settings.local.json");
+                    if !files.contains(&main_local) {
+                        files.push(main_local);
+                    }
+                }
+            }
+        }
+    }
+    files
+}
+
+/// The `Bash` rules `files` allow (`permissions.allow`), less `ours`, the
+/// ones Perch allows the run itself. A file that is there but can't be
+/// read as settings gives `Bash`, every command, as Perch can't tell what
+/// Claude Code makes of it. Missing files give nothing.
+pub fn settings_bash_allows(files: &[PathBuf], ours: &[&str]) -> Vec<String> {
+    let mut rules: Vec<String> = Vec::new();
+    for file in files {
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                rules.push("Bash".into());
+                continue;
+            }
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            rules.push("Bash".into());
+            continue;
+        };
+        let allowed = value
+            .pointer("/permissions/allow")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|rule| *rule == "Bash" || rule.starts_with("Bash("))
+            .filter(|rule| !ours.contains(rule));
+        rules.extend(allowed.map(str::to_string));
+    }
+    rules.sort();
+    rules.dedup();
+    rules
+}
+
+/// [`claude_unsandboxed_settings`] for a run reading `files`, of which
+/// `ours` are allowed by Perch itself.
+pub fn claude_unsandboxed_settings_for(files: &[PathBuf], ours: &[&str]) -> String {
+    claude_unsandboxed_settings(&settings_bash_allows(files, ours))
 }
 
 /// What a run may do.
@@ -774,7 +924,7 @@ pub fn linux_sandbox_refusal(path: Option<&std::ffi::OsStr>) -> Option<String> {
         _ => "neither".to_string(),
     };
     Some(format!(
-        "Claude Code's sandbox needs bwrap and socat on Linux, and this machine has {lacks} on PATH. Install bubblewrap and socat, then run it again."
+        "Claude Code's sandbox needs bwrap and socat on Linux, and this machine has {lacks} on PATH. Install bubblewrap and socat, then run it again — or, on a machine that is itself the boundary such as a throwaway VM, turn the sandbox off in Settings > Agents."
     ))
 }
 
@@ -813,6 +963,9 @@ pub struct RunSpec {
     pub mode: Mode,
     /// Directories outside `cwd` the run is given to read.
     pub read_dirs: Vec<PathBuf>,
+    /// Whether Claude Code's shell runs in its sandbox: `[agent]
+    /// sandbox`. Claude Code only; the other CLIs keep their own.
+    pub sandbox: bool,
 }
 
 impl RunSpec {
@@ -912,18 +1065,33 @@ impl RunSpec {
         ]);
         let (allowed, denied): (Vec<String>, Vec<String>) = match &self.mode {
             Mode::Ask => {
-                args.extend(isolation_args_with(claude_settings_with_dirs(
-                    &self.cwd,
-                    &self.read_dirs,
-                )));
+                args.extend(isolation_args_with(if self.sandbox {
+                    claude_settings_with_dirs(&self.cwd, &self.read_dirs)
+                } else {
+                    claude_unsandboxed_settings_for(
+                        &claude_settings_files(&self.cwd, false),
+                        READ_ONLY_BASH_RULES,
+                    )
+                }));
                 (
                     READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
-                    denied_tools().collect(),
+                    read_only_denied(self.sandbox).collect(),
                 )
             }
             Mode::Work(grant) => {
-                let settings =
-                    claude_work_settings_with_dirs(&self.cwd, grant, &self.read_dirs, GLOBS_HOLD);
+                // Without the sandbox, `Bash` stays off the allowed list,
+                // so each command comes to Perch, or to the CLI's own
+                // reviewer first, as a request.
+                // A trusted repository's own settings are read too, and
+                // their `Bash` rules come to Perch like the user's.
+                let settings = if self.sandbox {
+                    claude_work_settings_with_dirs(&self.cwd, grant, &self.read_dirs, GLOBS_HOLD)
+                } else {
+                    claude_unsandboxed_settings_for(
+                        &claude_settings_files(&self.cwd, grant.trust),
+                        &[],
+                    )
+                };
                 if grant.trust {
                     args.extend(trusted_args_with(&self.cwd, settings));
                 } else {
@@ -2507,6 +2675,7 @@ mod tests {
             binary: "claude".into(),
             model: "sonnet".into(),
             read_dirs: Vec::new(),
+            sandbox: true,
             effort: Effort::High,
             cwd: "/tmp".into(),
             prompt: "why?".into(),
@@ -2561,6 +2730,7 @@ mod tests {
             binary: "claude".into(),
             model: "sonnet".into(),
             read_dirs: Vec::new(),
+            sandbox: true,
             effort: Effort::Medium,
             cwd: "/tmp".into(),
             prompt: "and?".into(),
@@ -2629,6 +2799,7 @@ mod tests {
             binary: "agent".into(),
             model: "m".into(),
             read_dirs: Vec::new(),
+            sandbox: true,
             effort: Effort::High,
             cwd: "/tmp".into(),
             prompt: "do it".into(),
@@ -2658,6 +2829,145 @@ mod tests {
                 assert!(!arg.contains(bad), "{bad} in {arg}");
             }
         }
+    }
+
+    /// With `[agent] sandbox = false`, a Claude Code run names the
+    /// sandbox off instead of refusing without it. A question keeps its
+    /// git commands but not their `--output`; a Work run keeps `Bash` off
+    /// its allowed list, so every command is a request, and its edits
+    /// stay scoped to the worktree.
+    #[test]
+    fn claude_without_the_sandbox_turns_it_off_and_keeps_the_lists() {
+        let mut ask = work(Backend::ClaudeCode, WorkGrant::default(), None);
+        ask.mode = Mode::Ask;
+        ask.sandbox = false;
+        let args = ask.args();
+        // What `permissions` holds is the user's own file's, tested below.
+        assert_eq!(
+            settings_of(&args)["sandbox"],
+            serde_json::json!({"enabled": false})
+        );
+        let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        for tool in READ_ONLY_TOOLS {
+            assert!(args[..denied].iter().any(|a| a == tool), "{tool}");
+        }
+        for rule in UNSANDBOXED_READ_DENIED.iter().chain(WRITING_TOOLS) {
+            assert!(args[denied..].iter().any(|a| a == rule), "{rule}");
+        }
+        ask.sandbox = true;
+        let sandboxed = ask.args();
+        assert_eq!(
+            settings_of(&sandboxed)["sandbox"]["failIfUnavailable"],
+            true
+        );
+        assert!(!sandboxed.iter().any(|a| a.contains("*--output*")));
+
+        for trust in [false, true] {
+            let mut run = work(
+                Backend::ClaudeCode,
+                WorkGrant {
+                    trust,
+                    ..full_grant()
+                },
+                None,
+            );
+            run.sandbox = false;
+            let args = run.args();
+            assert_eq!(
+                settings_of(&args)["sandbox"],
+                serde_json::json!({"enabled": false})
+            );
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["--permission-prompt-tool", "stdio"]));
+            let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
+            let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            assert!(!args[allowed..denied].iter().any(|a| a.starts_with("Bash")));
+            assert!(args[allowed..denied].iter().any(|a| a == "Edit(//tmp/**)"));
+            assert!(args[denied..].iter().any(|a| a == "WebFetch"));
+            assert!(!args
+                .iter()
+                .any(|a| a.contains("dangerously") || a.contains("bypass")));
+        }
+    }
+
+    /// Without the sandbox, the `Bash` rules the settings files allow
+    /// become `ask` rules, but for Perch's own; a file Perch can't read
+    /// makes every command one, and a missing file adds nothing.
+    #[test]
+    fn unsandboxed_settings_ask_for_what_the_user_s_files_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("settings.json");
+        std::fs::write(
+            &user,
+            r#"{"permissions": {"allow": ["Bash(npm test:*)", "Bash(git diff:*)", "Bash(git diff *)", "Bash(git log)", "Read", " Bash ", "WebFetch"], "deny": ["Bash(rm:*)"]}}"#,
+        )
+        .unwrap();
+        let project = dir.path().join("project.json");
+        std::fs::write(
+            &project,
+            r#"{"permissions": {"allow": ["Bash(npm test:*)", "Bash(make:*)"]}}"#,
+        )
+        .unwrap();
+        let missing = dir.path().join("missing.json");
+        assert_eq!(
+            settings_bash_allows(
+                &[user.clone(), project.clone(), missing.clone()],
+                READ_ONLY_BASH_RULES
+            ),
+            ["Bash", "Bash(make:*)", "Bash(npm test:*)"]
+        );
+        // A Work run allows no command itself, so a git rule asks too.
+        assert!(settings_bash_allows(std::slice::from_ref(&user), &[])
+            .contains(&"Bash(git diff:*)".to_string()));
+        assert!(settings_bash_allows(std::slice::from_ref(&user), &[])
+            .contains(&"Bash(git diff *)".to_string()));
+        assert!(settings_bash_allows(std::slice::from_ref(&missing), &[]).is_empty());
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, "{ not json").unwrap();
+        assert_eq!(settings_bash_allows(&[broken], &[]), ["Bash"]);
+
+        let settings: serde_json::Value = serde_json::from_str(&claude_unsandboxed_settings_for(
+            &[project],
+            READ_ONLY_BASH_RULES,
+        ))
+        .unwrap();
+        assert_eq!(
+            settings,
+            serde_json::json!({
+                "sandbox": {"enabled": false},
+                "permissions": {"ask": ["Bash(make:*)", "Bash(npm test:*)"]},
+            })
+        );
+        assert_eq!(
+            claude_unsandboxed_settings_for(&[missing], READ_ONLY_BASH_RULES),
+            r#"{"sandbox":{"enabled":false}}"#
+        );
+
+        // In a linked worktree of a trusted repository, Claude Code also
+        // reads the main checkout's `.claude/settings.local.json`, so its
+        // `Bash` rules become `ask` rules too.
+        let main = dir.path().join("main");
+        let wt_git = main.join(".git/worktrees/wt");
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(main.join(".claude")).unwrap();
+        std::fs::create_dir_all(&wt_git).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+        std::fs::write(
+            main.join(".claude/settings.local.json"),
+            r#"{"permissions": {"allow": ["Bash(cargo test:*)"]}}"#,
+        )
+        .unwrap();
+        let files = claude_settings_files(&wt, true);
+        let main_local = real_path(&main).join(".claude/settings.local.json");
+        assert!(files.contains(&main_local), "{files:?}");
+        assert!(
+            settings_bash_allows(&files, &[]).contains(&"Bash(cargo test:*)".to_string()),
+            "{files:?}"
+        );
+        assert!(!claude_settings_files(&wt, false).contains(&main_local));
     }
 
     fn settings_of(args: &[String]) -> serde_json::Value {
@@ -3369,6 +3679,7 @@ mod tests {
             binary: "claude".into(),
             model: "opus".into(),
             read_dirs: Vec::new(),
+            sandbox: true,
             effort,
             cwd: "/tmp".into(),
             prompt: "why?".into(),
@@ -3419,6 +3730,7 @@ mod tests {
             binary: "codex".into(),
             model: "gpt-5.6-sol".into(),
             read_dirs: Vec::new(),
+            sandbox: true,
             effort: Effort::High,
             cwd: "/tmp/w t".into(),
             prompt: "why?".into(),
@@ -3522,6 +3834,7 @@ mod tests {
             binary: "agy".into(),
             model: "gemini-4-carbon".into(),
             read_dirs: Vec::new(),
+            sandbox: true,
             effort: Effort::Ultra,
             cwd: cwd.to_path_buf(),
             prompt: "Why?".into(),
@@ -3640,6 +3953,7 @@ mod tests {
             "{said}"
         );
         assert!(said.contains("has neither on PATH"), "{said}");
+        assert!(said.contains("Settings > Agents"), "{said}");
         let said = linux_sandbox_refusal(Some(&path(&[bwrap.path()]))).unwrap();
         assert!(said.contains("has no socat on PATH"), "{said}");
         assert_eq!(
@@ -3702,6 +4016,7 @@ mod tests {
             binary: "opencode".into(),
             model: "provider/model".into(),
             read_dirs: Vec::new(),
+            sandbox: true,
             effort: Effort::High,
             cwd: dir.path().to_path_buf(),
             prompt: "Why?".into(),

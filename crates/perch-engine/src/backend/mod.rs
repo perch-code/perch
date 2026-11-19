@@ -18815,8 +18815,11 @@ async fn ask_as(
         ctx.notice("There is no checkout to ask in");
         return;
     }
+    // Read once, so the framing, the commit note and the process agree
+    // when config.toml changes while the run is set up.
+    let sandbox = ctx.config().agent.sandbox;
     let work = if mode == RunMode::Work {
-        match work_setup(ctx, &item, backend, committer) {
+        match work_setup(ctx, &item, backend, committer, sandbox) {
             Ok(work) => Some(work),
             Err(message) => {
                 ctx.notice(message);
@@ -19056,10 +19059,7 @@ async fn ask_as(
     // may have let Work commit since.
     if let (Some((perch_agent::Mode::Work(grant), _, _)), None) = (&work, &prompt.system) {
         if grant.commit {
-            let note = if matches!(
-                backend,
-                perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode
-            ) {
+            let note = if unsandboxed(backend, sandbox) {
                 crate::ask::acp_resumed_commit_note()
             } else {
                 crate::ask::resumed_commit_note(packed_refs_closed(backend, &checkout.worktree))
@@ -19081,6 +19081,7 @@ async fn ask_as(
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
+    spec.sandbox = sandbox;
     read_dirs.extend(external_knowledge_dirs.iter().cloned());
     spec.read_dirs = read_dirs;
     // Queue time begins at admission, after local prompt preparation. This
@@ -19132,7 +19133,8 @@ async fn ask_as(
 /// request is denied if they have not answered in `approval_timeout`.
 /// The setting is read now, not when the run started, so turning it on
 /// or off holds for the next request. `nested` is the worktree and the
-/// `.git`s below its top as the run started.
+/// `.git`s below its top as the run started, and `sandboxed` whether
+/// Claude Code's sandbox was on for it.
 #[allow(clippy::too_many_arguments)]
 async fn on_approval(
     ctx: &Ctx,
@@ -19143,6 +19145,7 @@ async fn on_approval(
     id: &str,
     request: &perch_agent::ApprovalRequest,
     nested: Option<(&Path, &crate::nested_git::Nested)>,
+    sandboxed: bool,
 ) {
     let repo = ctx
         .item(item_id)
@@ -19172,6 +19175,7 @@ async fn on_approval(
         && git_write
         && match commit_grant_answers(
             perch_agent::Backend::parse(&run.backend),
+            sandboxed,
             run.working_directory.as_deref().map(Path::new),
             nested,
         )
@@ -19253,22 +19257,21 @@ async fn on_approval(
 /// asked about, always. Their run goes on acting inside the sandbox
 /// while git runs, so it can stage a submodule and move a repository in
 /// after any look, and git would run that repository's `core.fsmonitor`
-/// outside the sandbox. Gemini and OpenCode run over ACP with no sandbox
-/// and ask before each command, so nothing changes the worktree between
+/// outside the sandbox. Gemini and OpenCode run over ACP with no sandbox,
+/// and so does Claude Code with its sandbox off (`sandboxed` false, as
+/// the run was started), and they ask before each command, so nothing changes the worktree between
 /// the look and git that the reader didn't allow. There a commit that
 /// would run hooks is asked about (they may be what the run wrote), and
 /// so is one where a `.git` appeared or changed below the top since the
 /// run started.
 async fn commit_grant_answers(
     backend: Option<perch_agent::Backend>,
+    sandboxed: bool,
     worktree: Option<&Path>,
     nested: Option<(&Path, &crate::nested_git::Nested)>,
 ) -> Result<(), Option<String>> {
     const IN_THE_SANDBOX: &str = "The commit grant lets this agent commit inside its sandbox, not outside it: the run can change the worktree while git runs there, and git would run what a repository it put there holds.";
-    if !matches!(
-        backend,
-        Some(perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode)
-    ) {
+    if !backend.is_some_and(|backend| unsandboxed(backend, sandboxed)) {
         return Err(Some(
             nested_since(nested)
                 .await
@@ -19574,6 +19577,18 @@ async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord], item: Option<&Item>) {
     }
 }
 
+/// Whether a Work run of `backend` has no sandbox, so each command it
+/// wants is a request: Gemini and OpenCode over ACP always, and Claude
+/// Code when config turns its sandbox off (`sandbox` is `[agent]
+/// sandbox`, read once for the run). Codex keeps its own.
+fn unsandboxed(backend: perch_agent::Backend, sandbox: bool) -> bool {
+    match backend {
+        perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode => true,
+        perch_agent::Backend::ClaudeCode => !sandbox,
+        perch_agent::Backend::Codex => false,
+    }
+}
+
 /// Whether git in a Work run of `backend` in `worktree` that may commit
 /// can't lock `packed-refs`: Claude Code on Linux can't open a linked
 /// worktree's whole repository to a commit, and git says so on each one.
@@ -19583,12 +19598,14 @@ fn packed_refs_closed(backend: perch_agent::Backend, worktree: &Path) -> bool {
 
 /// What a Work run on `item` needs: the sandbox its `[repo.work]`
 /// grants, and the framing that says so. Refused for an item that is not
-/// the reader's own work (see `items::work_allowed`).
+/// the reader's own work (see `items::work_allowed`). `sandbox` is
+/// `[agent] sandbox` as the run reads it.
 fn work_setup(
     ctx: &Ctx,
     item: &Item,
     backend: perch_agent::Backend,
     committer: bool,
+    sandbox: bool,
 ) -> Result<(perch_agent::Mode, String, perch_github::Approvals), String> {
     if !committer && !crate::items::work_allowed(item, viewer_login(ctx).as_deref()) {
         return Err("Work runs only on your own worktrees and pull requests".into());
@@ -19619,12 +19636,10 @@ fn work_setup(
         }
         _ => "reaches no host without asking".to_string(),
     };
-    if matches!(
-        backend,
-        perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode
-    ) {
-        // agy's ACP server has no sandbox Perch can shape: every command
-        // is a request, and the framing says so instead.
+    if unsandboxed(backend, sandbox) {
+        // agy's ACP server has no sandbox Perch can shape, nor Claude
+        // Code with its sandbox off: every command is a request, and the
+        // framing says so instead.
         let (branch, base) = item
             .checkout
             .as_ref()
@@ -19636,6 +19651,7 @@ fn work_setup(
             &base,
             grant.commit,
             approvals,
+            backend == perch_agent::Backend::ClaudeCode,
         );
         return Ok((perch_agent::Mode::Work(grant), framing, approvals));
     }
@@ -20154,7 +20170,8 @@ async fn execute_question(
     } else {
         None
     };
-    let spawned = match crate::ask::host_refusal(spec.backend) {
+    let sandboxed = spec.sandbox;
+    let spawned = match crate::ask::host_refusal(spec.backend, spec.sandbox) {
         Some(why) => Err(perch_agent::Error::Refused(why)),
         None => {
             let external_dirs = recheck_external_knowledge_dirs(ctx, &run, &mut spec).await;
@@ -20272,7 +20289,7 @@ async fn execute_question(
                     .as_ref()
                     .map(|before| (worktree.as_path(), before));
                 on_approval(
-                    ctx, &run, &handle, &item_id, &thread.id, id, request, nested,
+                    ctx, &run, &handle, &item_id, &thread.id, id, request, nested, sandboxed,
                 )
                 .await;
             }
@@ -20785,6 +20802,8 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         ctx.notice("The owning discussion is gone");
         return;
     };
+    // Read once, as in `ask_as`.
+    let sandbox = ctx.config().agent.sandbox;
     let work = if old.mode == RunMode::Work {
         // A conflicts run on someone else's pull request goes again while
         // the reader may still push to its branch.
@@ -20792,7 +20811,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
             .original_request
             .starts_with(crate::review::merge::CONFLICTS_REQUEST)
             && conflicts_by_committer(ctx, &item).await == Ok(true);
-        match work_setup(ctx, &item, backend, committer) {
+        match work_setup(ctx, &item, backend, committer, sandbox) {
             Ok(work) => Some(work),
             Err(message) => {
                 ctx.notice(message);
@@ -20878,6 +20897,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         resume,
         work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
+    spec.sandbox = sandbox;
     let forget_archive = knowledge_dir.is_none() && spec.resume.is_none();
     read_dirs.extend(external_knowledge_dirs.iter().cloned());
     spec.read_dirs = read_dirs;
@@ -27745,6 +27765,88 @@ while True:
         assert!(told.ends_with("Question: Do it"), "{told}");
     }
 
+    /// With `[agent] sandbox = false`, Claude Code is started with its
+    /// sandbox off: a Work run is told every command is a request and its
+    /// resumed session gets the note that claims no sandbox, and a
+    /// question's git commands lose `--output`.
+    #[tokio::test]
+    async fn claude_with_its_sandbox_off_is_framed_and_started_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = recording_claude(dir.path());
+        config.agent.sandbox = false;
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let ask_it = |item: &Item, thread: Option<String>, mode: RunMode| {
+            ask(
+                &ctx,
+                item.id.clone(),
+                thread,
+                None,
+                "Do it".to_string(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+                mode,
+            )
+        };
+        let branch = work_branch(&ctx, &worktree);
+
+        ask_it(&branch, None, RunMode::Work).await;
+        let thread = ctx
+            .with_cache(|c| c.load_comment_threads(&branch.id).unwrap())
+            .unwrap()
+            .remove(0);
+        let runs = ctx
+            .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+            .unwrap();
+        assert_eq!(runs[0].status, RunStatus::Completed, "{:?}", runs[0].error);
+        let args = std::fs::read_to_string(dir.path().join("args-1")).unwrap();
+        assert!(args.contains("\"sandbox\":{\"enabled\":false}"), "{args}");
+        assert!(!args.contains("autoAllowBashIfSandboxed"), "{args}");
+        assert!(args.contains("every command you run"), "{args}");
+        assert!(
+            args.contains("an automatic reviewer decides each"),
+            "{args}"
+        );
+        assert!(!args.contains("Every command runs in a sandbox"), "{args}");
+
+        // Let Work commit; the resumed session is told so without a word
+        // about a sandbox it doesn't have.
+        ctx.with_cache(|c| {
+            c.insert_grant(&perch_github::WorkGrantRecord {
+                id: "g1".into(),
+                repo: "a/b".into(),
+                key: "commit".into(),
+                label: "commit".into(),
+                created_at: "2026-09-22T10:00:00Z".parse().unwrap(),
+            })
+        })
+        .unwrap()
+        .unwrap();
+        ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
+        let args = std::fs::read_to_string(dir.path().join("args-2")).unwrap();
+        assert!(args.contains("--resume"), "{args}");
+        let told = ctx
+            .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+            .unwrap()[1]
+            .prompt_snapshot
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            told.starts_with(&crate::ask::acp_resumed_commit_note()),
+            "{told}"
+        );
+
+        ask_it(&branch, Some(thread.id.clone()), RunMode::Ask).await;
+        let args = std::fs::read_to_string(dir.path().join("args-3")).unwrap();
+        assert!(args.contains("\"sandbox\":{\"enabled\":false}"), "{args}");
+        assert!(args.contains("Bash(git diff *--output*)"), "{args}");
+        assert!(args.contains("Bash(git diff:*)"), "{args}");
+    }
+
     /// A Work run that makes a `.git` below the worktree's top fails, with
     /// the path named, however it says it went: on Linux Claude Code's
     /// sandbox cannot stop it. One that was there before is not the run's.
@@ -29131,16 +29233,36 @@ read eof || true
         ];
         for backend in acp_backends {
             assert_eq!(
-                commit_grant_answers(backend, Some(worktree), nested).await,
+                commit_grant_answers(backend, true, Some(worktree), nested).await,
                 Ok(())
             );
         }
+        // Claude Code with its sandbox off asks before each command too,
+        // so its grant answers as theirs does; Codex keeps its sandbox.
+        assert_eq!(
+            commit_grant_answers(
+                Some(perch_agent::Backend::ClaudeCode),
+                false,
+                Some(worktree),
+                nested
+            )
+            .await,
+            Ok(())
+        );
+        assert!(commit_grant_answers(
+            Some(perch_agent::Backend::Codex),
+            false,
+            Some(worktree),
+            nested
+        )
+        .await
+        .is_err());
         for backend in [
             Some(perch_agent::Backend::ClaudeCode),
             Some(perch_agent::Backend::Codex),
             None,
         ] {
-            let said = commit_grant_answers(backend, Some(worktree), nested)
+            let said = commit_grant_answers(backend, true, Some(worktree), nested)
                 .await
                 .unwrap_err()
                 .unwrap();
@@ -29156,7 +29278,7 @@ read eof || true
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         for backend in acp_backends {
             assert_eq!(
-                commit_grant_answers(backend, Some(worktree), nested).await,
+                commit_grant_answers(backend, true, Some(worktree), nested).await,
                 Err(None)
             );
         }
@@ -29164,7 +29286,7 @@ read eof || true
 
         std::fs::create_dir_all(worktree.join("sub/.git")).unwrap();
         for backend in acp_backends {
-            let said = commit_grant_answers(backend, Some(worktree), nested)
+            let said = commit_grant_answers(backend, true, Some(worktree), nested)
                 .await
                 .unwrap_err()
                 .unwrap();
@@ -34854,6 +34976,36 @@ read eof || true
 
         // The poll doesn't take Perch's own write up again.
         assert!(!settings::look_again(&ctx, &config).await);
+    }
+
+    /// The sandbox switch takes at once, on what discovery found, and
+    /// turned back on (the key taken out) it is on again.
+    #[tokio::test]
+    async fn the_sandbox_setting_takes_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let mut discovered = (*ctx.config()).clone();
+        discovered.agent.binary = "/opt/claude/bin/claude".into();
+        ctx.replace_config(discovered);
+        let config = dir.path().join("config.toml");
+        assert!(ctx.config().agent.sandbox);
+
+        settings::write(
+            &ctx,
+            &config,
+            vec![perch_github::Setting::AgentSandbox(Some(false))],
+        )
+        .await;
+        assert!(!ctx.config().agent.sandbox);
+        assert_eq!(ctx.config().agent.binary, "/opt/claude/bin/claude");
+
+        settings::write(
+            &ctx,
+            &config,
+            vec![perch_github::Setting::AgentSandbox(None)],
+        )
+        .await;
+        assert!(ctx.config().agent.sandbox);
     }
 
     #[tokio::test]

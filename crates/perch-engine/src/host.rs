@@ -32,6 +32,13 @@ pub const HERE_FIRST: &str = if cfg!(target_os = "macos") {
 /// What the check for a repository on the host is called.
 pub const REPOSITORIES: &str = "Repositories";
 
+/// What the check for Claude Code's sandbox tools is called.
+pub const SANDBOX: &str = "bubblewrap and socat";
+
+/// What the sandbox check says when config turns the sandbox off: then
+/// the tools are not looked for, and nothing is missing.
+pub const SANDBOX_OFF: &str = "Not needed: Claude Code's sandbox is off ([agent] sandbox = false). Its commands run unsandboxed, and a Work run asks before each one.";
+
 /// One thing the host has or lacks.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostCheck {
@@ -86,6 +93,9 @@ pub(crate) struct Found {
     /// On Linux, which of `bwrap` and `socat` are not on `PATH`. `None`
     /// off Linux, where Claude Code's sandbox is the system's.
     pub sandbox_missing: Option<Vec<&'static str>>,
+    /// Config turns Claude Code's sandbox off (`[agent] sandbox =
+    /// false`), here or not, so its tools are not wanted.
+    pub sandbox_off: bool,
     /// What logind does at logout, when it could be asked: Linux with
     /// `loginctl`.
     pub logind: Option<Logind>,
@@ -294,10 +304,20 @@ pub(crate) fn checks(found: &Found) -> Vec<HostCheck> {
         .agents
         .iter()
         .any(|a| a.agent == Agent::ClaudeCode && a.found.is_some());
-    if let (true, Some(missing)) = (claude, &found.sandbox_missing) {
+    if claude && found.sandbox_off {
+        // Said on every platform, a Mac's own sandbox being off too, so
+        // whoever looks at the host sees its runs have none.
+        checks.push(HostCheck {
+            what: SANDBOX.into(),
+            ok: true,
+            required: false,
+            detail: SANDBOX_OFF.into(),
+            fix: None,
+        });
+    } else if let (true, Some(missing)) = (claude, &found.sandbox_missing) {
         checks.push(if missing.is_empty() {
             HostCheck {
-                what: "bubblewrap and socat".into(),
+                what: SANDBOX.into(),
                 ok: true,
                 required: true,
                 detail: "On PATH, for Claude Code's sandbox.".into(),
@@ -309,11 +329,11 @@ pub(crate) fn checks(found: &Found) -> Vec<HostCheck> {
                 .map(|tool| if *tool == "bwrap" { "bubblewrap" } else { tool })
                 .collect();
             HostCheck {
-                what: "bubblewrap and socat".into(),
+                what: SANDBOX.into(),
                 ok: false,
                 required: true,
                 detail: format!(
-                    "No {} on PATH. Claude Code's sandbox needs both on Linux, and its runs are refused without them.",
+                    "No {} on PATH. Claude Code's sandbox needs both on Linux, and its runs are refused without them. On a machine that is itself the boundary, such as a throwaway VM, the sandbox can be turned off instead in Settings > Agents.",
                     missing.join(" or ")
                 ),
                 fix: Some(install(found.installer, &packages)),
@@ -616,6 +636,7 @@ fn on_disk(config: &Config, path: Option<&OsStr>, linux: bool) -> Found {
         repos,
         agents,
         sandbox_missing: linux.then(|| perch_agent::linux_sandbox_missing(path)),
+        sandbox_off: !agent.sandbox,
         installer: Installer::find(&installer_dirs),
         ..Found::default()
     }
@@ -703,6 +724,7 @@ mod tests {
                 agent(Agent::Gemini, false),
             ],
             sandbox_missing: Some(vec![]),
+            sandbox_off: false,
             logind: Some(Logind {
                 kills: false,
                 kill_user_processes: false,
@@ -807,6 +829,7 @@ mod tests {
             .any(|c| c.what == "bubblewrap and socat" || c.what == "logind"));
         // Without Claude Code, no check: nothing needs the sandbox.
         let mut no_claude = found.clone();
+        no_claude.sandbox_off = true;
         no_claude.agents[0] = agent(Agent::ClaudeCode, false);
         let checks = checks(&no_claude);
         assert!(!checks.iter().any(|c| c.what == "bubblewrap and socat"));
@@ -816,6 +839,48 @@ mod tests {
             named(&checks, "Claude Code").fix.as_deref(),
             Some("curl -fsSL https://claude.ai/install.sh | bash")
         );
+    }
+
+    /// With the sandbox off in config, its tools are not wanted: the
+    /// check says the sandbox is off, on Linux without them or with them
+    /// and off Linux alike, and the host needs no setup for it.
+    #[test]
+    fn a_sandbox_turned_off_is_said_and_never_blocks() {
+        for missing in [Some(vec!["bwrap", "socat"]), Some(vec![]), None] {
+            let found = Found {
+                sandbox_missing: missing.clone(),
+                sandbox_off: true,
+                ..all_there()
+            };
+            let checks = checks(&found);
+            assert!(!needs_setup(&checks), "{missing:?}: {checks:#?}");
+            let sandbox = named(&checks, SANDBOX);
+            assert!(sandbox.ok && !sandbox.required && sandbox.fix.is_none());
+            assert_eq!(sandbox.detail, SANDBOX_OFF);
+        }
+        // On, and missing, it still blocks, and says it can be turned off.
+        let on = checks(&Found {
+            sandbox_missing: Some(vec!["socat"]),
+            ..all_there()
+        });
+        let sandbox = named(&on, SANDBOX);
+        assert!(sandbox.blocks());
+        assert!(
+            sandbox.detail.contains("Settings > Agents"),
+            "{}",
+            sandbox.detail
+        );
+    }
+
+    #[test]
+    fn on_disk_reads_the_sandbox_setting() {
+        let mut config = Config::parse_text("").unwrap();
+        assert!(!on_disk(&config, None, true).sandbox_off);
+        config = Config::parse_text("[agent]\nsandbox = false\n").unwrap();
+        let found = on_disk(&config, None, true);
+        assert!(found.sandbox_off);
+        // Still looked for, so turning it back on says what is missing.
+        assert_eq!(found.sandbox_missing, Some(vec!["bwrap", "socat"]));
     }
 
     #[test]

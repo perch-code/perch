@@ -91,10 +91,16 @@ pub fn run(args: &[String]) -> i32 {
 fn checks_said(checks: &[perch_engine::host::HostCheck]) -> String {
     let mut said = String::from("host checks:\n");
     for check in checks {
-        let mark = match (check.ok, check.required) {
-            (true, _) => "ok",
-            (false, true) => "missing",
-            (false, false) => "optional",
+        let mark = if check.what == perch_engine::host::SANDBOX
+            && check.detail == perch_engine::host::SANDBOX_OFF
+        {
+            "off"
+        } else {
+            match (check.ok, check.required) {
+                (true, _) => "ok",
+                (false, true) => "missing",
+                (false, false) => "optional",
+            }
         };
         said.push_str(&format!("  {mark:<9}{}: {}\n", check.what, check.detail));
         if let Some(fix) = check.fix.as_deref().filter(|_| !check.ok) {
@@ -130,5 +136,21 @@ mod tests {
             "host checks:\n  ok       git: git detail.\n  missing  GitHub token: GitHub token detail.\n           run: gh auth login\n  optional Codex: Codex detail.\n           run: npm install -g @openai/codex\nThe host needs setup: run what is under each missing check there.\n"
         );
         assert!(!super::checks_said(&[check("git", true, true, None)]).contains("needs setup"));
+        let off = super::checks_said(&[HostCheck {
+            what: perch_engine::host::SANDBOX.into(),
+            ok: true,
+            required: false,
+            detail: perch_engine::host::SANDBOX_OFF.into(),
+            fix: None,
+        }]);
+        assert!(
+            off.contains(&format!(
+                "  off      {}: {}\n",
+                perch_engine::host::SANDBOX,
+                perch_engine::host::SANDBOX_OFF
+            )),
+            "{off}"
+        );
+        assert!(!off.contains("needs setup"));
     }
 }

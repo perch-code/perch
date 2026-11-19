@@ -58,6 +58,9 @@ pub enum Setting {
     AgentModel(Option<String>),
     AgentEffort(Option<String>),
     AgentMaxConcurrentRuns(Option<usize>),
+    /// `[agent] sandbox`: `Some(false)` turns Claude Code's sandbox off;
+    /// None takes the key out, back to on.
+    AgentSandbox(Option<bool>),
     AgentBinary {
         backend: AgentBackend,
         binary: Option<String>,
@@ -480,6 +483,7 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             top(&["agent"], "max_concurrent_runs".into()),
             integer(runs.map(|n| n as u64), "max_concurrent_runs")?,
         ),
+        Setting::AgentSandbox(on) => (top(&["agent"], "sandbox".into()), on.map(Value::from)),
         Setting::AgentBinary { backend, binary } => {
             (top(backend.table(), "binary".into()), string(binary))
         }
@@ -1233,6 +1237,21 @@ mod tests {
             out.contains("[agent.gemini]\nmodels = [\"gemini-3-pro\"]\n"),
             "{out}"
         );
+    }
+
+    /// The sandbox is written only to turn it off; on again, the key
+    /// comes out and the default, on, holds.
+    #[test]
+    fn the_sandbox_is_written_off_and_taken_out_on() {
+        let out = edit(
+            "[agent]\nmodel = \"opus\"\n",
+            &[Setting::AgentSandbox(Some(false))],
+        );
+        assert_eq!(out, "[agent]\nmodel = \"opus\"\nsandbox = false\n");
+        assert!(!Config::parse_text(&out).unwrap().agent.sandbox);
+        let out = edit(&out, &[Setting::AgentSandbox(None)]);
+        assert_eq!(out, "[agent]\nmodel = \"opus\"\n");
+        assert!(Config::parse_text(&out).unwrap().agent.sandbox);
     }
 
     #[test]
