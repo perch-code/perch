@@ -42,6 +42,7 @@ async fn ask(
     print_only: bool,
 ) -> Result<(), String> {
     use perch_git::{Preparer, RepoId, Store};
+    use perch_github::config::{data_dir, home_dir};
     use perch_github::{resolve_token, GitHub, Side};
 
     let (full_name, number) = target.split_once('#').ok_or("expected owner/repo#number")?;
@@ -54,8 +55,10 @@ async fn ask(
     }
     let token = resolve_token(&config).ok_or("no token")?;
     let gh = GitHub::new(&token.value).map_err(|e| e.to_string())?;
-    let root = perch_github::config::data_dir().ok_or("no data dir")?;
-    let preparer = Preparer::new(Store::new(root.clone()), Some(token.value.clone()));
+    let root = data_dir().ok_or("no data dir")?;
+    let worktrees_dir = config.worktrees_dir_in(&root, &home_dir());
+    let store = Store::new(root.clone()).with_worktrees_dir(worktrees_dir);
+    let preparer = Preparer::new(store, Some(token.value.clone()));
 
     // A number is a pull request or an issue; GitHub says which. An issue
     // is asked about from the repository's home checkout, with no anchor.

@@ -43,11 +43,25 @@ impl RepoId {
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    worktrees_dir: Option<PathBuf>,
 }
 
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            worktrees_dir: None,
+        }
+    }
+
+    pub fn with_worktrees_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.worktrees_dir = dir;
+        self
+    }
+
+    /// An explicit worktree directory may also be used by other tools.
+    pub fn has_custom_worktrees_dir(&self) -> bool {
+        self.worktrees_dir.is_some()
     }
 
     pub fn root(&self) -> &Path {
@@ -71,7 +85,7 @@ impl Store {
     /// beside a stale one. The `/` in a branch name becomes `-` so the whole
     /// key is one path segment.
     pub fn worktree_path(&self, id: &RepoId, branch: &str) -> PathBuf {
-        self.root.join("worktrees").join(format!(
+        self.worktrees_dir().join(format!(
             "{}__{}__{}",
             sanitize(&id.owner),
             sanitize(&id.repo),
@@ -80,7 +94,9 @@ impl Store {
     }
 
     pub fn worktrees_dir(&self) -> PathBuf {
-        self.root.join("worktrees")
+        self.worktrees_dir
+            .clone()
+            .unwrap_or_else(|| self.root.join("worktrees"))
     }
 
     /// The home checkout of a repository: a worktree kept on the default

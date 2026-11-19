@@ -4659,7 +4659,9 @@ async fn run(
     if let Some(mut writer) = cache.as_ref().and_then(|cache| cache.lock().ok()) {
         knowledge.watch(&mut writer);
     }
-    let local_preparer = Preparer::new(Store::new(data_root.clone()), None);
+    let worktrees_dir = config.worktrees_dir_in(&data_root, &perch_github::config::home_dir());
+    let store = Store::new(data_root.clone()).with_worktrees_dir(worktrees_dir);
+    let local_preparer = Preparer::new(store.clone(), None);
     retire_archived_checkouts_from_cache(&cache, &local_preparer, &events).await;
     // Nothing runs from Perch's servers yet: tidy them.
     tokio::task::spawn_blocking(|| perch_lsp::sweep(&servers_dir()));
@@ -4710,7 +4712,7 @@ async fn run(
     // clone never stalls the notification poll, and the active checkout is
     // shared so a file open knows where to read from.
     let preparer = Arc::new(Preparer::new(
-        Store::new(data_root.clone()),
+        store,
         token.as_ref().map(|token| token.value.clone()),
     ));
     let checkout: Arc<std::sync::Mutex<Option<ReviewContext>>> =
@@ -9139,8 +9141,9 @@ fn edit_item(ctx: &Ctx, id: &str, edit: impl FnOnce(&mut Item)) {
 ///
 /// An owned checkout whose directory is gone is marked off disk; someone
 /// deleted it by hand. A directory under the store's worktrees that no
-/// item claims is removed and pruned: nothing can open it, and it is how
-/// what an older schema left behind gets retired.
+/// item claims is removed and pruned from the default store to retire
+/// leftovers from older schemas. A configured directory can also hold
+/// worktrees managed by other tools, so only recorded checkouts are retired there.
 async fn reconcile_checkouts(ctx: &Ctx) {
     let Some(items) = ctx.with_cache(|c| c.load_items().ok()).flatten() else {
         return;
@@ -9151,10 +9154,16 @@ async fn reconcile_checkouts(ctx: &Ctx) {
         let Some(checkout) = &item.checkout else {
             continue;
         };
-        if !checkout.owned {
+        if !checkout.owned || (item.is_archived() && !checkout.on_disk) {
             continue;
         }
-        let present = checkout.path.join(".git").exists();
+        let present = match owned_checkout_present(&ctx.preparer, item).await {
+            Ok(present) => present,
+            Err(error) => {
+                tracing::warn!(id = %item.id, %error, "could not verify checkout presence");
+                continue;
+            }
+        };
         if checkout.on_disk != present {
             tracing::info!(id = %item.id, path = %checkout.path.display(), present, "checkout presence changed");
             let mut updated = item.clone();
@@ -9175,13 +9184,22 @@ async fn reconcile_checkouts(ctx: &Ctx) {
     // Directories no row claims. A clean one is a leftover and goes; one
     // with uncommitted work in it is somebody's, whatever the table says,
     // and is left alone.
-    let known: std::collections::HashSet<std::path::PathBuf> = items
+    let known: std::collections::HashSet<PathBuf> = items
         .iter()
-        .filter_map(|i| i.checkout.as_ref().map(|c| c.path.clone()))
+        .filter_map(|item| item.checkout.as_ref())
+        .filter_map(|checkout| checkout.path.canonicalize().ok())
         .collect();
+    let candidates = if ctx.preparer.store().has_custom_worktrees_dir() {
+        Vec::new()
+    } else {
+        ctx.preparer.worktree_dirs()
+    };
     let mut removed = false;
-    for dir in ctx.preparer.worktree_dirs() {
-        if known.contains(&dir) {
+    for dir in candidates {
+        let Ok(path) = dir.canonicalize() else {
+            continue;
+        };
+        if known.contains(&path) {
             continue;
         }
         if dir.join(".git").exists() {
@@ -9294,7 +9312,9 @@ async fn removable(ctx: &Ctx, item: &Item) -> Result<bool, String> {
     let Some(checkout) = item.checkout.as_ref() else {
         return Ok(false);
     };
-    if checkout.path.join(".git").exists()
+    if owned_checkout_present(&ctx.preparer, item)
+        .await
+        .map_err(|e| e.to_string())?
         && ctx
             .preparer
             .is_dirty(&checkout.path)
@@ -9581,24 +9601,26 @@ async fn archive_item(
         return Err("That item is gone".into());
     };
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned && c.on_disk) {
-        if checkout.path.join(".git").exists() {
-            let dirty = match ctx.preparer.is_dirty(&checkout.path).await {
-                Ok(dirty) => dirty,
-                Err(error) => {
-                    if let Some(suspended) = suspended_navigation {
-                        ctx.navigation_requests.restore_suspended(suspended);
-                    }
-                    return Err(error.to_string());
-                }
-            };
-            if dirty {
+        let check_dirty = async {
+            if !owned_checkout_present(&ctx.preparer, &item).await? {
+                return Ok(false);
+            }
+            ctx.preparer.is_dirty(&checkout.path).await
+        };
+        let dirty = match check_dirty.await {
+            Ok(dirty) => dirty,
+            Err(error) => {
                 if let Some(suspended) = suspended_navigation {
                     ctx.navigation_requests.restore_suspended(suspended);
                 }
-                return Err(format!("{} has uncommitted changes", checkout.branch));
+                return Err(error.to_string());
             }
-            // What git ignores goes with the directory, as `git worktree
-            // remove` takes it: a build's output, and a `.env` too.
+        };
+        if dirty {
+            if let Some(suspended) = suspended_navigation {
+                ctx.navigation_requests.restore_suspended(suspended);
+            }
+            return Err(format!("{} has uncommitted changes", checkout.branch));
         }
     }
     if let Some(suspended) = suspended_navigation {
@@ -9757,7 +9779,9 @@ async fn retire_archived_checkout_from_cache(
         return Ok(());
     };
     let checkout = item.checkout.as_ref().cloned().unwrap();
-    let present = checkout.path.join(".git").exists();
+    let present = owned_checkout_present(preparer, &item)
+        .await
+        .map_err(|e| e.to_string())?;
     if present
         && preparer
             .is_dirty(&checkout.path)
@@ -9771,7 +9795,7 @@ async fn retire_archived_checkout_from_cache(
         let bare = owned_repo(preparer.store(), &item)
             .ok_or_else(|| format!("{} is not a repository name", item.repo_full_name))?;
         preparer
-            .remove_worktree(&bare, &checkout.path)
+            .remove_worktree(&bare, &checkout.path, &checkout.branch)
             .await
             .map_err(|error| error.to_string())?;
         forget_server_data(&checkout.path);
@@ -9808,7 +9832,10 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
     // Refuse before disturbing its work, then stop and fully reap every
     // owned process before either the checkout or its database rows go.
     if let Some(checkout) = item.checkout.as_ref().filter(|checkout| checkout.owned) {
-        if checkout.path.join(".git").exists()
+        if checkout.on_disk
+            && owned_checkout_present(&ctx.preparer, &item)
+                .await
+                .map_err(|error| error.to_string())?
             && ctx
                 .preparer
                 .is_dirty(&checkout.path)
@@ -9854,10 +9881,13 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
         .with_cache(|c| c.runs_for_item(id))
         .and_then(Result::ok)
         .unwrap_or_default();
-    drop_work_refs(ctx, &runs).await;
+    drop_work_refs(ctx, &runs, Some(&item)).await;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
         let bare = owned_repo(ctx.preparer.store(), &item);
-        let present = bare.is_some() && checkout.path.join(".git").exists();
+        let present = checkout.on_disk
+            && owned_checkout_present(&ctx.preparer, &item)
+                .await
+                .map_err(|error| error.to_string())?;
         if present {
             // Cancellation is asynchronous and the checkout is also a
             // normal directory the reader can edit. The first check
@@ -9879,7 +9909,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
         if let Some(bare) = bare {
             if present {
                 ctx.preparer
-                    .remove_worktree(&bare, &checkout.path)
+                    .remove_worktree(&bare, &checkout.path, &checkout.branch)
                     .await
                     .map_err(|e| e.to_string())?;
                 forget_server_data(&checkout.path);
@@ -10209,41 +10239,50 @@ async fn open_owned_branch(
     repo: &RepoId,
     checkout: &ItemCheckout,
 ) -> Result<perch_git::Checkout, perch_git::Error> {
-    if let Some(root) = &checkout.source {
-        if !checkout.path.join(".git").exists() {
-            let path = checkout.path.to_string_lossy().into_owned();
-            let git = ctx.preparer.git();
-            let _ = git
-                .run(Some(root), ["worktree", "prune"], Duration::from_secs(30))
-                .await;
-            git.run(
-                Some(root),
-                ["worktree", "add", &path, &checkout.branch],
-                Duration::from_secs(60),
-            )
-            .await?;
+    let source = match &checkout.source {
+        Some(root) => root.clone(),
+        None => ctx.preparer.ensure_bare(repo, |_| {}).await?,
+    };
+    let git = ctx.preparer.git();
+    if !checkout.on_disk
+        || !ctx
+            .preparer
+            .owns_worktree(&source, &checkout.path, &checkout.branch, true)
+            .await?
+    {
+        match checkout.path.symlink_metadata() {
+            Ok(_) => {
+                return Err(perch_git::Error::Io(format!(
+                    "{} is already occupied",
+                    checkout.path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(perch_git::Error::Io(error.to_string())),
         }
+        // An archived worktree's branch still lives in its repository.
+        let _ = git
+            .run(
+                Some(&source),
+                ["worktree", "prune"],
+                Duration::from_secs(30),
+            )
+            .await;
+        git.run(
+            Some(&source),
+            [
+                std::ffi::OsStr::new("worktree"),
+                std::ffi::OsStr::new("add"),
+                checkout.path.as_os_str(),
+                std::ffi::OsStr::new(&checkout.branch),
+            ],
+            Duration::from_secs(60),
+        )
+        .await?;
+    }
+    if checkout.source.is_some() {
         return open_own_checkout(ctx, repo, checkout, &checkout.base_ref).await;
     }
-    let bare = ctx.preparer.ensure_bare(repo, |_| {}).await?;
-    if !checkout.path.join(".git").exists() {
-        // Archived: the branch is still in the bare clone.
-        let path = checkout.path.to_string_lossy().into_owned();
-        let _ = ctx
-            .preparer
-            .git()
-            .run(Some(&bare), ["worktree", "prune"], Duration::from_secs(30))
-            .await;
-        ctx.preparer
-            .git()
-            .run(
-                Some(&bare),
-                ["worktree", "add", &path, &checkout.branch],
-                Duration::from_secs(60),
-            )
-            .await?;
-    }
-    let git = ctx.preparer.git();
     let head_sha = git
         .run(
             Some(&checkout.path),
@@ -10264,7 +10303,7 @@ async fn open_owned_branch(
     };
     let merge_base = git
         .run(
-            Some(&bare),
+            Some(&source),
             ["merge-base", &base, &head_sha],
             Duration::from_secs(30),
         )
@@ -10273,7 +10312,7 @@ async fn open_owned_branch(
         .unwrap_or_else(|_| head_sha.clone());
     Ok(perch_git::Checkout {
         worktree: checkout.path.clone(),
-        bare,
+        bare: source,
         branch: checkout.branch.clone(),
         head_sha,
         merge_base,
@@ -10594,12 +10633,7 @@ fn show_pull_request_early(
 ) -> bool {
     // No checkout yet: a directory that does not exist keeps whatever
     // reads one honest until `ReviewReady` brings the real one.
-    let missing = ctx
-        .preparer
-        .store()
-        .root()
-        .join("worktrees")
-        .join("pending");
+    let missing = ctx.preparer.store().root().join("pending-checkout");
     let checkout = perch_git::Checkout {
         worktree: missing.clone(),
         bare: missing,
@@ -14000,6 +14034,22 @@ fn owned_repo(store: &perch_git::Store, item: &Item) -> Option<PathBuf> {
     RepoId::parse(&item.repo_full_name).map(|repo| store.bare_path(&repo))
 }
 
+/// A recorded path can be reused by another checkout after it is retired.
+async fn owned_checkout_present(
+    preparer: &Preparer,
+    item: &Item,
+) -> Result<bool, perch_git::Error> {
+    let Some(checkout) = item.checkout.as_ref().filter(|checkout| checkout.owned) else {
+        return Ok(false);
+    };
+    let Some(repo) = owned_repo(preparer.store(), item) else {
+        return Ok(false);
+    };
+    preparer
+        .owns_worktree(&repo, &checkout.path, &checkout.branch, checkout.on_disk)
+        .await
+}
+
 /// A repository's root, when it is a checkout, where a branch of the
 /// reader's own clone is cut.
 fn root_of(ctx: &Ctx, identity: &str) -> Option<PathBuf> {
@@ -17282,10 +17332,19 @@ async fn open_pull_request(
         None => None,
     };
 
-    let on_disk = existing
+    let on_disk = match existing
         .as_ref()
-        .and_then(|item| item.checkout.as_ref())
-        .is_some_and(|checkout| checkout.path.join(".git").exists());
+        .and_then(|item| item.checkout.as_ref().map(|checkout| (item, checkout)))
+    {
+        Some((item, checkout)) if checkout.owned => {
+            match owned_checkout_present(&ctx.preparer, item).await {
+                Ok(present) => present,
+                Err(error) => fail!("{error}"),
+            }
+        }
+        Some((_, checkout)) => checkout.path.join(".git").exists(),
+        None => false,
+    };
     let kept = existing
         .as_ref()
         .and_then(|item| Some((item.clone(), item.pull_request()?.clone())));
@@ -17612,6 +17671,9 @@ async fn open_pull_request_at(
             open_own_checkout(ctx, &clone, own, &pull_request.base_ref).await
         }
         _ if source == PullSource::Offline => {
+            if !matches!(owned_checkout_present(&ctx.preparer, &item).await, Ok(true)) {
+                fail!("The saved worktree is unavailable");
+            }
             let path = kept.as_ref().map(|c| c.path.clone());
             reopen_from_disk(ctx, &clone, number, &branch, path).await
         }
@@ -17648,6 +17710,7 @@ async fn open_pull_request_at(
                     &pull_request.base_ref,
                     &branch,
                     prefetched,
+                    kept.as_ref().map(|checkout| checkout.path.as_path()),
                     checkout_progress(ctx, &repo, navigation_id),
                 )
                 .await
@@ -19481,9 +19544,20 @@ fn run_repository(ctx: &Ctx, run: &RunRecord) -> Option<PathBuf> {
 }
 
 /// Drop the refs Work runs recorded, as their runs are deleted.
-async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord]) {
+async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord], item: Option<&Item>) {
     for run in runs.iter().filter(|run| run.mode == RunMode::Work) {
-        let Some(repo) = run_repository(ctx, run) else {
+        let repo = match item {
+            Some(item)
+                if item
+                    .checkout
+                    .as_ref()
+                    .is_some_and(|checkout| checkout.owned) =>
+            {
+                owned_repo(ctx.preparer.store(), item).filter(|repo| is_repo(repo))
+            }
+            _ => run_repository(ctx, run),
+        };
+        let Some(repo) = repo else {
             continue;
         };
         let refs = [
@@ -20913,7 +20987,8 @@ async fn delete_comment_thread(ctx: &Ctx, id: &str) {
         .with_cache(|c| c.runs_for_discussion(id))
         .and_then(Result::ok)
         .unwrap_or_default();
-    drop_work_refs(ctx, &runs).await;
+    let item = item_id.as_deref().and_then(|item_id| ctx.item(item_id));
+    drop_work_refs(ctx, &runs, item.as_ref()).await;
     let context_before = context_dirs(ctx);
     if let Some(Err(e)) = ctx.with_cache(|c| c.delete_comment_thread(id)) {
         let _ = ctx
@@ -27354,24 +27429,10 @@ while True:
     async fn an_archived_checkout_s_servers_stop_only_once_it_goes() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
-        let tree = tempfile::tempdir().unwrap();
-        let worktree = std::fs::canonicalize(tree.path()).unwrap();
-        git(&worktree, &["init", "-q"]);
+        let bare = owned_clone(&ctx, dir.path());
         let mut item = store_pull(&ctx, 7);
         item.archived_at = Some(Timestamp::now());
-        item.checkout = Some(ItemCheckout {
-            branch: "perch/pr-7".into(),
-            base_ref: "main".into(),
-            head_sha: "h".into(),
-            path: worktree.clone(),
-            owned: true,
-            on_disk: true,
-            churn: None,
-            last_seen_head: None,
-            divergence: None,
-            source: None,
-        });
-        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        let (item, worktree) = owned_worktree(&ctx, &bare, "perch/pr-7", item, 0);
         // Its script is a change the checkout has.
         let kept = named_server(&worktree, perch_lsp::ServerKind::RustAnalyzer, "-").await;
         ctx.kept_servers.keep(NO_WINDOW, kept.clone()).await;
@@ -27379,7 +27440,7 @@ while True:
         assert!(retire_archived_checkout(&ctx, &item.id).await.is_err());
         assert_eq!(ctx.kept_servers.clients().len(), 1, "it stays, so they do");
 
-        std::fs::remove_dir_all(worktree.join(".git")).unwrap();
+        std::fs::remove_file(worktree.join(".git")).unwrap();
         retire_archived_checkout(&ctx, &item.id).await.unwrap();
         assert!(ctx.kept_servers.clients().is_empty());
         assert!(!ctx.item(&item.id).unwrap().checkout.unwrap().on_disk);
@@ -37295,6 +37356,103 @@ model = \"opus\"\n",
         .unwrap()
         .unwrap();
         (item, worktree)
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_preserves_unclaimed_directories_in_a_shared_worktree_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let shared = dir.path().join("herdr").join("worktrees");
+        let store = ctx
+            .preparer
+            .store()
+            .clone()
+            .with_worktrees_dir(Some(shared.clone()));
+        ctx.preparer = Arc::new(Preparer::new(store, None));
+
+        let bare = owned_clone(&ctx, dir.path());
+        let mut item = branch_item("archived");
+        item.archived_at = Some(Timestamp::now());
+        let (item, archived) = owned_worktree(&ctx, &bare, "archived", item, 0);
+
+        let other_worktree = shared.join("a__b__other-tool");
+        git(
+            &dir.path().join("source"),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "other-tool",
+                other_worktree.to_str().unwrap(),
+            ],
+        );
+        let other_directory = shared.join("other-directory");
+        std::fs::create_dir(&other_directory).unwrap();
+
+        reconcile_checkouts(&ctx).await;
+
+        assert!(other_worktree.join(".git").is_file());
+        assert!(other_directory.is_dir());
+        assert!(!archived.exists());
+        assert!(!ctx.item(&item.id).unwrap().checkout.unwrap().on_disk);
+    }
+
+    #[tokio::test]
+    async fn an_archived_item_does_not_claim_a_replacement_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let shared = dir.path().join("shared-worktrees");
+        let store = ctx
+            .preparer
+            .store()
+            .clone()
+            .with_worktrees_dir(Some(shared));
+        ctx.preparer = Arc::new(Preparer::new(store, None));
+        let bare = owned_clone(&ctx, dir.path());
+        let branch = "feature";
+        let (item, path) = owned_worktree(&ctx, &bare, branch, branch_item(branch), 0);
+        archive_item(&ctx, &item.id, None).await.unwrap();
+        assert!(!path.exists());
+
+        // A different repository now has a clean worktree on the same
+        // branch name at the path the archived item used to own.
+        let other = dir.path().join("source");
+        git(
+            &other,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        );
+        git(
+            &path,
+            &["commit", "-q", "--allow-empty", "-m", "other work"],
+        );
+        let foreign_head = git(&path, &["rev-parse", "HEAD"]);
+
+        reconcile_checkouts(&ctx).await;
+        let mut archived = ctx.item(&item.id).unwrap();
+        assert!(!archived.checkout.as_ref().unwrap().on_disk);
+        let repo = RepoId::parse(&item.repo_full_name).unwrap();
+        let error = open_owned_branch(&ctx, &repo, archived.checkout.as_ref().unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already occupied"));
+
+        // A stale on-disk flag cannot authorize cleanup either.
+        archived.checkout.as_mut().unwrap().on_disk = true;
+        ctx.with_cache(|cache| cache.update_item(&archived).unwrap());
+        retire_archived_checkout(&ctx, &item.id).await.unwrap();
+        assert!(!ctx.item(&item.id).unwrap().checkout.unwrap().on_disk);
+
+        delete_item(&ctx, &item.id, false).await.unwrap();
+        assert!(ctx.item(&item.id).is_none());
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]), foreign_head);
     }
 
     fn branch_item(name: &str) -> Item {

@@ -251,7 +251,7 @@ async fn archiving_keeps_the_branch_and_restoring_needs_no_clone() {
     let checkout = f.prepare(&head).await;
 
     f.preparer
-        .remove_worktree(&f.bare(), &checkout.worktree)
+        .remove_worktree(&f.bare(), &checkout.worktree, "perch/pr-7")
         .await
         .unwrap();
     assert!(!checkout.worktree.exists());
@@ -276,12 +276,178 @@ async fn archiving_keeps_the_branch_and_restoring_needs_no_clone() {
 }
 
 #[tokio::test]
+async fn reviews_reuse_existing_checkouts_and_restore_into_the_configured_directory() {
+    let f = Fixture::new();
+    let head = f.push_commit("pr");
+    let original = f.prepare(&head).await;
+    let dir = f._tmp.path().join("shared-worktrees");
+    let store = f.store.clone().with_worktrees_dir(Some(dir.clone()));
+    let preparer = Preparer::new(store, None);
+
+    let reopened = preparer
+        .prepare(&f.id, 7, &head, "main", "perch/pr-7", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(reopened.worktree, original.worktree);
+    preparer
+        .remove_worktree(&f.bare(), &original.worktree, "perch/pr-7")
+        .await
+        .unwrap();
+
+    let destination = dir.join("acme__widgets__perch-pr-7");
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("keep.txt"), "keep").unwrap();
+    let error = preparer
+        .prepare(&f.id, 7, &head, "main", "perch/pr-7", |_| {})
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already occupied"));
+    assert!(destination.join("keep.txt").is_file());
+    std::fs::remove_dir_all(&destination).unwrap();
+
+    let restored = preparer
+        .prepare(&f.id, 7, &head, "main", "perch/pr-7", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(restored.worktree, destination);
+    assert!(restored.worktree.join("a.txt").is_file());
+    assert_eq!(
+        f.prepare(&head).await.worktree.canonicalize().unwrap(),
+        destination.canonicalize().unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reviews_keep_the_configured_path_when_git_canonicalizes_it() {
+    let f = Fixture::new();
+    let head = f.push_commit("pr");
+    let actual = f._tmp.path().join("actual");
+    let alias = f._tmp.path().join("alias");
+    std::fs::create_dir(&actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let store = f.store.clone().with_worktrees_dir(Some(alias.clone()));
+    let preparer = Preparer::new(store, None);
+
+    for _ in 0..2 {
+        let checkout = preparer
+            .prepare(&f.id, 7, &head, "main", "perch/pr-7", |_| {})
+            .await
+            .unwrap();
+        assert_eq!(checkout.worktree, alias.join("acme__widgets__perch-pr-7"));
+    }
+}
+
+#[tokio::test]
+async fn a_replacement_at_the_old_path_does_not_block_restoring_a_review() {
+    let f = Fixture::new();
+    let head = f.push_commit("pr");
+    let old = f.prepare(&head).await.worktree;
+    git(&f.bare(), &["worktree", "lock", old.to_str().unwrap()]);
+    std::fs::remove_dir_all(&old).unwrap();
+    git(
+        &f.remote,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "foreign",
+            old.to_str().unwrap(),
+        ],
+    );
+    let store = f
+        .store
+        .clone()
+        .with_worktrees_dir(Some(f._tmp.path().join("shared")));
+    let destination = store.worktree_path(&f.id, "perch/pr-7");
+    let preparer = Preparer::new(store, None);
+
+    assert!(preparer
+        .remove_worktree(&f.bare(), &old, "perch/pr-7")
+        .await
+        .is_err());
+    let error = preparer
+        .prepare(&f.id, 7, &head, "main", "perch/pr-7", |_| {})
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("locked"));
+    git(&f.bare(), &["worktree", "unlock", old.to_str().unwrap()]);
+    let restored = preparer
+        .prepare(&f.id, 7, &head, "main", "perch/pr-7", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(restored.worktree, destination);
+    assert_eq!(git(&old, &["branch", "--show-current"]), "foreign");
+    assert!(old.join("pr.txt").is_file());
+    preparer
+        .remove_worktree(&f.bare(), &destination, "perch/pr-7")
+        .await
+        .unwrap();
+    preparer
+        .delete_branch(&f.bare(), "perch/pr-7")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_replaced_saved_path_does_not_hide_a_valid_checkout() {
+    let f = Fixture::new();
+    let head = f.push_commit("pr");
+    let old = f.prepare(&head).await.worktree;
+    let store = f
+        .store
+        .clone()
+        .with_worktrees_dir(Some(f._tmp.path().join("shared")));
+    let destination = store.worktree_path(&f.id, "perch/pr-7");
+    git(
+        &f.bare(),
+        &[
+            "worktree",
+            "add",
+            "--force",
+            destination.to_str().unwrap(),
+            "perch/pr-7",
+        ],
+    );
+    std::fs::remove_dir_all(&old).unwrap();
+    git(
+        &f.remote,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "foreign",
+            old.to_str().unwrap(),
+        ],
+    );
+
+    let preparer = Preparer::new(store, None);
+    let checkout = preparer
+        .prepare_after(
+            &f.id,
+            7,
+            &head,
+            "main",
+            "perch/pr-7",
+            None,
+            Some(&old),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(checkout.worktree, destination);
+    assert_eq!(git(&old, &["branch", "--show-current"]), "foreign");
+}
+
+#[tokio::test]
 async fn forgetting_deletes_the_branch() {
     let f = Fixture::new();
     let head = f.push_commit("pr");
     let checkout = f.prepare(&head).await;
     f.preparer
-        .remove_worktree(&f.bare(), &checkout.worktree)
+        .remove_worktree(&f.bare(), &checkout.worktree, "perch/pr-7")
         .await
         .unwrap();
 

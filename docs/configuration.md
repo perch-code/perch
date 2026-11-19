@@ -3,7 +3,7 @@
 Perch reads `~/.perch/config.toml`, or `$PERCH_HOME/config.toml` when
 `PERCH_HOME` is set. Every setting is optional.
 
-`PERCH_HOME` is also where the cache, the checkouts and the logs live, and
+`PERCH_HOME` is also where the cache and the logs live, and
 only one engine may use it at a time: a second Perch, or a `perchd`, on the
 same home refuses to start and says which process has it (see
 [One engine to a Perch home](reference.md#one-engine-to-a-perch-home)).
@@ -30,11 +30,12 @@ each time its config.toml changes, so a `[[repo]]` added there, or a
 [What the app checks](reference.md#what-the-app-checks)).
 
 Settings (`Cmd-,`, or the gear at the foot of the sidebar) edits this file.
-It changes only the keys you touch, so your comments and layout stay. Edits
-you make by hand while Perch runs are taken up within a couple of seconds.
-Everything applies at once except `[display]` and `[ui] code_font`, which
-wait for a restart. Settings has no control for `token`, or for a
-repository's `github` and `root`.
+It changes only the keys you touch, so your comments and layout stay. Most
+edits you make by hand take effect within a couple of seconds.
+Changes to `[display]` and `[ui] code_font` apply when the app restarts.
+Changes to `worktrees_dir` apply when the engine restarts. Edit the file
+directly to change `token`, `worktrees_dir`, or a repository's `github`
+and `root`.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -61,6 +62,7 @@ repository's `github` and `root`.
 | `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |
 | `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |
 | `clone_root` | `~` | The folder a repository added by its name is cloned into, such as `"~/Code"`; read by an engine on a host, which is where repositories are added by name |
+| `worktrees_dir` | `$PERCH_HOME/worktrees` (normally `~/.perch/worktrees`) | Base directory for new Perch-managed branch worktrees. Applies after an engine restart. |
 | `[remote] host` | none | SSH host to use when there is no saved window session (for example `"chris@devbox:2222"`). Perch subsequently reopens each window in its last environment. |
 | `[remote] command` | none | What ssh runs on the host, in your login shell, to reach the engine, such as `"perchd bridge"`; with none the app sends the `perchd` it carries there, starts it, and replaces an engine of another build it finds running idle |
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
@@ -77,6 +79,20 @@ repository's `github` and `root`.
 | `[repo.lsp] trust` | `false` | Start rust-analyzer and jdtls on anything in this repository without asking |
 
 The [reference](reference.md) covers what each setting does in more detail.
+
+## Worktree directory
+
+Add `worktrees_dir` as a top-level key in `config.toml` on the machine
+running the engine, then restart the engine.
+
+```toml
+worktrees_dir = "~/.herdr/worktrees"
+```
+
+`~` expands to the engine user's home directory. A relative path is
+resolved against `PERCH_HOME` (normally `~/.perch`). Existing worktrees
+keep their paths. Perch leaves unclaimed directories in a configured
+worktree directory alone.
 
 ## External knowledge
 

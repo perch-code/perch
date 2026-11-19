@@ -789,8 +789,11 @@ it as the item's first Work run.
 Without one, **Create worktree** makes the worktree alone. `Escape`, `Cmd-[`,
 or the bar's X leaves the view and keeps what was typed until Perch quits.
 
-Worktrees go under `~/.perch/worktrees/`, named for the repository and the
-branch. A repository with a root is cut in the root, your own clone: the
+Worktrees go under `~/.perch/worktrees/` by default, named for the
+repository and the branch. To put new worktrees elsewhere, set
+[`worktrees_dir`](configuration.md#worktree-directory).
+
+A repository with a root is cut in the root, your own clone: the
 branch is its branch, with your remotes and config, and `git worktree list`
 there shows the worktree. Perch writes exactly this much in a root: the new
 branch, git's record of the worktree, a fetch of the one base branch from its

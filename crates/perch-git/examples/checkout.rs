@@ -37,7 +37,9 @@ async fn main() -> anyhow::Result<()> {
 
     let root =
         perch_github::config::data_dir().ok_or_else(|| anyhow::anyhow!("no data directory"))?;
-    let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
+    let worktrees_dir = config.worktrees_dir_in(&root, &perch_github::config::home_dir());
+    let store = Store::new(root).with_worktrees_dir(worktrees_dir);
+    let preparer = Preparer::new(store, Some(token.value.clone()));
 
     let started = std::time::Instant::now();
     let branch = format!("perch/pr-{number}");

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::cmd::{Git, Progress};
 use crate::keyed::KeyedMutex;
+use crate::scan::parse_worktree_list;
 use crate::store::{RepoId, Store};
 use crate::Error;
 
@@ -316,7 +317,7 @@ impl Preparer {
         branch: &str,
         on_step: impl FnMut(Step) + Send,
     ) -> Result<Checkout, Error> {
-        self.prepare_after(id, number, head_sha, base_ref, branch, None, on_step)
+        self.prepare_after(id, number, head_sha, base_ref, branch, None, None, on_step)
             .await
     }
 
@@ -352,6 +353,7 @@ impl Preparer {
         base_ref: &str,
         branch: &str,
         prefetched: Option<Prefetched>,
+        preferred_path: Option<&Path>,
         mut on_step: impl FnMut(Step) + Send,
     ) -> Result<Checkout, Error> {
         let bare = self.ensure_bare(id, &mut on_step).await?;
@@ -395,21 +397,25 @@ impl Preparer {
 
         self.fill_blobs(&bare, head_sha, &mut on_step).await?;
         on_step(Step::CreatingWorktree);
-        let worktree = self.store.worktree_path(id, branch);
-
-        if !worktree.join(".git").exists() {
-            std::fs::create_dir_all(self.store.worktrees_dir())
-                .map_err(|e| Error::Io(e.to_string()))?;
-            // A directory left behind by an interrupted run would make
-            // `worktree add` fail; clear it and let git recreate it. So
-            // would a stale registration of a directory that is gone.
-            let _ = std::fs::remove_dir_all(&worktree);
+        let destination = self.store.worktree_path(id, branch);
+        let (existing, replaced) = self
+            .find_pull_worktree(&bare, branch, &destination, preferred_path)
+            .await?;
+        let worktree = if let Some(existing) = existing {
+            existing
+        } else {
+            self.prepare_worktree_destination(&destination)?;
+            for path in replaced {
+                self.prune_replaced_worktree(&bare, branch, &path).await?;
+            }
+            // A stale registration of a directory that is gone can block
+            // checking out its branch again.
             let _ = self
                 .git
                 .run(Some(&bare), ["worktree", "prune"], WORKTREE_TIMEOUT)
                 .await;
 
-            let path = worktree.to_string_lossy().into_owned();
+            let path = destination.to_string_lossy();
             if self.branch_exists(&bare, branch).await {
                 // An archived worktree being restored: the branch is still
                 // here, so check it out as it is. The head check below
@@ -417,7 +423,7 @@ impl Preparer {
                 self.git
                     .run(
                         Some(&bare),
-                        ["worktree", "add", &path, branch],
+                        ["worktree", "add", path.as_ref(), branch],
                         WORKTREE_TIMEOUT,
                     )
                     .await?;
@@ -425,12 +431,13 @@ impl Preparer {
                 self.git
                     .run(
                         Some(&bare),
-                        ["worktree", "add", "-B", branch, &path, head_sha],
+                        ["worktree", "add", "-B", branch, path.as_ref(), head_sha],
                         WORKTREE_TIMEOUT,
                     )
                     .await?;
             }
-        }
+            destination
+        };
 
         // Whether the directory was just made or already here, make sure it
         // is at the head that was asked for, unless someone has work in it.
@@ -904,9 +911,11 @@ impl Preparer {
         branch: &str,
         reserved: &[String],
     ) -> bool {
+        let path = self.store.worktree_path(id, branch);
         reserved.iter().any(|r| r == branch)
             || self.branch_exists(repo, branch).await
-            || self.store.worktree_path(id, branch).join(".git").exists()
+            || path.join(".git").exists()
+            || (self.store.has_custom_worktrees_dir() && path.symlink_metadata().is_ok())
     }
 
     /// The branches of one of the reader's clones that new work can start
@@ -1075,6 +1084,212 @@ impl Preparer {
             .ok_or_else(|| Error::Io(format!("git lists no worktree for {}", checkout.display())))
     }
 
+    async fn git_dir(&self, repo: &Path, flag: &str) -> Result<PathBuf, Error> {
+        let out = self
+            .git
+            .run(
+                Some(repo),
+                ["rev-parse", "--path-format=absolute", flag],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        Path::new(out.trim_end_matches(['\r', '\n']))
+            .canonicalize()
+            .map_err(|e| Error::Io(e.to_string()))
+    }
+
+    /// Whether the path is a linked checkout of the expected repository
+    /// and branch. A saved path can be reused by another checkout.
+    pub async fn owns_worktree(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        branch: &str,
+        allow_detached: bool,
+    ) -> Result<bool, Error> {
+        let marker = worktree.join(".git");
+        if !(repo.join(".git").exists() || repo.join("HEAD").is_file())
+            || !marker
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_file())
+        {
+            return Ok(false);
+        }
+        let common = self.git_dir(repo, "--git-common-dir").await?;
+        let admin = self.git_dir(worktree, "--git-dir").await?;
+        if admin.parent() != Some(common.join("worktrees").as_path()) {
+            return Ok(false);
+        }
+        let backlink =
+            std::fs::read_to_string(admin.join("gitdir")).map_err(|e| Error::Io(e.to_string()))?;
+        let backlink = admin.join(backlink.trim_end_matches(['\r', '\n']));
+        let marker = marker
+            .canonicalize()
+            .map_err(|e| Error::Io(e.to_string()))?;
+        if !backlink
+            .canonicalize()
+            .is_ok_and(|backlink| backlink == marker)
+        {
+            return Ok(false);
+        }
+        let head =
+            std::fs::read_to_string(admin.join("HEAD")).map_err(|e| Error::Io(e.to_string()))?;
+        let head = head.trim_end_matches(['\r', '\n']);
+        match head.strip_prefix("ref: refs/heads/") {
+            Some(current) => Ok(current == branch),
+            None => Ok(allow_detached
+                && matches!(head.len(), 40 | 64)
+                && head.bytes().all(|b| b.is_ascii_hexdigit())),
+        }
+    }
+
+    /// Find a review checkout registered to Perch's bare clone, including
+    /// one created before the worktree directory changed.
+    async fn find_pull_worktree(
+        &self,
+        bare: &Path,
+        branch: &str,
+        destination: &Path,
+        preferred_path: Option<&Path>,
+    ) -> Result<(Option<PathBuf>, Vec<PathBuf>), Error> {
+        let default = self
+            .store
+            .root()
+            .join("worktrees")
+            .join(destination.file_name().unwrap());
+        let aliases: Vec<_> = preferred_path
+            .into_iter()
+            .chain([destination, default.as_path()])
+            .filter_map(|path| Some((path, path.canonicalize().ok()?)))
+            .collect();
+        let listed = self
+            .git
+            .run(
+                Some(bare),
+                ["worktree", "list", "--porcelain"],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        let mut candidates: Vec<_> = parse_worktree_list(&listed)
+            .into_iter()
+            .filter(|entry| {
+                !entry.prunable
+                    && entry.path.file_name() == destination.file_name()
+                    && entry.branch.as_deref().is_none_or(|name| name == branch)
+                    && entry.path.join(".git").exists()
+            })
+            .filter_map(|entry| Some((entry.path.canonicalize().ok()?, entry)))
+            .collect();
+        let alias_rank = |real: &Path| aliases.iter().position(|(_, path)| path == real);
+        candidates.sort_by_key(|(real, entry)| {
+            (
+                alias_rank(real).unwrap_or(usize::MAX),
+                entry.branch.is_none(),
+            )
+        });
+
+        let mut replaced = Vec::new();
+        let mut verification_error = None;
+        for (real, entry) in candidates {
+            match self
+                .owns_worktree(bare, &entry.path, branch, entry.branch.is_none())
+                .await
+            {
+                Ok(true) => {
+                    let path = alias_rank(&real)
+                        .map(|rank| aliases[rank].0.to_path_buf())
+                        .unwrap_or(entry.path);
+                    return Ok((Some(path), replaced));
+                }
+                Ok(false) if entry.branch.as_deref() == Some(branch) => {
+                    replaced.push(entry.path);
+                }
+                Ok(false) => {}
+                Err(error) => verification_error = Some(error),
+            }
+        }
+        if let Some(error) = verification_error {
+            return Err(error);
+        }
+        Ok((None, replaced))
+    }
+
+    /// Git's prune sees the foreign checkout's .git file and keeps the stale
+    /// record. Remove only this branch's obsolete administrative directory.
+    async fn prune_replaced_worktree(
+        &self,
+        bare: &Path,
+        branch: &str,
+        path: &Path,
+    ) -> Result<(), Error> {
+        let common = self.git_dir(bare, "--git-common-dir").await?;
+        let marker = path.join(".git");
+        let marker = marker
+            .canonicalize()
+            .map_err(|e| Error::Io(e.to_string()))?;
+        let admins =
+            std::fs::read_dir(common.join("worktrees")).map_err(|e| Error::Io(e.to_string()))?;
+        for admin in admins {
+            let admin = admin.map_err(|e| Error::Io(e.to_string()))?;
+            if !admin
+                .file_type()
+                .map_err(|e| Error::Io(e.to_string()))?
+                .is_dir()
+            {
+                continue;
+            }
+            let admin = admin.path();
+            let Ok(backlink) = std::fs::read_to_string(admin.join("gitdir")) else {
+                continue;
+            };
+            let backlink = admin.join(backlink.trim_end_matches(['\r', '\n']));
+            if !backlink
+                .canonicalize()
+                .is_ok_and(|backlink| backlink == marker)
+            {
+                continue;
+            }
+            let Ok(head) = std::fs::read_to_string(admin.join("HEAD")) else {
+                continue;
+            };
+            if head
+                .trim_end_matches(['\r', '\n'])
+                .strip_prefix("ref: refs/heads/")
+                != Some(branch)
+            {
+                continue;
+            }
+            if !admin
+                .join("locked")
+                .symlink_metadata()
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                || !path.join(".git").exists()
+                || self.git_dir(path, "--git-dir").await? == admin
+            {
+                return Err(Error::Io(format!(
+                    "worktree registration at {} is still in use or locked",
+                    path.display()
+                )));
+            }
+            std::fs::remove_dir_all(&admin).map_err(|e| Error::Io(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn prepare_worktree_destination(&self, path: &Path) -> Result<(), Error> {
+        std::fs::create_dir_all(self.store.worktrees_dir())
+            .map_err(|e| Error::Io(e.to_string()))?;
+        match path.symlink_metadata() {
+            Ok(_) if self.store.has_custom_worktrees_dir() || path.join(".git").exists() => {
+                Err(Error::Io(format!("{} is already occupied", path.display())))
+            }
+            // A private store may contain a leftover from an interrupted checkout.
+            Ok(_) => std::fs::remove_dir_all(path).map_err(|e| Error::Io(e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Io(e.to_string())),
+        }
+    }
+
     /// `git worktree add <flags> <path> <commitish>` in `repo`, at the
     /// store's path for `branch`, after clearing a leftover there.
     async fn add_worktree(
@@ -1086,19 +1301,7 @@ impl Preparer {
         commitish: &str,
     ) -> Result<PathBuf, Error> {
         let worktree = self.store.worktree_path(id, branch);
-        if worktree.join(".git").exists() {
-            return Err(Error::Io(format!(
-                "{} is already a checkout",
-                worktree.display()
-            )));
-        }
-        std::fs::create_dir_all(self.store.worktrees_dir())
-            .map_err(|e| Error::Io(e.to_string()))?;
-        // Not a checkout, so anything at the path is a leftover from an
-        // interrupted run, and empty of git's knowledge.
-        if worktree.exists() {
-            std::fs::remove_dir_all(&worktree).map_err(|e| Error::Io(e.to_string()))?;
-        }
+        self.prepare_worktree_destination(&worktree)?;
         let _ = self
             .git
             .run(Some(repo), ["worktree", "prune"], WORKTREE_TIMEOUT)
@@ -1322,8 +1525,20 @@ impl Preparer {
     /// Deliberately not `git worktree remove --force`, which would happily
     /// delete uncommitted work. Callers check for dirt first; this only
     /// removes the directory and then tells git it is gone.
-    pub async fn remove_worktree(&self, bare: &Path, worktree: &Path) -> Result<(), Error> {
+    pub async fn remove_worktree(
+        &self,
+        bare: &Path,
+        worktree: &Path,
+        branch: &str,
+    ) -> Result<(), Error> {
         if worktree.exists() {
+            if !self.owns_worktree(bare, worktree, branch, true).await? {
+                return Err(Error::Io(format!(
+                    "{} is no longer the worktree for {branch} in {}",
+                    worktree.display(),
+                    bare.display()
+                )));
+            }
             std::fs::remove_dir_all(worktree).map_err(|e| Error::Io(e.to_string()))?;
         }
         self.git

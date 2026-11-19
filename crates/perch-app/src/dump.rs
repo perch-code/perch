@@ -78,7 +78,9 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
         .map_err(|e| e.to_string())?;
 
     let root = perch_github::config::data_dir().ok_or_else(|| "no data dir".to_string())?;
-    let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
+    let worktrees_dir = config.worktrees_dir_in(&root, &perch_github::config::home_dir());
+    let store = Store::new(root).with_worktrees_dir(worktrees_dir);
+    let preparer = Preparer::new(store, Some(token.value.clone()));
     let checkout = preparer
         .prepare(
             &id,

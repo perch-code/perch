@@ -108,6 +108,31 @@ async fn a_taken_name_in_the_root_gets_the_next_one() {
 }
 
 #[tokio::test]
+async fn new_work_uses_the_configured_directory_without_replacing_its_contents() {
+    let l = Local::new();
+    let dir = l._tmp.path().join("shared-worktrees");
+    let store = l.store.clone().with_worktrees_dir(Some(dir.clone()));
+    let occupied = store.worktree_path(&l.id, "fix");
+    std::fs::create_dir_all(&occupied).unwrap();
+    std::fs::write(occupied.join("keep.txt"), "keep").unwrap();
+    let preparer = Preparer::new(store, None);
+
+    let cut = preparer
+        .cut_branch(&l.root, &l.id, "fix", "main", &[])
+        .await
+        .unwrap();
+
+    assert_eq!(cut.branch, "fix-2");
+    assert_eq!(cut.worktree, dir.join("local__notes__fix-2"));
+    assert!(cut.worktree.join(".git").is_file());
+    assert_eq!(
+        std::fs::read_to_string(occupied.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    assert!(!l.store.worktrees_dir().exists());
+}
+
+#[tokio::test]
 async fn one_branch_is_fetched_into_its_remote_tracking_ref() {
     let l = Local::new();
     let clone = l.root.parent().unwrap().join("clone");

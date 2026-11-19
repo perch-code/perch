@@ -25,6 +25,9 @@ pub struct Config {
     /// the engine is: the home directory with none.
     #[serde(default)]
     pub clone_root: Option<String>,
+    /// Base directory for Perch's branch worktrees, on the engine's machine.
+    #[serde(default)]
+    pub worktrees_dir: Option<String>,
     /// `[[repo]]` entries: the repositories Perch knows about.
     #[serde(default)]
     pub repo: Vec<RepoConfig>,
@@ -978,6 +981,16 @@ impl Config {
         }
     }
 
+    /// The worktree directory override, with `~` read as `home` and
+    /// relative paths based in `data_root`.
+    pub fn worktrees_dir_in(&self, data_root: &Path, home: &Path) -> Option<PathBuf> {
+        self.worktrees_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| data_root.join(expand_home_in(dir, home)))
+    }
+
     pub fn github_hosts(&self) -> Vec<String> {
         let mut hosts = vec!["github.com".to_string()];
         if let Some(host) = self.github_host.as_deref().filter(|h| !h.is_empty()) {
@@ -1347,6 +1360,7 @@ impl Config {
             agent: AgentConfig::default(),
             github_host: None,
             clone_root: None,
+            worktrees_dir: None,
             repo: Vec::new(),
             knowledge: Vec::new(),
             work: WorkDefaults::default(),
@@ -1384,11 +1398,10 @@ pub(crate) fn toml_error_line(
     }
 }
 
-/// Where everything Perch keeps lives: `$PERCH_HOME`, else `~/.perch`.
+/// Perch's data directory: `$PERCH_HOME`, else `~/.perch`.
 ///
-/// One directory, so it can be named in a sentence, backed up, or deleted
-/// as a whole. Under it: `config.toml`, `perch.db`, `avatars/`, `repos/`,
-/// `worktrees/`, `homes/`, and `updates/`.
+/// Under it: `config.toml`, `perch.db`, `avatars/`, `repos/`, `homes/`,
+/// `updates/`, and `worktrees/` by default.
 pub fn perch_home() -> PathBuf {
     match std::env::var_os("PERCH_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => expand_home(&dir.to_string_lossy()),
@@ -2177,6 +2190,31 @@ network = ["index.crates.io"]
         assert_eq!(root("clone_root = \" ~/Code \""), home.join("Code"));
         assert_eq!(root("clone_root = \"Code\""), home.join("Code"));
         assert_eq!(root("clone_root = \"/srv/src\""), Path::new("/srv/src"));
+    }
+
+    #[test]
+    fn worktrees_dir_expands_home_and_resolves_relative_paths_from_perch_home() {
+        let home = Path::new("/home/dev");
+        let data_root = Path::new("/var/lib/perch");
+        let worktrees_dir = |text: &str| {
+            Config::parse(text)
+                .unwrap()
+                .worktrees_dir_in(data_root, home)
+        };
+        assert_eq!(worktrees_dir(""), None);
+        assert_eq!(worktrees_dir("worktrees_dir = ' '"), None);
+        assert_eq!(
+            worktrees_dir("worktrees_dir = '~/.herdr/worktrees'"),
+            Some(home.join(".herdr/worktrees"))
+        );
+        assert_eq!(
+            worktrees_dir("worktrees_dir = 'checkouts'"),
+            Some(data_root.join("checkouts"))
+        );
+        assert_eq!(
+            worktrees_dir("worktrees_dir = '/srv/worktrees'"),
+            Some(PathBuf::from("/srv/worktrees"))
+        );
     }
 
     #[test]
