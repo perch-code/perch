@@ -47,8 +47,9 @@ use crate::ui::agents::dropdown;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::notifications::{self, InboxStanding};
 use crate::ui::widgets::{
-    action_button, avatar, badge_box, badge_text, clickable, copy_to_clipboard, icon_button,
-    name_label, open_in_browser, sidebar_glyph, worktree_menu, Name,
+    action_button, action_button_with_icon, avatar, badge_box, badge_text, clickable,
+    copy_to_clipboard, icon_button, name_label, open_in_browser, sidebar_glyph, worktree_menu,
+    Name,
 };
 
 /// Whether the description's head says what the item is, rather than the
@@ -558,6 +559,7 @@ fn start_work_button(app: AppState, state: ReviewState) -> impl IntoView {
     let shown = Memo::new(move |_| starts_work(state) && checkout_on_disk(state).is_none());
     tip_with(
         row_button(
+            None,
             || "Start Work".to_string(),
             "start-work",
             || true,
@@ -573,22 +575,43 @@ fn start_work_button(app: AppState, state: ReviewState) -> impl IntoView {
 
 /// A button on a row of the details: a form's button at a chip's height.
 fn row_button(
+    icon: Option<SidebarIcon>,
     label: impl Fn() -> String + 'static,
     id: &'static str,
     enabled: impl Fn() -> bool + 'static,
     act: impl Fn() + 'static,
 ) -> impl IntoView {
-    action_button(label, id, false, enabled, act).style(|s| s.height(22.0).padding_horiz(8.0))
+    match icon {
+        Some(icon) => action_button_with_icon(icon, label, id, false, enabled, act)
+            .style(|s| s.height(22.0).padding_horiz(8.0))
+            .into_any(),
+        None => action_button(label, id, false, enabled, act)
+            .style(|s| s.height(22.0).padding_horiz(8.0))
+            .into_any(),
+    }
 }
 
 /// A chip on a row of the details that drops `menu` down: its word and a
-/// chevron.
+/// chevron, with an optional leading glyph.
 fn menu_chip(
+    icon: Option<SidebarIcon>,
     label: &'static str,
     name: &'static str,
     menu: impl Fn() -> Menu + 'static,
 ) -> impl IntoView {
+    let glyph = match icon {
+        Some(icon) => sidebar_glyph(icon, theme::fg_muted)
+            .style(|s| {
+                s.size(13.0, 13.0)
+                    .margin_right(5.0)
+                    .flex_shrink(0.0_f32)
+                    .pointer_events_none()
+            })
+            .into_any(),
+        None => Empty::new().style(|s| s.hide()).into_any(),
+    };
     Stack::horizontal((
+        glyph,
         Label::derived(move || label.to_string()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .color(theme::fg_muted())
@@ -652,6 +675,7 @@ fn inbox(
         return Stack::horizontal((
             tip_with(
                 row_button(
+                    Some(SidebarIcon::Check),
                     || "Done".to_string(),
                     "inbox-done",
                     || true,
@@ -666,10 +690,15 @@ fn inbox(
                 ),
                 || keymap::tip("Mark Done", Action::MarkDone),
             ),
-            menu_chip("Snooze", "inbox-snooze", move || match open() {
-                Some(item) => notifications::snooze_menu_of(app, snooze_backend.clone(), &item),
-                None => Menu::new(),
-            })
+            menu_chip(
+                Some(SidebarIcon::Clock),
+                "Snooze",
+                "inbox-snooze",
+                move || match open() {
+                    Some(item) => notifications::snooze_menu_of(app, snooze_backend.clone(), &item),
+                    None => Menu::new(),
+                },
+            )
             .style(move |s| s.apply_if(!notification, |s| s.hide())),
             crate::ui::nav_row::menu_button(
                 SidebarIcon::Ellipsis,
@@ -696,6 +725,7 @@ fn inbox(
                     .selectable(false)
             }),
         row_button(
+            Some(SidebarIcon::Undo),
             || "Move to Inbox".to_string(),
             "inbox-restore",
             || true,
@@ -3016,7 +3046,7 @@ fn assign_button(
     backend: Rc<Backend>,
     assignable: Memo<Option<Arc<Vec<MentionableUser>>>>,
 ) -> impl IntoView {
-    menu_chip("Assign", "assign menu", move || {
+    menu_chip(None, "Assign", "assign menu", move || {
         let users = assignable.get_untracked().unwrap_or_default();
         let viewer = app
             .viewer

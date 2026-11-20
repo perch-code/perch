@@ -772,13 +772,36 @@ pub(crate) fn action_button(
     enabled: impl Fn() -> bool + 'static,
     action: impl Fn() + 'static,
 ) -> impl View {
+    action_button_inner(None, label, debug, prominent, enabled, action)
+}
+
+/// An `action_button` with a leading glyph beside its label.
+pub(crate) fn action_button_with_icon(
+    icon: SidebarIcon,
+    label: impl Fn() -> String + 'static,
+    debug: impl Into<String>,
+    prominent: bool,
+    enabled: impl Fn() -> bool + 'static,
+    action: impl Fn() + 'static,
+) -> impl View {
+    action_button_inner(Some(icon), label, debug, prominent, enabled, action)
+}
+
+fn action_button_inner(
+    icon: Option<SidebarIcon>,
+    label: impl Fn() -> String + 'static,
+    debug: impl Into<String>,
+    prominent: bool,
+    enabled: impl Fn() -> bool + 'static,
+    action: impl Fn() + 'static,
+) -> impl View {
     let enabled: std::rc::Rc<dyn Fn() -> bool> = std::rc::Rc::new(enabled);
     let event_enabled = enabled.clone();
     let style_enabled = enabled.clone();
     let label_enabled = enabled.clone();
     let action: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(action);
     let click = action.clone();
-    Container::new(Label::derived(label).style(move |s| {
+    let text = Label::derived(label).style(move |s| {
         let color = if prominent {
             theme::canvas()
         } else {
@@ -793,64 +816,99 @@ pub(crate) fn action_button(
             })
             .selectable(false)
             .pointer_events_none()
-    }))
-    // floem sends a Click as well when Enter or Space comes up on a
-    // button with the keyboard, and as the key repeats: the key going
-    // down is the press, heard once.
-    .on_event_stop(el::Click, move |cx, _| {
-        let by_keyboard = cx.triggered_by.is_some_and(|e| e.is_keyboard_trigger());
-        if event_enabled() && !by_keyboard {
-            click();
+    });
+    let content = match icon {
+        Some(icon) => {
+            let source_enabled = enabled.clone();
+            let color_enabled = enabled.clone();
+            let glyph_color = move |available: bool| {
+                let color = if prominent {
+                    theme::canvas()
+                } else {
+                    theme::fg_muted()
+                };
+                if available || prominent {
+                    color
+                } else {
+                    color.with_alpha(DISABLED_ALPHA)
+                }
+            };
+            Stack::horizontal((
+                icon_in(
+                    move || icons::sidebar_icon(icon, glyph_color(source_enabled())),
+                    move || glyph_color(color_enabled()),
+                )
+                .style(|s| {
+                    s.size(13.0, 13.0)
+                        .margin_right(5.0)
+                        .flex_shrink(0.0_f32)
+                        .pointer_events_none()
+                }),
+                text,
+            ))
+            .style(|s| s.items_center().pointer_events_none())
+            .into_any()
         }
-    })
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        let pressed = matches!(key.code, Code::Enter | Code::NumpadEnter | Code::Space)
-            && key.modifiers.is_empty()
-            && !key.repeat;
-        if pressed && enabled() {
-            action();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(move |s| {
-        let available = style_enabled();
-        // A filled button fades its fill to grey; an outlined one, its
-        // label. Its white label stays white on the grey.
-        let fill = if !prominent {
-            theme::canvas()
-        } else if available {
-            theme::fg()
-        } else {
-            theme::fg().with_alpha(DISABLED_ALPHA)
-        };
-        clickable(s)
-            .height(30.0)
-            .padding_horiz(11.0)
-            .items_center()
-            .justify_center()
-            .flex_shrink(0.0_f32)
-            .background(fill)
-            .border(1.0)
-            .border_color(if prominent { fill } else { theme::border() })
-            .border_radius(theme::RADIUS)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .set_disabled(!available)
-            .apply_if(!available, |s| s.cursor(floem::style::CursorStyle::Default))
-            .apply_if(available, |s| {
-                s.hover(move |s| {
-                    s.background(if prominent {
-                        theme::action_hover()
-                    } else {
-                        theme::canvas_hover()
+        None => text.into_any(),
+    };
+    Container::new(content)
+        // floem sends a Click as well when Enter or Space comes up on a
+        // button with the keyboard, and as the key repeats: the key going
+        // down is the press, heard once.
+        .on_event_stop(el::Click, move |cx, _| {
+            let by_keyboard = cx.triggered_by.is_some_and(|e| e.is_keyboard_trigger());
+            if event_enabled() && !by_keyboard {
+                click();
+            }
+        })
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            let pressed = matches!(key.code, Code::Enter | Code::NumpadEnter | Code::Space)
+                && key.modifiers.is_empty()
+                && !key.repeat;
+            if pressed && enabled() {
+                action();
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        .style(move |s| {
+            let available = style_enabled();
+            // A filled button fades its fill to grey; an outlined one, its
+            // label. Its white label stays white on the grey.
+            let fill = if !prominent {
+                theme::canvas()
+            } else if available {
+                theme::fg()
+            } else {
+                theme::fg().with_alpha(DISABLED_ALPHA)
+            };
+            clickable(s)
+                .height(30.0)
+                .padding_horiz(11.0)
+                .items_center()
+                .justify_center()
+                .flex_shrink(0.0_f32)
+                .background(fill)
+                .border(1.0)
+                .border_color(if prominent { fill } else { theme::border() })
+                .border_radius(theme::RADIUS)
+                .keyboard_navigable()
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                .set_disabled(!available)
+                .apply_if(!available, |s| s.cursor(floem::style::CursorStyle::Default))
+                .apply_if(available, |s| {
+                    s.hover(move |s| {
+                        s.background(if prominent {
+                            theme::action_hover()
+                        } else {
+                            theme::canvas_hover()
+                        })
                     })
                 })
-            })
-    })
-    .debug_name(debug)
-    .into_view()
+        })
+        .debug_name(debug)
+        .into_view()
 }
 
 /// A glyph as a button, as closes a popover. Pressed as `action_button`
