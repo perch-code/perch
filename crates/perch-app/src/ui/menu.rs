@@ -78,6 +78,8 @@ enum Entry {
 pub struct Item {
     label: String,
     icon: Option<SidebarIcon>,
+    /// Whether the icon turns while the row shows, for a status in progress.
+    icon_turns: bool,
     /// Whether it is checked, for a row of a set; none for a command.
     /// A row that toggles flips it while the menu is up.
     checked: Option<Cell<bool>>,
@@ -131,6 +133,7 @@ impl Menu {
         let item = Item {
             label: label.into(),
             icon: None,
+            icon_turns: false,
             checked: None,
             enabled: true,
             shortcut: None,
@@ -422,6 +425,12 @@ impl Item {
     /// Draw the icon in `color`, as a status glyph is drawn elsewhere.
     pub fn icon_tint(mut self, color: fn() -> Color) -> Self {
         self.icon_tint = Some(color);
+        self
+    }
+
+    /// Turn the icon while the row shows, for a status in progress.
+    pub fn icon_turns(mut self, turns: bool) -> Self {
+        self.icon_turns = turns;
         self
     }
 
@@ -1657,7 +1666,19 @@ fn row(
         }) if enabled => *tint,
         _ => fg,
     };
+    let icon_turns = matches!(
+        entry,
+        Entry::Item(Item {
+            icon_turns: true,
+            ..
+        })
+    );
     let icon = icons.then(|| match icon {
+        Some(SidebarIcon::Refresh) if icon_turns => {
+            crate::review::run_view::turning_arrow(icon_fg)
+                .style(|s| s.size(16.0, 16.0).flex_shrink(0.0_f32))
+                .into_any()
+        }
         Some(icon) => sidebar_glyph(icon, icon_fg)
             .style(|s| s.size(16.0, 16.0).flex_shrink(0.0_f32))
             .into_any(),

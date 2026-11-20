@@ -1867,6 +1867,7 @@ fn checks_menu(state: ReviewState) -> Menu {
                 menu = menu.item(crate::review::merge::check_label(&check), move |item| {
                     item.icon(icon)
                         .icon_tint(ink)
+                        .icon_turns(icon == SidebarIcon::Refresh)
                         .detail(status)
                         .enabled(url.is_some())
                         .action(move || {
@@ -4970,9 +4971,15 @@ pub(crate) mod tests {
             crate::ui::menu::is_open(),
             "the glyph did not open its menu"
         );
+        let panel = named(harness.root_id(), "menu-panel:0").expect("no menu panel");
+        assert!(
+            named(panel, "turning arrow").is_some(),
+            "running check in menu does not turn"
+        );
         crate::ui::menu::close();
         harness.rebuild();
         harness.paint();
+        assert!(named(harness.root_id(), "menu-panel:0").is_none());
 
         // Forty checks scroll in a menu no taller than its cap.
         state
