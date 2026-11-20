@@ -552,9 +552,9 @@ The tables use the same groups and action IDs as Settings.
 | `open` | `super+o` | Opens a pull request or issue from its link or number |
 | `settings` | `super+,` | Opens Settings |
 | `close` | `super+w` | Closes Settings, the active file, the item, or the window, in that order |
-| `back` | `super+[` | Closes Settings or returns to the sidebar from an item or New Work |
-| `history_back` | `ctrl+-` | Goes back to where you were |
-| `history_forward` | `ctrl+shift+-` | Goes forward again after going back |
+| `back` | none | Closes Settings or returns to the sidebar from an item or New Work |
+| `history_back` | `super+[` | Goes back to where you were |
+| `history_forward` | `super+]` | Goes forward again after going back |
 | `toggle_agents` | `super+shift+a` | Shows or hides the list of agent runs |
 | `send_feedback` | none | Opens or closes Send Feedback |
 
@@ -563,10 +563,10 @@ The tables use the same groups and action IDs as Settings.
 | Action | Default | What it does |
 |---|---|---|
 | `toggle_sidebar` | `super+\` | Shows or hides the sidebar |
-| `focus_search` | `super+1`, `/` | Opens the sidebar and focuses its search box |
-| `inbox` | `super+2` | Shows the Inbox, opening the sidebar if needed |
-| `worktrees` | `super+3` | Shows Worktrees, opening the sidebar if needed |
-| `browse` | `super+4` | Shows Browse, opening the sidebar if needed |
+| `focus_search` | `super+shift+f`, `/` | Opens the sidebar and focuses its search box |
+| `inbox` | `ctrl+1` (macOS), `alt+1` (other) | Shows the Inbox, opening the sidebar if needed |
+| `worktrees` | `ctrl+2` (macOS), `alt+2` (other) | Shows Worktrees, opening the sidebar if needed |
+| `browse` | `ctrl+3` (macOS), `alt+3` (other) | Shows Browse, opening the sidebar if needed |
 | `next_item` | `j` | Opens the next sidebar item, or the first if none is open. Skips browser-only notifications. |
 | `previous_item` | `k` | Opens the previous sidebar item |
 | `mark_done` | `e` | Marks the Inbox row under the pointer done, else the open item's row |
@@ -577,8 +577,8 @@ The tables use the same groups and action IDs as Settings.
 
 | Action | Default | What it does |
 |---|---|---|
-| `show_conversation` | `super+shift+1` | Shows the open item's Conversation |
-| `show_code` | `super+shift+2` | Shows the open item's Code |
+| `show_conversation` | `super+1` | Shows the open item's Conversation |
+| `show_code` | `super+2` | Shows the open item's Code |
 | `next_tab` | `super+shift+]` | Goes to the next file tab, `Cmd-}` on a US keyboard |
 | `previous_tab` | `super+shift+[` | Goes to the file tab before, `Cmd-{` |
 | `refresh` | `super+r` | Fetches the open item from GitHub again |
@@ -1413,7 +1413,7 @@ offers **Copy**.
 | Go to Implementations | `Cmd-F12` |
 | Find All References | `Shift-F12` |
 | Show Call Hierarchy | `Shift-Alt-H` |
-| Back, Forward | `Ctrl--`, `Ctrl-Shift--` |
+| Back, Forward | `Cmd-[`, `Cmd-]` |
 | Close the panel | `Escape` |
 
 You can [change these shortcuts](#keyboard-shortcuts) or assign one to **Go to
@@ -1460,7 +1460,7 @@ comments. Click it again to return to the image.
 ## Links to code
 
 Click a file, line, or recognized symbol in a comment or agent reply to open it
-in Code. Hover to check the destination first. Press `Ctrl--` to return to the
+in Code. Hover to check the destination first. Press `Cmd-[` to return to the
 discussion. Links work in inline code, code blocks, and Markdown link
 destinations.
 

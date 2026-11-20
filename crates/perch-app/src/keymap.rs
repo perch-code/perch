@@ -63,6 +63,45 @@ pub enum Context {
     Composer,
 }
 
+macro_rules! action_keys {
+    ([$($key:literal),* $(,)?]) => {
+        &[$($key),*]
+    };
+    ([$($key:literal),* $(,)?], [$($other:literal),* $(,)?]) => {
+        if cfg!(target_os = "macos") {
+            &[$($key),*]
+        } else {
+            &[$($other),*]
+        }
+    };
+}
+
+#[cfg(test)]
+macro_rules! action_doc_keys {
+    ([$($key:literal),* $(,)?]) => {{
+        let keys: &[&str] = &[$($key),*];
+        if keys.is_empty() {
+            "none".to_string()
+        } else {
+            keys.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }};
+    ([$($key:literal),* $(,)?], [$($other:literal),* $(,)?]) => {{
+        let mac: &[&str] = &[$($key),*];
+        let other: &[&str] = &[$($other),*];
+        let fmt = |keys: &[&str]| {
+            keys.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!("{} (macOS), {} (other)", fmt(mac), fmt(other))
+    }};
+}
+
 macro_rules! actions {
     ($(
         $variant:ident {
@@ -70,7 +109,8 @@ macro_rules! actions {
             title: $title:literal,
             group: $group:ident,
             context: $context:ident,
-            keys: [$($key:literal),* $(,)?] $(,)?
+            keys: [$($key:literal),* $(,)?]
+            $(, other_keys: [$($other_key:literal),* $(,)?])? $(,)?
         }
     ),* $(,)?) => {
         /// A command a key can run.
@@ -114,7 +154,14 @@ macro_rules! actions {
             /// them. Some actions have none.
             pub fn defaults(self) -> &'static [&'static str] {
                 match self {
-                    $(Action::$variant => &[$($key),*],)*
+                    $(Action::$variant => action_keys!([$($key),*] $(, [$($other_key),*])?),)*
+                }
+            }
+
+            #[cfg(test)]
+            fn doc_defaults(self) -> String {
+                match self {
+                    $(Action::$variant => action_doc_keys!([$($key),*] $(, [$($other_key),*])?),)*
                 }
             }
         }
@@ -127,25 +174,25 @@ actions! {
     Open { id: "open", title: "Open…", group: General, context: Window, keys: ["super+o"] },
     Settings { id: "settings", title: "Settings", group: General, context: Window, keys: ["super+,"] },
     Close { id: "close", title: "Close", group: General, context: Window, keys: ["super+w"] },
-    Back { id: "back", title: "Back to the Sidebar", group: General, context: Window, keys: ["super+["] },
-    HistoryBack { id: "history_back", title: "Go Back", group: General, context: Window, keys: ["ctrl+-"] },
-    HistoryForward { id: "history_forward", title: "Go Forward", group: General, context: Window, keys: ["ctrl+shift+-"] },
+    Back { id: "back", title: "Back to the Sidebar", group: General, context: Window, keys: [] },
+    HistoryBack { id: "history_back", title: "Go Back", group: General, context: Window, keys: ["super+["] },
+    HistoryForward { id: "history_forward", title: "Go Forward", group: General, context: Window, keys: ["super+]"] },
     ToggleAgents { id: "toggle_agents", title: "Toggle Agents", group: General, context: Window, keys: ["super+shift+a"] },
     SendFeedback { id: "send_feedback", title: "Send Feedback", group: General, context: Window, keys: [] },
 
     ToggleSidebar { id: "toggle_sidebar", title: "Toggle Sidebar", group: Sidebar, context: Window, keys: ["super+\\"] },
-    FocusSearch { id: "focus_search", title: "Search the Sidebar", group: Sidebar, context: Window, keys: ["super+1", "/"] },
-    Inbox { id: "inbox", title: "Show Inbox", group: Sidebar, context: Window, keys: ["super+2"] },
-    Worktrees { id: "worktrees", title: "Show Worktrees", group: Sidebar, context: Window, keys: ["super+3"] },
-    Browse { id: "browse", title: "Show Browse", group: Sidebar, context: Window, keys: ["super+4"] },
+    FocusSearch { id: "focus_search", title: "Search the Sidebar", group: Sidebar, context: Window, keys: ["super+shift+f", "/"] },
+    Inbox { id: "inbox", title: "Show Inbox", group: Sidebar, context: Window, keys: ["ctrl+1"], other_keys: ["alt+1"] },
+    Worktrees { id: "worktrees", title: "Show Worktrees", group: Sidebar, context: Window, keys: ["ctrl+2"], other_keys: ["alt+2"] },
+    Browse { id: "browse", title: "Show Browse", group: Sidebar, context: Window, keys: ["ctrl+3"], other_keys: ["alt+3"] },
     NextItem { id: "next_item", title: "Next Item", group: Sidebar, context: Window, keys: ["j"] },
     PreviousItem { id: "previous_item", title: "Previous Item", group: Sidebar, context: Window, keys: ["k"] },
     MarkDone { id: "mark_done", title: "Mark Done", group: Sidebar, context: Window, keys: ["e"] },
     MarkUnread { id: "mark_unread", title: "Mark Unread", group: Sidebar, context: Window, keys: ["shift+u"] },
     Pin { id: "pin", title: "Pin", group: Sidebar, context: Window, keys: ["p"] },
 
-    ShowConversation { id: "show_conversation", title: "Show Conversation", group: Item, context: Window, keys: ["super+shift+1"] },
-    ShowCode { id: "show_code", title: "Show Code", group: Item, context: Window, keys: ["super+shift+2"] },
+    ShowConversation { id: "show_conversation", title: "Show Conversation", group: Item, context: Window, keys: ["super+1"] },
+    ShowCode { id: "show_code", title: "Show Code", group: Item, context: Window, keys: ["super+2"] },
     NextTab { id: "next_tab", title: "Next Tab", group: Item, context: Window, keys: ["super+shift+]"] },
     PreviousTab { id: "previous_tab", title: "Previous Tab", group: Item, context: Window, keys: ["super+shift+["] },
     Refresh { id: "refresh", title: "Refresh", group: Item, context: Window, keys: ["super+r"] },
@@ -661,17 +708,7 @@ mod tests {
             .collect();
         let expected: Vec<(&str, String)> = Action::ALL
             .iter()
-            .map(|action| {
-                let keys = match action.defaults() {
-                    [] => "none".to_string(),
-                    keys => keys
-                        .iter()
-                        .map(|k| format!("`{k}`"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                };
-                (action.id(), keys)
-            })
+            .map(|action| (action.id(), action.doc_defaults()))
             .collect();
         assert_eq!(rows, expected);
     }
@@ -697,10 +734,17 @@ mod tests {
             }
         );
         assert_eq!(
+            one(Action::HistoryBack),
+            Shortcut {
+                modifiers: os,
+                code: Code::BracketLeft
+            }
+        );
+        assert_eq!(
             one(Action::HistoryForward),
             Shortcut {
-                modifiers: Modifiers::CONTROL | Modifiers::SHIFT,
-                code: Code::Minus
+                modifiers: os,
+                code: Code::BracketRight
             }
         );
         assert_eq!(
@@ -712,8 +756,8 @@ mod tests {
             keymap.keys(Action::FocusSearch),
             &[
                 Shortcut {
-                    modifiers: os,
-                    code: Code::Digit1
+                    modifiers: os | Modifiers::SHIFT,
+                    code: Code::KeyF
                 },
                 Shortcut::key(Code::Slash)
             ]
@@ -745,12 +789,16 @@ mod tests {
 
     #[test]
     fn sidebar_tab_defaults_yield_to_configured_window_and_composer_shortcuts() {
-        let keymap =
-            with_bindings("focus_search = ['/', 'super+2']\nbold = 'super+3'\ninbox = 'super+4'");
+        let inbox = Action::Inbox.defaults()[0];
+        let worktrees = Action::Worktrees.defaults()[0];
+        let browse = Action::Browse.defaults()[0];
+        let keymap = with_bindings(&format!(
+            "focus_search = ['/', '{inbox}']\nbold = '{worktrees}'\ninbox = '{browse}'"
+        ));
         for (action, key) in [
-            (Action::FocusSearch, "super+2"),
-            (Action::Bold, "super+3"),
-            (Action::Inbox, "super+4"),
+            (Action::FocusSearch, inbox),
+            (Action::Bold, worktrees),
+            (Action::Inbox, browse),
         ] {
             assert!(keymap.matches(action, &press(key), true));
             assert!(keymap.conflicts(action).is_empty());
@@ -759,7 +807,7 @@ mod tests {
         assert_eq!(keymap.label(Action::Browse), None);
 
         // Two explicitly assigned keys still get the usual conflict report.
-        let keymap = with_bindings("browse = 'super+4'\nfocus_search = 'super+4'");
+        let keymap = with_bindings(&format!("browse = '{browse}'\nfocus_search = '{browse}'"));
         assert_eq!(keymap.conflicts(Action::Browse), vec![Action::FocusSearch]);
     }
 
@@ -814,7 +862,7 @@ mod tests {
         // `/` searches, but not from a box.
         assert!(keymap.matches(Action::FocusSearch, &press("/"), false));
         assert!(!keymap.matches(Action::FocusSearch, &press("/"), true));
-        assert!(keymap.matches(Action::FocusSearch, &press("super+1"), true));
+        assert!(keymap.matches(Action::FocusSearch, &press("super+shift+f"), true));
         assert!(!keymap.matches(Action::NextUnviewed, &press("shift+]"), true));
         // Keys that don't type are heard while typing.
         assert!(keymap.matches(Action::GoToDefinition, &press("f12"), true));
@@ -824,7 +872,7 @@ mod tests {
     #[test]
     fn a_match_takes_the_modifiers_exactly() {
         let keymap = Keymap::defaults();
-        assert!(!keymap.matches(Action::Back, &press("super+shift+["), false));
+        assert!(!keymap.matches(Action::HistoryBack, &press("super+shift+["), false));
         assert!(keymap.matches(Action::PreviousTab, &press("super+shift+["), false));
         assert!(!keymap.matches(Action::Comment, &press("shift+a"), false));
         assert!(!keymap.matches(Action::Find, &press("super+alt+f"), false));

@@ -599,7 +599,10 @@ pub fn key(
         return EventPropagation::Stop;
     }
     use crate::keymap::{pressed, Action};
-    if pressed(Action::Back, key, typing) || pressed(Action::Close, key, typing) {
+    if pressed(Action::Back, key, typing)
+        || pressed(Action::HistoryBack, key, typing)
+        || pressed(Action::Close, key, typing)
+    {
         close(state, true);
         return EventPropagation::Stop;
     }

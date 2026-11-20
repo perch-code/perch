@@ -1802,19 +1802,24 @@ mod tests {
         assert!(!state.new_work.open.get());
         assert!(named(harness.root_id(), "new-work-title").is_none());
 
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings("back = 'super+alt+['"));
         state.new_work.open.set(true);
         harness.rebuild();
         harness.paint();
-        harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
+        harness.dispatch_event(key(
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            OS_MOD | Modifiers::ALT,
+        ));
         harness.rebuild();
-        assert!(!state.new_work.open.get(), "Cmd-[ shuts it too");
+        assert!(!state.new_work.open.get(), "Back shuts it too");
     }
 
-    /// The mouse's back button and Ctrl-- go back from anywhere, the empty
+    /// The mouse's back button and Cmd-[ go back from anywhere, the empty
     /// pane too, opening the item the place was on; its forward button
     /// goes forward again.
     #[test]
-    fn the_mouse_back_button_and_ctrl_minus_go_back_across_items() {
+    fn the_mouse_back_button_and_history_back_go_back_across_items() {
         use crate::review::model::{Place, Spot};
         use floem::ui_events::pointer::{
             PointerButton, PointerButtonEvent, PointerEvent, PointerId, PointerInfo, PointerType,
@@ -1876,9 +1881,9 @@ mod tests {
         assert!(review.opening.get());
 
         harness.dispatch_event(key(
-            Code::Minus,
-            Key::Character("-".into()),
-            Modifiers::CONTROL,
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            OS_MOD,
         ));
         assert_eq!(state.open_item.get().as_deref(), Some("a"));
         assert!(!review.history.with(|h| h.can_go_back()));
@@ -2596,14 +2601,19 @@ mod tests {
         harness.rebuild();
         assert_eq!(showing(&review), "src/y.rs");
 
-        // Cmd-[ leaves the item with its tabs still open.
+        // Back leaves the item with its tabs still open.
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings("back = 'super+alt+['"));
         assert!(review.is_showing());
-        harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
+        harness.dispatch_event(key(
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            OS_MOD | Modifiers::ALT,
+        ));
         harness.rebuild();
-        assert!(!review.is_showing(), "Cmd-[ did not go back to the sidebar");
+        assert!(!review.is_showing(), "Back did not go back to the sidebar");
     }
 
-    /// Cmd-Shift-1 and Cmd-Shift-2 pick Conversation and Code. Code with
+    /// Cmd-1 and Cmd-2 pick Conversation and Code. Code with
     /// no file open opens none, and the item's first visit opens the tree
     /// beside the pane that says so; with no changes, the pane says that.
     #[test]
@@ -2613,11 +2623,11 @@ mod tests {
         let (mut harness, review) = window_with_a_file_open();
         let mode = |n: u8| {
             let (code, c) = if n == 1 {
-                (Code::Digit1, "!")
+                (Code::Digit1, "1")
             } else {
-                (Code::Digit2, "@")
+                (Code::Digit2, "2")
             };
-            key(code, Key::Character(c.into()), OS_MOD | Modifiers::SHIFT)
+            key(code, Key::Character(c.into()), OS_MOD)
         };
         harness.dispatch_event(mode(1));
         review.close_tab("src/x.rs");
@@ -2794,10 +2804,11 @@ mod tests {
         assert_eq!(review.review_launcher_instructions.get(), "t");
     }
 
-    /// Cmd-[ with new work over an item, and nothing focused so the root
+    /// Back with new work over an item, and nothing focused so the root
     /// is the key's target, shuts new work and leaves the item showing.
     #[test]
-    fn cmd_left_bracket_over_an_item_shuts_new_work_alone() {
+    fn back_over_an_item_shuts_new_work_alone() {
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings("back = 'super+alt+['"));
         let (mut harness, state, review) = window_and_state_with_a_file_open();
         state.new_work.open.set(true);
         harness.rebuild();
@@ -2806,7 +2817,11 @@ mod tests {
         harness.root_id().clear_focus();
         harness.rebuild();
         harness.paint();
-        harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
+        harness.dispatch_event(key(
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            OS_MOD | Modifiers::ALT,
+        ));
         harness.rebuild();
         assert!(!state.new_work.open.get(), "new work is still up");
         assert!(review.is_showing(), "the item closed with new work");

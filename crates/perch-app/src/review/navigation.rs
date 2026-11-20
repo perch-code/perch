@@ -1366,22 +1366,22 @@ pub(crate) mod tests {
         );
         assert_eq!(ed.cursor.get().offset(), doc.offset_of_row(0) + 3);
 
-        // Ctrl-- goes back to where the jump left.
+        // Cmd-[ goes back to where the jump left.
         harness.dispatch_event(key(
-            Code::Minus,
-            Key::Character("-".into()),
-            Modifiers::CONTROL,
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            crate::ui::OS_MOD,
         ));
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((2, 0)));
         assert_eq!(ed.cursor.get().offset(), doc.offset_of_row(3));
 
-        // Ctrl-Shift-- goes forward again.
+        // Cmd-] goes forward again.
         harness.dispatch_event(key(
-            Code::Minus,
-            Key::Character("_".into()),
-            Modifiers::CONTROL | Modifiers::SHIFT,
+            Code::BracketRight,
+            Key::Character("]".into()),
+            crate::ui::OS_MOD,
         ));
         harness.rebuild();
         harness.paint();
@@ -1389,17 +1389,17 @@ pub(crate) mod tests {
 
         // And once more back, twice: the second has nowhere to go.
         harness.dispatch_event(key(
-            Code::Minus,
-            Key::Character("-".into()),
-            Modifiers::CONTROL,
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            crate::ui::OS_MOD,
         ));
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((2, 0)));
         harness.dispatch_event(key(
-            Code::Minus,
-            Key::Character("-".into()),
-            Modifiers::CONTROL,
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            crate::ui::OS_MOD,
         ));
         harness.rebuild();
         harness.paint();
@@ -1408,7 +1408,7 @@ pub(crate) mod tests {
 
     /// A file a comment names without a line opens as the tree opens it:
     /// asked for, with nothing to jump to and so nothing unfolded, and the
-    /// place the reader left is where `Ctrl--` goes.
+    /// place the reader left is where `Cmd-[` goes.
     #[test]
     fn a_file_named_alone_opens_with_no_jump_and_back_returns() {
         let (mut harness, state, mut commands) = recording_harness();
@@ -1448,9 +1448,9 @@ pub(crate) mod tests {
         );
 
         harness.dispatch_event(key(
-            Code::Minus,
-            Key::Character("-".into()),
-            Modifiers::CONTROL,
+            Code::BracketLeft,
+            Key::Character("[".into()),
+            crate::ui::OS_MOD,
         ));
         harness.rebuild();
         assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
