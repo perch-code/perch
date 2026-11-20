@@ -216,6 +216,7 @@ pub(crate) fn refresh(app: AppState, state: ReviewState, backend: &Backend) -> b
         let navigation_id = backend.open_item(&item_id);
         app.begin_item_review(state, "Reading the pull request", &item_id, navigation_id);
     } else {
+        state.item_refreshing.set(true);
         backend.refresh_open_item(&item_id);
     }
     true

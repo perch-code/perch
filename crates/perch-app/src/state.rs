@@ -2003,6 +2003,7 @@ impl AppState {
                 comments,
                 events,
                 offline,
+                fetched_at,
             } => {
                 if !self.accepts_open_item(navigation_id, &item.id) {
                     tracing::debug!(item = %item.id, "ignored a stale issue-open result");
@@ -2023,6 +2024,7 @@ impl AppState {
                 review.pull_request.set(None);
                 review.stale_head.set(None);
                 review.offline.set(offline);
+                review.fetched_at.set(fetched_at);
                 review.upstream_changed.set(false);
                 review.head_moved.set(None);
                 review.install_issue_reactions(&issue, &comments);
@@ -2451,6 +2453,11 @@ impl AppState {
                     review.upstream_changed.set(true);
                 }
             }
+            Event::OpenItemRefreshed { item_id } => {
+                if review.is_item(&item_id) {
+                    review.item_refreshing.set(false);
+                }
+            }
             Event::ReviewFailed {
                 navigation_id,
                 message,
@@ -2632,6 +2639,7 @@ impl AppState {
                 comments,
                 events,
                 body_reactions,
+                fetched_at,
             } => {
                 if review.is_item(&item_id) {
                     let body = review
@@ -2644,6 +2652,9 @@ impl AppState {
                     );
                     review.issue_comments.set(comments);
                     review.issue_events.set(events);
+                    if let Some(at) = fetched_at {
+                        review.fetched_at.set(Some(at));
+                    }
                 }
             }
             Event::MentionableUsers {
@@ -2720,12 +2731,16 @@ impl AppState {
             Event::DiscussionReady {
                 item_id,
                 discussion,
+                fetched_at,
             } => {
                 if review.is_item(&item_id) {
                     review.install_reactions(discussion.reactions_by_id());
                     review
                         .discussion
                         .set(Some(review.with_submitted_reviews(discussion)));
+                    if let Some(at) = fetched_at {
+                        review.fetched_at.set(Some(at));
+                    }
                 }
             }
             Event::ChecksReady {
@@ -3697,6 +3712,7 @@ impl AppState {
             | Event::HistoricalReviewReady { .. }
             | Event::HistoricalReviewFailed { .. }
             | Event::OpenItemChanged { .. }
+            | Event::OpenItemRefreshed { .. }
             | Event::IssueReady { .. }
             | Event::IssueHome { .. } => {}
             Event::ReviewProgress { .. }
@@ -6775,6 +6791,7 @@ mod tests {
             Event::DiscussionReady {
                 item_id: "wt".into(),
                 discussion: Arc::new(discussion_with_reactions(theirs(ReactionKind::Heart, 1))),
+                fetched_at: None,
             },
             review,
         );
@@ -6813,6 +6830,7 @@ mod tests {
             Event::DiscussionReady {
                 item_id: "wt".into(),
                 discussion: Arc::new(read),
+                fetched_at: None,
             },
             review,
         );
@@ -7032,6 +7050,7 @@ mod tests {
                 comments: Arc::new(comments),
                 events: Arc::new(Vec::new()),
                 offline: false,
+                fetched_at: None,
             },
             review,
         );
@@ -7046,6 +7065,7 @@ mod tests {
                 comments: Arc::new(discussion_with_reactions(hooray.clone()).comments),
                 events: Arc::new(Vec::new()),
                 body_reactions: Reactions::default(),
+                fetched_at: None,
             },
             review,
         );
@@ -7143,6 +7163,7 @@ mod tests {
             Event::DiscussionReady {
                 item_id: "wt".into(),
                 discussion: Arc::new(perch_github::Discussion::default()),
+                fetched_at: None,
             },
             review,
         );

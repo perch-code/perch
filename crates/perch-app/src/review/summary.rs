@@ -134,7 +134,7 @@ pub fn card_head(
         ))
         .debug_name("title row")
         .style(|s| s.items_start().width_full().min_width(0.0).col_gap(16.0)),
-        card_byline(app, state, author),
+        card_byline(app, state, author, backend.clone()),
         properties_bar(app, state, backend),
     ))
     .debug_name("description head")
@@ -875,14 +875,17 @@ fn repo_label(state: ReviewState) -> impl IntoView {
 
 /// Who opened the item, when, and where, on one quiet line under the
 /// title: the avatar, the login and how long ago, then past a dot the
-/// repository and number. It wraps under itself in a narrow column.
+/// repository and number, then past a dot how fresh the item is with a
+/// refresh button. It wraps under itself in a narrow column.
 fn card_byline(
     app: AppState,
     state: ReviewState,
     author: Memo<Option<(String, String, Option<jiff::Timestamp>)>>,
+    backend: Rc<Backend>,
 ) -> impl IntoView {
     let has_author = Memo::new(move |_| author.with(Option::is_some));
     let has_repo = Memo::new(move |_| !repo_of(state).is_empty());
+    let has_fetched = Memo::new(move |_| state.fetched_at.with(Option::is_some));
     Stack::horizontal((
         dyn_container(
             move || author.get(),
@@ -892,15 +895,10 @@ fn card_byline(
             },
         )
         .style(move |s| s.min_width(0.0).apply_if(!has_author.get(), |s| s.hide())),
-        Empty::new().debug_name("byline dot").style(move |s| {
-            s.size(2.0, 2.0)
-                .border_radius(1.0)
-                .flex_shrink(0.0_f32)
-                .margin_horiz(2.0)
-                .background(theme::fg_subtle())
-                .apply_if(!has_author.get() || !has_repo.get(), |s| s.hide())
-        }),
+        byline_dot(move || has_author.get() && has_repo.get()),
         repo_label(state),
+        byline_dot(move || (has_author.get() || has_repo.get()) && has_fetched.get()),
+        as_of_view(app, state, backend, has_fetched),
     ))
     .debug_name("description byline")
     .style(move |s| {
@@ -912,7 +910,102 @@ fn card_byline(
             .col_gap(6.0)
             .row_gap(4.0)
             .margin_top(theme::DESCRIPTION_BYLINE_GAP)
-            .apply_if(!has_author.get() && !has_repo.get(), |s| s.hide())
+            .apply_if(
+                !has_author.get() && !has_repo.get() && !has_fetched.get(),
+                |s| s.hide(),
+            )
+    })
+}
+
+fn byline_dot(shown: impl Fn() -> bool + 'static) -> impl IntoView {
+    Empty::new().debug_name("byline dot").style(move |s| {
+        s.size(2.0, 2.0)
+            .border_radius(1.0)
+            .flex_shrink(0.0_f32)
+            .margin_horiz(2.0)
+            .background(theme::fg_subtle())
+            .apply_if(!shown(), |s| s.hide())
+    })
+}
+
+/// How long ago the open pull request or issue was fetched from GitHub:
+/// `"as of just now"`, `"as of 15m ago"`, `"as of 3h ago"`.
+fn as_of_text(when: jiff::Timestamp, now: jiff::Timestamp) -> String {
+    match timefmt::short(when, now).as_str() {
+        "now" => "as of just now".to_string(),
+        short => format!("as of {short} ago"),
+    }
+}
+
+/// How fresh the item is, and a small refresh button right beside it.
+fn as_of_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    has_fetched: Memo<bool>,
+) -> impl IntoView {
+    let text = Memo::new(move |_| {
+        state
+            .fetched_at
+            .get()
+            .map(|at| as_of_text(at, app.now.get()))
+            .unwrap_or_default()
+    });
+    let refreshing = Memo::new(move |_| state.item_refreshing.get());
+    let refresh = tip_with(
+        Container::new(dyn_container(
+            move || refreshing.get(),
+            move |turning| {
+                if turning {
+                    crate::review::run_view::turning_arrow(theme::fg_muted)
+                        .style(|s| s.size(13.0, 13.0))
+                        .into_any()
+                } else {
+                    svg(move || icons::sidebar_icon(SidebarIcon::Refresh, theme::fg_subtle()))
+                        .style(|s| s.size(13.0, 13.0).color(theme::fg_subtle()))
+                        .into_any()
+                }
+            },
+        ))
+        .debug_name("as of refresh")
+        .on_event_stop(el::Click, move |_, _| {
+            if state.item_refreshing.get_untracked() {
+                return;
+            }
+            crate::review::refresh(app, state, &backend);
+        })
+        .style(move |s| {
+            let s = reached_by_tab(s)
+                .size(20.0, 20.0)
+                .items_center()
+                .justify_center()
+                .border_radius(10.0)
+                .flex_shrink(0.0_f32);
+            if refreshing.get() {
+                s
+            } else {
+                clickable(s).hover(|s| s.background(theme::badge_bg()))
+            }
+        }),
+        || keymap::tip("Refresh", Action::Refresh),
+    );
+    Stack::horizontal((
+        Label::derived(move || text.get())
+            .debug_name("as of label")
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_subtle())
+                    .selectable(false)
+                    .flex_shrink(0.0_f32)
+            }),
+        refresh,
+    ))
+    .debug_name("as of group")
+    .style(move |s| {
+        s.items_center()
+            .col_gap(3.0)
+            .flex_shrink(0.0_f32)
+            .apply_if(!has_fetched.get(), |s| s.hide())
     })
 }
 
@@ -5469,5 +5562,84 @@ pub(crate) mod tests {
                 "a layer of the fade is {rgba:?} on a page of {page:?}"
             );
         }
+    }
+
+    #[test]
+    fn as_of_shows_after_the_repository_and_its_button_refreshes_the_item() {
+        let now: jiff::Timestamp = "2026-09-20T12:15:00Z".parse().unwrap();
+        let fifteen_ago: jiff::Timestamp = "2026-09-20T12:00:00Z".parse().unwrap();
+        let three_hours_ago: jiff::Timestamp = "2026-09-20T09:15:00Z".parse().unwrap();
+        assert_eq!(as_of_text(now, now), "as of just now");
+        assert_eq!(as_of_text(fifteen_ago, now), "as of 15m ago");
+        assert_eq!(as_of_text(three_hours_ago, now), "as of 3h ago");
+
+        let app = AppState::new();
+        app.now.set(now);
+        let (backend, mut commands) = Backend::recording();
+        let (mut harness, state) = pull_request_window(app, pull_request(812), backend);
+
+        // Hidden until a fetch timestamp arrives.
+        assert_eq!(rect(&harness, "as of group").width(), 0.0);
+
+        let item_id = state.item.get_untracked().unwrap().id.clone();
+        app.apply_with_review(
+            crate::backend::Event::DiscussionReady {
+                item_id: item_id.clone(),
+                discussion: Arc::new(perch_github::Discussion::default()),
+                fetched_at: Some(fifteen_ago),
+            },
+            state,
+        );
+        harness.rebuild();
+        harness.paint();
+
+        let byline = rect(&harness, "description byline");
+        let repo = rect(&harness, "repository line");
+        let as_of = rect(&harness, "as of label");
+        let refresh = rect(&harness, "as of refresh");
+        assert!(within(as_of, byline), "{as_of:?} is not on {byline:?}");
+        assert!(within(refresh, byline), "{refresh:?} is not on {byline:?}");
+        assert!(
+            as_of.x0 > repo.x1,
+            "as of at {as_of:?} is not after repo at {repo:?}"
+        );
+        assert!(
+            refresh.x0 >= as_of.x1,
+            "refresh at {refresh:?} is not to the right of as of at {as_of:?}"
+        );
+
+        // Clicking the refresh button refreshes the open item and turns the
+        // arrow until OpenItemRefreshed arrives.
+        press(&mut harness, "as of refresh");
+        assert!(state.item_refreshing.get());
+        let refreshed: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter(|c| {
+                matches!(
+                    c,
+                    crate::backend::Command::RefreshOpenItem { item_id: id } if id == &item_id
+                )
+            })
+            .collect();
+        assert_eq!(refreshed.len(), 1, "{refreshed:?}");
+
+        // A second click while refreshing does not send another refresh.
+        press(&mut harness, "as of refresh");
+        let extra: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter(|c| matches!(c, crate::backend::Command::RefreshOpenItem { .. }))
+            .collect();
+        assert!(extra.is_empty(), "{extra:?}");
+
+        // Finishing the refresh stops the spinner and updates the timestamp.
+        app.apply_with_review(
+            crate::backend::Event::DiscussionReady {
+                item_id: item_id.clone(),
+                discussion: Arc::new(perch_github::Discussion::default()),
+                fetched_at: Some(now),
+            },
+            state,
+        );
+        app.apply_with_review(crate::backend::Event::OpenItemRefreshed { item_id }, state);
+        assert!(!state.item_refreshing.get());
+        assert_eq!(state.fetched_at.get(), Some(now));
     }
 }

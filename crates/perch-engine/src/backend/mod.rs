@@ -1139,6 +1139,11 @@ pub enum Event {
     OpenItemChanged {
         item_id: String,
     },
+    /// A refresh of the open item has finished, whether or not GitHub
+    /// answered.
+    OpenItemRefreshed {
+        item_id: String,
+    },
     /// A remembered setting: at startup and on a resync for each key the
     /// UI asked to keep, `None` for one never kept, which goes back to its
     /// default; after a change, the new value.
@@ -1157,6 +1162,9 @@ pub enum Event {
         events: Arc<Vec<perch_github::PullEvent>>,
         /// True when the fetch failed and this is the snapshot alone.
         offline: bool,
+        /// When the issue's conversation was last fetched from GitHub.
+        #[serde(default)]
+        fetched_at: Option<Timestamp>,
     },
     /// Something worth a line in the popup and nothing more.
     Notice(String),
@@ -1453,6 +1461,10 @@ pub enum Event {
     DiscussionReady {
         item_id: String,
         discussion: Arc<perch_github::Discussion>,
+        /// When this discussion was fetched from GitHub. `None` when
+        /// rewriting the kept copy after a local change.
+        #[serde(default)]
+        fetched_at: Option<Timestamp>,
     },
     /// An issue's comments, fetched again after a notification about it
     /// or after an open that showed what was kept, and the reactions on
@@ -1462,6 +1474,10 @@ pub enum Event {
         comments: Arc<Vec<perch_github::IssueComment>>,
         events: Arc<Vec<perch_github::PullEvent>>,
         body_reactions: Reactions,
+        /// When this conversation was fetched from GitHub. `None` when
+        /// rewriting the kept copy after a local change.
+        #[serde(default)]
+        fetched_at: Option<Timestamp>,
     },
     /// Who of the item's repository matched `query`, in GitHub's order.
     /// Nobody when GitHub could not be asked.
@@ -10592,7 +10608,7 @@ fn show_kept_conversation(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
     let cached = ctx
         .with_cache(|c| c.load_discussion(item_id).ok().flatten())
         .flatten();
-    if let Some((_, d)) = cached {
+    if let Some((fetched_at, d)) = cached {
         if let Ok(mut guard) = ctx.slot.lock() {
             if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
                 open.body = Some(d.body.clone());
@@ -10602,6 +10618,7 @@ fn show_kept_conversation(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
         let _ = ctx.events.send(Event::DiscussionReady {
             item_id: item_id.to_string(),
             discussion: Arc::new(d),
+            fetched_at: Some(fetched_at),
         });
         description_rewrite::maybe_start(ctx, item_id);
     }
@@ -11760,7 +11777,7 @@ async fn submit_open_pull_request_review(
                 }
                 None => in_review_ids.clone(),
             };
-            publish_discussion(ctx, item_id, discussion);
+            publish_discussion(ctx, item_id, discussion, Some(Timestamp::now()));
             unmatched
         }
         Err(error) => {
@@ -12656,13 +12673,14 @@ fn show_kept_comments(ctx: &Ctx, item_id: &str) {
             .is_some_and(|open| open.item_id == item_id && open.pull_request.is_some())
     });
     if is_pull {
-        publish_discussion(ctx, item_id, discussion);
+        publish_discussion(ctx, item_id, discussion, None);
     } else {
         let _ = ctx.events.send(Event::IssueComments {
             item_id: item_id.to_string(),
             comments: Arc::new(discussion.comments),
             events: Arc::new(discussion.events),
             body_reactions: discussion.reactions,
+            fetched_at: None,
         });
         ctx.send_threads(item_id);
     }
@@ -13139,6 +13157,7 @@ async fn show_posted_issue_comment(ctx: &Ctx, item_id: &str, comment: &perch_git
             comments: Arc::new(discussion.comments),
             events: Arc::new(discussion.events),
             body_reactions: discussion.reactions,
+            fetched_at: None,
         });
     }
 }
@@ -13637,7 +13656,7 @@ fn append_cached_issue_comment(
         return false;
     };
     if added {
-        publish_discussion(ctx, item_id, discussion);
+        publish_discussion(ctx, item_id, discussion, None);
     }
     true
 }
@@ -15630,6 +15649,11 @@ async fn refresh_open_item(ctx: &Ctx, item_id: &str) -> bool {
     if let Ok(mut s) = ctx.refreshing.lock() {
         s.remove(item_id);
     };
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::OpenItemRefreshed {
+            item_id: item_id.to_string(),
+        });
+    }
     answered
 }
 
@@ -15768,6 +15792,7 @@ async fn refresh_open_issue(
             comments: Arc::new(comments),
             events: Arc::new(events),
             body_reactions,
+            fetched_at: Some(Timestamp::now()),
         });
     }
     Some(true)
@@ -16932,7 +16957,8 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
 
     // The conversation as it was last kept, for offline and for a first
     // paint that does not wait on the network.
-    let (kept, kept_events): (
+    let (kept_fetched_at, kept, kept_events): (
+        Option<Timestamp>,
         Vec<perch_github::IssueComment>,
         Vec<perch_github::PullEvent>,
     ) = existing
@@ -16941,7 +16967,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten())
                 .flatten()
         })
-        .map(|(_, d)| (d.comments, d.events))
+        .map(|(at, d)| (Some(at), d.comments, d.events))
         .unwrap_or_default();
     let snapshot = existing.as_ref().and_then(|item| item.issue().cloned());
     // Whether what shows now is the kept snapshot, to be fetched again
@@ -17053,9 +17079,12 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
     let timeline = Arc::new(timeline);
     let scope_gen = next_scope_gen();
     tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, kept = refetch, "issue ready");
-    if !offline && !refetch {
+    let fetched_at = if !offline && !refetch {
         keep_issue_comments(ctx, &item.id, &issue, &comments, &timeline);
-    }
+        Some(now)
+    } else {
+        kept_fetched_at
+    };
     let installed = ctx
         .navigation_requests
         .with_current_item(&item.id, navigation_id, || {
@@ -17086,6 +17115,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
                 comments: comments.clone(),
                 events: timeline.clone(),
                 offline,
+                fetched_at,
             });
             true
         })
@@ -18195,7 +18225,7 @@ async fn fetch_discussion(
                     ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
                 });
         if committed.is_some() {
-            publish_discussion(ctx, item_id, discussion);
+            publish_discussion(ctx, item_id, discussion, Some(Timestamp::now()));
             return true;
         }
         if !once_more {
@@ -18217,7 +18247,12 @@ async fn fetch_discussion(
 /// which a question is prompted with; and the discussion itself. The
 /// state layer also retains an accepted review if navigation changes
 /// after the cache commit but before this event is handled.
-fn publish_discussion(ctx: &Ctx, item_id: &str, discussion: perch_github::Discussion) {
+fn publish_discussion(
+    ctx: &Ctx,
+    item_id: &str,
+    discussion: perch_github::Discussion,
+    fetched_at: Option<Timestamp>,
+) {
     let view = ctx.view_for(item_id);
     let ctx = &view;
     if ctx.is_open(item_id) {
@@ -18233,6 +18268,7 @@ fn publish_discussion(ctx: &Ctx, item_id: &str, discussion: perch_github::Discus
         let _ = ctx.events.send(Event::DiscussionReady {
             item_id: item_id.to_string(),
             discussion: Arc::new(discussion),
+            fetched_at,
         });
         description_rewrite::maybe_start(ctx, item_id);
     }
@@ -27562,7 +27598,7 @@ while True:
         open_in_slot(&ctx.for_window(2), &item);
 
         // From the worker's own context, as a poll would.
-        publish_discussion(&ctx, &item.id, perch_github::Discussion::default());
+        publish_discussion(&ctx, &item.id, perch_github::Discussion::default(), None);
 
         let sent: Vec<_> = received.try_iter().collect();
         assert!(sent.iter().any(|(window, event)| *window == 2
@@ -30993,7 +31029,7 @@ read eof || true
                 &events[..],
                 [
                     Event::CommentThreads { item_id: threads_item, .. },
-                    Event::DiscussionReady { item_id: discussion_item, discussion },
+                    Event::DiscussionReady { item_id: discussion_item, discussion, .. },
                     Event::IssueCommentPosted { item_id, token: 5, result: Ok(comment) },
                 ]
                     if threads_item == &item.id
@@ -32194,7 +32230,7 @@ read eof || true
                 &events[..],
                 [
                     Event::CommentThreads { .. },
-                    Event::DiscussionReady { item_id: discussion_item, discussion },
+                    Event::DiscussionReady { item_id: discussion_item, discussion, .. },
                     Event::IssueCommentPosted { item_id, token: 9, result: Ok(comment) },
                 ]
                     if discussion_item == &item.id

@@ -686,6 +686,7 @@ mod tests {
             crate::backend::Event::DiscussionReady {
                 item_id: "wt".into(),
                 discussion: Arc::new(more),
+                fetched_at: None,
             },
             state,
         );

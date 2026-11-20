@@ -92,6 +92,7 @@ struct Page {
     issue_closable: Option<bool>,
     issue_reopenable: Option<bool>,
     home: Option<Arc<crate::backend::HomeCode>>,
+    fetched_at: Option<jiff::Timestamp>,
     stale_head: Option<String>,
     offline: bool,
     scope: Scope,
@@ -1076,6 +1077,10 @@ pub struct ReviewState {
     /// The reader asked for the default branch again, and the answer is
     /// not in.
     pub home_refreshing: RwSignal<bool>,
+    /// When the open pull request or issue was last fetched from GitHub.
+    pub fetched_at: RwSignal<Option<jiff::Timestamp>>,
+    /// The reader asked to refresh the open item, and the answer is not in.
+    pub item_refreshing: RwSignal<bool>,
     /// The head the pull request moved to while the worktree had work in
     /// it. The files on screen are the older ones.
     pub stale_head: RwSignal<Option<String>>,
@@ -1749,6 +1754,8 @@ impl ReviewState {
             issue_reopenable: RwSignal::new(None),
             home: RwSignal::new(None),
             home_refreshing: RwSignal::new(false),
+            fetched_at: RwSignal::new(None),
+            item_refreshing: RwSignal::new(false),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
             upstream_changed: RwSignal::new(false),
@@ -2022,6 +2029,8 @@ impl ReviewState {
         self.issue_reopenable.set(None);
         self.home.set(None);
         self.home_refreshing.set(false);
+        self.fetched_at.set(None);
+        self.item_refreshing.set(false);
         self.composer_close_reason.set(Default::default());
         self.close_menu.set(None);
         self.stale_head.set(None);
@@ -2173,6 +2182,7 @@ impl ReviewState {
     /// cross-item result must clear that owner's checkout at commit time.
     pub(crate) fn prepare_ready_for(&self, item_id: &str) {
         self.refreshing.set(false);
+        self.item_refreshing.set(false);
         if self
             .item
             .with_untracked(|item| item.as_ref().is_some_and(|item| item.id != item_id))
@@ -2389,6 +2399,7 @@ impl ReviewState {
             issue_closable: self.issue_closable.get_untracked(),
             issue_reopenable: self.issue_reopenable.get_untracked(),
             home: self.home.get_untracked(),
+            fetched_at: self.fetched_at.get_untracked(),
             stale_head: self.stale_head.get_untracked(),
             offline: self.offline.get_untracked(),
             scope: self.scope.get_untracked(),
@@ -2482,6 +2493,7 @@ impl ReviewState {
             self.issue_closable.set(page.issue_closable);
             self.issue_reopenable.set(page.issue_reopenable);
             self.home.set(page.home.clone());
+            self.fetched_at.set(page.fetched_at);
             self.stale_head.set(page.stale_head.clone());
             self.offline.set(page.offline);
             self.scope.set(page.scope.clone());

@@ -4386,6 +4386,7 @@ mod tests {
             Event::DiscussionReady {
                 item_id: "wt".into(),
                 discussion: Arc::new(discussion),
+                fetched_at: None,
             },
             state,
         );
@@ -4772,6 +4773,7 @@ mod tests {
             crate::backend::Event::DiscussionReady {
                 item_id: "wt".into(),
                 discussion: Arc::new(discussion),
+                fetched_at: None,
             },
             state,
         );
