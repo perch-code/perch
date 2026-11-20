@@ -27,6 +27,7 @@ use tokio::sync::Semaphore;
 
 pub use avatar::APP_AVATAR_CORNER;
 pub use connections::{Connection, Engine, Lifetime};
+pub use description_rewrite::{resolve_summary_model, DescriptionRewrite};
 pub use issue_draft::with_found_in;
 pub use knowledge::{cached_knowledge_dir, external_knowledge_dirs};
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
@@ -38,6 +39,7 @@ mod avatar;
 mod check_watch;
 pub(crate) mod client;
 mod connections;
+mod description_rewrite;
 mod feedback;
 mod history;
 mod issue_draft;
@@ -1680,6 +1682,11 @@ pub enum Event {
     IssueDraft {
         item_id: String,
         outcome: DescriptionOutcome,
+    },
+    /// Lifecycle of an automatic PR or issue description rewrite.
+    DescriptionRewrite {
+        item_id: String,
+        state: DescriptionRewrite,
     },
     /// Where Send Feedback's Preview… has got to.
     FeedbackStep {
@@ -10541,17 +10548,21 @@ async fn finish_open(
         });
     }
 
-    if let Some(pr) = pull_request.filter(|_| !shown_early) {
-        show_kept_conversation(ctx, &item.id, &pr);
-        match source {
-            PullSource::Kept => {
-                let (ctx, item_id) = (ctx.clone(), item.id.clone());
-                tokio::spawn(async move {
-                    refetch_opened_pull_request(&ctx, &item_id, pr, since, navigation_id).await
-                });
+    if let Some(pr) = pull_request {
+        if !shown_early {
+            show_kept_conversation(ctx, &item.id, &pr);
+            match source {
+                PullSource::Kept => {
+                    let (ctx, item_id) = (ctx.clone(), item.id.clone());
+                    tokio::spawn(async move {
+                        refetch_opened_pull_request(&ctx, &item_id, pr, since, navigation_id).await
+                    });
+                }
+                PullSource::Fetched => ask_for_conversation(ctx, &item.id, pr),
+                PullSource::Offline | PullSource::Shown => {}
             }
-            PullSource::Fetched => ask_for_conversation(ctx, &item.id, pr),
-            PullSource::Offline | PullSource::Shown => {}
+        } else {
+            description_rewrite::maybe_start(ctx, &item.id);
         }
     }
     true
@@ -10592,6 +10603,7 @@ fn show_kept_conversation(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
             item_id: item_id.to_string(),
             discussion: Arc::new(d),
         });
+        description_rewrite::maybe_start(ctx, item_id);
     }
     // The author's face is on the header, whether or not they said
     // anything in the discussion.
@@ -17087,6 +17099,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             .chain(comments.iter().map(|c| c.user_avatar_url.clone())),
     );
     ctx.send_threads(&item.id);
+    description_rewrite::maybe_start(ctx, &item.id);
     if !offline {
         let ctx = ctx.clone();
         let item_id = item.id.clone();
@@ -18221,6 +18234,7 @@ fn publish_discussion(ctx: &Ctx, item_id: &str, discussion: perch_github::Discus
             item_id: item_id.to_string(),
             discussion: Arc::new(discussion),
         });
+        description_rewrite::maybe_start(ctx, item_id);
     }
 }
 

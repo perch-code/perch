@@ -21,7 +21,10 @@ use crate::ui::menu::Menu;
 const MOST_RUNS: usize = 8;
 
 pub(super) fn groups(page: &Page) -> Vec<Group> {
-    let mut groups = vec![Group::new("Defaults", vec![model(page)])];
+    let mut groups = vec![Group::new(
+        "Defaults",
+        vec![model(page), summary_model(page), summary_effort(page)],
+    )];
     groups.extend(AgentBackend::ALL.into_iter().map(|backend| {
         let mut rows = vec![
             binary(page, backend),
@@ -195,6 +198,157 @@ fn model_menu(page: &Page) -> Menu {
         });
     }
     menu
+}
+
+fn summary_model(page: &Page) -> Row {
+    let control = {
+        let page = page.clone();
+        move || {
+            let (label_page, menu_page, enabled) = (page.clone(), page.clone(), page.clone());
+            select(
+                move || {
+                    let configured = label_page.with_config(|c| c.agent.summary_model.clone());
+                    match configured.as_deref().map(str::trim) {
+                        None => label_page.state.agent.with(|agent| {
+                            let mut auto = agent.clone();
+                            auto.summary_model = None;
+                            match perch_engine::backend::resolve_summary_model(&auto) {
+                                Some((_, model, _)) => format!("Auto ({})", model_label(&model)),
+                                None => "Auto".to_string(),
+                            }
+                        }),
+                        Some(m)
+                            if m.is_empty()
+                                || m.eq_ignore_ascii_case("off")
+                                || m.eq_ignore_ascii_case("none") =>
+                        {
+                            "Off".to_string()
+                        }
+                        Some(m) => model_label(m),
+                    }
+                },
+                move || summary_model_menu(&menu_page),
+                move || enabled.writable(),
+                "settings-agent-summary-model",
+            )
+            .into_any()
+        }
+    };
+    Row::new(
+        "agent-summary-model",
+        "Summary model",
+        || {
+            "Automatically rewrites PR and issue descriptions. Auto prefers Neon, then Opus 5.5, then Astra 6.2."
+                .to_string()
+        },
+        control,
+    )
+    .keywords(&[
+        "summary",
+        "rewrite",
+        "description",
+        "model",
+        "neon",
+        "opus",
+        "astra",
+        "agent.summary_model",
+    ])
+    .reset("agent.summary_model", Setting::AgentSummaryModel(None))
+}
+
+fn summary_model_menu(page: &Page) -> Menu {
+    let current = page.with_config(|c| c.agent.summary_model.clone());
+    let current_trimmed = current.as_deref().map(str::trim);
+    let is_auto = current_trimmed.is_none();
+    let is_off = current_trimmed.is_some_and(|m| {
+        m.is_empty() || m.eq_ignore_ascii_case("off") || m.eq_ignore_ascii_case("none")
+    });
+    let offered = page.state.agent.with(model_groups);
+    let mut listed = is_auto || is_off;
+
+    let write_auto = page.clone();
+    let write_off = page.clone();
+    let mut menu = Menu::new()
+        .item("Auto", move |item| {
+            item.checked(is_auto)
+                .detail("Neon → Opus → Astra")
+                .action(move || write_auto.write(Setting::AgentSummaryModel(None)))
+        })
+        .item("Off", move |item| {
+            item.checked(is_off)
+                .detail("Keep original")
+                .action(move || write_off.write(Setting::AgentSummaryModel(Some("off".into()))))
+        });
+
+    for group in offered {
+        menu = menu.separator();
+        for (backend, model) in group {
+            let checked = current_trimmed == Some(model.as_str());
+            listed |= checked;
+            let write = page.clone();
+            menu = menu.item(model_label(&model), move |item| {
+                item.checked(checked)
+                    .detail(backend.label())
+                    .action(move || write.write(Setting::AgentSummaryModel(Some(model.clone()))))
+            });
+        }
+    }
+    if !listed {
+        if let Some(current) = current_trimmed {
+            menu = menu.separator().item(model_label(current), |item| {
+                item.checked(true)
+                    .enabled(false)
+                    .note("Not offered: its agent wasn't found")
+            });
+        }
+    }
+    menu
+}
+
+fn summary_effort(page: &Page) -> Row {
+    let control = {
+        let page = page.clone();
+        move || {
+            dropdown(
+                &page,
+                move |page| {
+                    let current = page.with_config(|c| {
+                        c.agent
+                            .summary_effort
+                            .clone()
+                            .unwrap_or_else(|| "medium".to_string())
+                    });
+                    let mut offered: Vec<(String, String)> = perch_agent::Effort::ALL
+                        .into_iter()
+                        .map(|e| (e.label().to_string(), e.name().to_string()))
+                        .collect();
+                    match perch_agent::Effort::parse(&current) {
+                        Some(e) => (offered, e.name().to_string()),
+                        None => {
+                            offered.push((current.clone(), current.clone()));
+                            (offered, current)
+                        }
+                    }
+                },
+                move |name| Setting::AgentSummaryEffort(Some(name)),
+                "settings-agent-summary-effort".to_string(),
+            )
+        }
+    };
+    Row::new(
+        "agent-summary-effort",
+        "Summary effort",
+        || "How hard the summary model thinks when rewriting descriptions.".to_string(),
+        control,
+    )
+    .keywords(&[
+        "summary",
+        "effort",
+        "rewrite",
+        "description",
+        "agent.summary_effort",
+    ])
+    .reset("agent.summary_effort", Setting::AgentSummaryEffort(None))
 }
 
 fn effort(page: &Page, backend: AgentBackend) -> Row {

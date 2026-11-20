@@ -134,6 +134,14 @@ pub struct AgentConfig {
     /// What the picker starts on.
     #[serde(default = "default_model")]
     pub model: String,
+    /// Model for automatically rewriting PR and issue descriptions.
+    /// `None` uses the built-in preference order (Neon Medium, Opus 5.5
+    /// Medium, Astra 6.2 Medium). `Some("off")` disables automatic rewrites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_model: Option<String>,
+    /// Effort for automatic description rewrites (`None` defaults to `medium`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_effort: Option<String>,
     /// Claude Code's default effort: `low`, `medium`, `high`, `xhigh`, `max` or `ultra`.
     #[serde(default = "default_effort")]
     pub effort: String,
@@ -303,6 +311,8 @@ impl Default for AgentConfig {
             binary: default_binary(),
             binary_version: None,
             model: default_model(),
+            summary_model: None,
+            summary_effort: None,
             effort: default_effort(),
             models: default_models(),
             max_concurrent_runs: default_max_concurrent_runs(),

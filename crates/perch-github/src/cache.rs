@@ -50,10 +50,32 @@ pub use history_store::{history_subject_id, HISTORY_SUBJECT_ID_PREFIX};
 /// steps. Version 37 clears the activity the inbox stopped showing, so
 /// what comes back to it starts empty. Version 38 keeps who approved a
 /// Work run's requests as it was admitted. Version 39 stores GitHub
-/// history snapshots for the archive. Schemas 13 through 23
+/// history snapshots for the archive. Version 40 caches model-rewritten
+/// PR and issue descriptions. Schemas 13 through 23
 /// migrate in place so local conversations and agent history are never
 /// discarded.
-pub const SCHEMA_VERSION: u32 = 39;
+pub const SCHEMA_VERSION: u32 = 40;
+
+const DESCRIPTION_REWRITE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS description_rewrites (
+    item_id TEXT PRIMARY KEY,
+    source_hash TEXT NOT NULL,
+    model TEXT NOT NULL,
+    effort TEXT NOT NULL,
+    rewritten TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
+/// A cached model-rewritten description for a pull request or issue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DescriptionRewriteRecord {
+    pub item_id: String,
+    pub source_hash: String,
+    pub model: String,
+    pub effort: String,
+    pub rewritten: String,
+}
 
 /// The meta key for what the notification poll asks with. It holds the
 /// first page's ETag; the name is from the Last-Modified date it held
@@ -494,6 +516,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         tx.execute_batch(LSP_TRUST_SCHEMA)?;
         tx.execute_batch(REPO_LSP_TRUST_SCHEMA)?;
         tx.execute_batch(history_store::HISTORY_SCHEMA)?;
+        tx.execute_batch(DESCRIPTION_REWRITE_SCHEMA)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -565,6 +588,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             36 => tx.execute_batch("DELETE FROM item_activity")?,
             37 => add_run_approvals_column(&tx)?,
             38 => tx.execute_batch(history_store::HISTORY_SCHEMA)?,
+            39 => tx.execute_batch(DESCRIPTION_REWRITE_SCHEMA)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -4555,6 +4579,59 @@ impl Cache {
             return Ok(None);
         };
         Ok(Some((fetched_at, discussion)))
+    }
+
+    /// The cached model-rewritten description for an item, if any.
+    pub fn load_description_rewrite(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<DescriptionRewriteRecord>, CacheError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT item_id, source_hash, model, effort, rewritten \
+                 FROM description_rewrites WHERE item_id = ?1",
+                params![item_id],
+                |r| {
+                    Ok(DescriptionRewriteRecord {
+                        item_id: r.get(0)?,
+                        source_hash: r.get(1)?,
+                        model: r.get(2)?,
+                        effort: r.get(3)?,
+                        rewritten: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Store or replace the model-rewritten description for an item.
+    pub fn save_description_rewrite(
+        &self,
+        record: &DescriptionRewriteRecord,
+    ) -> Result<(), CacheError> {
+        let now = Timestamp::now().to_string();
+        self.conn.execute(
+            "INSERT INTO description_rewrites \
+             (item_id, source_hash, model, effort, rewritten, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(item_id) DO UPDATE SET \
+               source_hash = excluded.source_hash, \
+               model = excluded.model, \
+               effort = excluded.effort, \
+               rewritten = excluded.rewritten, \
+               updated_at = excluded.updated_at",
+            params![
+                record.item_id,
+                record.source_hash,
+                record.model,
+                record.effort,
+                record.rewritten,
+                now,
+            ],
+        )?;
+        Ok(())
     }
 
     /// Keep the checks for the head they were read at, replacing whatever

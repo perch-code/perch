@@ -283,6 +283,8 @@ fn needs_discovery(before: &AgentConfig, after: &AgentConfig) -> bool {
 fn patched(discovered: &AgentConfig, file: &AgentConfig) -> AgentConfig {
     let mut agent = discovered.clone();
     agent.model = file.model.clone();
+    agent.summary_model = file.summary_model.clone();
+    agent.summary_effort = file.summary_effort.clone();
     agent.effort = file.effort.clone();
     agent.max_concurrent_runs = file.max_concurrent_runs;
     agent.sandbox = file.sandbox;

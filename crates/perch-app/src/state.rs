@@ -335,6 +335,8 @@ pub struct AppState {
     /// What was typed into each pull request's Close as issue form, by
     /// item, until Perch quits or the issue is opened.
     pub issue_drafts: RwSignal<HashMap<String, crate::review::close_as_issue::IssueDraft>>,
+    /// Automatic model-rewritten PR and issue descriptions, by item id.
+    pub description_rewrites: RwSignal<HashMap<String, crate::backend::DescriptionRewrite>>,
     /// Ordered persisted events for details the reader has opened. The first
     /// history page does not pull every transcript into memory.
     pub agent_run_events:
@@ -556,6 +558,7 @@ impl AppState {
             agent_runs: RwSignal::new(Arc::new(Vec::new())),
             pull_request_drafts: RwSignal::new(HashMap::new()),
             issue_drafts: RwSignal::new(HashMap::new()),
+            description_rewrites: RwSignal::new(HashMap::new()),
             agent_run_events: RwSignal::new(HashMap::new()),
             agent_run_events_pages: RwSignal::new(HashMap::new()),
             tree_open: RwSignal::new(false),
@@ -3350,6 +3353,9 @@ impl AppState {
                 }
                 self.apply(Event::IssueDraft { item_id, outcome });
             }
+            Event::DescriptionRewrite { item_id, state } => {
+                self.apply(Event::DescriptionRewrite { item_id, state });
+            }
             Event::ClosedAsIssue { item_id, result } => {
                 if review.is_item(&item_id) {
                     review.issue_closing.set(false);
@@ -3475,6 +3481,11 @@ impl AppState {
                 }
             }
             Event::IssueDraft { .. } => {}
+            Event::DescriptionRewrite { item_id, state } => {
+                self.description_rewrites.update(|map| {
+                    map.insert(item_id, state);
+                });
+            }
             // A window's own, applied with its review state.
             Event::FeedbackStep { .. }
             | Event::FeedbackReady(_)

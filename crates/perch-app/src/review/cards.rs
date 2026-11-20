@@ -279,6 +279,8 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
 #[derive(Default)]
 pub(crate) struct More {
     pub(crate) quote: Option<Quote>,
+    /// Toggle between rewritten and original description, on a PR/issue.
+    pub(crate) toggle_summary: Option<ToggleRow>,
     /// Post to GitHub, on an agent's answer.
     pub(crate) post: Option<Offered>,
     /// Copy, of what an agent said, which has no link to copy.
@@ -287,6 +289,13 @@ pub(crate) struct More {
     pub(crate) url: String,
     pub(crate) edit: Option<Offered>,
     pub(crate) delete: Option<Offered>,
+}
+
+/// A row of the `⋯` menu whose label can flip dynamically.
+pub(crate) struct ToggleRow {
+    may: Rc<dyn Fn() -> bool>,
+    label: Rc<dyn Fn() -> String>,
+    action: Rc<dyn Fn()>,
 }
 
 /// Quote reply at the head of the `⋯` menu. There while `may` says so;
@@ -359,6 +368,7 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
 
     let More {
         quote,
+        toggle_summary,
         post,
         copy,
         url,
@@ -371,6 +381,10 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
     };
     let (may_edit, may_delete, may_post) = (offered(&edit), offered(&delete), offered(&post));
     let may_copy = offered(&copy);
+    let may_toggle_summary = {
+        let may = toggle_summary.as_ref().map(|row| row.may.clone());
+        Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
+    };
     let may_quote = {
         let may = quote.as_ref().map(|quote| quote.may.clone());
         Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
@@ -379,6 +393,7 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
     let any = Memo::new(move |_| {
         always
             || may_quote.get()
+            || may_toggle_summary.get()
             || may_post.get()
             || may_copy.get()
             || may_edit.get()
@@ -429,6 +444,16 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
                         linked_text::clear(owner);
                     }
                 })
+            });
+        }
+        if let Some(toggle) = toggle_summary
+            .as_ref()
+            .filter(|_| may_toggle_summary.get_untracked())
+        {
+            let label = (toggle.label)();
+            let action = toggle.action.clone();
+            menu = menu.item(label, |item| {
+                item.icon(SidebarIcon::Agents).action(move || action())
             });
         }
         if let Some(post) = post.as_ref().filter(|_| may_post.get_untracked()) {
@@ -1500,17 +1525,111 @@ pub fn description_card(
     editable: bool,
     whole: RwSignal<bool>,
 ) -> impl IntoView {
+    use crate::backend::DescriptionRewrite;
+    use std::cell::RefCell;
+
     let hovered = RwSignal::new(false);
-    let description = if body.trim().is_empty() {
-        Label::derived(|| "No description.".to_string())
-            .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_subtle()))
-            .into_any()
-    } else {
-        markdown::render_document(&body, state).into_any()
-    };
-    let scope = description.id();
+    let show_original = RwSignal::new(false);
+    let animating: RwSignal<Option<String>> = RwSignal::new(None);
+    let anim_gen = Rc::new(Cell::new(0u64));
+    let animated_body: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    let item_id = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
+    let rewrite = Memo::new(move |_| {
+        let id = item_id.as_deref()?;
+        app.description_rewrites.with(|m| m.get(id).cloned())
+    });
+
+    // When a freshly rewritten description arrives while the reader is looking
+    // at this card, play a short matrix-style scramble transition into it.
+    {
+        let original = body.clone();
+        let anim_gen = anim_gen.clone();
+        let animated_body = animated_body.clone();
+        floem::reactive::Effect::new(move |_| {
+            let Some(DescriptionRewrite::Ready {
+                body: rewritten,
+                fresh: true,
+                ..
+            }) = rewrite.get()
+            else {
+                return;
+            };
+            if show_original.get_untracked()
+                || animated_body.borrow().as_deref() == Some(rewritten.as_str())
+            {
+                return;
+            }
+            *animated_body.borrow_mut() = Some(rewritten.clone());
+            let token = anim_gen.get().wrapping_add(1);
+            anim_gen.set(token);
+            let from_text = matrix_preview(&original);
+            let to_text = matrix_preview(&rewritten);
+            start_matrix_animation(animating, anim_gen.clone(), token, from_text, to_text, 0);
+        });
+    }
+
+    let original_body = body.clone();
+    let active_body = Memo::new(move |_| {
+        if !show_original.get() {
+            if let Some(DescriptionRewrite::Ready { body, .. }) = rewrite.get() {
+                return body;
+            }
+        }
+        original_body.clone()
+    });
+
+    let body_view = dyn_container(
+        move || {
+            if animating.get().is_some() {
+                None
+            } else {
+                Some(active_body.get())
+            }
+        },
+        move |settled| match settled {
+            None => Label::derived(move || animating.get().unwrap_or_default())
+                .debug_name("description-matrix")
+                .style(|s| {
+                    s.width_full()
+                        .font_family(theme::CODE_FONT_STACK.to_string())
+                        .font_size(theme::TEXT_META)
+                        .line_height(1.45_f32)
+                        .color(theme::fg_muted())
+                        .text_wrap()
+                })
+                .into_any(),
+            Some(text) if text.trim().is_empty() => {
+                Label::derived(|| "No description.".to_string())
+                    .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_subtle()))
+                    .into_any()
+            }
+            Some(text) => markdown::render_document(&text, state).into_any(),
+        },
+    )
+    .style(|s| s.width_full());
+
+    let scope = body_view.id();
+    let toggle_anim_gen = anim_gen.clone();
     let more = More {
         quote: (!body.trim().is_empty()).then(|| quote_reply_action(state, body.clone(), scope)),
+        toggle_summary: Some(ToggleRow {
+            may: Rc::new(move || matches!(rewrite.get(), Some(DescriptionRewrite::Ready { .. }))),
+            label: Rc::new(move || {
+                if show_original.get_untracked() {
+                    "Show rewritten description".to_string()
+                } else {
+                    "Show original description".to_string()
+                }
+            }),
+            action: Rc::new(move || {
+                toggle_anim_gen.set(toggle_anim_gen.get().wrapping_add(1));
+                animating.set(None);
+                show_original.update(|v| *v = !*v);
+            }),
+        }),
         edit: Some(edit_in_card_action(
             state,
             node_id.clone(),
@@ -1519,11 +1638,40 @@ pub fn description_card(
         )),
         ..More::default()
     };
+
+    let rewriting_indicator = Stack::horizontal((
+        crate::review::run_view::spinner(theme::fg_subtle).style(|s| s.width(12.0).height(12.0)),
+        Label::derived(move || match rewrite.get() {
+            Some(DescriptionRewrite::Running { model, .. }) => format!(
+                "Rewriting description with {}\u{2026}",
+                crate::review::threads::model_label(&model)
+            ),
+            _ => String::new(),
+        })
+        .style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_subtle())
+                .selectable(false)
+        }),
+    ))
+    .debug_name("description-rewriting")
+    .style(move |s| {
+        let running = matches!(rewrite.get(), Some(DescriptionRewrite::Running { .. }));
+        s.items_center()
+            .gap(6.0)
+            .margin_bottom(8.0)
+            .apply_if(!running, |s| s.hide())
+    });
+
     let react = reactable(&node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
-    let shown = Stack::vertical((clamped(state, description, whole), reactions))
-        .style(|s| s.flex_col().width_full())
-        .into_any();
+    let shown = Stack::vertical((
+        rewriting_indicator,
+        clamped(state, body_view.into_any(), whole),
+        reactions,
+    ))
+    .style(|s| s.flex_col().width_full())
+    .into_any();
     let shown = edited_in_card(app, state, backend.clone(), node_id, shown);
     track_hover(
         Stack::vertical((
@@ -1545,6 +1693,97 @@ pub fn description_card(
         .style(|s| s.flex_col().width_full()),
         hovered,
     )
+}
+
+const MATRIX_STEPS: usize = 16;
+const MATRIX_FRAME_MS: u64 = 38;
+const MATRIX_MAX_CHARS: usize = 1200;
+const MATRIX_GLYPHS: &[char] = &[
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', '#', '$', '%',
+    '&', '*', '+', '=', '~', 'ｱ', 'ｲ', 'ｳ', 'ｴ', 'ｵ', 'ｶ', 'ｷ', 'ｸ',
+];
+
+fn start_matrix_animation(
+    animating: RwSignal<Option<String>>,
+    anim_gen: Rc<Cell<u64>>,
+    token: u64,
+    from: String,
+    to: String,
+    step: usize,
+) {
+    if anim_gen.get() != token {
+        return;
+    }
+    if step >= MATRIX_STEPS {
+        animating.set(None);
+        return;
+    }
+    let progress = (step as f32 + 1.0) / (MATRIX_STEPS as f32 + 1.0);
+    animating.set(Some(matrix_frame(&from, &to, progress, step)));
+    floem::action::exec_after(
+        std::time::Duration::from_millis(MATRIX_FRAME_MS),
+        move |_| {
+            start_matrix_animation(animating, anim_gen, token, from, to, step + 1);
+        },
+    );
+}
+
+/// Strip light markdown punctuation and cap length so the transition stays
+/// compact and fast.
+fn matrix_preview(markdown: &str) -> String {
+    let mut out = String::new();
+    for line in markdown.lines().take(20) {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let cleaned = line.trim_start_matches('#').trim_start();
+        for ch in cleaned.chars() {
+            if matches!(ch, '*' | '`') {
+                continue;
+            }
+            out.push(ch);
+            if out.chars().count() >= MATRIX_MAX_CHARS {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// One frame of a matrix-style character sweep from `from` to `to`.
+fn matrix_frame(from: &str, to: &str, progress: f32, tick: usize) -> String {
+    let from_chars: Vec<char> = from.chars().collect();
+    let to_chars: Vec<char> = to.chars().collect();
+    let len = (from_chars.len() as f32
+        + (to_chars.len() as f32 - from_chars.len() as f32) * progress)
+        .round()
+        .max(0.0) as usize;
+    let band = (len as f32 * 0.22).max(12.0);
+    let front = progress * (len as f32 + band);
+
+    let mut out = String::with_capacity(len);
+    for i in 0..len {
+        let target = to_chars.get(i).copied();
+        let source = from_chars.get(i).copied();
+        let pos = i as f32;
+        if pos < front - band {
+            if let Some(ch) = target {
+                out.push(ch);
+            }
+        } else if pos < front {
+            let preserve = target.or(source).filter(|c| *c == '\n' || *c == ' ');
+            if let Some(ws) = preserve {
+                out.push(ws);
+            } else {
+                let idx =
+                    i.wrapping_mul(31).wrapping_add(tick.wrapping_mul(17)) % MATRIX_GLYPHS.len();
+                out.push(MATRIX_GLYPHS[idx]);
+            }
+        } else if let Some(ch) = source.or(target) {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// How tall a description is drawn until the reader asks for the rest:
@@ -3838,5 +4077,22 @@ mod tests {
         let small = Size::new(200.0, 60.0);
         assert_eq!(row.fitted(face(100.0, 20.0), small), row);
         assert_eq!(byline.fitted(face(100.0, 20.0), small), byline);
+    }
+
+    #[test]
+    fn matrix_frame_sweeps_from_original_to_rewritten() {
+        let from = "Original PR summary text.";
+        let to = "Rewritten summary with assessment.";
+        let start = matrix_frame(from, to, 0.0, 0);
+        assert_eq!(start, from);
+        let mid = matrix_frame(from, to, 0.5, 4);
+        assert_ne!(mid, from);
+        assert_ne!(mid, to);
+        let end = matrix_frame(from, to, 1.0, 16);
+        assert_eq!(end, to);
+        assert_eq!(
+            matrix_preview("## Summary\n**Bold** `code`"),
+            "Summary\nBold code"
+        );
     }
 }

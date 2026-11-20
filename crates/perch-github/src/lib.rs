@@ -33,9 +33,9 @@ pub use activity::{ActivityEvent, ActivityOutcome, ItemActivity};
 pub use assignees::{Assigned, MAX_ASSIGNEES};
 pub use auth::{resolve_token, Token, TokenSource};
 pub use cache::{
-    history_subject_id, Cache, CacheError, CacheOpen, DraftRow, Reconciled, RunContext,
-    RunEventAppend, StoredReveals, WorkGrantRecord, HISTORY_SUBJECT_ID_PREFIX,
-    NOTIFICATIONS_LAST_MODIFIED_KEY,
+    history_subject_id, Cache, CacheError, CacheOpen, DescriptionRewriteRecord, DraftRow,
+    Reconciled, RunContext, RunEventAppend, StoredReveals, WorkGrantRecord,
+    HISTORY_SUBJECT_ID_PREFIX, NOTIFICATIONS_LAST_MODIFIED_KEY,
 };
 pub use client::{
     CheckProbe, CheckTags, EditedComment, Error, GitHub, HistoryPage, HistoryStream,

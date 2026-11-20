@@ -58,6 +58,8 @@ pub enum Setting {
     GithubHost(Option<String>),
     CloneRoot(Option<String>),
     AgentModel(Option<String>),
+    AgentSummaryModel(Option<String>),
+    AgentSummaryEffort(Option<String>),
     AgentEffort {
         backend: AgentBackend,
         effort: Option<String>,
@@ -491,6 +493,12 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
         Setting::GithubHost(host) => (top(&[], "github_host".into()), string(host)),
         Setting::CloneRoot(root) => (top(&[], "clone_root".into()), string(root)),
         Setting::AgentModel(model) => (top(&["agent"], "model".into()), string(model)),
+        Setting::AgentSummaryModel(model) => {
+            (top(&["agent"], "summary_model".into()), string(model))
+        }
+        Setting::AgentSummaryEffort(effort) => {
+            (top(&["agent"], "summary_effort".into()), string(effort))
+        }
         Setting::AgentEffort { backend, effort } => {
             (top(backend.table(), "effort".into()), string(effort))
         }
