@@ -1409,6 +1409,11 @@ pub struct ReviewState {
     /// Bumped whenever the active file's content changes, to rebuild the
     /// editor view: another file is another editor.
     pub editor_epoch: RwSignal<u64>,
+    /// The `(path, epoch)` that already has an `ask_again_while_opening`
+    /// timer running, so rebuilding the editor pane at the same epoch (for
+    /// instance switching tabs or toggling layout) does not start a second
+    /// concurrent retry loop.
+    opening_retry: RwSignal<Option<(String, u64)>>,
     /// The documents the open editors hold, set by the view that builds
     /// them and `None` while no editor is open. What the editor lays out
     /// is edited in place through these when the document changes under
@@ -1869,6 +1874,7 @@ impl ReviewState {
             loading: RwSignal::new(HashSet::new()),
             cursor_line: RwSignal::new(0),
             editor_epoch: RwSignal::new(0),
+            opening_retry: RwSignal::new(None),
             docs: RwSignal::new(None),
             comment_threads: RwSignal::new(Arc::new(Vec::new())),
             settled_findings: RwSignal::new(HashSet::new()),
@@ -3747,6 +3753,23 @@ impl ReviewState {
             && self
                 .files
                 .try_with_untracked(|f| f.is_some_and(|f| !f.contains_key(path)))
+    }
+
+    /// Claim the single retry timer for `(path, epoch)` while it is still
+    /// opening. Returns `false` if the file is no longer opening or another
+    /// timer already owns this `(path, epoch)`.
+    pub fn claim_opening_retry(&self, path: &str, epoch: u64) -> bool {
+        if !self.still_opening(path, epoch) {
+            return false;
+        }
+        let already = self.opening_retry.try_with_untracked(|slot| {
+            slot.is_some_and(|slot| slot.as_ref().is_some_and(|(p, e)| p == path && *e == epoch))
+        });
+        if already {
+            return false;
+        }
+        self.opening_retry.set(Some((path.to_string(), epoch)));
+        true
     }
 
     /// Mark `path` loading unless it is loaded or loading already.
@@ -8421,5 +8444,32 @@ mod tests {
         assert!(state.still_opening("src/lib.rs", epoch));
         scope.dispose();
         assert!(!state.still_opening("src/lib.rs", epoch));
+    }
+
+    #[test]
+    fn claim_opening_retry_runs_once_per_path_and_epoch() {
+        let scope = floem::reactive::Scope::new();
+        let (state, epoch) = scope.enter(|| {
+            let state = ReviewState::new();
+            state.open_tab("src/config.rs");
+            (state, state.editor_epoch.get_untracked())
+        });
+        assert!(state.claim_opening_retry("src/config.rs", epoch));
+        assert!(
+            !state.claim_opening_retry("src/config.rs", epoch),
+            "rebuilding the view at the same epoch must not start a second timer"
+        );
+        // Opening another tab bumps the epoch and allows claiming that tab.
+        state.open_tab("src/other.rs");
+        let other_epoch = state.editor_epoch.get_untracked();
+        assert!(!state.claim_opening_retry("src/config.rs", epoch));
+        assert!(state.claim_opening_retry("src/other.rs", other_epoch));
+        // Failed loads are never claimed.
+        state.open_tab("src/fail.rs");
+        let fail_epoch = state.editor_epoch.get_untracked();
+        state.fail_load("src/fail.rs");
+        assert!(!state.claim_opening_retry("src/fail.rs", fail_epoch));
+        scope.dispose();
+        assert!(!state.claim_opening_retry("src/other.rs", other_epoch));
     }
 }

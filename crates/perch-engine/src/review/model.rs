@@ -52,7 +52,10 @@ impl Origin {
 
 /// A file prepared for the editor: text to render, and everything needed to
 /// colour it and map a rendered line back to a real one.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// Over the wire, only the raw inputs (`path`, `head`, `base`, `status`,
+/// `truncated`, `scope`, `blob`) travel as JSON; the client rebuilds the
+/// diff buffers, alignment maps and syntax spans locally.
 pub struct LoadedFile {
     pub path: String,
     pub origin: Origin,
@@ -73,6 +76,11 @@ pub struct LoadedFile {
     /// The base side on its own, for the left of a split. `None` when the
     /// file is not in the changed list, or was added.
     pub base_buffer: Option<DisplayBuffer>,
+    /// The head side's verbatim text for changed files, so wire
+    /// serialization can send raw text instead of derived buffers and spans.
+    /// `None` for unchanged or truncated files, where `buffer.text` already
+    /// holds it verbatim.
+    pub(crate) head_text: Option<Arc<str>>,
     /// The base side's text, shared so an ask to the language server about
     /// a removed line does not copy the file.
     pub base_text: Option<Arc<str>>,
@@ -100,6 +108,96 @@ pub struct LoadedFile {
     pub picture: Option<Arc<PictureSource>>,
 }
 
+fn str_is_empty(s: &&str) -> bool {
+    s.is_empty()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(serde::Serialize)]
+struct WireLoadedFileRef<'a> {
+    path: &'a str,
+    head: &'a str,
+    #[serde(skip_serializing_if = "str_is_empty")]
+    base: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<ChangeStatus>,
+    #[serde(skip_serializing_if = "is_false")]
+    truncated: bool,
+    scope: &'a Scope,
+    #[serde(skip_serializing_if = "str_is_empty")]
+    blob: &'a str,
+}
+
+#[derive(serde::Deserialize)]
+struct WireLoadedFile {
+    path: String,
+    head: String,
+    #[serde(default)]
+    base: String,
+    #[serde(default)]
+    status: Option<ChangeStatus>,
+    #[serde(default)]
+    truncated: bool,
+    scope: Scope,
+    #[serde(default)]
+    blob: String,
+}
+
+impl serde::Serialize for LoadedFile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let head = if self.truncated {
+            self.buffer.text.as_str()
+        } else {
+            self.head_text
+                .as_deref()
+                .unwrap_or(self.buffer.text.as_str())
+        };
+        let base = if self.truncated {
+            ""
+        } else {
+            self.base_text.as_deref().unwrap_or("")
+        };
+        WireLoadedFileRef {
+            path: &self.path,
+            head,
+            base,
+            status: self.status,
+            truncated: self.truncated,
+            scope: &self.scope,
+            blob: &self.blob,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LoadedFile {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = WireLoadedFile::deserialize(deserializer)?;
+        if wire.truncated {
+            Ok(LoadedFile::truncated(
+                wire.path,
+                wire.head,
+                wire.status,
+                wire.scope,
+                wire.blob,
+            ))
+        } else {
+            Ok(crate::backend::build_loaded_file(
+                wire.path,
+                wire.head,
+                wire.base,
+                wire.status,
+                false,
+                wire.scope,
+                wire.blob,
+            ))
+        }
+    }
+}
+
 impl std::fmt::Debug for LoadedFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The buffer can be megabytes; a log line wants the shape, not the text.
@@ -124,6 +222,37 @@ pub struct Outline {
 }
 
 impl LoadedFile {
+    /// A placeholder file for a binary, oversized or unreadable file:
+    /// plain message text, no syntax highlighting, no base side.
+    pub(crate) fn truncated(
+        path: String,
+        message: impl AsRef<str>,
+        status: Option<ChangeStatus>,
+        scope: Scope,
+        blob: String,
+    ) -> Self {
+        let origin = Origin::of_path(&path);
+        Self {
+            path,
+            origin,
+            language: None,
+            buffer: DisplayBuffer::plain(message.as_ref()),
+            head_spans: LineSpans::default(),
+            base_spans: LineSpans::default(),
+            status,
+            truncated: true,
+            scope,
+            base_buffer: None,
+            head_text: None,
+            base_text: None,
+            alignment: Vec::new(),
+            base_to_display: Vec::new(),
+            display_to_base: Vec::new(),
+            blob,
+            picture: None,
+        }
+    }
+
     /// Build `base_to_display` and `display_to_base` from `buffer` and
     /// `alignment` once when the file loads, so every row lookup is O(1).
     pub fn base_maps(

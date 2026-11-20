@@ -242,13 +242,15 @@ pub fn editor_pane(
                                 }
                             }
                             None => {
-                                ask_again_while_opening(
-                                    state,
-                                    code_backend.clone(),
-                                    path.clone(),
-                                    epoch,
-                                    ASK_AGAIN_AFTER,
-                                );
+                                if state.claim_opening_retry(&path, epoch) {
+                                    ask_again_while_opening(
+                                        state,
+                                        code_backend.clone(),
+                                        path.clone(),
+                                        epoch,
+                                        ASK_AGAIN_AFTER,
+                                    );
+                                }
                                 loading_view(path).into_any()
                             }
                         },

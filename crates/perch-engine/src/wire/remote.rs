@@ -1176,10 +1176,14 @@ pub fn host_and_port(host: &str) -> (String, Option<u16>) {
 }
 
 /// The options every ssh the app starts for the engine is given.
-const SSH_OPTIONS: [&str; 15] = [
+/// `Compression=yes` shrinks the JSON wire stream (and binary uploads) over
+/// slow or congested links.
+const SSH_OPTIONS: [&str; 17] = [
     "-T",
     "-o",
     "BatchMode=yes",
+    "-o",
+    "Compression=yes",
     "-o",
     "ConnectTimeout=10",
     "-o",
@@ -1499,6 +1503,8 @@ mod tests {
                 "-T",
                 "-o",
                 "BatchMode=yes",
+                "-o",
+                "Compression=yes",
                 "-o",
                 "ConnectTimeout=10",
                 "-o",

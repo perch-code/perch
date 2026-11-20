@@ -922,3 +922,123 @@ fn a_rescope_says_which_scope_pick_the_engine_had_heard_of() {
     window.set_scope("a", perch_git::Scope::Uncommitted);
     assert!(scopes.heard() > picked);
 }
+
+#[test]
+fn loaded_file_travels_as_raw_inputs_and_rebuilds_whole() {
+    let cases = [
+        build_loaded_file(
+            "src/lib.rs".into(),
+            "fn a() {}\nfn b() {}\n\n".into(),
+            "fn a() {}\nfn old() {}\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            "blob-mod".into(),
+        ),
+        build_loaded_file(
+            "src/new.rs".into(),
+            "pub const X: usize = 1;\n".into(),
+            String::new(),
+            Some(perch_git::ChangeStatus::Added),
+            false,
+            perch_git::Scope::Branch,
+            "blob-add".into(),
+        ),
+        build_loaded_file(
+            "src/gone.rs".into(),
+            String::new(),
+            "fn gone() {}\n".into(),
+            Some(perch_git::ChangeStatus::Deleted),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ),
+        build_loaded_file(
+            "src/plain.rs".into(),
+            "fn plain() {}\n\n".into(),
+            String::new(),
+            None,
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ),
+        build_loaded_file(
+            "assets/logo.png".into(),
+            String::new(),
+            String::new(),
+            Some(perch_git::ChangeStatus::Modified),
+            true,
+            perch_git::Scope::Branch,
+            "blob-bin".into(),
+        ),
+        crate::review::model::LoadedFile::truncated(
+            "/outside/big.rs".into(),
+            "This file is too large to show.",
+            None,
+            perch_git::Scope::Branch,
+            String::new(),
+        ),
+        build_loaded_file(
+            "diagram.svg".into(),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"5\"/></svg>".into(),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            "blob-svg".into(),
+        ),
+    ];
+
+    for original in cases {
+        let json = serde_json::to_value(&original).unwrap();
+        let object = json.as_object().expect("LoadedFile serializes as object");
+        for derived in [
+            "buffer",
+            "base_buffer",
+            "head_spans",
+            "base_spans",
+            "alignment",
+            "base_to_display",
+            "display_to_base",
+            "picture",
+            "language",
+            "origin",
+        ] {
+            assert!(
+                !object.contains_key(derived),
+                "derived field {derived} should not cross the wire for {}",
+                original.path
+            );
+        }
+
+        let back: crate::review::model::LoadedFile = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+        assert_eq!(back.path, original.path);
+        assert_eq!(back.origin, original.origin);
+        assert_eq!(back.language, original.language);
+        assert_eq!(back.status, original.status);
+        assert_eq!(back.truncated, original.truncated);
+        assert_eq!(back.scope, original.scope);
+        assert_eq!(back.blob, original.blob);
+        assert_eq!(back.buffer.text, original.buffer.text);
+        assert_eq!(back.buffer.rows, original.buffer.rows);
+        assert_eq!(back.buffer.change_starts, original.buffer.change_starts);
+        assert_eq!(back.base_text, original.base_text);
+        assert_eq!(
+            back.base_buffer.as_ref().map(|b| (&b.text, &b.rows)),
+            original.base_buffer.as_ref().map(|b| (&b.text, &b.rows))
+        );
+        assert_eq!(back.alignment, original.alignment);
+        assert_eq!(back.base_to_display, original.base_to_display);
+        assert_eq!(back.display_to_base, original.display_to_base);
+        assert_eq!(back.head_spans.len(), original.head_spans.len());
+        for i in 0..original.head_spans.len() {
+            assert_eq!(back.head_spans.line(i), original.head_spans.line(i));
+        }
+        assert_eq!(back.base_spans.len(), original.base_spans.len());
+        for i in 0..original.base_spans.len() {
+            assert_eq!(back.base_spans.line(i), original.base_spans.line(i));
+        }
+        assert_eq!(back.picture.is_some(), original.picture.is_some());
+    }
+}

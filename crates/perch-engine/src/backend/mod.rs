@@ -21677,15 +21677,11 @@ async fn open_outside_file(
     let loaded = tokio::task::spawn_blocking({
         let path = path.clone();
         move || {
-            let mut file =
-                build_loaded_file(path, text, String::new(), None, false, scope, String::new());
             if truncated {
-                file.truncated = true;
-                file.language = None;
-                file.head_spans = perch_syntax::LineSpans::default();
-                file.picture = None;
+                crate::review::model::LoadedFile::truncated(path, text, None, scope, String::new())
+            } else {
+                build_loaded_file(path, text, String::new(), None, false, scope, String::new())
             }
-            file
         }
     })
     .await;
@@ -22827,24 +22823,13 @@ pub fn build_loaded_file(
 
     let origin = crate::review::model::Origin::of_path(&path);
     if binary {
-        return crate::review::model::LoadedFile {
+        return crate::review::model::LoadedFile::truncated(
             path,
-            origin,
-            language: None,
-            buffer: DisplayBuffer::plain("This file is binary and has no text to show."),
-            head_spans: LineSpans::default(),
-            base_spans: LineSpans::default(),
+            "This file is binary and has no text to show.",
             status,
-            truncated: true,
             scope,
-            base_buffer: None,
-            base_text: None,
-            alignment: Vec::new(),
-            base_to_display: Vec::new(),
-            display_to_base: Vec::new(),
             blob,
-            picture: None,
-        };
+        );
     }
 
     // An SVG is parsed into what it draws as well, each side that is
@@ -22860,7 +22845,7 @@ pub fn build_loaded_file(
     // gives the split view its base side and its row pairing. A file
     // outside the list is shown plainly, which is what makes browsing the
     // whole tree useful during a review.
-    let (buffer, base_buffer, base_text, alignment) = match status {
+    let (buffer, base_buffer, head_text, base_text, alignment) = match status {
         Some(_) => {
             let diff = file_diff(&base, &head);
             let alignment = perch_git::alignment(&diff, &base, &head);
@@ -22875,11 +22860,12 @@ pub fn build_loaded_file(
             (
                 DisplayBuffer::unified(&head, &base, &diff),
                 base_buffer,
+                Some(Arc::from(head.as_str())),
                 base_text,
                 alignment,
             )
         }
-        None => (DisplayBuffer::plain(&head), None, None, Vec::new()),
+        None => (DisplayBuffer::plain(&head), None, None, None, Vec::new()),
     };
     let (base_to_display, display_to_base) =
         crate::review::model::LoadedFile::base_maps(&buffer, &alignment);
@@ -22900,6 +22886,7 @@ pub fn build_loaded_file(
         truncated: false,
         scope,
         base_buffer,
+        head_text,
         base_text,
         alignment,
         base_to_display,

@@ -47,8 +47,9 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// or a repository to clone. 8: the `clone_root` setting. 9:
 /// `[[knowledge]]` directories, their settings and why one isn't shared.
 /// 10: the per-repository GitHub history setting. 11: the `[agent] sandbox`
-/// setting.
-pub const PROTOCOL: u32 = 11;
+/// setting. 12: `FileLoaded` sends raw head/base text and the client builds
+/// `LoadedFile` locally.
+pub const PROTOCOL: u32 = 12;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -62,6 +63,16 @@ pub const MAX_LINE: usize = 256 << 20;
 /// otherwise have a night of events kept for it; a client that comes back
 /// reconnects and resyncs.
 pub const MAX_BACKLOG: usize = 256 << 20;
+
+/// How long writing one event line may take before the engine notes a slow
+/// client in its log.
+const SLOW_WRITE: Duration = Duration::from_secs(1);
+
+/// Lines at or above this size, or any `FileLoaded` event (whose decode
+/// diffs and syntax-highlights the file), are parsed on the blocking pool so
+/// the client's link reactor stays free for commands and keepalives.
+const OFFLOAD_PARSE_BYTES: usize = 4 * 1024;
+const FILE_LOADED_TAG: &[u8] = b"\"FileLoaded\"";
 
 /// How long the engine waits, once a client has gone, for the last of
 /// what it was sent to be written.
@@ -347,6 +358,46 @@ async fn next_message<R: AsyncBufRead + Unpin, T: for<'de> Deserialize<'de>>(
                 serde_json::from_slice(line.trim_ascii_end()).map_err(|error| error.to_string()),
             ),
         });
+    }
+}
+
+/// Read one event line for a connected client, offloading `FileLoaded`
+/// (which runs diffing and tree-sitter highlighting on decode) and large
+/// JSON payloads to the blocking pool.
+async fn next_event_line<R: AsyncBufRead + Unpin>(
+    read: &mut R,
+    line: &mut Vec<u8>,
+) -> std::io::Result<Option<Result<EventLine, String>>> {
+    loop {
+        match next_line(read, line, MAX_LINE).await? {
+            None => return Ok(None),
+            Some(Line::TooLong) => {
+                return Ok(Some(Err(format!("a line longer than {MAX_LINE} bytes"))));
+            }
+            Some(Line::Read) if line.trim_ascii().is_empty() => continue,
+            Some(Line::Read) => {
+                let offload = line.len() >= OFFLOAD_PARSE_BYTES
+                    || line
+                        .windows(FILE_LOADED_TAG.len())
+                        .any(|w| w == FILE_LOADED_TAG);
+                if !offload {
+                    return Ok(Some(
+                        serde_json::from_slice(line.trim_ascii_end())
+                            .map_err(|error| error.to_string()),
+                    ));
+                }
+                let bytes = std::mem::take(line);
+                let (bytes, parsed) = tokio::task::spawn_blocking(move || {
+                    let parsed = serde_json::from_slice::<EventLine>(bytes.trim_ascii_end())
+                        .map_err(|error| error.to_string());
+                    (bytes, parsed)
+                })
+                .await
+                .unwrap_or_else(|error| (Vec::new(), Err(error.to_string())));
+                *line = bytes;
+                return Ok(Some(parsed));
+            }
+        }
     }
 }
 
@@ -674,6 +725,8 @@ where
         let done = done.clone();
         async move {
             while let Some(line) = to_write.recv().await {
+                let started = Instant::now();
+                let bytes = line.len();
                 let written = async {
                     write.write_all(&line).await?;
                     write.flush().await
@@ -683,7 +736,18 @@ where
                     done.notify_one();
                     return;
                 }
-                backlog.fetch_sub(line.len(), Ordering::Relaxed);
+                let elapsed = started.elapsed();
+                let left = backlog
+                    .fetch_sub(bytes, Ordering::Relaxed)
+                    .saturating_sub(bytes);
+                if elapsed >= SLOW_WRITE {
+                    tracing::warn!(
+                        bytes,
+                        backlog = left,
+                        waited = ?elapsed,
+                        "writing an event to a client was slow"
+                    );
+                }
             }
             let _ = write.shutdown().await;
         }
@@ -975,7 +1039,7 @@ where
             let _ended = ended;
             loop {
                 let next = tokio::select! {
-                    next = next_message::<_, EventLine>(&mut read, &mut line) => next,
+                    next = next_event_line(&mut read, &mut line) => next,
                     () = hung_up.notified() => return,
                 };
                 match next {
