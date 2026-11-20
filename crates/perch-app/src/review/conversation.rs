@@ -2638,6 +2638,62 @@ mod tests {
         assert!(!shown(&harness, "description-more"));
     }
 
+    /// A model-rewritten description shows a quiet provenance bar with an
+    /// inline toggle to flip between the summary and the original text.
+    #[test]
+    fn description_rewrite_bar_shows_provenance_and_toggles_original() {
+        use crate::backend::DescriptionRewrite;
+        use floem::reactive::SignalWith;
+
+        let (mut harness, app, state) = app_harness();
+        let item_id = state
+            .item
+            .with_untracked(|i| i.as_ref().unwrap().id.clone());
+        assert!(!shown(&harness, "description-rewriting"));
+        assert!(!shown(&harness, "description-rewritten"));
+
+        app.description_rewrites.update(|m| {
+            m.insert(
+                item_id.clone(),
+                DescriptionRewrite::Running {
+                    model: "gemini-4-neon".into(),
+                    effort: "medium".into(),
+                },
+            );
+        });
+        settle(&mut harness);
+        assert!(shown(&harness, "description-rewriting"));
+        assert!(!shown(&harness, "description-rewritten"));
+
+        app.description_rewrites.update(|m| {
+            m.insert(
+                item_id.clone(),
+                DescriptionRewrite::Ready {
+                    model: "gemini-4-neon".into(),
+                    effort: "medium".into(),
+                    body: "Concise Churchill summary.".into(),
+                    fresh: false,
+                },
+            );
+        });
+        settle(&mut harness);
+        assert!(!shown(&harness, "description-rewriting"));
+        assert!(shown(&harness, "description-rewritten"));
+        assert!(find(harness.root_id(), "Show original").is_some());
+        assert!(find(harness.root_id(), "Concise Churchill summary.").is_some());
+
+        let toggle = find(harness.root_id(), "description-rewrite-toggle").unwrap();
+        click_on(&mut harness, toggle);
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "Show summary").is_some());
+        assert!(find(harness.root_id(), "Concise Churchill summary.").is_none());
+
+        click_on(&mut harness, toggle);
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "Show original").is_some());
+        assert!(find(harness.root_id(), "Concise Churchill summary.").is_some());
+    }
+
     /// The page's end can be scrolled to, whatever wraps on it. Under a
     /// width cap taffy served the column's unwrapped height for the pass
     /// at the cap's width, and the oldest cards under long comments sat

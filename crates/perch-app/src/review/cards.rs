@@ -1612,23 +1612,26 @@ pub fn description_card(
     .style(|s| s.width_full());
 
     let scope = body_view.id();
-    let toggle_anim_gen = anim_gen.clone();
+    let toggle_view: Rc<dyn Fn()> = {
+        let toggle_anim_gen = anim_gen.clone();
+        Rc::new(move || {
+            toggle_anim_gen.set(toggle_anim_gen.get().wrapping_add(1));
+            animating.set(None);
+            show_original.update(|v| *v = !*v);
+        })
+    };
     let more = More {
         quote: (!body.trim().is_empty()).then(|| quote_reply_action(state, body.clone(), scope)),
         toggle_summary: Some(ToggleRow {
             may: Rc::new(move || matches!(rewrite.get(), Some(DescriptionRewrite::Ready { .. }))),
             label: Rc::new(move || {
                 if show_original.get_untracked() {
-                    "Show rewritten description".to_string()
+                    "Show summary".to_string()
                 } else {
                     "Show original description".to_string()
                 }
             }),
-            action: Rc::new(move || {
-                toggle_anim_gen.set(toggle_anim_gen.get().wrapping_add(1));
-                animating.set(None);
-                show_original.update(|v| *v = !*v);
-            }),
+            action: toggle_view.clone(),
         }),
         edit: Some(edit_in_card_action(
             state,
@@ -1639,34 +1642,115 @@ pub fn description_card(
         ..More::default()
     };
 
-    let rewriting_indicator = Stack::horizontal((
-        crate::review::run_view::spinner(theme::fg_subtle).style(|s| s.width(12.0).height(12.0)),
-        Label::derived(move || match rewrite.get() {
-            Some(DescriptionRewrite::Running { model, .. }) => format!(
-                "Rewriting description with {}\u{2026}",
-                crate::review::threads::model_label(&model)
-            ),
-            _ => String::new(),
-        })
-        .style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::fg_subtle())
-                .selectable(false)
-        }),
-    ))
-    .debug_name("description-rewriting")
+    #[derive(Clone, PartialEq, Eq)]
+    enum RewriteBar {
+        Hidden,
+        Running(String),
+        Ready(String),
+    }
+
+    let bar_state = Memo::new(move |_| match rewrite.get() {
+        Some(DescriptionRewrite::Running { model, .. }) => RewriteBar::Running(model),
+        Some(DescriptionRewrite::Ready { model, .. }) => RewriteBar::Ready(model),
+        Some(DescriptionRewrite::Failed { .. }) | None => RewriteBar::Hidden,
+    });
+
+    let bar_toggle = toggle_view.clone();
+    let rewrite_bar = dyn_container(
+        move || bar_state.get(),
+        move |bar| match bar {
+            RewriteBar::Hidden => Empty::new().into_any(),
+            RewriteBar::Running(model) => {
+                let label = format!(
+                    "Summarizing with {}\u{2026}",
+                    crate::review::threads::model_label(&model)
+                );
+                Stack::horizontal((
+                    crate::review::run_view::spinner(theme::fg_subtle)
+                        .style(|s| s.width(12.0).height(12.0).flex_shrink(0.0_f32)),
+                    Label::derived(move || label.clone()).style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::fg_subtle())
+                            .selectable(false)
+                    }),
+                ))
+                .debug_name("description-rewriting")
+                .style(|s| s.items_center().gap(6.0).min_height(22.0))
+                .into_any()
+            }
+            RewriteBar::Ready(model) => {
+                let model_name = crate::review::threads::model_label(&model);
+                let toggle_click = bar_toggle.clone();
+                let toggle_key = bar_toggle.clone();
+                Stack::horizontal((
+                    sidebar_glyph(SidebarIcon::Agents, theme::fg_subtle)
+                        .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32)),
+                    Label::derived(move || {
+                        if show_original.get() {
+                            "Original description".to_string()
+                        } else {
+                            format!("Summarized by {model_name}")
+                        }
+                    })
+                    .style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::fg_subtle())
+                            .selectable(false)
+                    }),
+                    Label::derived(|| "\u{b7}".to_string()).style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::fg_subtle())
+                            .selectable(false)
+                    }),
+                    Label::derived(move || {
+                        if show_original.get() {
+                            "Show summary".to_string()
+                        } else {
+                            "Show original".to_string()
+                        }
+                    })
+                    .on_event_stop(el::Click, move |_, _| toggle_click())
+                    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+                        if matches!(key.code, Code::Enter | Code::Space) {
+                            toggle_key();
+                            EventPropagation::Stop
+                        } else {
+                            EventPropagation::Continue
+                        }
+                    })
+                    .debug_name("description-rewrite-toggle")
+                    .style(|s| {
+                        clickable(s)
+                            .font_size(theme::TEXT_META)
+                            .color(theme::fg_muted())
+                            .padding_horiz(6.0)
+                            .height(22.0)
+                            .items_center()
+                            .flex_shrink(0.0_f32)
+                            .border_radius(theme::RADIUS)
+                            .selectable(false)
+                            .keyboard_navigable()
+                            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                            .hover(|s| s.color(theme::fg()).background(theme::canvas_hover()))
+                    }),
+                ))
+                .debug_name("description-rewritten")
+                .style(|s| s.items_center().gap(6.0).min_height(22.0))
+                .into_any()
+            }
+        },
+    )
     .style(move |s| {
-        let running = matches!(rewrite.get(), Some(DescriptionRewrite::Running { .. }));
-        s.items_center()
-            .gap(6.0)
-            .margin_bottom(8.0)
-            .apply_if(!running, |s| s.hide())
+        let hidden = bar_state.get() == RewriteBar::Hidden;
+        s.width_full()
+            .margin_bottom(10.0)
+            .apply_if(hidden, |s| s.hide())
     });
 
     let react = reactable(&node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
     let shown = Stack::vertical((
-        rewriting_indicator,
+        rewrite_bar,
         clamped(state, body_view.into_any(), whole),
         reactions,
     ))
@@ -1729,25 +1813,33 @@ fn start_matrix_animation(
 }
 
 /// Strip light markdown punctuation and cap length so the transition stays
-/// compact and fast.
+/// compact and fast. Folded `<details>` appendices are omitted because they
+/// stay collapsed once rendered.
 fn matrix_preview(markdown: &str) -> String {
     let mut out = String::new();
     for line in markdown.lines().take(20) {
+        let trimmed = line.trim_start();
+        if trimmed
+            .get(..8)
+            .is_some_and(|head| head.eq_ignore_ascii_case("<details"))
+        {
+            break;
+        }
         if !out.is_empty() {
             out.push('\n');
         }
-        let cleaned = line.trim_start_matches('#').trim_start();
+        let cleaned = trimmed.trim_start_matches('#').trim_start();
         for ch in cleaned.chars() {
             if matches!(ch, '*' | '`') {
                 continue;
             }
             out.push(ch);
             if out.chars().count() >= MATRIX_MAX_CHARS {
-                return out;
+                return out.trim_end().to_string();
             }
         }
     }
-    out
+    out.trim_end().to_string()
 }
 
 /// One frame of a matrix-style character sweep from `from` to `to`.
@@ -4093,6 +4185,12 @@ mod tests {
         assert_eq!(
             matrix_preview("## Summary\n**Bold** `code`"),
             "Summary\nBold code"
+        );
+        assert_eq!(
+            matrix_preview(
+                "Main point.\n\n<details>\n<summary>Appendix</summary>\nHidden\n</details>"
+            ),
+            "Main point."
         );
     }
 }
