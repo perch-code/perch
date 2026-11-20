@@ -1674,11 +1674,9 @@ fn row(
         })
     );
     let icon = icons.then(|| match icon {
-        Some(SidebarIcon::Refresh) if icon_turns => {
-            crate::review::run_view::turning_arrow(icon_fg)
-                .style(|s| s.size(16.0, 16.0).flex_shrink(0.0_f32))
-                .into_any()
-        }
+        Some(SidebarIcon::Refresh) if icon_turns => crate::review::run_view::turning_arrow(icon_fg)
+            .style(|s| s.size(16.0, 16.0).flex_shrink(0.0_f32))
+            .into_any(),
         Some(icon) => sidebar_glyph(icon, icon_fg)
             .style(|s| s.size(16.0, 16.0).flex_shrink(0.0_f32))
             .into_any(),

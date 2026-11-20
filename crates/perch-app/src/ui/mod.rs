@@ -1880,11 +1880,7 @@ mod tests {
         assert_eq!(state.open_item.get().as_deref(), Some("b"));
         assert!(review.opening.get());
 
-        harness.dispatch_event(key(
-            Code::BracketLeft,
-            Key::Character("[".into()),
-            OS_MOD,
-        ));
+        harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
         assert_eq!(state.open_item.get().as_deref(), Some("a"));
         assert!(!review.history.with(|h| h.can_go_back()));
 
