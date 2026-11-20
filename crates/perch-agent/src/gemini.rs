@@ -520,20 +520,21 @@ fn thought_level(effort: &str) -> &'static str {
     }
 }
 
-/// The `--settings` a print-mode run starts with. They outrank the
+/// The `--settings` a sandboxed print-mode run starts with. They outrank the
 /// user's file for the run and are never saved. The terminal sandbox is
 /// on and commands run in it without asking; the worktree and `dirs` are
 /// mounted read-only by a deny rule, which outranks any allow; the
 /// sandbox has no network; and web reads, browser use and MCP tools are
 /// denied by name, since they run outside the sandbox. Anything else that
-/// would ask is refused, print mode having nobody to ask.
+/// would ask (including an unsandboxed command) is refused, print mode
+/// having nobody to ask.
 pub fn read_only_settings(cwd: &Path, dirs: &[PathBuf]) -> String {
     let deny_write = std::iter::once(cwd)
         .chain(dirs.iter().map(PathBuf::as_path))
         .map(|path| format!("write_file({})", crate::real_path(path).display()));
     let deny: Vec<String> = deny_write
         .chain(
-            ["read_url(*)", "execute_url(*)", "mcp(*)", "unsandboxed(*)"]
+            ["read_url(*)", "execute_url(*)", "mcp(*)"]
                 .into_iter()
                 .map(str::to_string),
         )
@@ -548,6 +549,91 @@ pub fn read_only_settings(cwd: &Path, dirs: &[PathBuf]) -> String {
     .to_string()
 }
 
+/// Read-only git subcommands allowed when `[agent] sandbox = false` turns
+/// agy's terminal sandbox off.
+const UNSANDBOXED_GIT_SUBCOMMANDS: &[&str] = &[
+    "diff",
+    "log",
+    "show",
+    "blame",
+    "status",
+    "rev-parse",
+    "merge-base",
+    "ls-files",
+    "grep",
+    "ls-tree",
+    "cat-file",
+];
+
+/// Read-only inspection commands allowed alongside git when `[agent]
+/// sandbox = false`. agy's shell parser still refuses output redirection
+/// and command substitution on allowed commands, and print mode aborts
+/// the turn on any unlisted command (such as `echo` chained between git
+/// calls or `ls` on a context folder). `rg`, `find`, and `sed` are left
+/// out (`rg --pre` and `find -exec` run arbitrary programs, `sed -i`
+/// edits in place); agy's built-in file tools cover those instead.
+const UNSANDBOXED_SHELL_COMMANDS: &[&str] =
+    &["ls", "cat", "head", "tail", "wc", "echo", "pwd", "grep"];
+
+/// Added to a print-mode prompt when `[agent] sandbox = false` so Gemini
+/// stays inside the allowed command list instead of triggering an
+/// auto-denied shell command that aborts the turn.
+pub(crate) const UNSANDBOXED_SHELL_NOTE: &str = "Shell commands are restricted to read-only git (git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git grep, git ls-tree, git cat-file) and ls, cat, head, tail, wc, echo, pwd, grep, with no redirections or command substitutions. Use your built-in file tools (read_file, list_dir, find_by_name, grep_search) rather than other shell commands such as find, rg, or sed — an unlisted shell command aborts the run.";
+
+/// The `--settings` a print-mode run starts with when `[agent] sandbox =
+/// false`: agy's terminal sandbox is off, `toolPermission` is
+/// `request-review`, file writes and web/MCP tools are denied, and only
+/// read-only git and inspection commands are allowed. `agy`'s `command(...)`
+/// rules match literal space-separated token prefixes, so `--output` is
+/// denied immediately after the git subcommand while `--output=...` or
+/// later flags cannot be matched by prefix; as with Claude Code, turning
+/// the sandbox off is only for a machine that is itself the boundary.
+pub fn unsandboxed_read_only_settings(cwd: &Path, dirs: &[PathBuf]) -> String {
+    let real_cwd = crate::real_path(cwd);
+    let cwd_display = real_cwd.display();
+    let allow: Vec<String> = UNSANDBOXED_GIT_SUBCOMMANDS
+        .iter()
+        .flat_map(|sub| {
+            [
+                format!("command(git {sub})"),
+                format!("command(git -C {cwd_display} {sub})"),
+            ]
+        })
+        .chain(
+            UNSANDBOXED_SHELL_COMMANDS
+                .iter()
+                .map(|cmd| format!("command({cmd})")),
+        )
+        .collect();
+    let deny_write = std::iter::once("write_file(*)".to_string()).chain(
+        std::iter::once(cwd)
+            .chain(dirs.iter().map(PathBuf::as_path))
+            .map(|path| format!("write_file({})", crate::real_path(path).display())),
+    );
+    let deny_output = ["diff", "log", "show"].into_iter().flat_map(|sub| {
+        [
+            format!("command(git {sub} --output)"),
+            format!("command(git -C {cwd_display} {sub} --output)"),
+        ]
+    });
+    let deny: Vec<String> = deny_write
+        .chain(
+            ["read_url(*)", "execute_url(*)", "mcp(*)"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .chain(deny_output)
+        .collect();
+    json!({
+        "agentMode": "",
+        "toolPermission": "request-review",
+        "enableTerminalSandbox": false,
+        "allowNonWorkspaceAccess": false,
+        "permissions": {"allow": allow, "ask": [], "deny": deny},
+    })
+    .to_string()
+}
+
 /// The arguments every print-mode run shares, before the model's.
 ///
 /// A linked worktree's git directories sit outside it, where agy's
@@ -555,14 +641,25 @@ pub fn read_only_settings(cwd: &Path, dirs: &[PathBuf]) -> String {
 /// do the object directories a checkout borrows through alternates, a
 /// review snapshot's among them, without which git can't open a commit.
 /// They go in read-only with the rest.
-pub(crate) fn print_args(cwd: &Path, dirs: &[PathBuf], model: &str, effort: &str) -> Vec<String> {
+pub(crate) fn print_args(
+    cwd: &Path,
+    dirs: &[PathBuf],
+    sandbox: bool,
+    model: &str,
+    effort: &str,
+) -> Vec<String> {
     let dirs = print_dirs(cwd, dirs);
+    let settings = if sandbox {
+        read_only_settings(cwd, &dirs)
+    } else {
+        unsandboxed_read_only_settings(cwd, &dirs)
+    };
     let mut args: Vec<String> = vec![
         "--output-format".into(),
         "stream-json".into(),
         "--disable-slash-commands".into(),
         "--settings".into(),
-        read_only_settings(cwd, &dirs),
+        settings,
         "--model".into(),
         model.to_string(),
         "--effort".into(),
@@ -686,23 +783,38 @@ fn error_line(info: &Value) -> String {
     one_line(message, 100)
 }
 
-/// A command step that ran says how it exited: `Command exited with code
-/// N.` in its output.
+/// A command step that ran says how it exited (`Command exited with code
+/// N.`), and one that could not start says why (`Command failed to run:
+/// ...`, e.g. when agy's sandbox cannot connect). In print mode an
+/// auto-denied command can also finish `DONE` with empty output and no
+/// error object, so an empty output is treated as failed too.
 fn command_failed(output: &str) -> Option<String> {
-    let code = output
+    if let Some(code) = output
         .lines()
-        .find_map(|l| l.trim().strip_prefix("Command exited with code "))?
-        .trim_end_matches('.')
-        .trim();
-    (code != "0").then(|| {
-        output
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .map(|l| one_line(l, 100))
-            .unwrap_or_default()
-    })
+        .find_map(|l| l.trim().strip_prefix("Command exited with code "))
+    {
+        let code = code.trim_end_matches('.').trim();
+        return (code != "0").then(|| {
+            output
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(|l| one_line(l, 100))
+                .unwrap_or_default()
+        });
+    }
+    if let Some(line) = output
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Command failed to run:"))
+    {
+        return Some(one_line(line, 100));
+    }
+    output
+        .trim()
+        .is_empty()
+        .then(|| "command did not run".to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -717,8 +829,9 @@ pub struct GeminiParser {
     /// The text of each response step as it streams, by its subagent's
     /// parent step (`None` for the run's own) and its index.
     texts: HashMap<(Option<u64>, u64), String>,
-    /// Tool steps that have begun.
+    /// Tool steps that have begun, and those whose result has been emitted.
     started: HashSet<(Option<u64>, u64)>,
+    ended: HashSet<(Option<u64>, u64)>,
 }
 
 impl Default for GeminiParser {
@@ -734,6 +847,7 @@ impl GeminiParser {
             model: String::new(),
             texts: HashMap::new(),
             started: HashSet::new(),
+            ended: HashSet::new(),
         }
     }
 
@@ -763,7 +877,12 @@ impl GeminiParser {
 
     fn step(&mut self, s: &Value) -> Vec<RunEvent> {
         let index = s.get("step_index").and_then(Value::as_u64).unwrap_or(0);
-        let done = str_of(s, "state") == "DONE";
+        let state = str_of(s, "state");
+        let errored = matches!(
+            state.as_str(),
+            "ERROR" | "INVALID" | "CANCELED" | "CANCELLED" | "INTERRUPTED" | "HALTED"
+        );
+        let done = state == "DONE" || errored;
         let parent = s
             .pointer("/subagent_info/parent_step_index")
             .and_then(Value::as_u64);
@@ -806,10 +925,12 @@ impl GeminiParser {
                 if self.started.insert(key) {
                     events.push(call);
                 }
-                if done {
+                if done && self.ended.insert(key) {
                     let output = str_of(&info, "output");
                     let failure = if info.get("error").is_some_and(|e| !e.is_null()) {
                         Some(error_line(&info))
+                    } else if errored {
+                        Some(state.to_ascii_lowercase())
                     } else if name == "run_command" {
                         command_failed(&output)
                     } else {
@@ -2323,6 +2444,69 @@ mod tests {
     }
 
     #[test]
+    fn print_mode_surfaces_sandbox_launch_failures_and_error_states() {
+        let mut p = GeminiParser::new();
+        let started = p.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git log -1"}}}}"#,
+        );
+        assert_eq!(started.len(), 1);
+        let sandbox_failed = p.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git log -1"},"output":"Created At: 2026-11-19T15:30:00-08:00\nCompleted At: 2026-11-19T15:30:02-08:00\nCommand failed to run: connecting to sandbox server: read unix @->@: recvmsg: connection reset by peer.\n\nNo output from the command."}}}"#,
+        );
+        assert!(
+            matches!(
+                &sandbox_failed[..],
+                [RunEvent::ToolResult { id, ok: false, summary }]
+                    if id == "step-3" && summary.starts_with("Command failed to run: connecting to sandbox server:")
+            ),
+            "{sandbox_failed:?}"
+        );
+        // A step that ends in ERROR emits a failed ToolResult with its error line.
+        let _ = p.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":9,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git log -1"}}}}"#,
+        );
+        let denied = p.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":9,"state":"ERROR","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git log -1"},"error":{"type":"TOOL_ERROR","message":"permission check failed for unsandboxed \"git log -1\": user denied permission"}}}}"#,
+        );
+        assert!(
+            matches!(
+                &denied[..],
+                [RunEvent::ToolResult { id, ok: false, summary }]
+                    if id == "step-9" && summary.starts_with("permission check failed for unsandboxed")
+            ),
+            "{denied:?}"
+        );
+        // A command that exited 0 while echoing the failure phrase still counts as ok.
+        let echoed = p.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":10,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo ok"},"output":"Created At: x\nCommand exited with code 0.\n\nCommand output:\nCommand failed to run: literal\n"}}}"#,
+        );
+        assert!(
+            matches!(
+                &echoed[..],
+                [RunEvent::ToolCall { .. }, RunEvent::ToolResult { ok: true, summary, .. }]
+                    if summary.is_empty()
+            ),
+            "{echoed:?}"
+        );
+        // An auto-denied command in print mode can finish DONE with empty output
+        // and no error object; it must not be reported as a successful tool call.
+        let _ = p.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":12,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hi > out.txt"}}}}"#,
+        );
+        let auto_denied = p.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":12,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hi > out.txt"}}}}"#,
+        );
+        assert_eq!(
+            auto_denied,
+            vec![RunEvent::ToolResult {
+                id: "step-12".into(),
+                ok: false,
+                summary: "command did not run".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn read_only_settings_deny_writes_and_the_web() {
         let dir = tempfile::tempdir().unwrap();
         let settings: Value = serde_json::from_str(&read_only_settings(dir.path(), &[])).unwrap();
@@ -2339,10 +2523,74 @@ mod tests {
         for rule in ["read_url(*)", "execute_url(*)", "mcp(*)"] {
             assert!(deny.contains(&rule), "{rule}");
         }
+        assert!(
+            !deny.contains(&"unsandboxed(*)"),
+            "agy 1.5.13 warns on and ignores unsandboxed(*): {deny:?}"
+        );
         assert!(settings["permissions"]["allow"]
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn unsandboxed_read_only_settings_disable_sandbox_and_allow_read_only_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings: Value =
+            serde_json::from_str(&unsandboxed_read_only_settings(dir.path(), &[])).unwrap();
+        assert_eq!(settings["enableTerminalSandbox"], false);
+        assert_eq!(settings["toolPermission"], "request-review");
+        assert_eq!(settings["allowNonWorkspaceAccess"], false);
+        let real = crate::real_path(dir.path());
+        let allow: Vec<&str> = settings["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for rule in [
+            "command(git diff)".to_string(),
+            "command(git log)".to_string(),
+            "command(git show)".to_string(),
+            "command(git blame)".to_string(),
+            format!("command(git -C {} diff)", real.display()),
+            format!("command(git -C {} log)", real.display()),
+            "command(git ls-files)".to_string(),
+            "command(git grep)".to_string(),
+            "command(git ls-tree)".to_string(),
+            "command(git cat-file)".to_string(),
+            "command(ls)".to_string(),
+            "command(echo)".to_string(),
+            "command(grep)".to_string(),
+        ] {
+            assert!(
+                allow.contains(&rule.as_str()),
+                "missing {rule} in {allow:?}"
+            );
+        }
+        for forbidden in ["command(rg)", "command(find)", "command(sed)"] {
+            assert!(
+                !allow.contains(&forbidden),
+                "should not allow {forbidden}: {allow:?}"
+            );
+        }
+        let deny: Vec<&str> = settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for rule in [
+            "write_file(*)".to_string(),
+            format!("write_file({})", real.display()),
+            "read_url(*)".to_string(),
+            "execute_url(*)".to_string(),
+            "mcp(*)".to_string(),
+            "command(git diff --output)".to_string(),
+            format!("command(git -C {} log --output)", real.display()),
+        ] {
+            assert!(deny.contains(&rule.as_str()), "missing {rule} in {deny:?}");
+        }
     }
 
     #[test]
@@ -2941,7 +3189,7 @@ mod tests {
         let wt = root.join("wt");
         git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
 
-        let args = print_args(&wt, &[], "m", "low");
+        let args = print_args(&wt, &[], true, "m", "low");
         let added: Vec<&String> = args
             .windows(2)
             .filter(|w| w[0] == "--add-dir")
@@ -2975,7 +3223,7 @@ mod tests {
         )
         .unwrap();
 
-        let args = print_args(&root.join("checkout"), &[], "m", "low");
+        let args = print_args(&root.join("checkout"), &[], true, "m", "low");
         let added: Vec<&String> = args
             .windows(2)
             .filter(|w| w[0] == "--add-dir")

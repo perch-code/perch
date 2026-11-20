@@ -407,7 +407,7 @@ def build_custom_markdown(
                 subs["Approvals"],
                 count=1,
             )
-            without_sandbox = promote_block(subs["Without Claude Code's sandbox"])
+            without_sandbox = promote_block(subs["Without the agent sandbox"])
             return "\n\n".join([overview, asking, readonly, without_sandbox, work, approvals])
 
         # builder == "agent_context"

@@ -1030,11 +1030,11 @@ during an Ask run.
   `git blame`. Perch explicitly denies `Edit`, `Write`, `MultiEdit`,
   `NotebookEdit`, `WebFetch`, and `WebSearch`. Other unapproved tools are
   refused and show up in the activity log. Codex uses its `read-only` sandbox.
-- **Shell commands.** By default, Claude’s sandbox blocks network access and
-  file writes, including writes inside the worktree. If the sandbox cannot
-  start, the run stops. Perch does not retry outside it. See
-  [Without Claude Code’s sandbox](#without-claude-codes-sandbox) for the
-  optional setting.
+- **Shell commands.** By default, Claude’s and Gemini’s (`agy`) sandboxes block
+  network access and file writes, including writes inside the worktree. If the
+  sandbox cannot start, the run stops. Perch does not retry outside it. See
+  [Without the agent sandbox](#without-the-agent-sandbox) for the optional
+  setting.
 - **Settings.** For Ask, Claude Code uses `~/.claude/settings.json` and skips
   the repository’s `.claude/settings*.json`, `.mcp.json`, and MCP servers.
   Claude reviews also use `--safe-mode`. Codex treats the checkout as
@@ -1115,21 +1115,34 @@ The scan skips `node_modules`, `target`, `.venv`, and `venv`. It reads regular
 files, stays inside the worktree, and fails a run that exceeds its limit of
 200,000 directories and nested hooks.
 
-### Without Claude Code's sandbox
+### Without the agent sandbox
 
-Claude Code’s sandbox is on by default. If you use a separate machine as your
-security boundary, such as a disposable VM, **Settings > Agents > Claude Code >
-Sandbox** controls this setting. The corresponding engine setting is
-`[agent] sandbox = false`. Perch only disables the sandbox when you choose to
-do so. Turning it off changes the following behavior.
+Claude Code’s and Gemini’s (`agy`) sandboxes are on by default. If you use a
+separate machine as your security boundary, such as a disposable VM or
+container, **Settings > Agents > Defaults > Sandbox** controls this setting.
+The corresponding engine setting is `[agent] sandbox = false`. Perch only
+disables the sandbox when you choose to do so. Turning it off changes the
+following behavior.
 
 - The Linux host check for `bwrap` and `socat` reads **Off**. Claude starts
   with `sandbox.enabled` set to false.
-- Ask runs, native reviews, and verifiers keep their tool restrictions. Allowed
-  read commands run with your account’s permissions and network access. Perch
-  denies Git’s `--output` option.
-- Work still restricts its editing tools to allowed paths and checks Git
-  metadata when a run starts and ends. A shell command you approve can write
+- Claude Code Ask runs, native reviews, and verifiers keep their tool
+  restrictions. Allowed read commands run with your account’s permissions and
+  network access. Perch denies Git’s `--output` option.
+- Gemini (`agy`) Ask runs, native reviews, and verifiers start with
+  `enableTerminalSandbox` false and `toolPermission` set to `request-review`.
+  File-editing tools (`write_file(*)`), web reads, and MCP tools stay denied,
+  while read-only Git commands (`git diff`, `git log`, `git show`, `git blame`,
+  `git status`, `git rev-parse`, `git merge-base`, `git ls-files`, `git grep`,
+  `git ls-tree`, `git cat-file`, both directly and with `-C <cwd>`) and basic
+  inspection commands (`ls`, `cat`, `head`, `tail`, `wc`, `echo`, `pwd`,
+  `grep`) are allowed. Because `agy`’s `command(...)` rules match literal
+  space-separated prefixes, Perch denies `--output` immediately after the Git
+  subcommand (`git diff --output ...`) but cannot block `--output=<path>` or
+  `--output` after other flags — so as with Claude Code, there is no OS write
+  or network boundary beneath the allowed commands.
+- Claude Code Work still restricts its editing tools to allowed paths and checks
+  Git metadata when a run starts and ends. A shell command you approve can write
   anywhere your account can and reach any host. **Ask me** sends command
   requests to you, **Auto-review** asks Claude’s reviewer first, and **Allow
   all** approves them automatically. The repository commit grant applies to
@@ -1141,7 +1154,7 @@ do so. Turning it off changes the following behavior.
   need approval. A broad rule such as `Bash(git *)` can therefore make Git
   commands unavailable to them.
 
-Codex, Gemini and OpenCode are not affected.
+Codex and OpenCode are not affected.
 
 ### Approvals
 
@@ -1546,8 +1559,8 @@ on your first connection. Prepare the host under the account you use for SSH.
 
 1. If you use Claude Code on Linux, install its sandbox dependencies with
    `apt install bubblewrap socat` or your distribution’s equivalent. See
-   [Without Claude Code’s sandbox](#without-claude-codes-sandbox) if you run
-   Claude on a dedicated VM.
+   [Without the agent sandbox](#without-the-agent-sandbox) if you run on a
+   dedicated VM or container.
 2. Run `gh auth login` or set `token` in the host’s config.toml. Sign in to
    each agent CLI you plan to use there (`claude`, `codex`, `agy`, or
    `opencode`). The host uses its own credentials.

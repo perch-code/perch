@@ -412,9 +412,10 @@ pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
 
 /// Why this machine cannot run `backend` at all, said before a run
 /// starts rather than left to the agent's exit: Claude Code on Linux
-/// without bubblewrap and socat for its sandbox, unless config turns the
-/// sandbox off (`sandbox` false). Not in this crate's tests, whose fake
-/// agents need no sandbox and whose CI has neither.
+/// without bubblewrap and socat for its sandbox, unless `[agent] sandbox`
+/// is false (which also disables Gemini's terminal sandbox in print mode).
+/// Not in this crate's tests, whose fake agents need no sandbox and whose
+/// CI has neither.
 pub fn host_refusal(backend: perch_agent::Backend, sandbox: bool) -> Option<String> {
     if backend == perch_agent::Backend::ClaudeCode
         && sandbox

@@ -145,12 +145,13 @@ pub struct AgentConfig {
     /// remain part of their parent.
     #[serde(default = "default_max_concurrent_runs")]
     pub max_concurrent_runs: usize,
-    /// Whether Claude Code's shell runs in its sandbox: bubblewrap and
-    /// socat on Linux, the system's own on a Mac. On unless the file
-    /// says `false`, for a machine that is itself the boundary, such as
-    /// a throwaway VM. Off, a read-only run keeps its git commands but
-    /// loses the backstop under them, and every command a Work run wants
-    /// is a request.
+    /// Whether Claude Code's and Gemini's (`agy`) shells run in their
+    /// sandboxes: bubblewrap and socat for Claude Code on Linux, `agy`'s
+    /// terminal sandbox for Gemini, and the system's own on a Mac. On
+    /// unless the file says `false`, for a machine that is itself the
+    /// boundary, such as a throwaway VM or container. Off, read-only runs
+    /// keep their git commands without that backstop, and every command a
+    /// Work run wants is a request.
     #[serde(default = "default_sandbox")]
     pub sandbox: bool,
     #[serde(default)]

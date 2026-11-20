@@ -362,8 +362,8 @@ pub struct ReviewSpec {
     pub external_knowledge_dirs: Vec<PathBuf>,
     /// Where to keep the CLI's raw output for diagnosis, if anywhere.
     pub transcript: Option<Transcript>,
-    /// Whether Claude Code's shell runs in its sandbox: `[agent]
-    /// sandbox`. Claude Code only.
+    /// Whether Claude Code's and Gemini's shell runs in its sandbox:
+    /// `[agent] sandbox`.
     pub sandbox: bool,
 }
 
@@ -483,6 +483,7 @@ impl ReviewSpec {
         let prompt = [
             Some(CODEX_REVIEW_DATA_BOUNDARY.to_string()),
             Some(task),
+            (!self.sandbox).then(|| crate::gemini::UNSANDBOXED_SHELL_NOTE.to_string()),
             self.supplied_instructions(),
         ]
         .into_iter()
@@ -490,7 +491,13 @@ impl ReviewSpec {
         .collect::<Vec<_>>()
         .join("\n\n");
         let dirs = self.read_dirs();
-        let mut args = crate::gemini::print_args(&self.cwd, &dirs, &self.model, self.effort.name());
+        let mut args = crate::gemini::print_args(
+            &self.cwd,
+            &dirs,
+            self.sandbox,
+            &self.model,
+            self.effort.name(),
+        );
         args.extend([
             "--json-schema".into(),
             crate::gemini::api_schema(&review_output_schema()),
@@ -604,8 +611,8 @@ pub struct ReviewVerificationSpec {
     pub prompt: String,
     /// Where to keep the CLI's raw output for diagnosis, if anywhere.
     pub transcript: Option<Transcript>,
-    /// Whether Claude Code's shell runs in its sandbox: `[agent]
-    /// sandbox`. Claude Code only.
+    /// Whether Claude Code's and Gemini's shell runs in its sandbox:
+    /// `[agent] sandbox`.
     pub sandbox: bool,
 }
 
@@ -686,11 +693,26 @@ impl ReviewVerificationSpec {
     }
 
     fn gemini_args(&self) -> Vec<String> {
-        let mut args = crate::gemini::print_args(&self.cwd, &[], &self.model, self.effort.name());
+        let mut args = crate::gemini::print_args(
+            &self.cwd,
+            &[],
+            self.sandbox,
+            &self.model,
+            self.effort.name(),
+        );
+        let prompt = [
+            Some(CODEX_VERIFIER_DATA_BOUNDARY),
+            (!self.sandbox).then_some(crate::gemini::UNSANDBOXED_SHELL_NOTE),
+            Some(self.prompt.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n");
         args.extend([
             "--json-schema".into(),
             crate::gemini::api_schema(&review_verification_schema()),
-            format!("--print={CODEX_VERIFIER_DATA_BOUNDARY}\n\n{}", self.prompt),
+            format!("--print={prompt}"),
         ]);
         args
     }
@@ -2522,6 +2544,42 @@ mod tests {
             for tool in READ_ONLY_TOOLS {
                 assert!(args[..denied].iter().any(|a| a == tool), "{tool}");
             }
+        }
+    }
+
+    #[test]
+    fn gemini_review_without_the_sandbox_disables_terminal_sandbox_and_allows_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut review = review_spec(Backend::Gemini, dir.path().into());
+        let mut verifier = verification_spec(Backend::Gemini);
+        let sandboxed = [review.args(), verifier.args()];
+        review.sandbox = false;
+        verifier.sandbox = false;
+        for (args, before) in [review.args(), verifier.args()].iter().zip(&sandboxed) {
+            let before_idx = before.iter().position(|a| a == "--settings").unwrap() + 1;
+            let before_settings: serde_json::Value =
+                serde_json::from_str(&before[before_idx]).unwrap();
+            assert_eq!(before_settings["enableTerminalSandbox"], true);
+            assert_eq!(before_settings["toolPermission"], "proceed-in-sandbox");
+
+            let idx = args.iter().position(|a| a == "--settings").unwrap() + 1;
+            let settings: serde_json::Value = serde_json::from_str(&args[idx]).unwrap();
+            assert_eq!(settings["enableTerminalSandbox"], false);
+            assert_eq!(settings["toolPermission"], "request-review");
+            let allow = settings["permissions"]["allow"].as_array().unwrap();
+            assert!(allow.iter().any(|v| v == "command(git diff)"));
+            assert!(allow.iter().any(|v| v == "command(git log)"));
+            let deny = settings["permissions"]["deny"].as_array().unwrap();
+            assert!(deny.iter().any(|v| v == "write_file(*)"));
+            assert!(deny.iter().any(|v| v == "read_url(*)"));
+            assert!(deny.iter().any(|v| v == "command(git diff --output)"));
+            assert!(args
+                .iter()
+                .any(|a| a.starts_with("--print=")
+                    && a.contains(crate::gemini::UNSANDBOXED_SHELL_NOTE)));
+            assert!(!before
+                .iter()
+                .any(|a| a.contains(crate::gemini::UNSANDBOXED_SHELL_NOTE)));
         }
     }
 

@@ -43,7 +43,7 @@ change `token`, `worktrees_dir`, or an existing repository’s `github` and
 | `[agent] effort` | `"high"` | Effort the picker starts on: `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
 | `[agent] models` | `["fable", "opus", "sonnet", "haiku"]` | Claude models the picker offers |
 | `[agent] max_concurrent_runs` | `4` | Maximum simultaneous runs. Gemini runs one at a time. Other runs wait. |
-| `[agent] sandbox` | `true` | Run Claude Code commands in its sandbox. See [Without Claude Code’s sandbox](reference.md#without-claude-codes-sandbox) for what changes when you turn it off. |
+| `[agent] sandbox` | `true` | Run Claude Code and Gemini (`agy`) commands in their sandboxes. See [Without the agent sandbox](reference.md#without-the-agent-sandbox) for what changes when you turn it off. |
 | `[agent.codex] binary` | `"codex"` | Codex executable, a name on `PATH` or a path |
 | `[agent.codex] models` | Codex's own list | Codex models the picker offers |
 | `[agent.gemini] binary` | `"agy"` | Antigravity CLI executable, a name on `PATH` or a path |

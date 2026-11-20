@@ -60,8 +60,8 @@ pub enum Setting {
     AgentModel(Option<String>),
     AgentEffort(Option<String>),
     AgentMaxConcurrentRuns(Option<usize>),
-    /// `[agent] sandbox`: `Some(false)` turns Claude Code's sandbox off;
-    /// None takes the key out, back to on.
+    /// `[agent] sandbox`: `Some(false)` turns Claude Code's and Gemini's
+    /// sandboxes off; None takes the key out, back to on.
     AgentSandbox(Option<bool>),
     AgentBinary {
         backend: AgentBackend,

@@ -963,8 +963,8 @@ pub struct RunSpec {
     pub mode: Mode,
     /// Directories outside `cwd` the run is given to read.
     pub read_dirs: Vec<PathBuf>,
-    /// Whether Claude Code's shell runs in its sandbox: `[agent]
-    /// sandbox`. Claude Code only; the other CLIs keep their own.
+    /// Whether Claude Code's and Gemini's shell runs in its sandbox:
+    /// `[agent] sandbox`. Codex and OpenCode keep their own.
     pub sandbox: bool,
 }
 
@@ -979,14 +979,16 @@ impl RunSpec {
         }
     }
 
-    /// Gemini: a question in print mode, read-only in agy's sandbox, with
-    /// the prompt on stdin; Work as an ACP server, which asks.
+    /// Gemini: a question in print mode, read-only (in agy's sandbox unless
+    /// `[agent] sandbox = false`), with the prompt on stdin; Work as an ACP
+    /// server, which asks.
     fn gemini_args(&self) -> Vec<String> {
         match &self.mode {
             Mode::Ask => {
                 let mut args = gemini::print_args(
                     &self.cwd,
                     &self.read_dirs,
+                    self.sandbox,
                     &self.model,
                     gemini::effort_name(self.effort),
                 );
@@ -1168,7 +1170,18 @@ impl RunSpec {
                 )
             }
             Backend::Gemini => match &self.mode {
-                Mode::Ask => Conversation::Gemini(gemini::GeminiHost::new(self.framed_prompt())),
+                Mode::Ask => {
+                    let prompt = if !self.sandbox && self.resume.is_none() {
+                        format!(
+                            "{}\n\n{}",
+                            gemini::UNSANDBOXED_SHELL_NOTE,
+                            self.framed_prompt()
+                        )
+                    } else {
+                        self.framed_prompt()
+                    };
+                    Conversation::Gemini(gemini::GeminiHost::new(prompt))
+                }
                 Mode::Work(grant) => {
                     let mut writable = vec![real_path(&self.cwd)];
                     writable.extend(grant.write.iter().map(|p| real_path(p)));
@@ -2889,6 +2902,53 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("dangerously") || a.contains("bypass")));
         }
+    }
+
+    #[test]
+    fn gemini_ask_without_the_sandbox_uses_request_review_and_read_only_commands() {
+        let mut ask = work(Backend::Gemini, WorkGrant::default(), None);
+        ask.mode = Mode::Ask;
+        ask.sandbox = true;
+        let sandboxed = settings_of(&ask.args());
+        assert_eq!(sandboxed["enableTerminalSandbox"], true);
+        assert_eq!(sandboxed["toolPermission"], "proceed-in-sandbox");
+        assert!(sandboxed["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        ask.sandbox = false;
+        let unsandboxed = settings_of(&ask.args());
+        assert_eq!(unsandboxed["enableTerminalSandbox"], false);
+        assert_eq!(unsandboxed["toolPermission"], "request-review");
+        let allow = unsandboxed["permissions"]["allow"].as_array().unwrap();
+        assert!(allow.iter().any(|v| v == "command(git diff)"));
+        assert!(allow.iter().any(|v| v == "command(git log)"));
+        let deny = unsandboxed["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().any(|v| v == "write_file(*)"));
+        assert!(deny.iter().any(|v| v == "command(git diff --output)"));
+
+        // First unsandboxed Ask turn includes the shell allowlist note; sandboxed and resumed turns do not.
+        let mut unsandboxed_conv = ask.conversation();
+        let opening = match &mut unsandboxed_conv {
+            Conversation::Gemini(host) => host.opening().remove(0),
+            _ => panic!("expected Gemini print conversation"),
+        };
+        assert!(
+            opening.contains(gemini::UNSANDBOXED_SHELL_NOTE),
+            "{opening}"
+        );
+
+        ask.resume = Some("session-1".into());
+        let mut resumed_conv = ask.conversation();
+        let resumed_opening = match &mut resumed_conv {
+            Conversation::Gemini(host) => host.opening().remove(0),
+            _ => panic!("expected Gemini print conversation"),
+        };
+        assert!(
+            !resumed_opening.contains(gemini::UNSANDBOXED_SHELL_NOTE),
+            "{resumed_opening}"
+        );
     }
 
     /// Without the sandbox, the `Bash` rules the settings files allow

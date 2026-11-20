@@ -1,6 +1,6 @@
-//! Agents: the default model, effort and how many runs at once, then a
-//! card for each CLI with its executable and its models, and for Claude
-//! Code whether its shell runs in its sandbox.
+//! Agents: the default model, effort, how many runs at once, and whether
+//! Claude Code and Gemini run commands in their sandboxes, then a card for
+//! each CLI with its executable and its models.
 //!
 //! Two configs meet here. What the file says (`Page::with_config`) is what
 //! the boxes hold, binaries as typed. What Perch found on this machine
@@ -23,14 +23,18 @@ const MOST_RUNS: usize = 8;
 pub(super) fn groups(page: &Page) -> Vec<Group> {
     let mut groups = vec![Group::new(
         "Defaults",
-        vec![model(page), effort(page), concurrent_runs(page)],
+        vec![
+            model(page),
+            effort(page),
+            concurrent_runs(page),
+            sandbox(page),
+        ],
     )];
     groups.extend(AgentBackend::ALL.into_iter().map(|backend| {
-        let mut rows = vec![binary(page, backend), models(page, backend)];
-        if backend == AgentBackend::Claude {
-            rows.push(sandbox(page));
-        }
-        Group::new(title(backend), rows)
+        Group::new(
+            title(backend),
+            vec![binary(page, backend), models(page, backend)],
+        )
     }));
     groups
 }
@@ -324,19 +328,20 @@ fn sandbox(page: &Page) -> Row {
                 move || on_page.with_config(|c| c.agent.sandbox),
                 move || enabled.writable(),
                 move |on| write.write(Setting::AgentSandbox((!on).then_some(false))),
-                "settings-claude-sandbox",
+                "settings-agent-sandbox",
             )
             .into_any()
         }
     };
     Row::new(
-        "claude-sandbox",
+        "agent-sandbox",
         "Sandbox",
         || {
-            "Run Claude Code's commands in its sandbox: bubblewrap and socat on Linux. Turn \
-             it off only where the machine is itself the boundary, such as a throwaway VM. \
-             Off, Work asks before every command, and questions and reviews run their git \
-             commands without that backstop."
+            "Run Claude Code's and Gemini's commands in their sandboxes (bubblewrap and socat \
+             for Claude Code on Linux, agy's terminal sandbox for Gemini). Turn it off only \
+             where the machine is itself the boundary, such as a throwaway VM or container. \
+             Off, Claude Code Work asks before every command, and Claude Code and Gemini \
+             questions and reviews run their read-only commands without that backstop."
                 .to_string()
         },
         control,
@@ -346,6 +351,9 @@ fn sandbox(page: &Page) -> Row {
         "bubblewrap",
         "bwrap",
         "socat",
+        "gemini",
+        "agy",
+        "container",
         "vm",
         "agent.sandbox",
     ])
@@ -462,9 +470,9 @@ mod tests {
             "agent-model",
             "agent-effort",
             "agent-runs",
+            "agent-sandbox",
             "claude-binary",
             "claude-models",
-            "claude-sandbox",
             "codex-binary",
             "codex-models",
             "gemini-binary",
@@ -528,8 +536,8 @@ mod tests {
 
         // The sandbox is on while the file says nothing, and turning it
         // off writes `false`.
-        assert!(!shown(&harness, "settings-reset:claude-sandbox"));
-        click(&mut harness, "settings-claude-sandbox");
+        assert!(!shown(&harness, "settings-reset:agent-sandbox"));
+        click(&mut harness, "settings-agent-sandbox");
         assert_eq!(
             written(&mut commands),
             vec![Setting::AgentSandbox(Some(false))]
@@ -584,8 +592,8 @@ mod tests {
             window(1400.0, 1400.0, "[agent]\nsandbox = false\n");
         state.agent.set(discovered());
         open_on(&mut harness, state, Section::Agents);
-        assert!(shown(&harness, "settings-reset:claude-sandbox"));
-        click(&mut harness, "settings-claude-sandbox");
+        assert!(shown(&harness, "settings-reset:agent-sandbox"));
+        click(&mut harness, "settings-agent-sandbox");
         assert_eq!(written(&mut commands), vec![Setting::AgentSandbox(None)]);
         settle(&mut harness);
     }

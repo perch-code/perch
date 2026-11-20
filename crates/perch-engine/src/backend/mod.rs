@@ -19578,9 +19578,9 @@ async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord], item: Option<&Item>) {
 }
 
 /// Whether a Work run of `backend` has no sandbox, so each command it
-/// wants is a request: Gemini and OpenCode over ACP always, and Claude
-/// Code when config turns its sandbox off (`sandbox` is `[agent]
-/// sandbox`, read once for the run). Codex keeps its own.
+/// wants is a request: Gemini and OpenCode over ACP always (for Gemini,
+/// `[agent] sandbox` governs print-mode questions, reviews and verifiers),
+/// and Claude Code when `[agent] sandbox` is false. Codex keeps its own.
 fn unsandboxed(backend: perch_agent::Backend, sandbox: bool) -> bool {
     match backend {
         perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode => true,
