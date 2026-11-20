@@ -274,8 +274,8 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
 }
 
 /// What an entry's `⋯` menu holds besides what [`actions`] draws beside
-/// it: a reply, Ask about this, its link, and Edit and Delete where the
-/// entry offers them; on an agent's answer, Post to GitHub and Copy too.
+/// it: Quote reply, its link, and Edit and Delete where the entry offers
+/// them; on an agent's answer, Post to GitHub and Copy too.
 #[derive(Default)]
 pub(crate) struct More {
     pub(crate) quote: Option<Quote>,
@@ -283,18 +283,16 @@ pub(crate) struct More {
     pub(crate) post: Option<Offered>,
     /// Copy, of what an agent said, which has no link to copy.
     pub(crate) copy: Option<Offered>,
-    pub(crate) ask: Option<Rc<dyn Fn()>>,
     /// The entry on GitHub; empty for one with no page of its own.
     pub(crate) url: String,
     pub(crate) edit: Option<Offered>,
     pub(crate) delete: Option<Offered>,
 }
 
-/// The reply at the head of the `⋯` menu, named `label`: Quote Reply on a
-/// card, Reply on a review comment. There while `may` says so; `quote`
-/// gets what is selected in `scope`'s text, or `None` where nothing is.
+/// Quote reply at the head of the `⋯` menu. There while `may` says so;
+/// `quote` gets what is selected in `scope`'s text, or `None` where
+/// nothing is.
 pub(crate) struct Quote {
-    label: &'static str,
     scope: floem::ViewId,
     may: Rc<dyn Fn() -> bool>,
     quote: Rc<dyn Fn(Option<String>)>,
@@ -302,13 +300,11 @@ pub(crate) struct Quote {
 
 impl Quote {
     pub(crate) fn new(
-        label: &'static str,
         scope: floem::ViewId,
         may: impl Fn() -> bool + 'static,
         quote: Rc<dyn Fn(Option<String>)>,
     ) -> Self {
         Self {
-            label,
             scope,
             may: Rc::new(may),
             quote,
@@ -348,11 +344,11 @@ pub(crate) fn actions(
     .into_any()
 }
 
-/// The `⋯` at the end of an entry's actions, and the menu under it: a
-/// reply, Ask about this, Copy link and Open on GitHub, then Edit, then
-/// Delete in red, each past a line. Drawn while the card is under the
-/// pointer, and while its menu is up, which the pointer leaves the card
-/// to reach. Absent while the menu would have no rows.
+/// The `⋯` at the end of an entry's actions, and the menu under it:
+/// Quote reply, Copy link and Open on GitHub, then Edit, then Delete in
+/// red, each past a line. Drawn while the card is under the pointer, and
+/// while its menu is up, which the pointer leaves the card to reach.
+/// Absent while the menu would have no rows.
 ///
 /// Quote reply quotes what is selected in the entry's text, and a press
 /// on the `⋯` takes the focus the selection lives by. So the selection is
@@ -365,7 +361,6 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
         quote,
         post,
         copy,
-        ask,
         url,
         edit,
         delete,
@@ -380,7 +375,7 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
         let may = quote.as_ref().map(|quote| quote.may.clone());
         Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
     };
-    let always = ask.is_some() || !url.is_empty();
+    let always = !url.is_empty();
     let any = Memo::new(move |_| {
         always
             || may_quote.get()
@@ -424,21 +419,16 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
         if let Some(quote) = quote.as_ref().filter(|_| may_quote.get_untracked()) {
             let selected = linked_text::selected_under(quote.scope);
             let owner = held.get();
-            let (label, quote) = (quote.label, quote.quote.clone());
+            let quote = quote.quote.clone();
             // Quoted, the words are selected no longer, as a press on
             // a button would have left them.
-            menu = menu.item(label, |item| {
+            menu = menu.item("Quote Reply", |item| {
                 item.icon(SidebarIcon::Reply).action(move || {
                     quote(selected.clone());
                     if let Some(owner) = owner {
                         linked_text::clear(owner);
                     }
                 })
-            });
-        }
-        if let Some(ask) = ask.clone() {
-            menu = menu.item("Ask About This", |item| {
-                item.icon(SidebarIcon::Thread).action(move || ask())
             });
         }
         if let Some(post) = post.as_ref().filter(|_| may_post.get_untracked()) {
@@ -1452,27 +1442,6 @@ pub fn avatar_url_for(state: ReviewState, login: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The composer, with a comment quoted above the draft and, for a line
-/// comment, anchored to its line. On Conversation the composer is laid in
-/// place and scrolls to itself.
-fn ask_about(
-    app: AppState,
-    state: ReviewState,
-    anchor: Option<Anchor>,
-    author: &str,
-    url: &str,
-    body: &str,
-) {
-    let quote = crate::ask::quote_for(author, url, body);
-    // To an agent, whatever was last sent from here: a quoted comment is
-    // a question about it, not a reply to it.
-    let agent = state
-        .agent_last
-        .get_untracked()
-        .unwrap_or_else(|| threads::defaults(app));
-    state.open_composer_with(None, anchor, quote, Destination::agent(agent), None);
-}
-
 /// Quote reply in a card's `⋯` menu: Conversation's composer, over the
 /// timeline, bound for GitHub, with the text quoted as GitHub's own Quote
 /// reply quotes it: what is selected in `scope`, the card's text, or else
@@ -1480,10 +1449,9 @@ fn ask_about(
 /// description, so a reply is a new comment, the newest, and the quote
 /// says what it answers. A draft already bound for GitHub there keeps its
 /// text, the quote under it. Absent where there is no pull request or
-/// issue to post to, as Reply is.
+/// issue to post to.
 fn quote_reply_action(state: ReviewState, body: String, scope: floem::ViewId) -> Quote {
     Quote::new(
-        "Quote Reply",
         scope,
         move || state.pull_request.with(Option::is_some) || state.issue.with(Option::is_some),
         Rc::new(move |selected| quote_reply(state, selected.as_deref().unwrap_or(&body))),
@@ -1764,17 +1732,10 @@ pub fn comment_card(
         verb: "commented".into(),
         when: Some(comment.created_at),
     };
-    let (author, url, body) = (
-        comment.user.clone(),
-        comment.html_url.clone(),
-        comment.body.clone(),
-    );
-    let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
     let text = markdown::render_linked(&comment.body, state).into_any();
     let deletable = comment.viewer_can_delete && !comment.node_id.is_empty();
     let more = More {
         quote: Some(quote_reply_action(state, comment.body.clone(), text.id())),
-        ask: Some(ask),
         url: comment.html_url.clone(),
         edit: Some(edit_in_card_action(
             state,
@@ -1901,10 +1862,6 @@ pub fn review_card(
         verb: verdict(&review).to_string(),
         when: review.submitted_at,
     };
-    let ask = summary.clone().map(|body| {
-        let (author, url) = (login.clone(), url.clone());
-        Rc::new(move || ask_about(app, state, None, &author, &url, &body)) as Rc<dyn Fn()>
-    });
     let text = summary
         .as_ref()
         .map(|body| markdown::render_linked(body, state).into_any());
@@ -1935,7 +1892,6 @@ pub fn review_card(
 
     let more = More {
         quote,
-        ask,
         url,
         edit,
         ..More::default()

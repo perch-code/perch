@@ -6634,13 +6634,14 @@ mod window {
     }
 
     #[test]
-    fn ask_about_this_on_a_github_comment_opens_the_composer_under_its_thread() {
+    fn quote_reply_on_a_github_comment_opens_the_composer_under_its_thread() {
         let (mut harness, state) = harness();
+        state.pull_request.set(Some(Arc::new(pull_request())));
         state.set_comment_threads(Arc::new(vec![github_thread(100, 7, &["nit: name this"])]));
         harness.rebuild();
         harness.paint();
 
-        // The Ask is drawn while the card is under the pointer.
+        // The menu button is drawn while the card is under the pointer.
         let rect = card_rect(&harness, "gh-100");
         let (left, top) = pane_origin();
         let inside = (
@@ -6651,7 +6652,7 @@ mod window {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        crate::review::cards::more::pick(&mut harness, root_id, "Ask About This");
+        crate::review::cards::more::pick(&mut harness, root_id, "Quote Reply");
         let composer = state.composer.get().expect("the composer opened");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-100"));
         assert_eq!(
@@ -6661,8 +6662,8 @@ mod window {
         );
         assert_eq!(
             state.composer_draft.get(),
-            "",
-            "nothing is quoted; the thread carries the comment"
+            "> nit: name this\n\n",
+            "the comment is quoted"
         );
         assert!(state.follow_up_is_inline("gh-100"));
     }

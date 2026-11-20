@@ -3137,11 +3137,15 @@ mod tests {
     /// One of GitHub's review threads is a thread card at its first
     /// comment's time, opening with where it was left rather than "You
     /// asked": each comment carries its own byline, the reply under the
-    /// comment it answers, and no Local chip. Ask about this on a comment
-    /// opens the composer under the thread itself, with nothing quoted.
+    /// comment it answers, and no Local chip. Quote reply on a comment
+    /// opens the composer under the thread itself, quoting the comment.
     #[test]
-    fn a_github_thread_is_a_thread_card_whose_ask_opens_under_it() {
+    fn a_github_thread_is_a_thread_card_whose_quote_reply_opens_under_it() {
         let (mut harness, _, state) = app_harness();
+        let mut open = pull();
+        open.state = "open".into();
+        open.merged = false;
+        state.pull_request.set(Some(Arc::new(open)));
         let discussion = discussion();
         let mut github = perch_github::comments::review_threads_of(&discussion, "wt", "h");
         assert_eq!(github.len(), 1);
@@ -3200,7 +3204,7 @@ mod tests {
             "the reply's byline comes after the comment"
         );
 
-        // The card is under the fold; bring it up and hover it for the Ask.
+        // The card is under the fold; bring it up and hover it for Quote Reply.
         card.scroll_to(None);
         harness.rebuild();
         harness.paint();
@@ -3208,7 +3212,7 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.rebuild();
         harness.paint();
-        crate::review::cards::more::pick(&mut harness, card, "Ask About This");
+        crate::review::cards::more::pick(&mut harness, card, "Quote Reply");
         let composer = state.composer.get().expect("the composer opened");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(
@@ -3217,8 +3221,8 @@ mod tests {
         );
         assert_eq!(
             state.composer_draft.get(),
-            "",
-            "the thread carries the comment; nothing is quoted"
+            "> epoch\n\n",
+            "the comment is quoted"
         );
         assert!(
             find(card, "composer-box").is_some(),
@@ -3663,12 +3667,7 @@ mod tests {
         harness.paint();
         assert_eq!(
             crate::review::cards::more::rows(&mut harness, comment),
-            [
-                "Quote Reply",
-                "Ask About This",
-                "Copy Link",
-                "Open on GitHub"
-            ]
+            ["Quote Reply", "Copy Link", "Open on GitHub"]
         );
     }
 

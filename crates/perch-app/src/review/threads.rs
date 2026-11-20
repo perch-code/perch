@@ -3619,7 +3619,7 @@ fn agent_actions(
     // whose draft would need a review. The pull request lands after the
     // threads, so this follows it rather than the message's own rebuild.
     let more = cards::More {
-        quote: Some(cards::Quote::new("Quote Reply", scope, || true, quote)),
+        quote: Some(cards::Quote::new(scope, || true, quote)),
         post: Some(cards::edit_action(
             move || state.github_offered_on(&thread),
             post,
@@ -3676,63 +3676,41 @@ fn quote_to_agent(
     );
 }
 
-/// Reply and Ask about this on a comment in a thread that is on GitHub,
-/// the reader's or anyone's. Reply opens the composer under the thread,
-/// bound for GitHub, whatever the thread's last message was, while it has
-/// somewhere on GitHub to go, with what is selected in `scope`, the
-/// comment's text, quoted, as github.com's does; with nothing selected
-/// the box opens empty, the thread saying what it answers. Ask about
-/// this opens it to an agent, so the answer lands beside the comment it
-/// is about; the thread's history carries the comment to the agent, and
-/// nothing is quoted.
-fn reply_and_ask(
-    app: AppState,
+/// Quote reply on a comment in a thread that is on GitHub, the reader's
+/// or anyone's. Opens the composer under the thread, bound for GitHub,
+/// whatever the thread's last message was, while it has somewhere on
+/// GitHub to go, with what is selected in `scope`, the comment's text,
+/// quoted — or the whole comment when nothing is selected — under
+/// whatever the reader had typed there for GitHub.
+fn quote_reply_action(
     state: ReviewState,
     thread: &CommentThread,
+    body: String,
     scope: floem::ViewId,
-) -> (cards::Quote, Rc<dyn Fn()>) {
-    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
-    // To an agent, whatever the thread's last message was: the point is
-    // to ask about the comment, not to answer it.
-    let ask: Rc<dyn Fn()> = Rc::new(move || {
-        state.open_composer_with(
-            Some(thread_id.clone()),
-            anchor.clone(),
-            String::new(),
-            Destination::agent(
-                state
-                    .agent_last
-                    .get_untracked()
-                    .unwrap_or_else(|| defaults(app)),
-            ),
-            None,
-        );
-    });
+) -> cards::Quote {
     // To GitHub, whatever the thread's last message was: an answer to
     // the comment, under the agent's take on it if there is one. Absent
     // where it has nowhere to go, as Post to GitHub is.
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let reply_to: Rc<dyn Fn(Option<String>)> = Rc::new(move |selected| {
-        let draft = selected.map_or_else(String::new, |selected| {
-            let quote = crate::ask::quote_reply(&selected);
-            // What the reader had typed for GitHub in this box stays,
-            // the quote under it.
-            let typed = state
-                .composer
-                .with_untracked(|c| {
-                    c.as_ref().is_some_and(|c| {
-                        c.thread_id.as_deref() == Some(thread_id.as_str())
-                            && c.editing.is_none()
-                            && c.destination.is_github()
-                    })
+        let quote = crate::ask::quote_reply(selected.as_deref().unwrap_or(&body));
+        // What the reader had typed for GitHub in this box stays,
+        // the quote under it.
+        let typed = state
+            .composer
+            .with_untracked(|c| {
+                c.as_ref().is_some_and(|c| {
+                    c.thread_id.as_deref() == Some(thread_id.as_str())
+                        && c.editing.is_none()
+                        && c.destination.is_github()
                 })
-                .then(|| state.composer_draft.get_untracked())
-                .filter(|d| !d.trim().is_empty());
-            match typed {
-                Some(typed) => format!("{}\n\n{quote}", typed.trim_end()),
-                None => quote,
-            }
-        });
+            })
+            .then(|| state.composer_draft.get_untracked())
+            .filter(|d| !d.trim().is_empty());
+        let draft = match typed {
+            Some(typed) => format!("{}\n\n{quote}", typed.trim_end()),
+            None => quote,
+        };
         state.open_composer_with(
             Some(thread_id.clone()),
             anchor.clone(),
@@ -3742,19 +3720,13 @@ fn reply_and_ask(
         );
     });
     let for_reply = thread.clone();
-    let reply = cards::Quote::new(
-        "Reply",
-        scope,
-        move || state.github_offered_on(&for_reply),
-        reply_to,
-    );
-    (reply, ask)
+    cards::Quote::new(scope, move || state.github_offered_on(&for_reply), reply_to)
 }
 
 /// A comment from GitHub in a thread, under its author's face and
 /// byline, with the reactions on it under its text, and the reaction
-/// picker and a `⋯` menu on hover: Reply, Ask about this, its link, and
-/// Edit and Delete where GitHub lets the reader.
+/// picker and a `⋯` menu on hover: Quote reply, its link, and Edit and
+/// Delete where GitHub lets the reader.
 #[allow(clippy::too_many_arguments)]
 fn github_message_view(
     app: AppState,
@@ -3768,7 +3740,7 @@ fn github_message_view(
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let text = message_body(state, thread, &message.body, Some((app, backend.clone())));
-    let (reply, ask) = reply_and_ask(app, state, thread, text.id());
+    let quote = quote_reply_action(state, thread, message.body.clone(), text.id());
     let node_id = message.node_id.clone().unwrap_or_default();
     let may = node_id.clone();
     let delete = cards::delete_action(state, node_id.clone(), move || {
@@ -3782,8 +3754,7 @@ fn github_message_view(
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let more = cards::More {
-        quote: Some(reply),
-        ask: Some(ask),
+        quote: Some(quote),
         url: message.html_url.clone().unwrap_or_default(),
         edit: Some(edit),
         delete: Some(delete),
@@ -3870,9 +3841,9 @@ fn draft_message_view(
 }
 
 /// A comment of the reader's that is on GitHub, under their face and
-/// name with the comment's time, Reply, the reaction picker and the `⋯`
-/// menu on hover, as anyone's comment has, and the reactions on it under
-/// its text. The menu's Edit opens the composer in its row, and its
+/// name with the comment's time, Quote reply, the reaction picker and the
+/// `⋯` menu on hover, as anyone's comment has, and the reactions on it
+/// under its text. The menu's Edit opens the composer in its row, and its
 /// Delete asks first. No Draft mark.
 fn posted_message_view(
     app: AppState,
@@ -3885,7 +3856,7 @@ fn posted_message_view(
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let text = message_body(state, thread, &message.body, Some((app, backend.clone())));
-    let (reply, ask) = reply_and_ask(app, state, thread, text.id());
+    let quote = quote_reply_action(state, thread, message.body.clone(), text.id());
     // The reader wrote it, so GitHub lets them edit and delete it.
     let node_id = message.node_id.clone().unwrap_or_default();
     let deletable = !node_id.is_empty();
@@ -3894,8 +3865,7 @@ fn posted_message_view(
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let more = cards::More {
-        quote: Some(reply),
-        ask: Some(ask),
+        quote: Some(quote),
         url: message.html_url.clone().unwrap_or_default(),
         edit: Some(edit),
         delete: Some(delete),
@@ -6984,9 +6954,9 @@ mod tests {
         assert!(
             {
                 let theirs = find(harness.root_id(), "theirs").unwrap();
-                cards::more::rows(&mut harness, theirs).contains(&"Reply".to_string())
+                cards::more::rows(&mut harness, theirs).contains(&"Quote Reply".to_string())
             },
-            "rohan's comment offers Reply"
+            "rohan's comment offers Quote Reply"
         );
         assert!(
             find(find(harness.root_id(), "ours").unwrap(), "You asked").is_none(),
@@ -7020,8 +6990,7 @@ mod tests {
         assert_eq!(
             cards::more::rows(&mut harness, ours),
             [
-                "Reply",
-                "Ask About This",
+                "Quote Reply",
                 "Copy Link",
                 "Open on GitHub",
                 "Edit",
@@ -7084,10 +7053,13 @@ mod tests {
             harness.rebuild();
             harness.paint();
             let root = harness.root_id();
-            cards::more::pick(harness, root, "Reply");
+            cards::more::pick(harness, root, "Quote Reply");
         };
         reply(&mut harness);
-        let composer = state.composer.get().expect("Reply opened the composer");
+        let composer = state
+            .composer
+            .get()
+            .expect("Quote Reply opened the composer");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(composer.destination, Destination::GitHub);
         assert_eq!(state.composer_draft.get(), "> epoch\n\n");
@@ -7100,12 +7072,13 @@ mod tests {
         );
     }
 
-    /// Reply on a GitHub user's comment opens the composer under the
-    /// thread bound for GitHub, whatever the thread ends in: here the
-    /// agent's answer, under which Follow up would open on the agent.
-    /// Only while the pull request is open; on a closed one it is absent.
+    /// Quote reply on a GitHub user's comment opens the composer under the
+    /// thread bound for GitHub with the comment quoted, whatever the thread
+    /// ends in: here the agent's answer, under which Follow up would open
+    /// on the agent. Only while the pull request is open; on a closed one
+    /// it is absent.
     #[test]
-    fn reply_on_a_github_comment_goes_to_github_under_the_agents_answer() {
+    fn quote_reply_on_a_github_comment_goes_to_github_under_the_agents_answer() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = state_with_pull_request();
@@ -7124,13 +7097,16 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root = harness.root_id();
-        cards::more::pick(&mut harness, root, "Reply");
-        let composer = state.composer.get().expect("Reply opened the composer");
+        cards::more::pick(&mut harness, root, "Quote Reply");
+        let composer = state
+            .composer
+            .get()
+            .expect("Quote Reply opened the composer");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(composer.anchor, thread.anchor);
         assert_eq!(composer.destination, Destination::GitHub);
         assert_eq!(composer.editing, None);
-        assert!(state.composer_draft.get().is_empty());
+        assert_eq!(state.composer_draft.get(), "> epoch\n\n");
         state.close_composer();
 
         // Follow up under the same thread is the agent's, as before.
@@ -7149,19 +7125,17 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(
-            !cards::more::rows(&mut harness, root).contains(&"Reply".to_string()),
+            !cards::more::rows(&mut harness, root).contains(&"Quote Reply".to_string()),
             "nowhere for a draft to go"
         );
     }
 
     /// A follow-up follows the thread's last message: under rohan's
     /// comment it is bound for GitHub, under the agent's answer for that
-    /// agent at its run's effort. Ask about this on rohan's comment goes
-    /// to an agent whatever the thread ends in.
+    /// agent at its run's effort.
     #[test]
-    fn a_follow_up_follows_the_last_message_and_ask_about_this_goes_to_an_agent() {
-        let root = TestRoot::new();
-        let app = AppState::new();
+    fn a_follow_up_follows_the_last_message() {
+        let _root = TestRoot::new();
         let state = state_with_pull_request();
         let thread = github_thread_with_private_messages();
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
@@ -7214,38 +7188,6 @@ mod tests {
             Destination::GitHub
         );
         state.close_composer();
-
-        // Ask about this on rohan's comment.
-        let (backend, _commands) = crate::backend::Backend::recording();
-        let view = message_view(
-            app,
-            state,
-            Rc::new(backend),
-            theirs.clone(),
-            theirs.messages[0].clone(),
-            ThreadFace::Card,
-            Lane::Flush,
-        )
-        .style(|s| s.width(600.0));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
-        harness.rebuild();
-        harness.paint();
-        let root_id = harness.root_id();
-        cards::more::pick(&mut harness, root_id, "Ask About This");
-        let composer = state
-            .composer
-            .get()
-            .expect("Ask about this opened the composer");
-        assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
-        assert_eq!(
-            composer.destination,
-            Destination::agent((
-                perch_agent::Backend::ClaudeCode,
-                "opus".into(),
-                perch_agent::Effort::High
-            ))
-        );
-        assert_eq!(composer.editing, None);
     }
 
     /// An agent's finished answer offers Post to GitHub and Copy at its
