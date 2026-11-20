@@ -262,7 +262,8 @@ async fn ask(
     }
     println!("--- run ---");
 
-    let effort = perch_agent::Effort::parse(&config.agent.effort).unwrap_or_default();
+    let effort =
+        perch_agent::Effort::parse(config.agent.effort_for(backend.name())).unwrap_or_default();
     let mut spec = run_spec(
         &config.agent,
         backend,

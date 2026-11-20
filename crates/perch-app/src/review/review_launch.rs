@@ -902,7 +902,7 @@ fn build_draft(app: AppState, state: ReviewState, item_id: &str) -> Option<Revie
                         app,
                         backend,
                         model,
-                        perch_agent::ReviewEffort::parse(&agent.effort),
+                        perch_agent::ReviewEffort::parse(agent.effort_for(backend.name())),
                     )
                 });
                 ReviewPreferenceChoice {

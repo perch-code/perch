@@ -411,20 +411,27 @@ pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
 }
 
 /// Why this machine cannot run `backend` at all, said before a run
-/// starts rather than left to the agent's exit: Claude Code on Linux
-/// without bubblewrap and socat for its sandbox, unless `[agent] sandbox`
-/// is false (which also disables Gemini's terminal sandbox in print mode).
+/// starts rather than left to the agent's exit:
+/// - Claude Code on Linux without bubblewrap and socat for its sandbox,
+///   unless `[agent] sandbox = false`.
+/// - Gemini (`agy`) print-mode runs (Ask, Review, Verifier) on Linux when
+///   `agy`'s terminal sandbox (`sbox`) cannot create a user+UTS namespace or
+///   call `sethostname` (e.g. under Podman/Docker seccomp), unless
+///   `[agent.gemini] sandbox = false`. (Gemini Work runs over ACP with no
+///   sandbox, so `is_work` skips the check.)
 /// Not in this crate's tests, whose fake agents need no sandbox and whose
-/// CI has neither.
-pub fn host_refusal(backend: perch_agent::Backend, sandbox: bool) -> Option<String> {
-    if backend == perch_agent::Backend::ClaudeCode
-        && sandbox
-        && cfg!(target_os = "linux")
-        && !cfg!(test)
-    {
-        return perch_agent::linux_sandbox_refusal(std::env::var_os("PATH").as_deref());
+/// CI may lack them.
+pub fn host_refusal(backend: perch_agent::Backend, sandbox: bool, is_work: bool) -> Option<String> {
+    if !sandbox || !cfg!(target_os = "linux") || cfg!(test) {
+        return None;
     }
-    None
+    match backend {
+        perch_agent::Backend::ClaudeCode => {
+            perch_agent::linux_sandbox_refusal(std::env::var_os("PATH").as_deref())
+        }
+        perch_agent::Backend::Gemini if !is_work => perch_agent::gemini_linux_sandbox_refusal(),
+        _ => None,
+    }
 }
 
 /// What to say when a run would not start: a refusal as it stands, and
@@ -464,7 +471,7 @@ pub fn run_spec(
         // Every discussion's directory is under here, and a question is
         // pointed at its own.
         read_dirs: vec![crate::context::root(&perch_github::config::perch_home())],
-        sandbox: agent.sandbox,
+        sandbox: agent.sandbox_for(backend.name()),
     }
 }
 

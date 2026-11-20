@@ -497,6 +497,7 @@ fn frame(
     rows: &Rows,
     name: String,
     status: AgentRunStatus,
+    dot_color: fn() -> floem::peniko::Color,
     subject: impl Fn() -> String + 'static,
     detail: impl Fn() -> String + 'static,
     actions: impl FnOnce(RwSignal<bool>) -> floem::AnyView,
@@ -511,12 +512,11 @@ fn frame(
             .style(|s| s.size(12.0, 12.0).margin_top(3.0).flex_shrink(0.0_f32))
             .into_any()
     } else {
-        let color = status_color(status);
         Empty::new()
             .style(move |s| {
                 s.size(7.0, 7.0)
                     .border_radius(4.0)
-                    .background(color())
+                    .background(dot_color())
                     .margin_top(6.0)
                     .margin_left(2.0)
                     .margin_right(3.0)
@@ -647,6 +647,7 @@ fn row(
         rows,
         format!("agents-dropdown-run:{}", run.id),
         status,
+        status_color(status),
         move || subject.clone(),
         detail,
         move |hovered| run_actions(hovered, actions_backend, &run).into_any(),
@@ -715,10 +716,12 @@ fn review_row(
         close(review, false);
         super::open_review(review, key.clone());
     });
+    let dot_color = reviews::group_dot_color(&group);
     frame(
         rows,
         format!("agents-dropdown-review:{}", group.key),
         status,
+        dot_color,
         move || subject.clone(),
         detail,
         actions,

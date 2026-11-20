@@ -364,8 +364,8 @@ pub struct ReviewSpec {
     pub external_knowledge_dirs: Vec<PathBuf>,
     /// Where to keep the CLI's raw output for diagnosis, if anywhere.
     pub transcript: Option<Transcript>,
-    /// Whether Claude Code's and Gemini's shell runs in its sandbox:
-    /// `[agent] sandbox`.
+    /// Whether the backend's OS sandbox is enabled (per-agent `sandbox`
+    /// setting for Claude Code, Codex, and Gemini).
     pub sandbox: bool,
 }
 
@@ -530,6 +530,7 @@ impl ReviewSpec {
             Some(&self.merge_base_ref),
             &self.model,
             self.effort,
+            self.sandbox,
             &developer_instructions,
         ));
         if let Some(schema) = &self.output_schema {
@@ -613,8 +614,8 @@ pub struct ReviewVerificationSpec {
     pub prompt: String,
     /// Where to keep the CLI's raw output for diagnosis, if anywhere.
     pub transcript: Option<Transcript>,
-    /// Whether Claude Code's and Gemini's shell runs in its sandbox:
-    /// `[agent] sandbox`.
+    /// Whether the backend's OS sandbox is enabled (per-agent `sandbox`
+    /// setting for Claude Code, Codex, and Gemini).
     pub sandbox: bool,
 }
 
@@ -725,6 +726,7 @@ impl ReviewVerificationSpec {
             None,
             &self.model,
             self.effort,
+            self.sandbox,
             CODEX_VERIFIER_DATA_BOUNDARY,
         ));
         args.push("--".into());
@@ -746,12 +748,14 @@ impl ReviewVerificationSpec {
 }
 
 /// The Codex flags shared by a native review and a verifier, after `exec`'s
-/// own: a read-only, never-asking run with no user or repository
-/// configuration. A native review passes the base it reviews against.
+/// own: a read-only (or `danger-full-access` when `[agent.codex] sandbox =
+/// false`), never-asking run with no user or repository configuration. A
+/// native review passes the base it reviews against.
 fn codex_isolation_args(
     base: Option<&str>,
     model: &str,
     effort: ReviewEffort,
+    sandbox: bool,
     developer_instructions: &str,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
@@ -770,11 +774,16 @@ fn codex_isolation_args(
         args.push("--base".into());
         args.push(base.to_string());
     }
+    let sandbox_mode = if sandbox {
+        "sandbox_mode=\"read-only\""
+    } else {
+        "sandbox_mode=\"danger-full-access\""
+    };
     args.extend([
         "--model".into(),
         model.to_string(),
         "--config".into(),
-        "sandbox_mode=\"read-only\"".into(),
+        sandbox_mode.into(),
         "--config".into(),
         "approval_policy=\"never\"".into(),
         "--config".into(),
@@ -2609,6 +2618,26 @@ mod tests {
             assert!(!before
                 .iter()
                 .any(|a| a.contains(crate::gemini::UNSANDBOXED_SHELL_NOTE)));
+        }
+    }
+
+    #[test]
+    fn codex_review_without_the_sandbox_uses_danger_full_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut review = review_spec(Backend::Codex, dir.path().into());
+        let mut verifier = verification_spec(Backend::Codex);
+        review.sandbox = false;
+        verifier.sandbox = false;
+        for args in [review.args(), verifier.args()] {
+            assert!(
+                args.iter()
+                    .any(|arg| arg == "sandbox_mode=\"danger-full-access\""),
+                "{args:?}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg == "sandbox_mode=\"read-only\""),
+                "{args:?}"
+            );
         }
     }
 

@@ -40,16 +40,24 @@ change `token`, `worktrees_dir`, or an existing repository’s `github` and
 | `github_host` | none | A GitHub Enterprise host whose remotes count as GitHub |
 | `[agent] binary` | `"claude"` | Claude Code executable, a name on `PATH` or a path |
 | `[agent] model` | `"opus"` | Model the composer's picker starts on |
-| `[agent] effort` | `"high"` | Effort the picker starts on: `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
+| `[agent] effort` | `"high"` | Claude Code's default effort: `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
 | `[agent] models` | `["fable", "opus", "sonnet", "haiku"]` | Claude models the picker offers |
-| `[agent] max_concurrent_runs` | `4` | Maximum simultaneous runs. Gemini runs one at a time. Other runs wait. |
-| `[agent] sandbox` | `true` | Run Claude Code and Gemini (`agy`) commands in their sandboxes. See [Without the agent sandbox](reference.md#without-the-agent-sandbox) for what changes when you turn it off. |
+| `[agent] max_concurrent_runs` | `4` | Maximum simultaneous Claude Code runs. Other Claude runs wait. |
+| `[agent] sandbox` | `true` | Run Claude Code commands in its sandbox. See [Without the agent sandbox](reference.md#without-the-agent-sandbox). |
 | `[agent.codex] binary` | `"codex"` | Codex executable, a name on `PATH` or a path |
+| `[agent.codex] effort` | `"high"` | Codex's default effort |
 | `[agent.codex] models` | Codex's own list | Codex models the picker offers |
+| `[agent.codex] max_concurrent_runs` | `4` | Maximum simultaneous Codex runs |
+| `[agent.codex] sandbox` | `true` | Run Codex commands in its sandbox (`read-only` / `workspace-write`). Off uses `danger-full-access`. |
 | `[agent.gemini] binary` | `"agy"` | Antigravity CLI executable, a name on `PATH` or a path |
+| `[agent.gemini] effort` | `"high"` | Gemini's default effort |
 | `[agent.gemini] models` | `agy`'s own list | Gemini models the picker offers |
+| `[agent.gemini] max_concurrent_runs` | `1` | Maximum simultaneous Gemini (`agy`) runs |
+| `[agent.gemini] sandbox` | `true` | Run Gemini (`agy`) print-mode commands in its terminal sandbox. See [Without the agent sandbox](reference.md#without-the-agent-sandbox). |
 | `[agent.opencode] binary` | `"opencode"` | OpenCode 2.3.0+ executable, a name on `PATH` or a path |
+| `[agent.opencode] effort` | `"high"` | OpenCode's default effort |
 | `[agent.opencode] models` | OpenCode's own list | Provider-qualified IDs from `opencode models` |
+| `[agent.opencode] max_concurrent_runs` | `4` | Maximum simultaneous OpenCode runs |
 | `[work] branch_prefix` | `""` | Put before branch names Perch fills in, such as `"chris/"` |
 | `[work] approvals` | `"auto"` | Who answers a Work run's requests outside its sandbox: `"auto"` (the CLI's auto-reviewer, then you) or `"ask"` (you) |
 | `[work] approval_timeout_mins` | `15` in the app, `480` under `perchd` | Minutes a request to you waits before it is denied |

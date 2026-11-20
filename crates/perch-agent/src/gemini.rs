@@ -817,6 +817,21 @@ fn command_failed(output: &str) -> Option<String> {
         .then(|| "command did not run".to_string())
 }
 
+fn is_sandbox_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("sandbox server") || lower.contains("sbox:")
+}
+
+fn result_denied_without_output(r: &Value) -> bool {
+    let has_structured = r.get("structured_output").is_some_and(|v| !v.is_null());
+    let has_response = !str_of(r, "response").trim().is_empty();
+    let has_denied = r
+        .get("denied_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| !actions.is_empty());
+    !has_structured && !has_response && has_denied
+}
+
 // ---------------------------------------------------------------------
 // Print mode
 // ---------------------------------------------------------------------
@@ -832,6 +847,8 @@ pub struct GeminiParser {
     /// Tool steps that have begun, and those whose result has been emitted.
     started: HashSet<(Option<u64>, u64)>,
     ended: HashSet<(Option<u64>, u64)>,
+    /// First sandbox startup failure seen on a command in the current turn.
+    sandbox_error: Option<String>,
 }
 
 impl Default for GeminiParser {
@@ -848,6 +865,7 @@ impl GeminiParser {
             texts: HashMap::new(),
             started: HashSet::new(),
             ended: HashSet::new(),
+            sandbox_error: None,
         }
     }
 
@@ -936,6 +954,11 @@ impl GeminiParser {
                     } else {
                         None
                     };
+                    if let Some(ref msg) = failure {
+                        if name == "run_command" && is_sandbox_error(msg) {
+                            self.sandbox_error.get_or_insert_with(|| msg.clone());
+                        }
+                    }
                     events.push(RunEvent::ToolResult {
                         id,
                         ok: failure.is_none(),
@@ -949,18 +972,25 @@ impl GeminiParser {
     }
 
     fn result(&mut self, r: &Value) -> Vec<RunEvent> {
+        let sandbox_error = self.sandbox_error.take();
         let mut events = Vec::new();
         // A structured result is the run's answer: what a review is read
         // from. It goes as the last thing said, fenced, so the review's
         // reader finds it after whatever prose came first.
-        if let Some(structured) = r.get("structured_output").filter(|v| !v.is_null()) {
-            events.push(RunEvent::Text(format!(
-                "```json\n{}\n```",
-                serde_json::to_string_pretty(structured).unwrap_or_default()
-            )));
-        }
+        let has_structured =
+            if let Some(structured) = r.get("structured_output").filter(|v| !v.is_null()) {
+                events.push(RunEvent::Text(format!(
+                    "```json\n{}\n```",
+                    serde_json::to_string_pretty(structured).unwrap_or_default()
+                )));
+                true
+            } else {
+                false
+            };
+        let has_answer = has_structured || !str_of(r, "response").trim().is_empty();
         // What agy refused without a step to show for it, like a read
         // outside the workspace. Without these a turn can end in silence.
+        let mut denied_tools = Vec::new();
         for denied in r
             .get("denied_actions")
             .and_then(Value::as_array)
@@ -971,6 +1001,9 @@ impl GeminiParser {
                 name if name.is_empty() => str_of(denied, "action"),
                 name => name,
             };
+            if !tool.is_empty() && !denied_tools.contains(&tool) {
+                denied_tools.push(tool.clone());
+            }
             events.push(RunEvent::PermissionDenied {
                 tool: (!tool.is_empty()).then_some(tool),
                 message: "agy did not allow it".into(),
@@ -993,6 +1026,23 @@ impl GeminiParser {
             .map(|s| (s * 1000.0) as u64)
             .unwrap_or(0);
         match str_of(r, "status").as_str() {
+            // Headless `agy` still exits 0 with status "SUCCESS" and an empty
+            // response when a permission denial (including an unsandboxed
+            // retry after the sandbox failed) aborts the turn. Treat that as a
+            // failure so the run does not pass as completed with nothing found.
+            "SUCCESS" if !has_answer && (sandbox_error.is_some() || !denied_tools.is_empty()) => {
+                let message = if sandbox_error.is_some() {
+                    "Gemini's (agy) terminal sandbox could not start, so the run stopped without answering. On a container or throwaway VM where the machine is itself the boundary, turn Gemini's sandbox off in Settings > Agents > Gemini (Antigravity) ([agent.gemini] sandbox = false).".to_string()
+                } else if denied_tools.is_empty() {
+                    "agy stopped without answering because a tool permission was denied".to_string()
+                } else {
+                    format!(
+                        "agy stopped without answering because it did not allow {}",
+                        denied_tools.join(", ")
+                    )
+                };
+                events.push(RunEvent::Failed { message });
+            }
             "SUCCESS" => events.push(RunEvent::Finished {
                 session_id,
                 cost_usd: None,
@@ -1071,7 +1121,9 @@ impl GeminiHost {
                 }
             }
             Some("result") => {
-                let failed = v.pointer("/result/status").and_then(Value::as_str) != Some("SUCCESS");
+                let result = v.get("result").unwrap_or(&Value::Null);
+                let failed =
+                    str_of(result, "status") != "SUCCESS" || result_denied_without_output(result);
                 match self.queued.pop_front() {
                     Some(next) if !failed => {
                         let write = user_message(&next);
@@ -3350,6 +3402,9 @@ mod tests {
 
     #[test]
     fn what_print_mode_refused_is_shown() {
+        // When an auto-denied tool aborts a headless turn without producing
+        // any answer, agy still prints status=SUCCESS and response=""; Perch
+        // must fail the run rather than report it as completed.
         let mut parser = GeminiParser::new();
         let events = parser.parse_line(
             r#"{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":"","denied_actions":[{"action":"read_file","display_name":"ReadFile"}]}}"#,
@@ -3361,7 +3416,40 @@ mod tests {
                 message: "agy did not allow it".into(),
             }
         );
+        assert!(
+            matches!(
+                events.last(),
+                Some(RunEvent::Failed { message }) if message.contains("ReadFile")
+            ),
+            "{events:?}"
+        );
+
+        // If agy recovered and still produced a response, the run finishes
+        // while keeping the denied-action notice in the transcript.
+        let mut recovered = GeminiParser::new();
+        let events = recovered.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":"Done anyway.","denied_actions":[{"action":"read_file","display_name":"ReadFile"}]}}"#,
+        );
+        assert!(matches!(events[0], RunEvent::PermissionDenied { .. }));
         assert!(matches!(events.last(), Some(RunEvent::Finished { .. })));
+
+        // When a sandbox connection failure preceded the empty denied result,
+        // the failure message points at Gemini's per-agent sandbox setting.
+        let mut sandbox_fail = GeminiParser::new();
+        let _ = sandbox_fail.parse_line(
+            r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git log -1"},"output":"Command failed to run: connecting to sandbox server: read unix @->@: recvmsg: connection reset by peer.\n\nNo output from the command."}}}"#,
+        );
+        let events = sandbox_fail.parse_line(
+            r#"{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"Bash"}]}}"#,
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(RunEvent::Failed { message })
+                    if message.contains("sandbox") && message.contains("[agent.gemini] sandbox = false")
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]

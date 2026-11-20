@@ -4732,7 +4732,7 @@ async fn run(
     let review_snapshots = Arc::new(ReviewSnapshotStore::new(data_root.clone()));
     let config = Arc::new(config);
     let run_manager = runs::RunManager::new(
-        config.agent.max_concurrent_runs,
+        runs::BackendLimits::from_agent(&config.agent),
         cache.clone(),
         events.clone(),
     );
@@ -18817,7 +18817,7 @@ async fn ask_as(
     }
     // Read once, so the framing, the commit note and the process agree
     // when config.toml changes while the run is set up.
-    let sandbox = ctx.config().agent.sandbox;
+    let sandbox = ctx.config().agent.sandbox_for(backend.name());
     let work = if mode == RunMode::Work {
         match work_setup(ctx, &item, backend, committer, sandbox) {
             Ok(work) => Some(work),
@@ -19579,13 +19579,13 @@ async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord], item: Option<&Item>) {
 
 /// Whether a Work run of `backend` has no sandbox, so each command it
 /// wants is a request: Gemini and OpenCode over ACP always (for Gemini,
-/// `[agent] sandbox` governs print-mode questions, reviews and verifiers),
-/// and Claude Code when `[agent] sandbox` is false. Codex keeps its own.
+/// `[agent.gemini] sandbox` governs print-mode questions, reviews and
+/// verifiers), and Claude Code or Codex when their per-agent `sandbox` is
+/// false.
 fn unsandboxed(backend: perch_agent::Backend, sandbox: bool) -> bool {
     match backend {
         perch_agent::Backend::Gemini | perch_agent::Backend::OpenCode => true,
-        perch_agent::Backend::ClaudeCode => !sandbox,
-        perch_agent::Backend::Codex => false,
+        perch_agent::Backend::ClaudeCode | perch_agent::Backend::Codex => !sandbox,
     }
 }
 
@@ -19651,7 +19651,10 @@ fn work_setup(
             &base,
             grant.commit,
             approvals,
-            backend == perch_agent::Backend::ClaudeCode,
+            matches!(
+                backend,
+                perch_agent::Backend::ClaudeCode | perch_agent::Backend::Codex
+            ),
         );
         return Ok((perch_agent::Mode::Work(grant), framing, approvals));
     }
@@ -20171,7 +20174,11 @@ async fn execute_question(
         None
     };
     let sandboxed = spec.sandbox;
-    let spawned = match crate::ask::host_refusal(spec.backend, spec.sandbox) {
+    let spawned = match crate::ask::host_refusal(
+        spec.backend,
+        spec.sandbox,
+        matches!(spec.mode, perch_agent::Mode::Work(_)),
+    ) {
         Some(why) => Err(perch_agent::Error::Refused(why)),
         None => {
             let external_dirs = recheck_external_knowledge_dirs(ctx, &run, &mut spec).await;
@@ -20810,7 +20817,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         return;
     };
     // Read once, as in `ask_as`.
-    let sandbox = ctx.config().agent.sandbox;
+    let sandbox = ctx.config().agent.sandbox_for(backend.name());
     let work = if old.mode == RunMode::Work {
         // A conflicts run on someone else's pull request goes again while
         // the reader may still push to its branch.
@@ -23391,7 +23398,11 @@ mod tests {
         config.repo = repos;
         let cache = Some(Arc::new(std::sync::Mutex::new(cache)));
         let events = EventSender::from(events);
-        let runs = runs::RunManager::new(4, cache.clone(), events.clone());
+        let runs = runs::RunManager::new(
+            runs::BackendLimits::from_agent(&config.agent),
+            cache.clone(),
+            events.clone(),
+        );
         let ctx = Ctx {
             session: Arc::new(std::sync::RwLock::new(Some(Session {
                 github: Arc::new(GitHub::with_base_uri("token", base).unwrap()),
@@ -29231,26 +29242,18 @@ read eof || true
                 Ok(())
             );
         }
-        // Claude Code with its sandbox off asks before each command too,
-        // so its grant answers as theirs does; Codex keeps its sandbox.
-        assert_eq!(
-            commit_grant_answers(
-                Some(perch_agent::Backend::ClaudeCode),
-                false,
-                Some(worktree),
-                nested
-            )
-            .await,
-            Ok(())
-        );
-        assert!(commit_grant_answers(
+        // Claude Code and Codex with their sandboxes off ask before commands
+        // too, so their commit grants answer outside a sandbox just as the ACP
+        // agents' do.
+        for backend in [
+            Some(perch_agent::Backend::ClaudeCode),
             Some(perch_agent::Backend::Codex),
-            false,
-            Some(worktree),
-            nested
-        )
-        .await
-        .is_err());
+        ] {
+            assert_eq!(
+                commit_grant_answers(backend, false, Some(worktree), nested).await,
+                Ok(())
+            );
+        }
         for backend in [
             Some(perch_agent::Backend::ClaudeCode),
             Some(perch_agent::Backend::Codex),
@@ -34983,23 +34986,52 @@ read eof || true
         ctx.replace_config(discovered);
         let config = dir.path().join("config.toml");
         assert!(ctx.config().agent.sandbox);
+        assert!(ctx.config().agent.gemini.sandbox);
+        assert!(ctx.config().agent.codex.sandbox);
 
         settings::write(
             &ctx,
             &config,
-            vec![perch_github::Setting::AgentSandbox(Some(false))],
+            vec![perch_github::Setting::AgentSandbox {
+                backend: perch_github::AgentBackend::Gemini,
+                sandbox: Some(false),
+            }],
         )
         .await;
-        assert!(!ctx.config().agent.sandbox);
+        assert!(ctx.config().agent.sandbox);
+        assert!(!ctx.config().agent.gemini.sandbox);
+        assert!(ctx.config().agent.codex.sandbox);
         assert_eq!(ctx.config().agent.binary, "/opt/claude/bin/claude");
 
         settings::write(
             &ctx,
             &config,
-            vec![perch_github::Setting::AgentSandbox(None)],
+            vec![perch_github::Setting::AgentSandbox {
+                backend: perch_github::AgentBackend::Claude,
+                sandbox: Some(false),
+            }],
+        )
+        .await;
+        assert!(!ctx.config().agent.sandbox);
+        assert!(!ctx.config().agent.gemini.sandbox);
+
+        settings::write(
+            &ctx,
+            &config,
+            vec![
+                perch_github::Setting::AgentSandbox {
+                    backend: perch_github::AgentBackend::Claude,
+                    sandbox: None,
+                },
+                perch_github::Setting::AgentSandbox {
+                    backend: perch_github::AgentBackend::Gemini,
+                    sandbox: None,
+                },
+            ],
         )
         .await;
         assert!(ctx.config().agent.sandbox);
+        assert!(ctx.config().agent.gemini.sandbox);
     }
 
     #[tokio::test]
@@ -35019,8 +35051,22 @@ read eof || true
             &config,
             vec![
                 perch_github::Setting::AgentModel(Some("sonnet".into())),
-                perch_github::Setting::AgentEffort(Some("max".into())),
-                perch_github::Setting::AgentMaxConcurrentRuns(Some(2)),
+                perch_github::Setting::AgentEffort {
+                    backend: perch_github::AgentBackend::Claude,
+                    effort: Some("max".into()),
+                },
+                perch_github::Setting::AgentEffort {
+                    backend: perch_github::AgentBackend::Gemini,
+                    effort: Some("medium".into()),
+                },
+                perch_github::Setting::AgentMaxConcurrentRuns {
+                    backend: perch_github::AgentBackend::Claude,
+                    runs: Some(2),
+                },
+                perch_github::Setting::AgentMaxConcurrentRuns {
+                    backend: perch_github::AgentBackend::Gemini,
+                    runs: Some(3),
+                },
             ],
         )
         .await;
@@ -35028,11 +35074,15 @@ read eof || true
         let agent = ctx.config().agent.clone();
         assert_eq!(agent.model, "sonnet");
         assert_eq!(agent.effort, "max");
+        assert_eq!(agent.gemini.effort, "medium");
         assert_eq!(agent.max_concurrent_runs, 2);
+        assert_eq!(agent.gemini.max_concurrent_runs, 3);
         assert_eq!(agent.binary, "/opt/claude/bin/claude");
         assert_eq!(agent.binary_version.as_deref(), Some("2.1.0"));
         assert_eq!(agent.codex.models, ["gpt-6.1-sol"]);
-        assert_eq!(ctx.runs.free_slots(), 2);
+        assert_eq!(ctx.runs.free_slots_for(perch_github::CLAUDE_CODE), 2);
+        assert_eq!(ctx.runs.free_slots_for(perch_github::GEMINI), 3);
+        assert_eq!(ctx.runs.free_slots_for(perch_github::CODEX), 4);
         let events: Vec<Event> = received.try_iter().collect();
         let told = events
             .iter()

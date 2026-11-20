@@ -91,8 +91,10 @@ pub fn run(args: &[String]) -> i32 {
 fn checks_said(checks: &[perch_engine::host::HostCheck]) -> String {
     let mut said = String::from("host checks:\n");
     for check in checks {
-        let mark = if check.what == perch_engine::host::SANDBOX
-            && check.detail == perch_engine::host::SANDBOX_OFF
+        let mark = if (check.what == perch_engine::host::SANDBOX
+            && check.detail == perch_engine::host::SANDBOX_OFF)
+            || (check.what == perch_engine::host::GEMINI_SANDBOX
+                && check.detail == perch_engine::host::GEMINI_SANDBOX_OFF)
         {
             "off"
         } else {

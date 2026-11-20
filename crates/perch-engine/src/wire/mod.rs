@@ -48,8 +48,8 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// `[[knowledge]]` directories, their settings and why one isn't shared.
 /// 10: the per-repository GitHub history setting. 11: the `[agent] sandbox`
 /// setting. 12: `FileLoaded` sends raw head/base text and the client builds
-/// `LoadedFile` locally.
-pub const PROTOCOL: u32 = 12;
+/// `LoadedFile` locally. 13: per-agent effort, run limit, and sandbox settings.
+pub const PROTOCOL: u32 = 13;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

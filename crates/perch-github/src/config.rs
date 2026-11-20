@@ -134,24 +134,21 @@ pub struct AgentConfig {
     /// What the picker starts on.
     #[serde(default = "default_model")]
     pub model: String,
-    /// `low`, `medium`, `high`, `xhigh`, `max` or `ultra`.
+    /// Claude Code's default effort: `low`, `medium`, `high`, `xhigh`, `max` or `ultra`.
     #[serde(default = "default_effort")]
     pub effort: String,
     /// The Claude Code models the picker offers.
     #[serde(default = "default_models")]
     pub models: Vec<String>,
-    /// Maximum top-level agent processes (Gemini runs one at a time).
-    /// Additional work waits in the durable FIFO queue; native subagents
-    /// remain part of their parent.
+    /// Maximum top-level Claude Code processes. Additional runs wait in
+    /// the durable FIFO queue; native subagents remain part of their parent.
     #[serde(default = "default_max_concurrent_runs")]
     pub max_concurrent_runs: usize,
-    /// Whether Claude Code's and Gemini's (`agy`) shells run in their
-    /// sandboxes: bubblewrap and socat for Claude Code on Linux, `agy`'s
-    /// terminal sandbox for Gemini, and the system's own on a Mac. On
-    /// unless the file says `false`, for a machine that is itself the
-    /// boundary, such as a throwaway VM or container. Off, read-only runs
-    /// keep their git commands without that backstop, and every command a
-    /// Work run wants is a request.
+    /// Whether Claude Code's shell runs in its sandbox (bubblewrap and
+    /// socat on Linux, Seatbelt on macOS). On unless the file says `false`,
+    /// for a machine that is itself the boundary, such as a throwaway VM or
+    /// container. Off, read-only runs keep their git commands without that
+    /// backstop, and every command a Work run wants is a request.
     #[serde(default = "default_sandbox")]
     pub sandbox: bool,
     #[serde(default)]
@@ -173,11 +170,23 @@ pub struct CodexConfig {
     /// Filled by startup discovery and copied into durable run provenance.
     #[serde(default)]
     pub binary_version: Option<String>,
+    /// Codex's default effort: `low`, `medium`, `high`, `xhigh`, `max` or `ultra`.
+    #[serde(default = "default_effort")]
+    pub effort: String,
     /// The Codex models the picker offers, after the Claude Code ones.
     /// Empty in the file means ask Codex; empty after that means Codex
     /// is not offered.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Maximum top-level Codex processes.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
+    /// Whether Codex's commands run in its sandbox (`read-only` /
+    /// `workspace-write`). Off uses `danger-full-access` (`untrusted`
+    /// approvals in Work; unrestricted shell in read-only runs because
+    /// Codex has no command allowlist).
+    #[serde(default = "default_sandbox")]
+    pub sandbox: bool,
     /// The effort names each model takes, from the catalog, keyed by
     /// model. Filled by discovery, never by the file. A model
     /// not listed here is assumed to take every level.
@@ -196,11 +205,25 @@ pub struct GeminiConfig {
     /// Filled by startup discovery and copied into durable run provenance.
     #[serde(default)]
     pub binary_version: Option<String>,
+    /// Gemini's default effort: `low`, `medium`, `high`, `xhigh`, `max` or `ultra`.
+    #[serde(default = "default_effort")]
+    pub effort: String,
     /// The Gemini models the picker offers, after the others. Empty in
     /// the file means ask agy; empty after that means Gemini is not
     /// offered.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Maximum top-level Gemini (`agy`) processes. Defaults to 1 so Perch
+    /// does not run `agy` in parallel unless configured to.
+    #[serde(default = "default_gemini_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
+    /// Whether Gemini's (`agy`) print-mode commands run in its terminal
+    /// sandbox. On unless the file says `false`, for a machine that is
+    /// itself the boundary, such as a container whose seccomp filter blocks
+    /// `sethostname`. Work runs always use ACP with no sandbox and ask
+    /// before each command.
+    #[serde(default = "default_sandbox")]
+    pub sandbox: bool,
     /// The effort names each model takes, from the catalog. Filled by
     /// discovery, never by the file.
     #[serde(default)]
@@ -212,7 +235,9 @@ pub struct GeminiConfig {
 pub struct OpenCodeConfig {
     pub binary: String,
     pub binary_version: Option<String>,
+    pub effort: String,
     pub models: Vec<String>,
+    pub max_concurrent_runs: usize,
 }
 
 impl Default for OpenCodeConfig {
@@ -220,7 +245,9 @@ impl Default for OpenCodeConfig {
         Self {
             binary: "opencode".into(),
             binary_version: None,
+            effort: default_effort(),
             models: Vec::new(),
+            max_concurrent_runs: default_max_concurrent_runs(),
         }
     }
 }
@@ -263,6 +290,9 @@ fn default_models() -> Vec<String> {
 fn default_max_concurrent_runs() -> usize {
     4
 }
+fn default_gemini_max_concurrent_runs() -> usize {
+    1
+}
 fn default_sandbox() -> bool {
     true
 }
@@ -289,7 +319,10 @@ impl Default for GeminiConfig {
         Self {
             binary: default_gemini_binary(),
             binary_version: None,
+            effort: default_effort(),
             models: Vec::new(),
+            max_concurrent_runs: default_gemini_max_concurrent_runs(),
+            sandbox: default_sandbox(),
             efforts: BTreeMap::new(),
         }
     }
@@ -300,7 +333,10 @@ impl Default for CodexConfig {
         Self {
             binary: default_codex_binary(),
             binary_version: None,
+            effort: default_effort(),
             models: Vec::new(),
+            max_concurrent_runs: default_max_concurrent_runs(),
+            sandbox: default_sandbox(),
             efforts: BTreeMap::new(),
         }
     }
@@ -360,6 +396,38 @@ impl AgentConfig {
             GEMINI => &self.gemini.models,
             OPENCODE => &self.opencode.models,
             _ => &self.models,
+        }
+    }
+
+    /// Default effort configured for a backend name.
+    pub fn effort_for(&self, backend: &str) -> &str {
+        match backend {
+            CODEX => &self.codex.effort,
+            GEMINI => &self.gemini.effort,
+            OPENCODE => &self.opencode.effort,
+            _ => &self.effort,
+        }
+    }
+
+    /// Concurrent run limit configured for a backend name (at least 1).
+    pub fn max_concurrent_runs_for(&self, backend: &str) -> usize {
+        match backend {
+            CODEX => self.codex.max_concurrent_runs,
+            GEMINI => self.gemini.max_concurrent_runs,
+            OPENCODE => self.opencode.max_concurrent_runs,
+            _ => self.max_concurrent_runs,
+        }
+        .max(1)
+    }
+
+    /// Whether a backend's OS sandbox is enabled. OpenCode has no OS
+    /// sandbox and always returns `false`.
+    pub fn sandbox_for(&self, backend: &str) -> bool {
+        match backend {
+            CODEX => self.codex.sandbox,
+            GEMINI => self.gemini.sandbox,
+            OPENCODE => false,
+            _ => self.sandbox,
         }
     }
 

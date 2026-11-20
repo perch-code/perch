@@ -58,11 +58,20 @@ pub enum Setting {
     GithubHost(Option<String>),
     CloneRoot(Option<String>),
     AgentModel(Option<String>),
-    AgentEffort(Option<String>),
-    AgentMaxConcurrentRuns(Option<usize>),
-    /// `[agent] sandbox`: `Some(false)` turns Claude Code's and Gemini's
-    /// sandboxes off; None takes the key out, back to on.
-    AgentSandbox(Option<bool>),
+    AgentEffort {
+        backend: AgentBackend,
+        effort: Option<String>,
+    },
+    AgentMaxConcurrentRuns {
+        backend: AgentBackend,
+        runs: Option<usize>,
+    },
+    /// Per-agent `sandbox`: `Some(false)` turns that backend's sandbox off;
+    /// `None` takes the key out, back to on. OpenCode has no OS sandbox.
+    AgentSandbox {
+        backend: AgentBackend,
+        sandbox: Option<bool>,
+    },
     AgentBinary {
         backend: AgentBackend,
         binary: Option<String>,
@@ -482,12 +491,22 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
         Setting::GithubHost(host) => (top(&[], "github_host".into()), string(host)),
         Setting::CloneRoot(root) => (top(&[], "clone_root".into()), string(root)),
         Setting::AgentModel(model) => (top(&["agent"], "model".into()), string(model)),
-        Setting::AgentEffort(effort) => (top(&["agent"], "effort".into()), string(effort)),
-        Setting::AgentMaxConcurrentRuns(runs) => (
-            top(&["agent"], "max_concurrent_runs".into()),
+        Setting::AgentEffort { backend, effort } => {
+            (top(backend.table(), "effort".into()), string(effort))
+        }
+        Setting::AgentMaxConcurrentRuns { backend, runs } => (
+            top(backend.table(), "max_concurrent_runs".into()),
             integer(runs.map(|n| n as u64), "max_concurrent_runs")?,
         ),
-        Setting::AgentSandbox(on) => (top(&["agent"], "sandbox".into()), on.map(Value::from)),
+        Setting::AgentSandbox { backend, sandbox } => {
+            if *backend == AgentBackend::OpenCode {
+                return Err("OpenCode has no OS sandbox setting".into());
+            }
+            (
+                top(backend.table(), "sandbox".into()),
+                sandbox.map(Value::from),
+            )
+        }
         Setting::AgentBinary { backend, binary } => {
             (top(backend.table(), "binary".into()), string(binary))
         }
@@ -1234,7 +1253,10 @@ mod tests {
                     backend: AgentBackend::Gemini,
                     models: Some(vec!["gemini-3-pro".into(), " ".into()]),
                 },
-                Setting::AgentMaxConcurrentRuns(Some(2)),
+                Setting::AgentMaxConcurrentRuns {
+                    backend: AgentBackend::Claude,
+                    runs: Some(2),
+                },
             ],
         );
         let c = Config::parse_text(&out).unwrap();
@@ -1247,26 +1269,61 @@ mod tests {
         );
     }
 
-    /// The sandbox is written only to turn it off; on again, the key
-    /// comes out and the default, on, holds.
+    /// Each backend's sandbox is written only to turn it off; on again, the
+    /// key comes out and the default, on, holds — independently per agent.
     #[test]
     fn the_sandbox_is_written_off_and_taken_out_on() {
         let out = edit(
             "[agent]\nmodel = \"opus\"\n",
-            &[Setting::AgentSandbox(Some(false))],
+            &[
+                Setting::AgentSandbox {
+                    backend: AgentBackend::Claude,
+                    sandbox: Some(false),
+                },
+                Setting::AgentSandbox {
+                    backend: AgentBackend::Gemini,
+                    sandbox: Some(false),
+                },
+                Setting::AgentSandbox {
+                    backend: AgentBackend::Codex,
+                    sandbox: Some(false),
+                },
+            ],
         );
-        assert_eq!(out, "[agent]\nmodel = \"opus\"\nsandbox = false\n");
-        assert!(!Config::parse_text(&out).unwrap().agent.sandbox);
-        let out = edit(&out, &[Setting::AgentSandbox(None)]);
-        assert_eq!(out, "[agent]\nmodel = \"opus\"\n");
-        assert!(Config::parse_text(&out).unwrap().agent.sandbox);
+        let parsed = Config::parse_text(&out).unwrap();
+        assert!(!parsed.agent.sandbox);
+        assert!(!parsed.agent.gemini.sandbox);
+        assert!(!parsed.agent.codex.sandbox);
+        let out = edit(
+            &out,
+            &[Setting::AgentSandbox {
+                backend: AgentBackend::Claude,
+                sandbox: None,
+            }],
+        );
+        let parsed = Config::parse_text(&out).unwrap();
+        assert!(parsed.agent.sandbox);
+        assert!(!parsed.agent.gemini.sandbox);
+        assert!(!parsed.agent.codex.sandbox);
+        assert!(edit_text(
+            "",
+            &[Setting::AgentSandbox {
+                backend: AgentBackend::OpenCode,
+                sandbox: Some(false),
+            }],
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
     fn a_new_key_joins_an_existing_table() {
         let out = edit(
             "[agent]\nmodel = \"opus\"\n\n[work]\nbranch_prefix = \"c/\"\n",
-            &[Setting::AgentEffort(Some("max".into()))],
+            &[Setting::AgentEffort {
+                backend: AgentBackend::Claude,
+                effort: Some("max".into()),
+            }],
         );
         assert_eq!(
             out,
@@ -1355,7 +1412,10 @@ mod tests {
         // Onto the next header, keeping the table it was under.
         let out = edit(
             "[agent]\nmodel = \"opus\"\n# effort = \"max\"\neffort = \"high\"\n\n[work]\nbranch_prefix = \"c/\"\n",
-            &[Setting::AgentEffort(None)],
+            &[Setting::AgentEffort {
+                backend: AgentBackend::Claude,
+                effort: None,
+            }],
         );
         assert_eq!(
             out,
@@ -1397,7 +1457,10 @@ mod tests {
         // The last key of the file: onto the end.
         let out = edit(
             "[agent]\nmodel = \"opus\"\n# last\neffort = \"high\"\n# end\n",
-            &[Setting::AgentEffort(None)],
+            &[Setting::AgentEffort {
+                backend: AgentBackend::Claude,
+                effort: None,
+            }],
         );
         assert_eq!(out, "[agent]\nmodel = \"opus\"\n# last\n# end\n");
     }
@@ -1411,7 +1474,13 @@ mod tests {
     #[test]
     fn crlf_line_ends_and_a_byte_order_mark_are_kept() {
         let text = "\u{feff}poll_interval_secs = 60\r\n[agent]\r\nmodel = \"opus\"\r\n";
-        let out = edit(text, &[Setting::AgentEffort(Some("high".into()))]);
+        let out = edit(
+            text,
+            &[Setting::AgentEffort {
+                backend: AgentBackend::Claude,
+                effort: Some("high".into()),
+            }],
+        );
         assert_eq!(
             out,
             "\u{feff}poll_interval_secs = 60\r\n[agent]\r\nmodel = \"opus\"\r\neffort = \"high\"\r\n"
@@ -1442,8 +1511,42 @@ mod tests {
             Setting::GithubHost(Some("ghe.corp".into())),
             Setting::CloneRoot(Some("~/Code".into())),
             Setting::AgentModel(Some("sonnet".into())),
-            Setting::AgentEffort(Some("low".into())),
-            Setting::AgentMaxConcurrentRuns(Some(8)),
+            Setting::AgentEffort {
+                backend: AgentBackend::Claude,
+                effort: Some("low".into()),
+            },
+            Setting::AgentEffort {
+                backend: AgentBackend::Codex,
+                effort: Some("xhigh".into()),
+            },
+            Setting::AgentEffort {
+                backend: AgentBackend::Gemini,
+                effort: Some("medium".into()),
+            },
+            Setting::AgentEffort {
+                backend: AgentBackend::OpenCode,
+                effort: Some("low".into()),
+            },
+            Setting::AgentMaxConcurrentRuns {
+                backend: AgentBackend::Claude,
+                runs: Some(8),
+            },
+            Setting::AgentMaxConcurrentRuns {
+                backend: AgentBackend::Codex,
+                runs: Some(3),
+            },
+            Setting::AgentMaxConcurrentRuns {
+                backend: AgentBackend::Gemini,
+                runs: Some(2),
+            },
+            Setting::AgentMaxConcurrentRuns {
+                backend: AgentBackend::OpenCode,
+                runs: Some(5),
+            },
+            Setting::AgentSandbox {
+                backend: AgentBackend::Gemini,
+                sandbox: Some(false),
+            },
             Setting::AgentBinary {
                 backend: AgentBackend::Claude,
                 binary: Some("/bin/claude".into()),
@@ -1476,7 +1579,16 @@ mod tests {
         assert_eq!(c.clone_root.as_deref(), Some("~/Code"));
         assert_eq!(c.agent.model, "sonnet");
         assert_eq!(c.agent.effort, "low");
+        assert_eq!(c.agent.codex.effort, "xhigh");
+        assert_eq!(c.agent.gemini.effort, "medium");
+        assert_eq!(c.agent.opencode.effort, "low");
         assert_eq!(c.agent.max_concurrent_runs, 8);
+        assert_eq!(c.agent.codex.max_concurrent_runs, 3);
+        assert_eq!(c.agent.gemini.max_concurrent_runs, 2);
+        assert_eq!(c.agent.opencode.max_concurrent_runs, 5);
+        assert!(c.agent.sandbox);
+        assert!(c.agent.codex.sandbox);
+        assert!(!c.agent.gemini.sandbox);
         assert_eq!(c.agent.binary, "/bin/claude");
         assert_eq!(c.agent.gemini.binary, "agy2");
         assert_eq!(c.agent.codex.models, vec!["a".to_string(), "b".to_string()]);
@@ -1497,7 +1609,14 @@ mod tests {
             "clone_root",
             "agent.model",
             "agent.effort",
+            "agent.codex.effort",
+            "agent.gemini.effort",
+            "agent.opencode.effort",
             "agent.max_concurrent_runs",
+            "agent.codex.max_concurrent_runs",
+            "agent.gemini.max_concurrent_runs",
+            "agent.opencode.max_concurrent_runs",
+            "agent.gemini.sandbox",
             "agent.binary",
             "agent.gemini.binary",
             "agent.codex.models",
@@ -1513,7 +1632,7 @@ mod tests {
         ] {
             assert!(keys.contains(key), "{key} missing from {keys:?}");
         }
-        assert_eq!(keys.len(), 18, "{keys:?}");
+        assert_eq!(keys.len(), 25, "{keys:?}");
     }
 
     fn keybinding(action: &'static str, keys: Option<&[&str]>) -> Setting {

@@ -166,7 +166,10 @@ fn check_description(check: &HostCheck) -> String {
 
 /// How a check stands, in a word.
 fn check_mark(check: &HostCheck) -> &'static str {
-    if check.what == perch_engine::host::SANDBOX && check.detail == perch_engine::host::SANDBOX_OFF
+    if (check.what == perch_engine::host::SANDBOX
+        && check.detail == perch_engine::host::SANDBOX_OFF)
+        || (check.what == perch_engine::host::GEMINI_SANDBOX
+            && check.detail == perch_engine::host::GEMINI_SANDBOX_OFF)
     {
         return "Off";
     }
@@ -260,6 +263,7 @@ fn host_check(page: &Page, check: &HostCheck) -> Row {
             "GitHub token" => "GitHub authentication",
             "agy (Gemini)" => "Gemini (Antigravity CLI)",
             perch_engine::host::SANDBOX => "Claude Code sandbox",
+            perch_engine::host::GEMINI_SANDBOX => "Gemini sandbox",
             "logind" => "Keep running after SSH disconnects",
             other => other,
         }
@@ -276,6 +280,7 @@ fn host_check(page: &Page, check: &HostCheck) -> Row {
         "GitHub token" => &["token"],
         "agy (Gemini)" => &["agy"],
         perch_engine::host::SANDBOX => &["bubblewrap", "bwrap", "socat", "sandbox"],
+        perch_engine::host::GEMINI_SANDBOX => &["gemini", "agy", "sbox", "sethostname", "sandbox"],
         _ => &[],
     })
     .keywords(&["host", "setup", "check", "missing", "install", "perchd"])

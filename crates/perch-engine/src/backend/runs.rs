@@ -23,16 +23,67 @@ pub(crate) struct RunManager {
     inner: Arc<Inner>,
 }
 
-struct Inner {
+/// Per-backend concurrent run limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BackendLimits {
+    pub claude: usize,
+    pub codex: usize,
+    pub gemini: usize,
+    pub opencode: usize,
+}
+
+impl BackendLimits {
+    pub(crate) fn from_agent(agent: &perch_github::AgentConfig) -> Self {
+        Self {
+            claude: agent.max_concurrent_runs_for(perch_github::CLAUDE_CODE),
+            codex: agent.max_concurrent_runs_for(perch_github::CODEX),
+            gemini: agent.max_concurrent_runs_for(perch_github::GEMINI),
+            opencode: agent.max_concurrent_runs_for(perch_github::OPENCODE),
+        }
+    }
+}
+
+struct Pool {
     limit: Arc<Semaphore>,
     /// The limit `set_limit` last asked for, and the permits in use that
     /// are to be kept rather than given back.
     target: Arc<Mutex<Target>>,
-    /// One Gemini run at a time, in the order they came, so Perch never
-    /// runs `agy` in parallel on the reader's account. Taken after a Work
-    /// run's worktree lock and before a slot, so a waiting Gemini run
-    /// holds back neither Claude Code nor Codex.
-    gemini: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Pool {
+    fn new(limit: usize) -> Self {
+        let limit = limit.max(1);
+        Self {
+            limit: Arc::new(Semaphore::new(limit)),
+            target: Arc::new(Mutex::new(Target { limit, owed: 0 })),
+        }
+    }
+
+    fn set_limit(&self, limit: usize) {
+        let limit = limit.max(1);
+        let mut target = self
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if limit > target.limit {
+            let more = limit - target.limit;
+            let repaid = more.min(target.owed);
+            target.owed -= repaid;
+            self.limit.add_permits(more - repaid);
+        } else if limit < target.limit {
+            let fewer = target.limit - limit;
+            let taken = self.limit.forget_permits(fewer);
+            target.owed += fewer - taken;
+        }
+        target.limit = limit;
+    }
+}
+
+struct Inner {
+    claude: Pool,
+    codex: Pool,
+    gemini: Pool,
+    opencode: Pool,
     /// One Work run at a time in a worktree, in the order they came. A
     /// Work run takes its worktree's lock before a slot, so one waiting
     /// on another Work run does not hold a slot from anyone else.
@@ -70,7 +121,7 @@ enum OwnerFence {
 struct Entry {
     id: String,
     owner: RunOwner,
-    gemini: bool,
+    backend: String,
     /// For a Work run, the worktree it changes, as the disk resolves it.
     worktree: Option<PathBuf>,
     cancelled: AtomicBool,
@@ -116,7 +167,6 @@ pub(crate) struct Admission {
 pub(crate) struct RunLease {
     entry: Arc<Entry>,
     _slot: Slot,
-    _gemini: Option<OwnedMutexGuard<()>>,
     _worktree: Option<OwnedMutexGuard<()>>,
 }
 
@@ -156,15 +206,17 @@ pub(crate) struct OwnerDeletion {
 }
 
 impl RunManager {
-    pub(crate) fn new(limit: usize, cache: SharedCache, events: super::EventSender<Event>) -> Self {
+    pub(crate) fn new(
+        limits: BackendLimits,
+        cache: SharedCache,
+        events: super::EventSender<Event>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                limit: Arc::new(Semaphore::new(limit.max(1))),
-                target: Arc::new(Mutex::new(Target {
-                    limit: limit.max(1),
-                    owed: 0,
-                })),
-                gemini: Arc::new(tokio::sync::Mutex::new(())),
+                claude: Pool::new(limits.claude),
+                codex: Pool::new(limits.codex),
+                gemini: Pool::new(limits.gemini),
+                opencode: Pool::new(limits.opencode),
                 worktrees: Mutex::new(HashMap::new()),
                 admission: Mutex::new(AdmissionGate::default()),
                 entries: Mutex::new(HashMap::new()),
@@ -175,28 +227,29 @@ impl RunManager {
         }
     }
 
-    /// Let `limit` runs go at once from now on, at least one. A higher
-    /// limit starts waiting runs straight away. A lower one stops nothing
-    /// that is running: it takes the free slots now and the rest as the
-    /// runs holding them end.
-    pub(crate) fn set_limit(&self, limit: usize) {
-        let limit = limit.max(1);
-        let mut target = self
-            .inner
-            .target
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if limit > target.limit {
-            let more = limit - target.limit;
-            let repaid = more.min(target.owed);
-            target.owed -= repaid;
-            self.inner.limit.add_permits(more - repaid);
-        } else if limit < target.limit {
-            let fewer = target.limit - limit;
-            let taken = self.inner.limit.forget_permits(fewer);
-            target.owed += fewer - taken;
+    fn pool(&self, backend: &str) -> &Pool {
+        match backend {
+            perch_github::CODEX => &self.inner.codex,
+            perch_github::GEMINI => &self.inner.gemini,
+            perch_github::OPENCODE => &self.inner.opencode,
+            _ => &self.inner.claude,
         }
-        target.limit = limit;
+    }
+
+    /// Update each backend's concurrent run limit (at least one each). A
+    /// higher limit starts waiting runs straight away. A lower one stops
+    /// nothing that is running: it takes the free slots now and the rest as
+    /// the runs holding them end.
+    pub(crate) fn set_limits(&self, limits: BackendLimits) {
+        self.inner.claude.set_limit(limits.claude);
+        self.inner.codex.set_limit(limits.codex);
+        self.inner.gemini.set_limit(limits.gemini);
+        self.inner.opencode.set_limit(limits.opencode);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_limit_for(&self, backend: &str, limit: usize) {
+        self.pool(backend).set_limit(limit);
     }
 
     /// How many runs are queued or under way.
@@ -225,10 +278,10 @@ impl RunManager {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// How many runs could start now.
+    /// How many runs for `backend` could start now.
     #[cfg(test)]
-    pub(crate) fn free_slots(&self) -> usize {
-        self.inner.limit.available_permits()
+    pub(crate) fn free_slots_for(&self, backend: &str) -> usize {
+        self.pool(backend).limit.available_permits()
     }
 
     /// Persist a queued run and expose it to the app before returning.  A
@@ -313,7 +366,7 @@ impl RunManager {
         let entry = Arc::new(Entry {
             id: run.id.clone(),
             owner: run.owner.clone(),
-            gemini: run.backend == perch_github::GEMINI,
+            backend: run.backend.clone(),
             worktree,
             cancelled: AtomicBool::new(false),
             execution_done: AtomicBool::new(false),
@@ -398,55 +451,41 @@ impl RunManager {
                 }
             }
         };
-        let gemini = if entry.gemini {
-            match self.inner.gemini.clone().try_lock_owned() {
-                Ok(guard) => Some(guard),
-                Err(_) => {
-                    self.set_activity(&entry.id, "Waiting for the Gemini run");
-                    let wait = self.inner.gemini.clone().lock_owned();
-                    tokio::pin!(wait);
-                    let guard = tokio::select! {
-                        biased;
-                        _ = entry.cancel.notified() => {
-                            self.finish_cancelled_queue(&entry);
-                            return None;
-                        }
-                        guard = &mut wait => guard,
-                    };
-                    if entry.cancelled.load(Ordering::Acquire) {
+        let pool = self.pool(&entry.backend);
+        let slot = match pool.limit.clone().try_acquire_owned() {
+            Ok(permit) => Slot {
+                permit: Some(permit),
+                target: pool.target.clone(),
+            },
+            Err(_) => {
+                if entry.backend == perch_github::GEMINI {
+                    self.set_activity(&entry.id, "Waiting for a Gemini execution slot");
+                }
+                let acquire = pool.limit.clone().acquire_owned();
+                tokio::pin!(acquire);
+                tokio::select! {
+                    biased;
+                    _ = entry.cancel.notified() => {
                         self.finish_cancelled_queue(&entry);
                         return None;
                     }
-                    self.set_activity(&entry.id, "Waiting for an execution slot");
-                    Some(guard)
+                    permit = &mut acquire => match permit {
+                        Ok(permit) => Slot {
+                            permit: Some(permit),
+                            target: pool.target.clone(),
+                        },
+                        Err(_) => {
+                            self.complete_entry(
+                                &entry,
+                                RunStatus::Interrupted,
+                                TerminalReason::AppShutdown,
+                                "Perch stopped before the run could start".into(),
+                            );
+                            return None;
+                        }
+                    },
                 }
             }
-        } else {
-            None
-        };
-        let acquire = self.inner.limit.clone().acquire_owned();
-        tokio::pin!(acquire);
-        let slot = tokio::select! {
-            biased;
-            _ = entry.cancel.notified() => {
-                self.finish_cancelled_queue(&entry);
-                return None;
-            }
-            permit = &mut acquire => match permit {
-                Ok(permit) => Slot {
-                    permit: Some(permit),
-                    target: self.inner.target.clone(),
-                },
-                Err(_) => {
-                    self.complete_entry(
-                        &entry,
-                        RunStatus::Interrupted,
-                        TerminalReason::AppShutdown,
-                        "Perch stopped before the run could start".into(),
-                    );
-                    return None;
-                }
-            },
         };
         if entry.cancelled.load(Ordering::Acquire) {
             self.finish_cancelled_queue(&entry);
@@ -477,7 +516,6 @@ impl RunManager {
         Some(RunLease {
             entry,
             _slot: slot,
-            _gemini: gemini,
             _worktree: worktree,
         })
     }
@@ -719,7 +757,10 @@ impl RunManager {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             gate.closed = true;
-            self.inner.limit.close();
+            self.inner.claude.limit.close();
+            self.inner.codex.limit.close();
+            self.inner.gemini.limit.close();
+            self.inner.opencode.limit.close();
         }
         let entries: Vec<_> = self
             .inner
@@ -1026,7 +1067,16 @@ mod tests {
         });
         cache.insert_item(&item).unwrap();
         let (events, _) = std::sync::mpsc::channel();
-        RunManager::new(limit, Some(Arc::new(Mutex::new(cache))), events.into())
+        RunManager::new(
+            BackendLimits {
+                claude: limit,
+                codex: limit,
+                gemini: 1,
+                opencode: limit,
+            },
+            Some(Arc::new(Mutex::new(cache))),
+            events.into(),
+        )
     }
 
     fn add_request(manager: &RunManager, thread_id: &str, request_id: &str) {
@@ -1135,14 +1185,14 @@ mod tests {
     #[tokio::test]
     async fn a_higher_limit_frees_slots_at_once_and_a_lower_one_as_runs_end() {
         let manager = manager(1);
-        let free = |manager: &RunManager| manager.inner.limit.available_permits();
+        let free = |manager: &RunManager| manager.free_slots_for(perch_github::CODEX);
         assert_eq!(free(&manager), 1);
 
-        manager.set_limit(3);
+        manager.set_limit_for(perch_github::CODEX, 3);
         assert_eq!(free(&manager), 3);
-        manager.set_limit(0);
+        manager.set_limit_for(perch_github::CODEX, 0);
         assert_eq!(free(&manager), 1, "never below one");
-        manager.set_limit(2);
+        manager.set_limit_for(perch_github::CODEX, 2);
         assert_eq!(free(&manager), 2);
 
         // Both slots in use, then the limit drops to one: nothing stops,
@@ -1155,7 +1205,7 @@ mod tests {
             .start(admit(&manager, run("two", "thread-two", "request-two")))
             .await
             .unwrap();
-        manager.set_limit(1);
+        manager.set_limit_for(perch_github::CODEX, 1);
         assert_eq!(free(&manager), 0);
         let three = admit(&manager, run("three", "thread-three", "request-three"));
         let waiter = {
@@ -1181,14 +1231,14 @@ mod tests {
             .start(admit(&manager, run("four", "thread-four", "request-four")))
             .await
             .unwrap();
-        manager.set_limit(3);
+        manager.set_limit_for(perch_github::CODEX, 3);
         let five = manager
             .start(admit(&manager, run("five", "thread-five", "request-five")))
             .await
             .unwrap();
-        manager.set_limit(1);
+        manager.set_limit_for(perch_github::CODEX, 1);
         assert_eq!(free(&manager), 0);
-        manager.set_limit(2);
+        manager.set_limit_for(perch_github::CODEX, 2);
         assert_eq!(free(&manager), 0, "two runs hold the two slots");
         end(&manager, four);
         end(&manager, five);
@@ -1198,18 +1248,19 @@ mod tests {
     #[tokio::test]
     async fn a_slot_let_go_before_its_lease_is_made_still_repays_a_lower_limit() {
         let manager = manager(2);
-        let free = |manager: &RunManager| manager.inner.limit.available_permits();
+        let free = |manager: &RunManager| manager.free_slots_for(perch_github::CODEX);
         let one = manager
             .start(admit(&manager, run("one", "thread-one", "request-one")))
             .await
             .unwrap();
         // What `start` holds between acquiring and building the lease,
         // when a cancel makes it let go there.
+        let pool = manager.pool(perch_github::CODEX);
         let slot = Slot {
-            permit: Some(manager.inner.limit.clone().try_acquire_owned().unwrap()),
-            target: manager.inner.target.clone(),
+            permit: Some(pool.limit.clone().try_acquire_owned().unwrap()),
+            target: pool.target.clone(),
         };
-        manager.set_limit(1);
+        manager.set_limit_for(perch_github::CODEX, 1);
         assert_eq!(free(&manager), 0);
         drop(slot);
         assert_eq!(free(&manager), 0, "one still holds the one slot");
@@ -1575,7 +1626,7 @@ mod tests {
         );
         assert_eq!(
             manager.load("g2").unwrap().latest_activity.as_deref(),
-            Some("Waiting for the Gemini run")
+            Some("Waiting for a Gemini execution slot")
         );
 
         let third = admit(&manager, gemini("g3"));
@@ -1585,15 +1636,15 @@ mod tests {
         };
         tokio::task::yield_now().await;
 
-        // Waiting Gemini runs have not taken the second global slot, so a
-        // Codex run proceeds alongside the active Gemini run.
+        // Waiting Gemini runs have not taken a Codex slot, so a Codex run
+        // proceeds alongside the active Gemini run.
         let codex = manager
             .start(admit(
                 &manager,
                 run("codex", "thread-codex", "request-codex"),
             ))
             .await
-            .expect("queued Gemini runs must not hold global slots");
+            .expect("queued Gemini runs must not hold slots from other backends");
 
         // Cancelling a queued Gemini run settles it without ever starting it.
         manager.cancel("g2");
@@ -1618,7 +1669,14 @@ mod tests {
             .unwrap();
         assert_eq!(third.entry.id, "g3");
 
-        for lease in [codex, third] {
+        // Raising Gemini's per-agent limit allows a second concurrent Gemini run.
+        manager.set_limit_for(perch_github::GEMINI, 2);
+        let fourth = manager
+            .start(admit(&manager, gemini("g4")))
+            .await
+            .expect("raising Gemini's limit lets a second Gemini run start");
+
+        for lease in [codex, third, fourth] {
             manager.transition(
                 &lease.entry.id,
                 RunStatus::Failed,

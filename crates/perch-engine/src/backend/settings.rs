@@ -278,14 +278,22 @@ fn needs_discovery(before: &AgentConfig, after: &AgentConfig) -> bool {
         || before.opencode.models != after.opencode.models
 }
 
-/// What discovery found, with the file's own model, effort, run limit
-/// and sandbox.
+/// What discovery found, with the file's own model, per-agent effort, run
+/// limits and sandbox switches.
 fn patched(discovered: &AgentConfig, file: &AgentConfig) -> AgentConfig {
     let mut agent = discovered.clone();
     agent.model = file.model.clone();
     agent.effort = file.effort.clone();
     agent.max_concurrent_runs = file.max_concurrent_runs;
     agent.sandbox = file.sandbox;
+    agent.codex.effort = file.codex.effort.clone();
+    agent.codex.max_concurrent_runs = file.codex.max_concurrent_runs;
+    agent.codex.sandbox = file.codex.sandbox;
+    agent.gemini.effort = file.gemini.effort.clone();
+    agent.gemini.max_concurrent_runs = file.gemini.max_concurrent_runs;
+    agent.gemini.sandbox = file.gemini.sandbox;
+    agent.opencode.effort = file.opencode.effort.clone();
+    agent.opencode.max_concurrent_runs = file.opencode.max_concurrent_runs;
     crate::ask::settle_model(&mut agent);
     agent
 }
@@ -375,8 +383,9 @@ pub(super) async fn take_up_whole_config(ctx: &Ctx, path: &Path) -> Result<Confi
     if running.poll_interval_secs != before.poll_interval_secs {
         held.poll_interval.notify_one();
     }
-    if running.agent.max_concurrent_runs != before.agent.max_concurrent_runs {
-        ctx.runs.set_limit(running.agent.max_concurrent_runs);
+    let new_limits = super::runs::BackendLimits::from_agent(&running.agent);
+    if new_limits != super::runs::BackendLimits::from_agent(&before.agent) {
+        ctx.runs.set_limits(new_limits);
     }
     let _ = ctx.events.send(Event::Repos(running.declared_repos()));
     ctx.send_work_approvals();

@@ -832,11 +832,12 @@ followed by the 15 most recent completions. Use the arrows and Enter to open a
 run, or Escape to dismiss the list. **View** in a completion notice and
 **Show** in Review also open the run. Switching items leaves it running.
 
-By default, Perch runs up to four agents at once and starts queued runs in
-order. Gemini runs one at a time. A queued Gemini run leaves slots available to
-other agents. Stopping a run ends its processes. Quitting the local engine ends
-the runs it owns. After an unexpected exit, unfinished runs appear as
-**Interrupted**. You can retry them yourself.
+Each agent has its own concurrency limit and starts queued runs in order. By
+default, Claude Code, Codex, and OpenCode run up to four at a time, and Gemini
+runs one at a time. A queued run for one agent never holds back other agents.
+Stopping a run ends its processes. Quitting the local engine ends the runs it
+owns. After an unexpected exit, unfinished runs appear as **Interrupted**. You
+can retry them yourself.
 
 Perch finds installed agent CLIs automatically. Set only the options you want to
 change.
@@ -845,20 +846,29 @@ change.
 [agent]
 binary = "claude"
 model = "opus"
-effort = "high"                # low | medium | high | xhigh | max | ultra
+effort = "high"                # Claude Code default: low | medium | high | xhigh | max | ultra
 models = ["fable", "opus", "sonnet", "haiku"]
 max_concurrent_runs = 4
+sandbox = true
 
 [agent.codex]
 binary = "codex"
+effort = "high"
 models = ["gpt-6-astra"]       # omit to use Codex's own model catalog
+max_concurrent_runs = 4
+sandbox = true
 
 [agent.gemini]
 binary = "agy"
+effort = "high"
 models = ["gemini-4-carbon"]   # omit to use agy's own model catalog
+max_concurrent_runs = 1
+sandbox = true
 
 [agent.opencode]
 binary = "opencode"           # omit models to use OpenCode's provider/model catalog
+effort = "high"
+max_concurrent_runs = 4
 ```
 
 If your configured model is a Claude model and Claude Code is missing, Perch
@@ -1101,8 +1111,11 @@ Perch gives neither agent its GitHub token. One Work run can edit a worktree at
 a time. Another Work run waits without using an agent slot. Ask runs can
 continue alongside it.
 
-On Linux, Claude Code needs `bwrap` and `socat` on `PATH` for its sandbox. If
-either is missing, Ask and Work refuse to start with the sandbox enabled.
+On Linux, Claude Code needs `bwrap` and `socat` on `PATH` for its sandbox, and
+Gemini (`agy`) needs unprivileged user namespaces with `sethostname` allowed
+for its `sbox` terminal sandbox. If a required capability is missing (for
+example under a Podman or Docker seccomp profile that blocks `sethostname`),
+runs for that agent refuse to start with its sandbox enabled.
 
 Perch checks nested Git repositories before and after a Work run. It fails the
 run and names the path if a new `.git` appears or an existing repository’s
@@ -1117,44 +1130,57 @@ files, stays inside the worktree, and fails a run that exceeds its limit of
 
 ### Without the agent sandbox
 
-Claude Code’s and Gemini’s (`agy`) sandboxes are on by default. If you use a
-separate machine as your security boundary, such as a disposable VM or
-container, **Settings > Agents > Defaults > Sandbox** controls this setting.
-The corresponding engine setting is `[agent] sandbox = false`. Perch only
-disables the sandbox when you choose to do so. Turning it off changes the
-following behavior.
+Claude Code’s, Codex’s, and Gemini’s (`agy`) sandboxes are on by default and
+can be toggled independently per agent. If you use a separate machine as your
+security boundary, such as a disposable VM or container, each agent’s card
+under **Settings > Agents** has its own **Sandbox** toggle (`[agent] sandbox =
+false` for Claude Code, `[agent.codex] sandbox = false` for Codex, and
+`[agent.gemini] sandbox = false` for Gemini). Perch only disables a sandbox
+when you choose to do so. Turning an agent’s sandbox off changes the following
+behavior for that agent alone.
 
-- The Linux host check for `bwrap` and `socat` reads **Off**. Claude starts
-  with `sandbox.enabled` set to false.
-- Claude Code Ask runs, native reviews, and verifiers keep their tool
-  restrictions. Allowed read commands run with your account’s permissions and
-  network access. Perch denies Git’s `--output` option.
-- Gemini (`agy`) Ask runs, native reviews, and verifiers start with
-  `enableTerminalSandbox` false and `toolPermission` set to `request-review`.
-  File-editing tools (`write_file(*)`), web reads, and MCP tools stay denied,
-  while read-only Git commands (`git diff`, `git log`, `git show`, `git blame`,
-  `git status`, `git rev-parse`, `git merge-base`, `git ls-files`, `git grep`,
-  `git ls-tree`, `git cat-file`, both directly and with `-C <cwd>`) and basic
-  inspection commands (`ls`, `cat`, `head`, `tail`, `wc`, `echo`, `pwd`,
-  `grep`) are allowed. Because `agy`’s `command(...)` rules match literal
-  space-separated prefixes, Perch denies `--output` immediately after the Git
-  subcommand (`git diff --output ...`) but cannot block `--output=<path>` or
-  `--output` after other flags — so as with Claude Code, there is no OS write
-  or network boundary beneath the allowed commands.
-- Claude Code Work still restricts its editing tools to allowed paths and checks
-  Git metadata when a run starts and ends. A shell command you approve can write
-  anywhere your account can and reach any host. **Ask me** sends command
-  requests to you, **Auto-review** asks Claude’s reviewer first, and **Allow
-  all** approves them automatically. The repository commit grant applies to
-  eligible Git commits.
-- Perch turns shell allow rules in your Claude settings into ask rules. This
-  includes project and local settings for trusted Work runs, including the main
-  checkout’s settings for a linked worktree. An unreadable settings file makes
-  every command require approval. Ask runs and reviews refuse commands that
-  need approval. A broad rule such as `Bash(git *)` can therefore make Git
-  commands unavailable to them.
+- **Claude Code (`[agent] sandbox = false`):**
+  - The Linux host check for `bwrap` and `socat` reads **Off**. Claude starts
+    with `sandbox.enabled` set to false.
+  - Ask runs, native reviews, and verifiers keep their tool restrictions.
+    Allowed read commands run with your account’s permissions and network
+    access. Perch denies Git’s `--output` option.
+  - Work still restricts its editing tools to allowed paths and checks Git
+    metadata when a run starts and ends. A shell command you approve can write
+    anywhere your account can and reach any host. **Ask me** sends command
+    requests to you, **Auto-review** asks Claude’s reviewer first, and **Allow
+    all** approves them automatically. The repository commit grant applies to
+    eligible Git commits.
+  - Perch turns shell allow rules in your Claude settings into ask rules. This
+    includes project and local settings for trusted Work runs, including the
+    main checkout’s settings for a linked worktree. An unreadable settings file
+    makes every command require approval. Ask runs and reviews refuse commands
+    that need approval. A broad rule such as `Bash(git *)` can therefore make
+    Git commands unavailable to them.
+- **Gemini (`[agent.gemini] sandbox = false`):**
+  - The Linux host check for Gemini’s sandbox reads **Off**.
+  - Ask runs, native reviews, and verifiers start with `enableTerminalSandbox`
+    false and `toolPermission` set to `request-review`. File-editing tools
+    (`write_file(*)`), web reads, and MCP tools stay denied, while read-only
+    Git commands (`git diff`, `git log`, `git show`, `git blame`, `git status`,
+    `git rev-parse`, `git merge-base`, `git ls-files`, `git grep`,
+    `git ls-tree`, `git cat-file`, both directly and with `-C <cwd>`) and basic
+    inspection commands (`ls`, `cat`, `head`, `tail`, `wc`, `echo`, `pwd`,
+    `grep`) are allowed. Because `agy`’s `command(...)` rules match literal
+    space-separated prefixes, Perch denies `--output` immediately after the Git
+    subcommand (`git diff --output ...`) but cannot block `--output=<path>` or
+    `--output` after other flags — so as with Claude Code, there is no OS write
+    or network boundary beneath the allowed commands.
+  - Gemini Work runs always use ACP without a sandbox and ask before every
+    command.
+- **Codex (`[agent.codex] sandbox = false`):**
+  - Ask runs, native reviews, and verifiers use `danger-full-access`. Because
+    Codex has no shell command allowlist, read-only runs (`approval_policy =
+    "never"`) run with full shell access.
+  - Work runs use `danger-full-access` with `approvalPolicy = "untrusted"`, so
+    untrusted commands still ask for approval.
 
-Codex and OpenCode are not affected.
+OpenCode has no OS sandbox (Perch restricts it through ACP tool permissions).
 
 ### Approvals
 
@@ -1629,8 +1655,14 @@ when it receives a new GitHub token.
   `npm install -g @openai/codex` for Codex, and a link to the agy
   documentation.
 - **Claude Code’s sandbox.** On Linux, install `bubblewrap` and `socat` on the
-  host’s `PATH`. When you disable the sandbox in config, this check reads
-  **Off**.
+  host’s `PATH`. When you disable Claude Code’s sandbox in config (`[agent]
+  sandbox = false`), this check reads **Off**.
+- **Gemini’s (`agy`) sandbox.** On Linux, `agy`’s `sbox` needs unprivileged
+  user namespaces with `sethostname` allowed (container seccomp profiles such
+  as Podman’s default block `sethostname`). When blocked, Perch surfaces the
+  reason here and refuses sandboxed Gemini print runs up front; turn off
+  Gemini’s sandbox alone (`[agent.gemini] sandbox = false`) on a container or
+  VM host where the machine is already the boundary.
 - **Linux login sessions.** Where logind is available, Perch uses
   `loginctl show-session` to check whether logging out kills your processes. If
   it does, add the SSH user to `KillExcludeUsers` in a logind drop-in and

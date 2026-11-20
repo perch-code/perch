@@ -35,9 +35,15 @@ pub const REPOSITORIES: &str = "Repositories";
 /// What the check for Claude Code's sandbox tools is called.
 pub const SANDBOX: &str = "bubblewrap and socat";
 
-/// What the sandbox check says when config turns the sandbox off: then
-/// the tools are not looked for, and nothing is missing.
+/// What the sandbox check says when config turns Claude Code's sandbox off:
+/// then the tools are not looked for, and nothing is missing.
 pub const SANDBOX_OFF: &str = "Not needed: Claude Code's sandbox is off ([agent] sandbox = false). Its commands run unsandboxed, and a Work run asks before each one.";
+
+/// What the check for Gemini's (`agy`) terminal sandbox on Linux is called.
+pub const GEMINI_SANDBOX: &str = "Gemini (agy) sandbox";
+
+/// What the Gemini sandbox check says when config turns it off.
+pub const GEMINI_SANDBOX_OFF: &str = "Not needed: Gemini's sandbox is off ([agent.gemini] sandbox = false). Its print-mode read-only commands run unsandboxed.";
 
 /// One thing the host has or lacks.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -96,6 +102,12 @@ pub(crate) struct Found {
     /// Config turns Claude Code's sandbox off (`[agent] sandbox =
     /// false`), here or not, so its tools are not wanted.
     pub sandbox_off: bool,
+    /// On Linux, whether `agy`'s terminal sandbox (`sbox`) is blocked by
+    /// the kernel or container seccomp filter. `None` off Linux; `Some(None)`
+    /// when the probe succeeded; `Some(Some(block))` when blocked.
+    pub gemini_sandbox_block: Option<Option<perch_agent::GeminiSandboxBlock>>,
+    /// Config turns Gemini's sandbox off (`[agent.gemini] sandbox = false`).
+    pub gemini_sandbox_off: bool,
     /// What logind does at logout, when it could be asked: Linux with
     /// `loginctl`.
     pub logind: Option<Logind>,
@@ -333,11 +345,49 @@ pub(crate) fn checks(found: &Found) -> Vec<HostCheck> {
                 ok: false,
                 required: true,
                 detail: format!(
-                    "No {} on PATH. Claude Code's sandbox needs both on Linux, and its runs are refused without them. On a machine that is itself the boundary, such as a throwaway VM, the sandbox can be turned off instead in Settings > Agents.",
+                    "No {} on PATH. Claude Code's sandbox needs both on Linux, and its runs are refused without them. On a machine that is itself the boundary, such as a throwaway VM or container, Claude Code's sandbox can be turned off instead in Settings > Agents > Claude Code.",
                     missing.join(" or ")
                 ),
                 fix: Some(install(found.installer, &packages)),
             }
+        });
+    }
+
+    let gemini = found
+        .agents
+        .iter()
+        .any(|a| a.agent == Agent::Gemini && a.found.is_some());
+    let other_agent = found
+        .agents
+        .iter()
+        .any(|a| a.agent != Agent::Gemini && a.found.is_some());
+    if gemini && found.gemini_sandbox_off {
+        checks.push(HostCheck {
+            what: GEMINI_SANDBOX.into(),
+            ok: true,
+            required: false,
+            detail: GEMINI_SANDBOX_OFF.into(),
+            fix: None,
+        });
+    } else if let (true, Some(probe)) = (gemini, found.gemini_sandbox_block) {
+        checks.push(match probe {
+            None => HostCheck {
+                what: GEMINI_SANDBOX.into(),
+                ok: true,
+                required: false,
+                detail: "User namespaces and sethostname work for agy's terminal sandbox.".into(),
+                fix: None,
+            },
+            Some(block) => HostCheck {
+                what: GEMINI_SANDBOX.into(),
+                ok: false,
+                // Only block the whole host when Gemini is the sole installed
+                // agent; when Claude/Codex/OpenCode are installed, show this
+                // as an optional diagnostic instead of locking setup.
+                required: !other_agent,
+                detail: perch_agent::gemini_sandbox_refusal_for(block),
+                fix: None,
+            },
         });
     }
 
@@ -637,6 +687,8 @@ fn on_disk(config: &Config, path: Option<&OsStr>, linux: bool) -> Found {
         agents,
         sandbox_missing: linux.then(|| perch_agent::linux_sandbox_missing(path)),
         sandbox_off: !agent.sandbox,
+        gemini_sandbox_block: linux.then(perch_agent::gemini_linux_sandbox_block),
+        gemini_sandbox_off: !agent.gemini.sandbox,
         installer: Installer::find(&installer_dirs),
         ..Found::default()
     }
@@ -725,6 +777,8 @@ mod tests {
             ],
             sandbox_missing: Some(vec![]),
             sandbox_off: false,
+            gemini_sandbox_block: None,
+            gemini_sandbox_off: false,
             logind: Some(Logind {
                 kills: false,
                 kill_user_processes: false,
@@ -876,11 +930,65 @@ mod tests {
     fn on_disk_reads_the_sandbox_setting() {
         let mut config = Config::parse_text("").unwrap();
         assert!(!on_disk(&config, None, true).sandbox_off);
+        assert!(!on_disk(&config, None, true).gemini_sandbox_off);
         config = Config::parse_text("[agent]\nsandbox = false\n").unwrap();
         let found = on_disk(&config, None, true);
         assert!(found.sandbox_off);
+        assert!(!found.gemini_sandbox_off);
         // Still looked for, so turning it back on says what is missing.
         assert_eq!(found.sandbox_missing, Some(vec!["bwrap", "socat"]));
+        config = Config::parse_text("[agent.gemini]\nsandbox = false\n").unwrap();
+        let found = on_disk(&config, None, true);
+        assert!(!found.sandbox_off);
+        assert!(found.gemini_sandbox_off);
+    }
+
+    #[test]
+    fn gemini_sandbox_check_reports_blocked_and_off_states() {
+        let with_gemini = vec![
+            agent(Agent::ClaudeCode, true),
+            agent(Agent::Codex, true),
+            agent(Agent::Gemini, true),
+        ];
+        let blocked = checks(&Found {
+            agents: with_gemini.clone(),
+            gemini_sandbox_block: Some(Some(perch_agent::GeminiSandboxBlock::SetHostname)),
+            ..all_there()
+        });
+        let check = named(&blocked, GEMINI_SANDBOX);
+        assert!(!check.ok);
+        // Other agents are installed, so this is diagnostic, not a setup blocker.
+        assert!(!check.required);
+        assert!(check.detail.contains("sethostname"), "{}", check.detail);
+        assert!(
+            check.detail.contains("[agent.gemini] sandbox = false"),
+            "{}",
+            check.detail
+        );
+
+        // When Gemini is the only agent installed, a blocked sandbox blocks setup.
+        let gemini_only = checks(&Found {
+            agents: vec![
+                agent(Agent::ClaudeCode, false),
+                agent(Agent::Codex, false),
+                agent(Agent::Gemini, true),
+            ],
+            gemini_sandbox_block: Some(Some(perch_agent::GeminiSandboxBlock::SetHostname)),
+            ..all_there()
+        });
+        let check = named(&gemini_only, GEMINI_SANDBOX);
+        assert!(check.blocks());
+
+        // Turning Gemini's sandbox off clears the check without affecting Claude's.
+        let off = checks(&Found {
+            agents: with_gemini,
+            gemini_sandbox_block: Some(Some(perch_agent::GeminiSandboxBlock::SetHostname)),
+            gemini_sandbox_off: true,
+            ..all_there()
+        });
+        let check = named(&off, GEMINI_SANDBOX);
+        assert!(check.ok && !check.required);
+        assert_eq!(check.detail, GEMINI_SANDBOX_OFF);
     }
 
     #[test]

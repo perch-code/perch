@@ -1,6 +1,6 @@
-//! Agents: the default model, effort, how many runs at once, and whether
-//! Claude Code and Gemini run commands in their sandboxes, then a card for
-//! each CLI with its executable and its models.
+//! Agents: the default model, then a card for each CLI with its
+//! executable, models, default effort, concurrent run limit, and (where the
+//! CLI has an OS sandbox) its sandbox toggle.
 //!
 //! Two configs meet here. What the file says (`Page::with_config`) is what
 //! the boxes hold, binaries as typed. What Perch found on this machine
@@ -21,20 +21,18 @@ use crate::ui::menu::Menu;
 const MOST_RUNS: usize = 8;
 
 pub(super) fn groups(page: &Page) -> Vec<Group> {
-    let mut groups = vec![Group::new(
-        "Defaults",
-        vec![
-            model(page),
-            effort(page),
-            concurrent_runs(page),
-            sandbox(page),
-        ],
-    )];
+    let mut groups = vec![Group::new("Defaults", vec![model(page)])];
     groups.extend(AgentBackend::ALL.into_iter().map(|backend| {
-        Group::new(
-            title(backend),
-            vec![binary(page, backend), models(page, backend)],
-        )
+        let mut rows = vec![
+            binary(page, backend),
+            models(page, backend),
+            effort(page, backend),
+            concurrent_runs(page, backend),
+        ];
+        if backend != AgentBackend::OpenCode {
+            rows.push(sandbox(page, backend));
+        }
+        Group::new(title(backend), rows)
     }));
     groups
 }
@@ -55,6 +53,16 @@ fn slug(backend: AgentBackend) -> &'static str {
         AgentBackend::Codex => "codex",
         AgentBackend::Gemini => "gemini",
         AgentBackend::OpenCode => "opencode",
+    }
+}
+
+/// The backend name string used by `AgentConfig::*_for`.
+fn backend_name(backend: AgentBackend) -> &'static str {
+    match backend {
+        AgentBackend::Claude => perch_github::CLAUDE_CODE,
+        AgentBackend::Codex => perch_github::CODEX,
+        AgentBackend::Gemini => perch_github::GEMINI,
+        AgentBackend::OpenCode => perch_github::OPENCODE,
     }
 }
 
@@ -189,14 +197,16 @@ fn model_menu(page: &Page) -> Menu {
     menu
 }
 
-fn effort(page: &Page) -> Row {
+fn effort(page: &Page, backend: AgentBackend) -> Row {
+    let key = format!("{}.effort", table(backend));
     let control = {
         let page = page.clone();
         move || {
             dropdown(
                 &page,
-                |page| {
-                    let current = page.with_config(|c| c.agent.effort.clone());
+                move |page| {
+                    let current =
+                        page.with_config(|c| c.agent.effort_for(backend_name(backend)).to_string());
                     let mut offered: Vec<(String, String)> = perch_agent::Effort::ALL
                         .into_iter()
                         .map(|e| (e.label().to_string(), e.name().to_string()))
@@ -210,29 +220,51 @@ fn effort(page: &Page) -> Row {
                         }
                     }
                 },
-                |name| Setting::AgentEffort(Some(name)),
-                "settings-agent-effort",
+                move |name| Setting::AgentEffort {
+                    backend,
+                    effort: Some(name),
+                },
+                format!("settings-{}-effort", slug(backend)),
             )
         }
     };
     Row::new(
-        "agent-effort",
+        format!("{}-effort", slug(backend)),
         "Default effort",
-        || "How hard the model thinks, unless you pick otherwise.".to_string(),
+        move || {
+            format!(
+                "How hard {} thinks, unless you pick otherwise.",
+                title(backend)
+            )
+        },
         control,
     )
-    .keywords(&["effort", "thinking", "reasoning", "agent.effort"])
-    .reset("agent.effort", Setting::AgentEffort(None))
+    .keywords(&[
+        "effort",
+        "thinking",
+        "reasoning",
+        slug(backend),
+        "agent.effort",
+    ])
+    .reset(
+        key,
+        Setting::AgentEffort {
+            backend,
+            effort: None,
+        },
+    )
 }
 
-fn concurrent_runs(page: &Page) -> Row {
+fn concurrent_runs(page: &Page, backend: AgentBackend) -> Row {
+    let key = format!("{}.max_concurrent_runs", table(backend));
     let control = {
         let page = page.clone();
         move || {
             dropdown(
                 &page,
-                |page| {
-                    let current = page.with_config(|c| c.agent.max_concurrent_runs);
+                move |page| {
+                    let current = page
+                        .with_config(|c| c.agent.max_concurrent_runs_for(backend_name(backend)));
                     let mut offered: Vec<usize> = (1..=MOST_RUNS).collect();
                     if !offered.contains(&current) {
                         offered.push(current);
@@ -241,30 +273,44 @@ fn concurrent_runs(page: &Page) -> Row {
                     let offered = offered.into_iter().map(|n| (n.to_string(), n)).collect();
                     (offered, current)
                 },
-                |n| Setting::AgentMaxConcurrentRuns(Some(n)),
-                "settings-agent-runs",
+                move |n| Setting::AgentMaxConcurrentRuns {
+                    backend,
+                    runs: Some(n),
+                },
+                format!("settings-{}-runs", slug(backend)),
             )
         }
     };
-    Row::new(
-        "agent-runs",
-        "Runs at once",
-        || {
-            "How many agent runs go at the same time. The rest wait their turn, and Gemini \
-             runs one at a time."
+    let description = match backend {
+        AgentBackend::Gemini => {
+            "How many Gemini runs go at the same time. Defaults to 1 so Perch does not run agy \
+             in parallel unless you raise it."
                 .to_string()
-        },
+        }
+        _ => format!(
+            "How many {} runs go at the same time. The rest wait their turn.",
+            title(backend)
+        ),
+    };
+    Row::new(
+        format!("{}-runs", slug(backend)),
+        "Runs at once",
+        move || description.clone(),
         control,
     )
     .keywords(&[
         "concurrent",
         "parallel",
         "queue",
-        "agent.max_concurrent_runs",
+        slug(backend),
+        "max_concurrent_runs",
     ])
     .reset(
-        "agent.max_concurrent_runs",
-        Setting::AgentMaxConcurrentRuns(None),
+        key,
+        Setting::AgentMaxConcurrentRuns {
+            backend,
+            runs: None,
+        },
     )
 }
 
@@ -317,33 +363,53 @@ fn binary(page: &Page, backend: AgentBackend) -> Row {
     )
 }
 
-/// `[agent] sandbox`: on unless the file says `false`. Turned back on, the
+/// Per-agent `sandbox`: on unless the file says `false`. Turned back on, the
 /// key comes out of the file.
-fn sandbox(page: &Page) -> Row {
+fn sandbox(page: &Page, backend: AgentBackend) -> Row {
+    let key = format!("{}.sandbox", table(backend));
     let control = {
         let page = page.clone();
         move || {
             let (on_page, enabled, write) = (page.clone(), page.clone(), page.clone());
             toggle(
-                move || on_page.with_config(|c| c.agent.sandbox),
+                move || on_page.with_config(|c| c.agent.sandbox_for(backend_name(backend))),
                 move || enabled.writable(),
-                move |on| write.write(Setting::AgentSandbox((!on).then_some(false))),
-                "settings-agent-sandbox",
+                move |on| {
+                    write.write(Setting::AgentSandbox {
+                        backend,
+                        sandbox: (!on).then_some(false),
+                    })
+                },
+                format!("settings-{}-sandbox", slug(backend)),
             )
             .into_any()
         }
     };
+    let description = match backend {
+        AgentBackend::Claude => {
+            "Run Claude Code's commands in its sandbox (bubblewrap and socat on Linux). Turn \
+             it off only where the machine is itself the boundary, such as a throwaway VM or \
+             container. Off, Work asks before every command, and questions and reviews run \
+             their read-only commands without that backstop."
+        }
+        AgentBackend::Codex => {
+            "Run Codex's commands in its sandbox. Turn it off only where the machine is itself \
+             the boundary, such as a throwaway VM or container. Off, Work asks before untrusted \
+             commands, and questions and reviews run with full shell access (Codex has no \
+             read-only command allowlist)."
+        }
+        AgentBackend::Gemini => {
+            "Run Gemini's (agy) read-only commands in its terminal sandbox. Turn it off only \
+             where the machine is itself the boundary, such as a container whose seccomp \
+             filter blocks sethostname. Off, questions and reviews run their allowed read-only \
+             commands without that backstop; Work always asks before each command."
+        }
+        AgentBackend::OpenCode => "",
+    };
     Row::new(
-        "agent-sandbox",
+        format!("{}-sandbox", slug(backend)),
         "Sandbox",
-        || {
-            "Run Claude Code's and Gemini's commands in their sandboxes (bubblewrap and socat \
-             for Claude Code on Linux, agy's terminal sandbox for Gemini). Turn it off only \
-             where the machine is itself the boundary, such as a throwaway VM or container. \
-             Off, Claude Code Work asks before every command, and Claude Code and Gemini \
-             questions and reviews run their read-only commands without that backstop."
-                .to_string()
-        },
+        move || description.to_string(),
         control,
     )
     .keywords(&[
@@ -351,13 +417,18 @@ fn sandbox(page: &Page) -> Row {
         "bubblewrap",
         "bwrap",
         "socat",
-        "gemini",
-        "agy",
+        "sethostname",
         "container",
         "vm",
-        "agent.sandbox",
+        slug(backend),
     ])
-    .reset("agent.sandbox", Setting::AgentSandbox(None))
+    .reset(
+        key,
+        Setting::AgentSandbox {
+            backend,
+            sandbox: None,
+        },
+    )
 }
 
 fn default_binary(backend: AgentBackend) -> &'static str {
@@ -460,7 +531,7 @@ mod tests {
 
     #[test]
     fn the_agents_say_what_was_found_and_offer_what_was_found() {
-        let (mut harness, state, mut commands) = window(1400.0, 1400.0, FILE);
+        let (mut harness, state, mut commands) = window(1400.0, 2600.0, FILE);
         let page = Page::new(state, std::rc::Rc::new(crate::backend::Backend::detached()));
         assert_eq!(found(&page, AgentBackend::Claude), "Looking for it…");
 
@@ -468,18 +539,32 @@ mod tests {
         open_on(&mut harness, state, Section::Agents);
         for row in [
             "agent-model",
-            "agent-effort",
-            "agent-runs",
-            "agent-sandbox",
             "claude-binary",
             "claude-models",
+            "claude-effort",
+            "claude-runs",
+            "claude-sandbox",
             "codex-binary",
             "codex-models",
+            "codex-effort",
+            "codex-runs",
+            "codex-sandbox",
             "gemini-binary",
             "gemini-models",
+            "gemini-effort",
+            "gemini-runs",
+            "gemini-sandbox",
+            "opencode-binary",
+            "opencode-models",
+            "opencode-effort",
+            "opencode-runs",
         ] {
             assert!(shown(&harness, &format!("settings-row:{row}")), "{row}");
         }
+        assert!(
+            !shown(&harness, "settings-row:opencode-sandbox"),
+            "OpenCode has no OS sandbox"
+        );
         assert!(shown(&harness, "settings-group:Gemini (Antigravity)"));
         assert_eq!(
             found(&page, AgentBackend::Claude),
@@ -513,9 +598,11 @@ mod tests {
 
         // The file's choices, with resets where it makes them.
         assert!(shown(&harness, "settings-reset:agent-model"));
+        assert!(shown(&harness, "settings-reset:claude-effort"));
         assert!(shown(&harness, "settings-reset:codex-binary"));
         assert!(!shown(&harness, "settings-reset:claude-binary"));
-        assert!(!shown(&harness, "settings-reset:agent-runs"));
+        assert!(!shown(&harness, "settings-reset:claude-runs"));
+        assert!(!shown(&harness, "settings-reset:gemini-effort"));
 
         // The model dropdown offers what was found, Codex's after Claude's.
         pick(&mut harness, "settings-agent-model", "Sol 6.1");
@@ -523,24 +610,66 @@ mod tests {
             written(&mut commands),
             vec![Setting::AgentModel(Some("gpt-6.1-sol".into()))]
         );
-        pick(&mut harness, "settings-agent-effort", "Low");
+        pick(&mut harness, "settings-claude-effort", "Low");
         assert_eq!(
             written(&mut commands),
-            vec![Setting::AgentEffort(Some("low".into()))]
+            vec![Setting::AgentEffort {
+                backend: AgentBackend::Claude,
+                effort: Some("low".into()),
+            }]
         );
-        pick(&mut harness, "settings-agent-runs", "6");
+        pick(&mut harness, "settings-gemini-effort", "Medium");
         assert_eq!(
             written(&mut commands),
-            vec![Setting::AgentMaxConcurrentRuns(Some(6))]
+            vec![Setting::AgentEffort {
+                backend: AgentBackend::Gemini,
+                effort: Some("medium".into()),
+            }]
+        );
+        pick(&mut harness, "settings-claude-runs", "6");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::AgentMaxConcurrentRuns {
+                backend: AgentBackend::Claude,
+                runs: Some(6),
+            }]
+        );
+        pick(&mut harness, "settings-gemini-runs", "3");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::AgentMaxConcurrentRuns {
+                backend: AgentBackend::Gemini,
+                runs: Some(3),
+            }]
         );
 
-        // The sandbox is on while the file says nothing, and turning it
-        // off writes `false`.
-        assert!(!shown(&harness, "settings-reset:agent-sandbox"));
-        click(&mut harness, "settings-agent-sandbox");
+        // Each agent's sandbox toggles independently.
+        assert!(!shown(&harness, "settings-reset:claude-sandbox"));
+        assert!(!shown(&harness, "settings-reset:gemini-sandbox"));
+        assert!(!shown(&harness, "settings-reset:codex-sandbox"));
+        click(&mut harness, "settings-gemini-sandbox");
         assert_eq!(
             written(&mut commands),
-            vec![Setting::AgentSandbox(Some(false))]
+            vec![Setting::AgentSandbox {
+                backend: AgentBackend::Gemini,
+                sandbox: Some(false),
+            }]
+        );
+        click(&mut harness, "settings-codex-sandbox");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::AgentSandbox {
+                backend: AgentBackend::Codex,
+                sandbox: Some(false),
+            }]
+        );
+        click(&mut harness, "settings-claude-sandbox");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::AgentSandbox {
+                backend: AgentBackend::Claude,
+                sandbox: Some(false),
+            }]
         );
 
         // An executable box is blank while the file names none.
@@ -584,17 +713,36 @@ mod tests {
         assert!(outline.iter().any(|row| row.contains("Sol 6.1")));
     }
 
-    /// Off in the file, the switch is off with a reset, and turning it
-    /// back on takes the key out.
+    /// Off in the file, each backend's switch is independently off with a
+    /// reset, and turning it back on takes only its key out.
     #[test]
     fn a_sandbox_turned_off_is_turned_on_by_taking_the_key_out() {
-        let (mut harness, state, mut commands) =
-            window(1400.0, 1400.0, "[agent]\nsandbox = false\n");
+        let (mut harness, state, mut commands) = window(
+            1400.0,
+            2400.0,
+            "[agent]\nsandbox = false\n\n[agent.gemini]\nsandbox = false\n",
+        );
         state.agent.set(discovered());
         open_on(&mut harness, state, Section::Agents);
-        assert!(shown(&harness, "settings-reset:agent-sandbox"));
-        click(&mut harness, "settings-agent-sandbox");
-        assert_eq!(written(&mut commands), vec![Setting::AgentSandbox(None)]);
+        assert!(shown(&harness, "settings-reset:claude-sandbox"));
+        assert!(shown(&harness, "settings-reset:gemini-sandbox"));
+        assert!(!shown(&harness, "settings-reset:codex-sandbox"));
+        click(&mut harness, "settings-gemini-sandbox");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::AgentSandbox {
+                backend: AgentBackend::Gemini,
+                sandbox: None,
+            }]
+        );
+        click(&mut harness, "settings-claude-sandbox");
+        assert_eq!(
+            written(&mut commands),
+            vec![Setting::AgentSandbox {
+                backend: AgentBackend::Claude,
+                sandbox: None,
+            }]
+        );
         settle(&mut harness);
     }
 

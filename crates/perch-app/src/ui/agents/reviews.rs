@@ -75,6 +75,27 @@ pub(crate) fn entries(app: AppState, review: ReviewState) -> Vec<AgentReviewRunG
     entries
 }
 
+/// Whether any finished attempt in `summary` had unread/incomplete output.
+pub(crate) fn has_incomplete_ingestion(summary: &ReviewGroupSummary) -> bool {
+    summary.attempts.iter().any(|attempt| {
+        attempt.phase == perch_github::ReviewerPhase::Completed
+            && attempt.ingestion_state == perch_github::ReviewIngestionState::Incomplete
+    })
+}
+
+/// The status dot colour for a review group: amber when a completed review left
+/// output unread so an incomplete review never looks all-clear green.
+pub(crate) fn group_dot_color(group: &AgentReviewRunGroup) -> fn() -> floem::peniko::Color {
+    let status = group_status(group);
+    if status == AgentRunStatus::Completed
+        && group.summary.as_ref().is_some_and(has_incomplete_ingestion)
+    {
+        theme::notice_fg
+    } else {
+        status_color(status)
+    }
+}
+
 /// A key for a review's line that changes when what the line shows does:
 /// how it stands, its reviewers' runs and how they stand, and its counts.
 pub(crate) fn entry_key(group: &AgentReviewRunGroup) -> String {
@@ -87,9 +108,17 @@ pub(crate) fn entry_key(group: &AgentReviewRunGroup) -> String {
                 .iter()
                 .filter(|attempt| attempt.phase.is_terminal())
                 .count();
+            let incomplete = summary
+                .attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.phase == perch_github::ReviewerPhase::Completed
+                        && attempt.ingestion_state == perch_github::ReviewIngestionState::Incomplete
+                })
+                .count();
             let g = &summary.group;
             format!(
-                "{}:{done}:{}/{}/{}/{}",
+                "{}:{done}:{incomplete}:{}/{}/{}/{}",
                 g.status.name(),
                 g.new_findings,
                 g.still_present,
@@ -145,7 +174,8 @@ pub(crate) fn reviewers_label(group: &AgentReviewRunGroup) -> String {
 }
 
 /// What a finished review found, in the counts' own words, each kind it
-/// has: `3 new · 1 still present`.
+/// has: `3 new · 1 still present`. An incomplete ingestion never reads as
+/// `nothing found`.
 fn found_label(summary: &ReviewGroupSummary) -> String {
     let g = &summary.group;
     let found = [
@@ -158,8 +188,15 @@ fn found_label(summary: &ReviewGroupSummary) -> String {
     .filter(|(count, _)| *count > 0)
     .map(|(count, words)| format!("{count} {words}"))
     .collect::<Vec<_>>();
+    let incomplete = has_incomplete_ingestion(summary);
     if found.is_empty() {
-        "nothing found".to_string()
+        if incomplete {
+            "incomplete".to_string()
+        } else {
+            "nothing found".to_string()
+        }
+    } else if incomplete {
+        format!("{} \u{b7} incomplete", found.join(" \u{b7} "))
     } else {
         found.join(" \u{b7} ")
     }
@@ -205,16 +242,20 @@ pub(crate) fn how_label(group: &AgentReviewRunGroup, now: jiff::Timestamp) -> St
     }
 }
 
-/// The attempts Retry runs again: each reviewer that failed, stopped or
-/// was interrupted, once the review is over.
+/// The attempts Retry runs again: each reviewer that failed, stopped, was
+/// interrupted, or completed with unreadable/incomplete output, once the
+/// review is over.
 pub(crate) fn retryable_attempts(group: &AgentReviewRunGroup) -> Vec<String> {
-    use perch_github::ReviewerPhase as P;
+    use perch_github::{ReviewIngestionState as I, ReviewerPhase as P};
     match &group.summary {
         Some(summary) if summary.group.status.is_active() => Vec::new(),
         Some(summary) => summary
             .attempts
             .iter()
-            .filter(|attempt| matches!(attempt.phase, P::Failed | P::Stopped | P::Interrupted))
+            .filter(|attempt| {
+                matches!(attempt.phase, P::Failed | P::Stopped | P::Interrupted)
+                    || (attempt.phase == P::Completed && attempt.ingestion_state == I::Incomplete)
+            })
             .map(|attempt| attempt.id.clone())
             .collect(),
         None => group
@@ -357,7 +398,7 @@ fn line(
             .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32))
             .into_any()
     } else {
-        let color = status_color(status);
+        let color = group_dot_color(&group);
         Empty::new()
             .style(move |s| {
                 s.size(7.0, 7.0)
@@ -626,7 +667,8 @@ struct FindingRow {
 fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> impl IntoView {
     let group_id = summary.group.id.clone();
     let item_id = summary.group.item_id.clone();
-    let done = !summary.group.status.is_active();
+    let show_nothing_found = summary.group.status == perch_github::ReviewGroupStatus::Completed
+        && !has_incomplete_ingestion(&summary);
     let rows = Memo::new(move |_| {
         let mut found: Vec<ReviewFindingSummary> = app
             .review_findings_for(&item_id)
@@ -667,12 +709,17 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
         move |rows| {
             if rows.is_empty() {
                 return Label::derived(move || {
-                    if done { "Nothing found." } else { "" }.to_string()
+                    if show_nothing_found {
+                        "Nothing found."
+                    } else {
+                        ""
+                    }
+                    .to_string()
                 })
                 .style(move |s| {
                     s.font_size(theme::TEXT_META)
                         .color(theme::fg_subtle())
-                        .apply_if(!done, |s| s.hide())
+                        .apply_if(!show_nothing_found, |s| s.hide())
                 })
                 .into_any();
             }
@@ -701,7 +748,9 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
     // Nothing at all while a running review has found nothing yet.
     .style(move |s| {
         s.width_full()
-            .apply_if(!done && rows.with(|r| r.is_empty()), |s| s.hide())
+            .apply_if(!show_nothing_found && rows.with(|r| r.is_empty()), |s| {
+                s.hide()
+            })
     })
 }
 
@@ -833,12 +882,17 @@ fn reviewers(
             })
             .into_any();
     }
-    Stack::vertical_from_iter(
-        group
-            .runs
-            .iter()
-            .map(|run| reviewer(app, review, backend.clone(), run.clone()).into_any()),
-    )
+    Stack::vertical_from_iter(group.runs.iter().map(|run| {
+        let incomplete = group.summary.as_ref().is_some_and(|summary| {
+            summary.attempts.iter().any(|attempt| {
+                (attempt.run_id.as_deref() == Some(run.id.as_str())
+                    || run.review_attempt_id.as_deref() == Some(attempt.id.as_str()))
+                    && attempt.phase == perch_github::ReviewerPhase::Completed
+                    && attempt.ingestion_state == perch_github::ReviewIngestionState::Incomplete
+            })
+        });
+        reviewer(app, review, backend.clone(), run.clone(), incomplete).into_any()
+    }))
     .debug_name("agent-review-reviewers")
     .style(|s| s.flex_col().width_full().gap(2.0))
     .into_any()
@@ -851,6 +905,7 @@ fn reviewer(
     review: ReviewState,
     backend: Rc<Backend>,
     initial: AgentRunSummary,
+    incomplete: bool,
 ) -> impl IntoView {
     let id = initial.id.clone();
     let run = {
@@ -863,7 +918,11 @@ fn reviewer(
             if matches!(status, AgentRunStatus::Starting | AgentRunStatus::Running) {
                 live_dot(app, 6.0).into_any()
             } else {
-                let color = status_color(status);
+                let color = if status == AgentRunStatus::Completed && incomplete {
+                    theme::notice_fg
+                } else {
+                    status_color(status)
+                };
                 Empty::new()
                     .style(move |s| s.size(6.0, 6.0).border_radius(3.0).background(color()))
                     .into_any()
@@ -894,11 +953,14 @@ fn reviewer(
                 .filter(|_| run.status.is_active())
             {
                 Some(activity) => activity,
-                None => format!(
-                    "{} \u{b7} {}",
-                    run.status.label(),
-                    elapsed_label(&run, app.now.get())
-                ),
+                None => {
+                    let label = if run.status == AgentRunStatus::Completed && incomplete {
+                        "Incomplete"
+                    } else {
+                        run.status.label()
+                    };
+                    format!("{label} \u{b7} {}", elapsed_label(&run, app.now.get()))
+                }
             }
         })
         .debug_name("agent-review-reviewer-status")
@@ -906,6 +968,7 @@ fn reviewer(
             let status = run.with(|run| run.status);
             s.font_size(theme::TEXT_BADGE)
                 .color(match status {
+                    AgentRunStatus::Completed if incomplete => theme::notice_fg(),
                     AgentRunStatus::Completed => theme::fg_subtle(),
                     status if status.is_active() => theme::fg_muted(),
                     status => status_color(status)(),
@@ -1396,6 +1459,61 @@ mod tests {
         assert!(
             list.height() < content,
             "the reviews at {list:?} do not scroll {content} of lines"
+        );
+    }
+
+    /// An incomplete ingestion never presents as a clean "nothing found"
+    /// review: its header says `incomplete`, `Nothing found.` is hidden, the
+    /// reviewer row reads `Incomplete`, and Retry is offered.
+    #[test]
+    fn an_incomplete_review_does_not_say_nothing_found_and_offers_retry() {
+        let (mut harness, app, state, mut commands) = window();
+        add(
+            app,
+            &[reviewer(
+                "gemini-run",
+                "attempt-gemini",
+                RunStatus::Completed,
+                5,
+            )],
+        );
+        let mut incomplete = review(5, &["attempt-gemini"]);
+        incomplete.attempts[0].backend = "gemini".into();
+        incomplete.attempts[0].run_id = Some("gemini-run".into());
+        incomplete.attempts[0].ingestion_state = perch_github::ReviewIngestionState::Incomplete;
+        incomplete.attempts[0].diagnostics = Some("the reviewer ended without an answer".into());
+        set_reviews(app, vec![incomplete]);
+        settle(&mut harness);
+        click(&mut harness, "review-control");
+        assert!(state.review_open.get());
+        assert!(
+            named(harness.root_id(), "Review #5 · Gemini · incomplete").is_some(),
+            "incomplete review header should say incomplete, not nothing found"
+        );
+        assert!(named(harness.root_id(), "Review #5 · Gemini · nothing found").is_none());
+
+        click(&mut harness, "agent-review-head");
+        assert!(named(harness.root_id(), "Nothing found.").is_none());
+        let note = named(harness.root_id(), "agent-review-note").expect("missing unread note");
+        assert!(named(
+            note,
+            "Perch could not read all of Gemini's output: the reviewer ended without an answer"
+        )
+        .is_some());
+        let status = named(harness.root_id(), "agent-review-reviewer-status")
+            .expect("missing reviewer status");
+        assert!(
+            named(status, "Incomplete · 0s").is_some(),
+            "incomplete reviewer row should show Incomplete, not Completed"
+        );
+        sent(&mut commands);
+        press(&mut harness, "group-5", "agent-review retry");
+        assert!(
+            sent(&mut commands).iter().any(|c| matches!(
+                c,
+                Command::RetryReviewAttempt { attempt_id } if attempt_id == "attempt-gemini"
+            )),
+            "Retry did not retry the incomplete attempt"
         );
     }
 }

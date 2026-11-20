@@ -111,7 +111,6 @@ pub fn defaults(app: AppState) -> AgentChoice {
 /// at the nearest effort it takes. With nothing installed the config's
 /// own choice stands, and the run says what is missing.
 fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
-    let effort = perch_agent::Effort::parse(&agent.effort).unwrap_or_default();
     let offered = agent
         .models
         .iter()
@@ -129,8 +128,10 @@ fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
             .map(|(_, m)| m)
             .unwrap_or_else(|| agent.model.clone())
     };
+    let backend = crate::ask::backend_for(agent, &model);
+    let effort = perch_agent::Effort::parse(agent.effort_for(backend.name())).unwrap_or_default();
     (
-        crate::ask::backend_for(agent, &model),
+        backend,
         model.clone(),
         nearest_effort(agent, &model, effort),
     )
@@ -6005,6 +6006,7 @@ mod tests {
         // Claude Code is not installed: its aliases are gone, and Codex is.
         agent.models.clear();
         agent.codex.models = vec!["gpt-5.5".into(), "gpt-6-astra".into()];
+        agent.codex.effort = "ultra".into();
         agent.codex.efforts.insert(
             "gpt-5.5".into(),
             ["low", "xhigh"].map(String::from).to_vec(),

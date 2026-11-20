@@ -924,8 +924,99 @@ pub fn linux_sandbox_refusal(path: Option<&std::ffi::OsStr>) -> Option<String> {
         _ => "neither".to_string(),
     };
     Some(format!(
-        "Claude Code's sandbox needs bwrap and socat on Linux, and this machine has {lacks} on PATH. Install bubblewrap and socat, then run it again — or, on a machine that is itself the boundary such as a throwaway VM, turn the sandbox off in Settings > Agents."
+        "Claude Code's sandbox needs bwrap and socat on Linux, and this machine has {lacks} on PATH. Install bubblewrap and socat, then run it again — or, on a machine that is itself the boundary such as a throwaway VM or container, turn Claude Code's sandbox off in Settings > Agents > Claude Code."
     ))
+}
+
+/// Why `agy`'s Linux terminal sandbox (`sbox`) cannot start on this host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeminiSandboxBlock {
+    /// Creating an unprivileged user/UTS namespace (`unshare`) was rejected.
+    UserNamespace,
+    /// `sethostname` inside the new user/UTS namespace was rejected (for
+    /// example by Podman/Docker's default seccomp profile).
+    SetHostname,
+}
+
+/// Probe whether `agy`'s Linux terminal sandbox (`sbox`) can create a user+UTS
+/// namespace and set its hostname. Runs in a forked child using only
+/// async-signal-safe syscalls so the multi-threaded caller is untouched.
+/// Returns `None` off Linux or when the probe succeeds.
+pub fn gemini_linux_sandbox_block() -> Option<GeminiSandboxBlock> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: The child executes only raw async-signal-safe libc calls
+        // (`unshare`, `sethostname`, `_exit`) without touching Rust state.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return None;
+        }
+        if pid == 0 {
+            let unshare_rc = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWUTS) };
+            if unshare_rc != 0 {
+                unsafe { libc::_exit(1) };
+            }
+            const NAME: &[u8] = b"sandbox";
+            let host_rc =
+                unsafe { libc::sethostname(NAME.as_ptr().cast::<libc::c_char>(), NAME.len()) };
+            if host_rc != 0 {
+                unsafe { libc::_exit(2) };
+            }
+            unsafe { libc::_exit(0) };
+        }
+        let mut status: libc::c_int = 0;
+        loop {
+            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if waited == pid {
+                break;
+            }
+            if waited < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return None;
+            }
+        }
+        if libc::WIFEXITED(status) {
+            match libc::WEXITSTATUS(status) {
+                0 => None,
+                1 => Some(GeminiSandboxBlock::UserNamespace),
+                2 => Some(GeminiSandboxBlock::SetHostname),
+                _ => Some(GeminiSandboxBlock::UserNamespace),
+            }
+        } else if libc::WIFSIGNALED(status) {
+            // A strict seccomp filter with SECCOMP_RET_KILL_PROCESS terminates
+            // the child with SIGSYS.
+            Some(GeminiSandboxBlock::SetHostname)
+        } else {
+            None
+        }
+    }
+}
+
+/// Human-readable refusal for a blocked Gemini (`agy`) Linux sandbox.
+pub fn gemini_sandbox_refusal_for(block: GeminiSandboxBlock) -> String {
+    let cause = match block {
+        GeminiSandboxBlock::UserNamespace => "unprivileged user namespaces are blocked",
+        GeminiSandboxBlock::SetHostname => {
+            "sethostname in a user namespace is blocked (for example by a container seccomp profile)"
+        }
+    };
+    format!(
+        "Gemini's (agy) terminal sandbox cannot start on this Linux host: {cause}. On a machine that is itself the boundary, such as a container or throwaway VM, turn Gemini's sandbox off in Settings > Agents > Gemini (Antigravity) ([agent.gemini] sandbox = false)."
+    )
+}
+
+/// Why Gemini (`agy`) cannot run sandboxed in print mode on this Linux host,
+/// checked before launching the CLI so a run fails fast instead of wasting a
+/// turn before `sbox` crashes.
+pub fn gemini_linux_sandbox_refusal() -> Option<String> {
+    gemini_linux_sandbox_block().map(gemini_sandbox_refusal_for)
 }
 
 /// Which of the tools Claude Code's sandbox needs on Linux, `bwrap` and
@@ -1234,21 +1325,29 @@ impl RunSpec {
             "model_reasoning_effort": self.effort.name(),
             "mcp_servers": mcp,
         });
-        if let Some(grant) = grant {
-            let filesystem: serde_json::Map<String, serde_json::Value> =
-                codex_work_entries(&self.cwd, grant)
-                    .into_iter()
-                    .chain(
-                        self.read_dirs
-                            .iter()
-                            .map(|path| (real_path(path).to_string_lossy().into_owned(), "read")),
-                    )
-                    .map(|(path, access)| (path, serde_json::json!(access)))
-                    .collect();
-            config["default_permissions"] = serde_json::json!(CODEX_WORK_PROFILE);
-            config["permissions"] =
-                serde_json::json!({CODEX_WORK_PROFILE: {"filesystem": filesystem}});
+        if self.sandbox {
+            if let Some(grant) = grant {
+                let filesystem: serde_json::Map<String, serde_json::Value> =
+                    codex_work_entries(&self.cwd, grant)
+                        .into_iter()
+                        .chain(
+                            self.read_dirs.iter().map(|path| {
+                                (real_path(path).to_string_lossy().into_owned(), "read")
+                            }),
+                        )
+                        .map(|(path, access)| (path, serde_json::json!(access)))
+                        .collect();
+                config["default_permissions"] = serde_json::json!(CODEX_WORK_PROFILE);
+                config["permissions"] =
+                    serde_json::json!({CODEX_WORK_PROFILE: {"filesystem": filesystem}});
+            }
         }
+        let (approval_policy, sandbox) = match (grant.is_some(), self.sandbox) {
+            (true, true) => ("on-request", None),
+            (true, false) => ("untrusted", Some("danger-full-access".to_string())),
+            (false, true) => ("never", Some("read-only".to_string())),
+            (false, false) => ("never", Some("danger-full-access".to_string())),
+        };
         CodexThread {
             cwd: self.cwd.to_string_lossy().into_owned(),
             model: self.model.clone(),
@@ -1256,14 +1355,9 @@ impl RunSpec {
             prompt: self.prompt.clone(),
             developer_instructions: self.system.clone(),
             resume: self.resume.clone(),
-            approval_policy: if grant.is_some() {
-                "on-request"
-            } else {
-                "never"
-            }
-            .to_string(),
+            approval_policy: approval_policy.to_string(),
             reviewer: grant.map(|g| if g.auto_review { "auto_review" } else { "user" }.to_string()),
-            sandbox: grant.is_none().then(|| "read-only".to_string()),
+            sandbox,
             config,
         }
     }
@@ -4094,5 +4188,33 @@ mod tests {
         assert_eq!(trusted.refusal(), None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(matches!(Run::spawn(untrusted, tx), Err(Error::Refused(_))));
+    }
+
+    #[test]
+    fn codex_without_the_sandbox_uses_danger_full_access_and_untrusted_work_approvals() {
+        let mut ask = work(Backend::Codex, WorkGrant::default(), None);
+        ask.mode = Mode::Ask;
+        ask.sandbox = false;
+        let thread = ask.codex_thread();
+        assert_eq!(thread.sandbox.as_deref(), Some("danger-full-access"));
+        assert_eq!(thread.approval_policy, "never");
+
+        let mut work_spec = work(Backend::Codex, full_grant(), None);
+        work_spec.sandbox = false;
+        let thread = work_spec.codex_thread();
+        assert_eq!(thread.sandbox.as_deref(), Some("danger-full-access"));
+        assert_eq!(thread.approval_policy, "untrusted");
+        assert!(thread.config.get("default_permissions").is_none());
+        assert!(thread.config.get("permissions").is_none());
+    }
+
+    #[test]
+    fn gemini_sandbox_refusal_messages_name_the_cause_and_setting() {
+        let host = gemini_sandbox_refusal_for(GeminiSandboxBlock::SetHostname);
+        assert!(host.contains("sethostname"), "{host}");
+        assert!(host.contains("[agent.gemini] sandbox = false"), "{host}");
+        let ns = gemini_sandbox_refusal_for(GeminiSandboxBlock::UserNamespace);
+        assert!(ns.contains("user namespaces"), "{ns}");
+        assert!(ns.contains("[agent.gemini] sandbox = false"), "{ns}");
     }
 }

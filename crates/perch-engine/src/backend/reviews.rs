@@ -1226,13 +1226,15 @@ async fn execute_attempt(
         knowledge_dir,
         external_knowledge_dirs,
         transcript: Some(transcript(captured.root(), &attempt.id, "review")),
-        sandbox: ctx.config().agent.sandbox,
+        sandbox: ctx.config().agent.sandbox_for(backend.name()),
     };
 
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Reviewing);
     send_group(ctx, &group_id);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let spawned = if matches!(backend, AgentBackend::Gemini | AgentBackend::OpenCode)
+    let spawned = if let Some(why) = crate::ask::host_refusal(backend, spec.sandbox, false) {
+        Err(perch_agent::Error::Refused(why))
+    } else if matches!(backend, AgentBackend::Gemini | AgentBackend::OpenCode)
         && (spec.knowledge_dir.is_some() || !spec.external_knowledge_dirs.is_empty())
     {
         match perch_agent::Run::spawn_review(spec.clone(), tx.clone()) {
@@ -1250,13 +1252,17 @@ async fn execute_attempt(
     let handle = match spawned {
         Ok(handle) => handle,
         Err(error) => {
+            let message = match error {
+                perch_agent::Error::Refused(why) => why,
+                other => format!("Could not start native review: {other}"),
+            };
             finish_failed_attempt(
                 ctx,
                 &attempt,
                 run,
                 lease,
                 TerminalReason::SpawnFailed,
-                &format!("Could not start native review: {error}"),
+                &message,
             );
             return;
         }
@@ -2130,10 +2136,14 @@ async fn run_verification(
         diff_path: Some(snapshot.diff_path()),
         prompt,
         transcript: Some(transcript(snapshot.root(), &attempt.id, "verification")),
-        sandbox: ctx.config().agent.sandbox,
+        sandbox: ctx.config().agent.sandbox_for(backend.name()),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = match perch_agent::Run::spawn_review_verification(spec, tx) {
+    let spawned = match crate::ask::host_refusal(backend, spec.sandbox, false) {
+        Some(why) => Err(perch_agent::Error::Refused(why)),
+        None => perch_agent::Run::spawn_review_verification(spec, tx),
+    };
+    let handle = match spawned {
         Ok(handle) => handle,
         Err(error) => {
             diagnostics.push(format!(
