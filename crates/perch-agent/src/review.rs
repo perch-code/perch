@@ -22,8 +22,10 @@ use crate::{
 /// Bumped when the extractor learns a format. 2 reads the report Claude
 /// Code's review skill files through `ReportFindings`; 3 also reads the
 /// same findings when the skill prints them as a fenced JSON array instead;
-/// 4 reads the text `codex exec review` prints, including its clean prose.
-pub const REVIEW_ADAPTER_VERSION: u32 = 5;
+/// 4 reads the text `codex exec review` prints, including its clean prose;
+/// 5 reads Claude's numbered-list findings; 6 also accepts a leading
+/// severity badge (such as `🔴 Important` or `🟡 Nit`) before the location.
+pub const REVIEW_ADAPTER_VERSION: u32 = 6;
 pub const REVIEW_OUTPUT_FORMAT_VERSION: u32 = 1;
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1819,11 +1821,13 @@ fn extract_text_review(raw: &str, manifest: &ReviewManifest) -> ReviewExtraction
     }
 }
 
-/// Claude Code 2.1.296's review skill sometimes writes the findings it was
-/// told to print as a JSON array as a numbered list instead: each item opens
-/// with a backticked `path:line`, then the summary, then an indented
-/// "Failure scenario:" paragraph. Items read as the array's objects would.
-/// A numbered line that does not open with a location is not a finding.
+/// Claude Code's review skill sometimes writes the findings it was told to
+/// print as a JSON array as a numbered list instead: each item opens with
+/// an optional severity badge and a backticked `path:line`, then the
+/// summary, then an indented "Failure scenario:" paragraph. Items read as
+/// the array's objects would. A numbered line that does not open with a
+/// location (with at most a recognized severity badge before it) is not a
+/// finding.
 fn extract_listed_review(raw: &str, manifest: &ReviewManifest) -> Option<ReviewExtraction> {
     let items = listed_items(raw);
     if items.is_empty() {
@@ -1850,6 +1854,9 @@ fn extract_listed_review(raw: &str, manifest: &ReviewManifest) -> Option<ReviewE
         };
         match normalize_reported_finding(reported, index, raw, item.start, manifest) {
             Ok(mut finding) => {
+                if let Some(severity) = item.severity {
+                    finding.severity = severity;
+                }
                 finding.evidence = EvidenceSpan {
                     start: item.start,
                     end: item.end,
@@ -1874,22 +1881,35 @@ fn extract_listed_review(raw: &str, manifest: &ReviewManifest) -> Option<ReviewE
 struct ListedItem<'a> {
     start: usize,
     end: usize,
+    severity: Option<ReviewSeverity>,
     location: &'a str,
     summary: String,
     failure_scenario: String,
 }
 
 fn listed_items(raw: &str) -> Vec<ListedItem<'_>> {
-    // (start, end, location, lines after the location)
-    let mut items: Vec<(usize, usize, &str, Vec<&str>)> = Vec::new();
+    struct Pending<'a> {
+        start: usize,
+        end: usize,
+        severity: Option<ReviewSeverity>,
+        location: &'a str,
+        lines: Vec<&'a str>,
+    }
+    let mut items: Vec<Pending<'_>> = Vec::new();
     let mut open = false;
     let mut offset = 0;
     for line in raw.split_inclusive('\n') {
         let text = line.trim_end_matches(['\n', '\r']);
         let line_start = offset;
         offset += line.len();
-        if let Some((location, rest)) = listed_item_head(text) {
-            items.push((line_start, line_start + text.len(), location, vec![rest]));
+        if let Some((severity, location, rest)) = listed_item_head(text) {
+            items.push(Pending {
+                start: line_start,
+                end: line_start + text.len(),
+                severity,
+                location,
+                lines: vec![rest],
+            });
             open = true;
             continue;
         }
@@ -1897,18 +1917,18 @@ fn listed_items(raw: &str) -> Vec<ListedItem<'_>> {
             continue;
         };
         if text.trim().is_empty() {
-            item.3.push("");
+            item.lines.push("");
         } else if text.starts_with([' ', '\t']) {
-            item.1 = line_start + text.len();
-            item.3.push(text.trim());
+            item.end = line_start + text.len();
+            item.lines.push(text.trim());
         } else {
             open = false;
         }
     }
     items
         .into_iter()
-        .map(|(start, end, location, lines)| {
-            let text = lines.join("\n");
+        .map(|item| {
+            let text = item.lines.join("\n");
             let mut paragraphs = text
                 .split("\n\n")
                 .map(|paragraph| paragraph.trim().replace('\n', " "))
@@ -1916,13 +1936,15 @@ fn listed_items(raw: &str) -> Vec<ListedItem<'_>> {
             let summary = paragraphs.next().unwrap_or_default();
             let rest = paragraphs.collect::<Vec<_>>().join("\n\n");
             let failure_scenario = rest
-                .strip_prefix("Failure scenario:")
+                .strip_prefix("**Failure scenario:**")
+                .or_else(|| rest.strip_prefix("Failure scenario:"))
                 .map_or(rest.as_str(), str::trim_start)
                 .to_string();
             ListedItem {
-                start,
-                end,
-                location,
+                start: item.start,
+                end: item.end,
+                severity: item.severity,
+                location: item.location,
                 summary,
                 failure_scenario,
             }
@@ -1930,8 +1952,9 @@ fn listed_items(raw: &str) -> Vec<ListedItem<'_>> {
         .collect()
 }
 
-/// `12. `path:40`: summary` split into the location and the summary.
-fn listed_item_head(line: &str) -> Option<(&str, &str)> {
+/// `12. `path:40`: summary` or `12. 🔴 **Important** `path:40`: summary`
+/// split into the optional severity, the location, and the summary.
+fn listed_item_head(line: &str) -> Option<(Option<ReviewSeverity>, &str, &str)> {
     let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     if digits == 0 {
         return None;
@@ -1940,8 +1963,14 @@ fn listed_item_head(line: &str) -> Option<(&str, &str)> {
         .strip_prefix(". ")
         .or_else(|| line[digits..].strip_prefix(") "))?
         .trim_start();
-    let rest = rest.strip_prefix("**").unwrap_or(rest);
-    let (location, rest) = rest.strip_prefix('`')?.split_once('`')?;
+    let (prefix, after_tick) = rest.split_once('`')?;
+    let trimmed_prefix = prefix.trim().trim_matches('*').trim();
+    let severity = if trimmed_prefix.is_empty() {
+        None
+    } else {
+        Some(ReviewSeverity::parse(trimmed_prefix)?)
+    };
+    let (location, rest) = after_tick.split_once('`')?;
     if location.is_empty() || location.contains(char::is_whitespace) {
         return None;
     }
@@ -1950,7 +1979,7 @@ fn listed_item_head(line: &str) -> Option<(&str, &str)> {
         .trim_start()
         .trim_start_matches([':', '—', '–', '-'])
         .trim_start();
-    Some((location, rest))
+    Some((severity, location, rest))
 }
 
 /// A paragraph that is one of the ways reviewers say clean. Markdown
@@ -3232,6 +3261,64 @@ mod tests {
         let result = extract_review(Backend::ClaudeCode, outside, &manifest());
         assert!(result.incomplete);
         assert_eq!(result.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn numbered_list_findings_with_severity_badges_are_read_with_their_severity() {
+        // What Claude Code 2.1.329's /code-review prints: severity badge before `path:line`.
+        let raw = concat!(
+            "4 findings (2 🔴 Important, 1 🟡 Nit, 1 ⚪ Pre-existing):\n\n",
+            "1. 🔴 **Important** `src/lib.rs:4`: `with_compactions_poll_interval_ms(Some(0))` spins without a pause.\n\n",
+            "   Failure scenario: A caller passes 0 and holds a runtime worker at full CPU.\n\n",
+            "2. **🔴 Important** `src/lib.rs:12`: Answer cache evicts the active manifest.\n\n",
+            "   **Failure scenario:** Reads cross FFI on every block.\n\n",
+            "3. 🟡 **Nit** `deleted.rs:2`: Invalid concurrency is only rejected at build.\n\n",
+            "   Failure scenario: The builder is already consumed.\n\n",
+            "4. ⚪ Pre-existing `src/lib.rs:20` — Older wording in the README.\n\n",
+            "   Failure scenario: Reader mis-sizes the local volume.\n",
+        );
+        let result = extract_review(Backend::ClaudeCode, raw, &manifest());
+        assert!(!result.incomplete, "{:?}", result.diagnostics);
+        assert!(!result.explicit_clean);
+        assert_eq!(result.findings.len(), 4);
+
+        assert_eq!(result.findings[0].severity, ReviewSeverity::High);
+        assert_eq!(
+            result.findings[0].title,
+            "`with_compactions_poll_interval_ms(Some(0))` spins without a pause."
+        );
+        assert_eq!(
+            result.findings[0].body,
+            "Failure scenario: A caller passes 0 and holds a runtime worker at full CPU."
+        );
+        assert_eq!(
+            result.findings[0].location.as_ref().unwrap().start_line,
+            Some(4)
+        );
+        assert_eq!(
+            &raw[result.findings[0].evidence.start..result.findings[0].evidence.end],
+            result.findings[0].evidence.text
+        );
+
+        assert_eq!(result.findings[1].severity, ReviewSeverity::High);
+        assert_eq!(
+            result.findings[1].body,
+            "Failure scenario: Reads cross FFI on every block."
+        );
+
+        assert_eq!(result.findings[2].severity, ReviewSeverity::Low);
+        let deleted = result.findings[2].location.as_ref().unwrap();
+        assert_eq!(deleted.path, "deleted.rs");
+        assert_eq!(deleted.side, ReviewSide::Left);
+
+        assert_eq!(result.findings[3].severity, ReviewSeverity::Info);
+        assert_eq!(result.findings[3].title, "Older wording in the README.");
+
+        // Non-severity prose before a backticked path is not a finding.
+        let prose = "1. Check `src/lib.rs:4` before merging.\n2. See `deleted.rs:2`.\n";
+        let result = extract_review(Backend::ClaudeCode, prose, &manifest());
+        assert!(result.incomplete);
+        assert!(result.findings.is_empty());
     }
 
     #[test]
