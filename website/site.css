@@ -178,6 +178,7 @@ body::before, .bar::before {
     --mark: #e1be79; --screen-paper: #24231f;
   }
   body { --grain-strength: .22; --grain-wash: #504936; }
+  .brand { color: var(--band-ink); }
   .guide-cover { background-color: #364a51; color: #efe4ca; }
 }
 
