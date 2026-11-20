@@ -480,13 +480,14 @@ pub(crate) fn tab_action(tab: SidebarTab) -> Action {
 
 /// Inbox, Worktrees and Browse. Selection uses the same persistence path
 /// as the filter menu, so changing tabs leaves the other filters intact.
+/// Clicking the tab that is already shown slides the drawer shut.
 fn scope_tabs(state: AppState) -> impl IntoView {
     dyn_stack(
         || SidebarTab::ALL,
         |tab| tab.label(),
         move |tab| {
             Button::new(with_shortcut_hint(tab_action(tab), Label::new(tab.label())))
-                .action(move || set_filters(state, move |f| f.tab = tab))
+                .action(move || show_tab(state, tab))
                 .debug_name(format!("tab:{}", tab.label()))
                 .style(move |s| {
                     let selected = state.item_filters.with(|f| f.tab == tab);
@@ -526,12 +527,14 @@ pub(crate) fn set_filters(state: AppState, edit: impl FnOnce(&mut crate::items::
     )));
 }
 
-/// Show `tab` in the drawer, as its tab does, opening the drawer when it
-/// is shut.
+/// Show `tab` in the drawer, opening the drawer when it is shut. When the
+/// drawer is already open on `tab`, slide it shut instead.
 pub(crate) fn show_tab(state: AppState, tab: SidebarTab) {
-    if state.item_filters.with_untracked(|f| f.tab) != tab {
-        set_filters(state, move |f| f.tab = tab);
+    if state.item_filters.with_untracked(|f| f.tab) == tab {
+        state.toggle_sidebar();
+        return;
     }
+    set_filters(state, move |f| f.tab = tab);
     if !state.sidebar_open.get_untracked() {
         state.show_sidebar(true);
     }
@@ -2207,6 +2210,36 @@ mod tests {
             !state.sidebar_open.get(),
             "the control did not shut the drawer"
         );
+    }
+
+    #[test]
+    fn clicking_the_selected_tab_shuts_the_drawer() {
+        let (mut harness, state) = harness();
+
+        // Switching to Inbox keeps the drawer open.
+        click_tab(&mut harness, SidebarTab::Inbox);
+        assert_eq!(state.item_filters.get().tab, SidebarTab::Inbox);
+        assert!(state.sidebar_open.get());
+
+        // Clicking Inbox again while it is already selected shuts the drawer.
+        click_tab(&mut harness, SidebarTab::Inbox);
+        assert_eq!(state.item_filters.get().tab, SidebarTab::Inbox);
+        assert!(
+            !state.sidebar_open.get(),
+            "clicking the already-selected tab should shut the drawer"
+        );
+
+        // Showing the same tab while the drawer is shut opens it again.
+        show_tab(state, SidebarTab::Inbox);
+        assert!(state.sidebar_open.get());
+        assert_eq!(state.item_filters.get().tab, SidebarTab::Inbox);
+
+        // Showing a different tab while shut switches and opens the drawer.
+        show_tab(state, SidebarTab::Inbox);
+        assert!(!state.sidebar_open.get());
+        show_tab(state, SidebarTab::Browse);
+        assert!(state.sidebar_open.get());
+        assert_eq!(state.item_filters.get().tab, SidebarTab::Browse);
     }
 
     #[test]
