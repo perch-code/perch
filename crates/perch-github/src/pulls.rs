@@ -9,7 +9,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::workflow_runs::{Check, CheckKind, CheckRunState, CheckState, Checks};
 
-type CheckRunKey = (String, String, String);
+/// What tells one workflow's check runs apart from another's. GitHub's
+/// workflow node id when present, so two workflow files with the same
+/// display name do not supersede one another; else the display name.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum WorkflowId {
+    Node(String),
+    Name(String),
+}
+
+type CheckRunKey = (WorkflowId, String, String);
 
 /// A rollup entry with what it is told apart from the others by.
 struct ParsedCheck {
@@ -474,7 +483,10 @@ query PullRequestOverview($owner: String!, $name: String!, $number: Int!, $conte
                 status
                 workflow_run: workflowRun {
                   event
-                  workflow { name }
+                  workflow {
+                    id
+                    name
+                  }
                 }
               }
             }
@@ -785,6 +797,8 @@ struct WorkflowRunRefPayload {
 #[derive(Debug, Deserialize)]
 struct WorkflowRefPayload {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     name: String,
 }
 
@@ -812,27 +826,34 @@ fn checks_from_contexts(
 
     let mut runs = Vec::<Check>::new();
     let mut check_run_keys = std::collections::HashMap::<CheckRunKey, usize>::new();
-    let mut superseded = Vec::<Check>::new();
-    // A failed job a newer run did again. GitHub's aggregate still counts it.
+    let mut superseded = Vec::<(CheckRunKey, Check)>::new();
+    // A failed job a newer run replaced. GitHub's aggregate still counts it.
     let mut replaced_failure = false;
     for ParsedCheck { check, key, suite } in &parsed {
         // A workflow run on the same commit, for the same event, that
         // started later stands for the workflow. While it runs, a job it
         // has not got to yet is waiting, not whatever the older run said;
-        // once it is done, it is the older run's word or nothing.
-        if let (Some(suite), Some((workflow, event, _))) = (suite, key) {
-            let running = current
-                .get(&(workflow.as_str(), event.as_str()))
-                .filter(|newer| newer.id != suite.id && !newer.done);
-            if let Some(newer) = running {
-                if !current_names.contains(&(newer.id, check.name.as_str())) {
-                    superseded.push(Check {
-                        state: CheckRunState::Waiting,
-                        url: None,
-                        started_at: None,
-                        completed_at: None,
-                        ..check.clone()
-                    });
+        // once it is done, the older run is superseded whole, so a job the
+        // older run alone had (slatedb#2265: an unexpanded matrix job
+        // cancelled before its matrix ran) does not linger beside the
+        // newer run's jobs.
+        if let (Some(suite), Some(key)) = (suite, key) {
+            let (workflow, event, _) = key;
+            if let Some(newer) = current
+                .get(&(workflow, event.as_str()))
+                .filter(|newer| newer.id != suite.id)
+            {
+                if !newer.done && !current_names.contains(&(newer.id, check.name.as_str())) {
+                    superseded.push((
+                        key.clone(),
+                        Check {
+                            state: CheckRunState::Waiting,
+                            url: None,
+                            started_at: None,
+                            completed_at: None,
+                            ..check.clone()
+                        },
+                    ));
                 }
                 replaced_failure |= check.state.is_failing();
                 continue;
@@ -856,12 +877,7 @@ fn checks_from_contexts(
         }
     }
     // An older run may hold the same job more than once, as its attempts.
-    for check in superseded {
-        let key = (
-            check.workflow.clone().unwrap_or_default(),
-            check.event.clone().unwrap_or_default(),
-            check.name.clone(),
-        );
+    for (key, check) in superseded {
         if let std::collections::hash_map::Entry::Vacant(entry) = check_run_keys.entry(key) {
             entry.insert(runs.len());
             runs.push(check);
@@ -909,16 +925,19 @@ fn checks_from_contexts(
 
 /// Per workflow and event, the run that stands for it: one still running
 /// before one that is done, else the one whose jobs started last.
-fn current_suites(parsed: &[ParsedCheck]) -> std::collections::HashMap<(&str, &str), SuiteRef> {
+fn current_suites<'a>(
+    parsed: &'a [ParsedCheck],
+) -> std::collections::HashMap<(&'a WorkflowId, &'a str), SuiteRef> {
     type Rank = (bool, Option<Timestamp>, u64);
-    let mut latest = std::collections::HashMap::<(&str, &str), (Rank, SuiteRef)>::new();
+    let mut latest =
+        std::collections::HashMap::<(&'a WorkflowId, &'a str), (Rank, SuiteRef)>::new();
     for p in parsed {
         let (Some(suite), Some((workflow, event, _))) = (p.suite, &p.key) else {
             continue;
         };
         let rank = (!suite.done, p.check.started_at, suite.id);
         let entry = latest
-            .entry((workflow.as_str(), event.as_str()))
+            .entry((workflow, event.as_str()))
             .or_insert((rank, suite));
         if rank > entry.0 {
             *entry = (rank, suite);
@@ -956,6 +975,12 @@ impl CheckContextPayload {
                         id,
                         done: suite_done,
                     });
+                let workflow_id = workflow_run
+                    .as_ref()
+                    .and_then(|run| run.workflow.as_ref())
+                    .and_then(|workflow| workflow.id.as_deref())
+                    .filter(|id| !id.is_empty())
+                    .map(|id| WorkflowId::Node(id.to_string()));
                 let workflow = workflow_run
                     .as_ref()
                     .and_then(|run| run.workflow.as_ref())
@@ -965,7 +990,8 @@ impl CheckContextPayload {
                     .and_then(|run| run.event)
                     .filter(|event| !event.is_empty());
                 let key = (
-                    workflow.clone().unwrap_or_default(),
+                    workflow_id
+                        .unwrap_or_else(|| WorkflowId::Name(workflow.clone().unwrap_or_default())),
                     event.clone().unwrap_or_default(),
                     name.clone(),
                 );
@@ -1356,14 +1382,134 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_rerun_keeps_what_the_older_run_alone_ran() {
+    fn a_finished_newer_run_supersedes_an_older_run_whole() {
         let checks = rerun_rollup("COMPLETED");
-        let go = checks
+        assert!(
+            checks.runs.iter().all(|c| c.name != "bindings-go"),
+            "an older suite's unmatched job does not linger after the newer run finishes"
+        );
+        assert_eq!(checks.runs.len(), 3);
+    }
+
+    /// slatedb#2265: the first run of PR Checks was cancelled while `tests`
+    /// was still running, leaving an unexpanded `tests (cross)` job with
+    /// conclusion CANCELLED. The second run passed and expanded the matrix
+    /// into platform-specific jobs, so no check run in it is literally named
+    /// `tests (cross)`. The cancelled placeholder must not linger or fail the
+    /// checks.
+    #[test]
+    fn a_cancelled_unexpanded_matrix_job_from_an_older_run_is_superseded() {
+        let run = |name: &str, conclusion: &str, started: &str, suite: u64| {
+            serde_json::json!({
+                "__typename": "CheckRun",
+                "name": name,
+                "status": "COMPLETED",
+                "conclusion": conclusion,
+                "started_at": started,
+                "completed_at": started,
+                "check_suite": {
+                    "database_id": suite,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            })
+        };
+        let contexts = serde_json::json!([
+            run("tests", "CANCELLED", "2026-11-15T19:08:52Z", 118447662905),
+            run("tests (cross)", "CANCELLED", "2026-11-15T19:18:21Z", 118447662905),
+            run("tests", "SUCCESS", "2026-11-15T19:18:25Z", 118449984855),
+            run("tests (cross) (macos-latest)", "SUCCESS", "2026-11-15T19:34:23Z", 118449984855),
+            run("tests (cross) (windows-latest)", "SUCCESS", "2026-11-15T19:34:23Z", 118449984855),
+            {"__typename": "StatusContext", "context": "license/cla", "state": "SUCCESS"},
+        ]);
+        let checks = checks_from_contexts(
+            Some("FAILURE".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
+        assert_eq!(checks.state, CheckState::Passing);
+        let names: Vec<&str> = checks.runs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "tests",
+                "tests (cross) (macos-latest)",
+                "tests (cross) (windows-latest)",
+                "license/cla",
+            ]
+        );
+        assert!(checks.runs.iter().all(|c| c.state.is_passing()));
+    }
+
+    #[test]
+    fn rerunning_failed_jobs_within_one_suite_keeps_the_other_jobs() {
+        let run = |name: &str, conclusion: &str, started: &str| {
+            serde_json::json!({
+                "__typename": "CheckRun",
+                "name": name,
+                "status": "COMPLETED",
+                "conclusion": conclusion,
+                "started_at": started,
+                "check_suite": {
+                    "database_id": 120152317958_u64,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            })
+        };
+        let contexts = serde_json::json!([
+            run("tests", "SUCCESS", "2026-11-18T19:56:15Z"),
+            run("bindings-python", "FAILURE", "2026-11-18T20:13:52Z"),
+            run("bindings-python", "SUCCESS", "2026-11-20T17:49:18Z"),
+        ]);
+        let checks = checks_from_contexts(
+            Some("FAILURE".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
+        assert_eq!(checks.state, CheckState::Passing);
+        assert_eq!(checks.runs.len(), 2);
+        assert!(checks
             .runs
             .iter()
-            .find(|c| c.name == "bindings-go")
-            .unwrap();
-        assert_eq!(go.state, CheckRunState::Success);
+            .all(|c| c.state == CheckRunState::Success));
+    }
+
+    #[test]
+    fn distinct_workflows_sharing_a_name_and_different_events_do_not_supersede_each_other() {
+        let run = |wf_id: &str, event: &str, name: &str, started: &str, suite: u64| {
+            serde_json::json!({
+                "__typename": "CheckRun",
+                "name": name,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "started_at": started,
+                "check_suite": {
+                    "database_id": suite,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": event,
+                        "workflow": { "id": wf_id, "name": "CI" },
+                    },
+                },
+            })
+        };
+        let contexts = serde_json::json!([
+            run("W_a", "pull_request", "rust", "2026-11-15T19:00:00Z", 1),
+            run("W_b", "pull_request", "web", "2026-11-15T19:05:00Z", 2),
+            run("W_a", "push", "rust-push", "2026-11-15T19:10:00Z", 3),
+        ]);
+        let checks = checks_from_contexts(
+            Some("SUCCESS".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
+        assert_eq!(checks.state, CheckState::Passing);
+        let names: Vec<&str> = checks.runs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["rust", "web", "rust-push"]);
     }
 
     /// slatedb#2145: the next run of PR Checks cancelled the first run's
