@@ -77,6 +77,9 @@ fn installed(app: AppState) -> Vec<(&'static str, perch_agent::Backend)> {
         if !agent.codex.models.is_empty() {
             found.push(("Codex", perch_agent::Backend::Codex));
         }
+        if !agent.gemini.models.is_empty() {
+            found.push(("Gemini", perch_agent::Backend::Gemini));
+        }
         found
     })
 }
@@ -207,8 +210,6 @@ pub fn close(review: ReviewState, restore_focus: bool) {
 #[derive(Clone, PartialEq)]
 struct Shown {
     accounts: Vec<(&'static str, Account)>,
-    /// Gemini runs, but agy reports no limits to show.
-    gemini: bool,
     opencode: bool,
     now: Timestamp,
 }
@@ -228,7 +229,6 @@ fn popover(app: AppState) -> impl IntoView {
                     .collect()
             })
         },
-        gemini: app.agent.with(|agent| !agent.gemini.models.is_empty()),
         opencode: app.agent.with(|agent| !agent.opencode.models.is_empty()),
         now: now.get(),
     });
@@ -238,8 +238,6 @@ fn popover(app: AppState) -> impl IntoView {
             if shown.accounts.is_empty() {
                 let text = if shown.opencode {
                     "OpenCode reports no usage limits"
-                } else if shown.gemini {
-                    "agy reports no usage limits"
                 } else {
                     "No agent CLI found"
                 };
@@ -459,6 +457,7 @@ mod tests {
         app.agent.update(|agent| {
             agent.models = vec!["sonnet".into()];
             agent.codex.models = vec!["gpt-5".into()];
+            agent.gemini.models = vec!["gemini-4-neon-medium".into()];
         });
         app.usage.set(Board {
             claude: Account {
@@ -487,7 +486,20 @@ mod tests {
                 }),
                 error: Some("Codex took too long to report usage".into()),
             },
-            gemini: Account::default(),
+            gemini: Account {
+                usage: Some(Usage {
+                    plan: None,
+                    windows: vec![
+                        window("session", "5-hour", 3.0),
+                        window("weekly", "Weekly", 16.0),
+                    ],
+                    limited: false,
+                    overage: false,
+                    free_resets: None,
+                    observed_at: Timestamp::now(),
+                }),
+                error: None,
+            },
             opencode: Account::default(),
         });
         settle(&mut harness);
@@ -538,7 +550,9 @@ mod tests {
         );
         let claude = rect(&harness, "usage-section:Claude");
         let codex = rect(&harness, "usage-section:Codex");
+        let gemini = rect(&harness, "usage-section:Gemini");
         assert!(claude.y1 <= codex.y0, "Claude before Codex");
+        assert!(codex.y1 <= gemini.y0, "Codex before Gemini");
         for name in ["usage-window:session", "usage-window:weekly:Fable"] {
             assert!(named(harness.root_id(), name).is_some(), "no {name}");
         }

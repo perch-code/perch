@@ -1,13 +1,13 @@
 //! How much of their plan's limits the reader has used, per CLI.
 //!
-//! Three sources, one board. `claude -p /usage` prints Claude Code's
-//! limits as data without calling the model; `codex app-server` answers
-//! `account/rateLimits/read` without starting a thread. Both are asked on
-//! a timer. And every run Perch starts says the same as it goes: Claude's
-//! stream carries a `rate_limit_event`, Codex's app-server an
-//! `account/rateLimits/updated`. The parser hands each of those lines here,
-//! so the board is as fresh as the last run or the last poll, whichever
-//! came later.
+//! One board across CLIs. `claude -p /usage` and `agy -p /usage` print
+//! Claude Code's and Gemini's limits as data without calling a model;
+//! `codex app-server` answers `account/rateLimits/read` without starting a
+//! thread. All are asked on a timer. And every run Perch starts for Claude
+//! or Codex says the same as it goes: Claude's stream carries a
+//! `rate_limit_event`, Codex's app-server an `account/rateLimits/updated`.
+//! The parser hands each of those lines here, so the board is as fresh as
+//! the last run or the last poll, whichever came later.
 //!
 //! The board is the process's, not a run's: the limits are the account's,
 //! and every run of one CLI reports the same account.
@@ -67,7 +67,6 @@ pub struct Account {
 pub struct Board {
     pub claude: Account,
     pub codex: Account,
-    /// agy reports no limits Perch can read; this stays empty.
     pub gemini: Account,
     #[serde(default)]
     pub opencode: Account,
@@ -331,6 +330,78 @@ fn codex_window(minutes: Option<u64>) -> (String, String) {
     }
 }
 
+/// The `/usage` command's report from `agy -p /usage --output-format json`
+/// (or the `command_result` line of `--output-format stream-json`). Only
+/// the Gemini Models group is taken; third-party model groups are ignored.
+pub fn from_gemini_report(line: &Value) -> Option<Usage> {
+    if line.pointer("/command/name").and_then(Value::as_str) != Some("usage") {
+        return None;
+    }
+    let groups = line.pointer("/command/data/groups")?.as_array()?;
+    let mut windows: Vec<Window> = groups
+        .iter()
+        .filter(|group| is_gemini_group(group))
+        .filter_map(|group| group.get("buckets").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|bucket| {
+            let remaining = bucket.get("remaining_fraction").and_then(Value::as_f64)?;
+            let used_percent = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
+            let kind = bucket.get("window").and_then(Value::as_str).unwrap_or("");
+            let (key, label) = match kind {
+                "5h" => ("session".into(), "5-hour".into()),
+                "weekly" => ("weekly".into(), "Weekly".into()),
+                other if !other.is_empty() => (other.into(), capitalize(&other.replace('_', " "))),
+                _ => {
+                    let id = bucket.get("id").and_then(Value::as_str).unwrap_or("window");
+                    let name = bucket
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Limit");
+                    (id.into(), name.into())
+                }
+            };
+            Some(Window {
+                key,
+                label,
+                used_percent,
+                resets_at: bucket
+                    .get("reset_time")
+                    .and_then(Value::as_str)
+                    .and_then(|at| at.parse().ok()),
+            })
+        })
+        .collect();
+    if windows.is_empty() {
+        return None;
+    }
+    order(&mut windows);
+    Some(Usage {
+        plan: None,
+        limited: windows.iter().any(|w| w.used_percent >= 100.0),
+        windows,
+        overage: false,
+        free_resets: None,
+        observed_at: Timestamp::now(),
+    })
+}
+
+fn is_gemini_group(group: &Value) -> bool {
+    group
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("gemini"))
+        || group
+            .get("buckets")
+            .and_then(Value::as_array)
+            .is_some_and(|buckets| {
+                buckets.iter().any(|b| {
+                    b.get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.starts_with("gemini-"))
+                })
+            })
+}
+
 /// Shortest window first, a model's own after the ones for every model.
 fn order(windows: &mut [Window]) {
     let rank = |w: &Window| match w.key.as_str() {
@@ -469,11 +540,35 @@ pub async fn read_codex(binary: &Path, cwd: &Path) -> Result<Usage, String> {
     answer
 }
 
+/// Ask Antigravity (`agy`) for `/usage`. A local command: no model is called
+/// and nothing is billed.
+pub async fn read_gemini(binary: &Path, cwd: &Path) -> Result<Usage, String> {
+    let mut command = Command::new(binary);
+    command
+        .args(["-p", "/usage", "--output-format", "json"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    crate::scrub_env(&mut command);
+    let output = tokio::time::timeout(POLL_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "Gemini took too long to report usage".to_string())?
+        .map_err(|e| format!("could not run {}: {e}", binary.display()))?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|line| from_gemini_report(&line))
+        .ok_or_else(|| "Gemini reported no plan usage".to_string())
+}
+
 /// The CLIs to poll, and where to run them.
 #[derive(Debug, Clone)]
 pub struct Poll {
     pub claude: Option<PathBuf>,
     pub codex: Option<PathBuf>,
+    pub gemini: Option<PathBuf>,
     pub cwd: PathBuf,
     pub every: Duration,
 }
@@ -503,7 +598,12 @@ pub fn keep_fresh(poll: Poll) {
                     report(Backend::Codex, read_codex(binary, &poll.cwd).await);
                 }
             };
-            tokio::join!(claude, codex);
+            let gemini = async {
+                if let Some(binary) = &poll.gemini {
+                    report(Backend::Gemini, read_gemini(binary, &poll.cwd).await);
+                }
+            };
+            tokio::join!(claude, codex, gemini);
             // A wake while the poll ran is not lost: `Notify` keeps one.
             loop {
                 tokio::select! {
@@ -547,6 +647,8 @@ mod tests {
     const CLAUDE_REPORT: &str = r#"{"type":"assistant","usage_report":{"rate_limits":{"limits":[{"kind":"session","group":"session","percent":3,"resets_at":"2026-09-27T22:00:00.081948+00:00","scope":null,"severity":"normal","is_active":false},{"kind":"weekly_all","group":"weekly","percent":95,"resets_at":"2026-09-28T00:00:00.081970+00:00","scope":null,"severity":"critical","is_active":true},{"kind":"weekly_scoped","group":"weekly","percent":16,"resets_at":"2026-09-28T00:00:00.082141+00:00","scope":{"model":{"display_name":"Fable"},"surface":null},"severity":"normal","is_active":false}],"extra_usage":{"is_enabled":false}}}}"#;
 
     const CODEX_READ: &str = r#"{"ordinaryUsageAllowed":false,"rateLimits":{"limitId":"codex","primary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":1791046709},"secondary":null,"planType":"pro","rateLimitReachedType":"rate_limit_reached"},"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":1791046709},"secondary":null,"planType":"pro","rateLimitReachedType":"rate_limit_reached"}},"rateLimitResetCredits":{"availableCount":1,"credits":[]}}"#;
+
+    const GEMINI_REPORT: &str = r#"{"conversation_id":"","status":"SUCCESS","num_turns":0,"command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.8417,"reset_time":"2026-11-24T23:28:19Z"},{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.9662,"reset_time":"2026-11-21T04:35:23Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.5,"reset_time":"2026-11-28T01:53:42Z"},{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.25,"reset_time":"2026-11-21T06:53:42Z"}]}]}}}"#;
 
     fn v(s: &str) -> Value {
         serde_json::from_str(s).unwrap()
@@ -657,5 +759,42 @@ mod tests {
             "a sparse update keeps the plan"
         );
         assert_eq!(merged.free_resets, Some(1));
+    }
+
+    #[test]
+    fn geminis_usage_report_takes_only_the_gemini_group() {
+        let usage = from_gemini_report(&v(GEMINI_REPORT)).unwrap();
+        assert_eq!(
+            keys(&usage),
+            [("session", "5-hour", 3.0), ("weekly", "Weekly", 16.0)]
+        );
+        assert_eq!(
+            usage.windows[0].resets_at.unwrap().as_second(),
+            "2026-11-21T04:35:23Z"
+                .parse::<Timestamp>()
+                .unwrap()
+                .as_second()
+        );
+        assert_eq!(
+            usage.windows[1].resets_at.unwrap().as_second(),
+            "2026-11-24T23:28:19Z"
+                .parse::<Timestamp>()
+                .unwrap()
+                .as_second()
+        );
+        assert!(!usage.limited);
+
+        let exhausted = from_gemini_report(&v(
+            r#"{"command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"5h","remaining_fraction":0.0}]}]}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(keys(&exhausted), [("session", "5-hour", 100.0)]);
+        assert!(exhausted.limited);
+
+        let third_party_only = v(
+            r#"{"command":{"name":"usage","data":{"groups":[{"name":"Claude and GPT models","buckets":[{"id":"3p-5h","window":"5h","remaining_fraction":0.5}]}]}}}"#,
+        );
+        assert!(from_gemini_report(&third_party_only).is_none());
+        assert!(from_gemini_report(&v(r#"{"command":{"name":"credits","data":{}}}"#)).is_none());
     }
 }

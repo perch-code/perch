@@ -4406,6 +4406,7 @@ fn watch_usage(agent: &perch_github::AgentConfig, data_root: &Path, events: &Eve
     perch_agent::usage::keep_fresh(perch_agent::usage::Poll {
         claude: installed(&agent.binary, &agent.models),
         codex: installed(&agent.codex.binary, &agent.codex.models),
+        gemini: installed(&agent.gemini.binary, &agent.gemini.models),
         cwd: data_root.to_path_buf(),
         every: USAGE_POLL_INTERVAL,
     });
