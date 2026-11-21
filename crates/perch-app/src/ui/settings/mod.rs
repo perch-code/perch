@@ -17,6 +17,7 @@ mod general;
 mod keyboard;
 mod knowledge;
 mod language_servers;
+mod prompts;
 mod repositories;
 mod work;
 
@@ -155,6 +156,7 @@ pub enum Section {
     Appearance,
     KeyboardShortcuts,
     Agents,
+    Prompts,
     Work,
     Repositories,
     Knowledge,
@@ -162,12 +164,13 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::General,
         Section::Environment,
         Section::Appearance,
         Section::KeyboardShortcuts,
         Section::Agents,
+        Section::Prompts,
         Section::Work,
         Section::Repositories,
         Section::Knowledge,
@@ -181,6 +184,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::KeyboardShortcuts => "Keyboard shortcuts",
             Section::Agents => "Agents",
+            Section::Prompts => "Prompts",
             Section::Work => "Work",
             Section::Repositories => "Repositories",
             Section::Knowledge => "Knowledge",
@@ -195,6 +199,7 @@ impl Section {
             Section::Appearance => SidebarIcon::Palette,
             Section::KeyboardShortcuts => SidebarIcon::Keyboard,
             Section::Agents => SidebarIcon::Agents,
+            Section::Prompts => SidebarIcon::Pencil,
             Section::Work => SidebarIcon::Branch,
             Section::Repositories => SidebarIcon::Repository,
             Section::Knowledge => SidebarIcon::Folder,
@@ -212,6 +217,7 @@ impl Section {
             Section::Appearance => appearance::groups(page),
             Section::KeyboardShortcuts => keyboard::groups(page),
             Section::Agents => agents::groups(page),
+            Section::Prompts => prompts::groups(page),
             Section::Work => work::groups(page),
             Section::Repositories => repositories::groups(page),
             Section::Knowledge => knowledge::groups(page),

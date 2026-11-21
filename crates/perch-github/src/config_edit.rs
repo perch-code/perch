@@ -12,7 +12,7 @@ use std::path::Path;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
 use crate::config::{
-    toml_error_line, Appearance, Approvals, Config, KnowledgeSource, RepoConfig, Theme,
+    toml_error_line, Appearance, Approvals, Config, KnowledgeSource, PromptKind, RepoConfig, Theme,
 };
 
 /// Remote windows write app preferences on the UI thread while the local
@@ -105,6 +105,12 @@ pub enum Setting {
     Repo {
         identity: String,
         change: RepoSetting,
+    },
+    /// `[prompts] <kind>`: `None`, blank, or text identical to the built-in
+    /// editorial default takes the key out of the file.
+    Prompt {
+        kind: PromptKind,
+        value: Option<String>,
     },
     /// A `[[knowledge]]` entry, identified by its relative directory.
     Knowledge {
@@ -576,6 +582,10 @@ fn place_of(change: &Setting) -> Result<(Place, Option<Value>), String> {
             };
             (place, value)
         }
+        Setting::Prompt { kind, value } => (
+            top(&["prompts"], kind.key().into()),
+            prompt_value(*kind, value),
+        ),
         Setting::Knowledge { .. } => unreachable!("handled in edit_knowledge"),
     })
 }
@@ -600,6 +610,78 @@ fn string(value: &Option<String>) -> Option<Value> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(Value::from)
+}
+
+/// A prompt override: trimmed, removed when empty or identical to the
+/// built-in editorial default, and formatted as a TOML multiline basic
+/// string when it spans multiple lines so `config.toml` stays readable.
+fn prompt_value(kind: PromptKind, value: &Option<String>) -> Option<Value> {
+    let text = value.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    if kind
+        .default_body()
+        .is_some_and(|default| default.trim() == text)
+    {
+        return None;
+    }
+    if text.contains('\n') {
+        if let Some(multiline) = toml_multiline_string(text) {
+            return Some(multiline);
+        }
+    }
+    Some(Value::from(text))
+}
+
+/// Format `text` as a TOML multiline basic string (`"""\n...\n"""`) and
+/// verify it parses back to `text` verbatim. Falls back to `None` if any
+/// edge case prevents an exact round-trip.
+fn toml_multiline_string(text: &str) -> Option<Value> {
+    let mut escaped = String::with_capacity(text.len() + 16);
+    let mut quotes = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '\\' => {
+                quotes = 0;
+                escaped.push_str("\\\\");
+            }
+            '"' => {
+                quotes += 1;
+                if quotes >= 3 {
+                    escaped.push_str("\\\"");
+                    quotes = 0;
+                } else {
+                    escaped.push('"');
+                }
+            }
+            '\r' => {
+                quotes = 0;
+                escaped.push_str("\\r");
+            }
+            '\t' => {
+                quotes = 0;
+                escaped.push('\t');
+            }
+            '\n' => {
+                quotes = 0;
+                escaped.push('\n');
+            }
+            c if c.is_control() => {
+                quotes = 0;
+                escaped.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => {
+                quotes = 0;
+                escaped.push(c);
+            }
+        }
+    }
+    // Avoid trailing quotes merging with the closing `"""`.
+    if escaped.ends_with('"') {
+        escaped.pop();
+        escaped.push_str("\\\"");
+    }
+    let raw = format!("\"\"\"\n{escaped}\"\"\"");
+    let parsed: Value = raw.parse().ok()?;
+    (parsed.as_str() == Some(text)).then_some(parsed)
 }
 
 /// A list of strings, each trimmed and the empty ones dropped; an empty
@@ -2029,6 +2111,63 @@ mod tests {
         .collect();
         assert_eq!(keys, want);
         assert!(present_keys("[agent", &[]).is_empty());
+    }
+
+    #[test]
+    fn prompts_round_trip_multiline_and_drop_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "");
+        let multiline =
+            "First line.\nSecond line with \"quotes\" and \"\"\"triple\"\"\"\nand trailing \"";
+        let written = write_settings(
+            &path,
+            &[
+                Setting::Prompt {
+                    kind: PromptKind::Ask,
+                    value: Some(multiline.into()),
+                },
+                Setting::Prompt {
+                    kind: PromptKind::PrSummary,
+                    value: Some("Short bullets only.".into()),
+                },
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(written.config.prompts.ask(), Some(multiline));
+        assert_eq!(
+            written.config.prompts.pr_summary(),
+            Some("Short bullets only.")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"\"\"\n"),
+            "expected multiline TOML:\n{text}"
+        );
+        let keys = present_keys(&text, &[]);
+        assert!(keys.contains("prompts.ask"));
+        assert!(keys.contains("prompts.pr_summary"));
+
+        // Writing the built-in default removes the key from config.toml.
+        let written = write_settings(
+            &path,
+            &[
+                Setting::Prompt {
+                    kind: PromptKind::PrSummary,
+                    value: Some(crate::DEFAULT_PR_SUMMARY_PROMPT.into()),
+                },
+                Setting::Prompt {
+                    kind: PromptKind::Ask,
+                    value: Some("   ".into()),
+                },
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(written.config.prompts.ask(), None);
+        assert_eq!(written.config.prompts.pr_summary(), None);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(present_keys(&text, &[]).is_empty());
     }
 
     #[test]

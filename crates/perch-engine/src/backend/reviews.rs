@@ -1221,7 +1221,10 @@ async fn execute_attempt(
         merge_base_sha: captured.manifest.range.merge_base.clone(),
         head_sha: captured.manifest.range.head.clone(),
         output_schema: schema,
-        instructions,
+        instructions: combine_review_instructions(
+            ctx.config().prompts.review(),
+            instructions.as_deref(),
+        ),
         discussion_dir,
         knowledge_dir,
         external_knowledge_dirs,
@@ -3664,6 +3667,19 @@ fn finish_stopped_attempt(
     send_agent_runs(ctx, 50);
 }
 
+/// Combine global `[prompts] review` preferences with per-run instructions.
+/// Per-run instructions come last so a one-off focus still has the last word.
+fn combine_review_instructions(global: Option<&str>, per_run: Option<&str>) -> Option<String> {
+    let global = global.map(str::trim).filter(|s| !s.is_empty());
+    let per_run = per_run.map(str::trim).filter(|s| !s.is_empty());
+    match (global, per_run) {
+        (Some(g), Some(p)) => Some(format!("{g}\n\n{p}")),
+        (Some(g), None) => Some(g.to_string()),
+        (None, Some(p)) => Some(p.to_string()),
+        (None, None) => None,
+    }
+}
+
 fn finish_failed_attempt(
     ctx: &Ctx,
     attempt: &ReviewerAttempt,
@@ -4208,5 +4224,23 @@ mod tests {
         let parsed: VerificationEnvelope = serde_json::from_str(candidate).unwrap();
         assert_eq!(parsed.verifications.len(), 1);
         assert_eq!(parsed.verifications[0].finding_id, "f1");
+    }
+
+    #[test]
+    fn combine_review_instructions_orders_per_run_after_global() {
+        assert_eq!(combine_review_instructions(None, None), None);
+        assert_eq!(combine_review_instructions(Some("  "), Some("")), None);
+        assert_eq!(
+            combine_review_instructions(Some("Focus on locks."), None),
+            Some("Focus on locks.".into())
+        );
+        assert_eq!(
+            combine_review_instructions(None, Some("Only src/a.rs.")),
+            Some("Only src/a.rs.".into())
+        );
+        assert_eq!(
+            combine_review_instructions(Some("Focus on locks."), Some("Only src/a.rs.")),
+            Some("Focus on locks.\n\nOnly src/a.rs.".into())
+        );
     }
 }

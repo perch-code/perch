@@ -61,6 +61,13 @@ change `token`, `worktrees_dir`, or an existing repository’s `github` and
 | `[work] branch_prefix` | `""` | Put before branch names Perch fills in, such as `"chris/"` |
 | `[work] approvals` | `"auto"` | Who answers a Work run's requests outside its sandbox: `"auto"` (the CLI's auto-reviewer, then you) or `"ask"` (you) |
 | `[work] approval_timeout_mins` | `15` in the app, `480` under `perchd` | Minutes a request to you waits before it is denied |
+| `[prompts] ask` | none | Additional preferences appended to Ask runs after Perch's framing and safety boundaries |
+| `[prompts] work` | none | Additional preferences appended to Work runs after Perch's framing and safety boundaries |
+| `[prompts] review` | none | Additional focus areas or rules appended to automated code reviews across all backends (per-run instructions still take precedence) |
+| `[prompts] pr_summary` | built-in default | Editorial instructions for automatic pull request description rewrites (Perch keeps its read-only, untrusted-data, and Markdown-only wrappers) |
+| `[prompts] issue_summary` | built-in default | Editorial instructions for automatic issue description rewrites (Perch keeps its read-only, untrusted-data, and Markdown-only wrappers) |
+| `[prompts] pr_description` | built-in default | Editorial instructions when drafting a new pull request's title and description (Perch keeps its read-only, untrusted-data, and output-format wrappers) |
+| `[prompts] issue_draft` | built-in default | Editorial instructions when drafting a GitHub issue from a pull request being closed (Perch keeps its read-only, untrusted-data, and output-format wrappers) |
 | `[keybindings]` *action* | the action's keys | Keys for an action by its id: a string such as `"super+t"`, a list of them, or `""` for none; see [Keyboard shortcuts](reference.md#keyboard-shortcuts) |
 | `[ui] appearance` | `"system"` | `"light"`, `"dark"` or `"system"` |
 | `[ui] theme` | `"classic"` | `"classic"`, `"warm-linen"` or `"blue-mist"`. A fresh Perch home starts with `"warm-linen"`. |

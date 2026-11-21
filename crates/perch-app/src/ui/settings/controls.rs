@@ -519,6 +519,189 @@ pub(crate) fn setting_text(
         })
 }
 
+/// A multiline box for a setting's text, such as a prompt override. What is
+/// typed is written when the box loses the keyboard or on Cmd/Ctrl+Enter;
+/// Escape puts the file's value back. Until something is typed, the box
+/// follows the file, and letting go of it writes nothing.
+pub(crate) fn setting_multiline(
+    page: &Page,
+    value: impl Fn() -> String + 'static,
+    placeholder: &str,
+    height: f64,
+    commit: impl Fn(String) + 'static,
+    debug: impl Into<String>,
+) -> impl View {
+    use floem::views::editor::command::CommandExecuted;
+    use floem::views::editor::core::cursor::CursorAffinity;
+    use floem::views::editor::core::editor::EditType;
+    use floem::views::editor::core::selection::Selection;
+
+    let editing = page.state.settings.editing;
+    let value: Rc<dyn Fn() -> String> = Rc::new(value);
+    let initial = Effect::untrack(|| value());
+    let draft = RwSignal::new(initial.clone());
+    let typing = Rc::new(Cell::new(false));
+    let base: Rc<RefCell<String>> = Rc::new(RefCell::new(initial.clone()));
+    let sent: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    let editor = crate::ui::widgets::prose_editor(initial, placeholder, None);
+    let handle = editor.editor().clone();
+
+    let replace_doc = {
+        let handle = handle.clone();
+        Rc::new(move |next: &str| {
+            let doc = handle.doc();
+            let current = doc.text().to_string();
+            if current == next {
+                return;
+            }
+            let len = doc.text().len();
+            doc.edit_single(
+                Selection::region(0, len, CursorAffinity::Backward),
+                next,
+                EditType::Other,
+            );
+        })
+    };
+
+    {
+        let (value, base, sent, replace_doc) = (
+            value.clone(),
+            base.clone(),
+            sent.clone(),
+            replace_doc.clone(),
+        );
+        Effect::new(move |_| {
+            let now = value();
+            let answered = sent.borrow_mut().take().is_some();
+            let typed = draft.get_untracked();
+            let untouched = typed.trim() == base.borrow().trim();
+            if untouched || answered || typed.trim() == now.trim() {
+                if typed != now {
+                    draft.set(now.clone());
+                    replace_doc(&now);
+                }
+                base.replace(now);
+            }
+        });
+    }
+
+    let commit: Rc<dyn Fn(String)> = Rc::new(commit);
+    let send: Rc<dyn Fn() -> bool> = {
+        let (value, base, sent) = (value.clone(), base.clone(), sent.clone());
+        Rc::new(move || {
+            let Some(typed) = draft.try_get_untracked() else {
+                return false;
+            };
+            let trimmed = typed.trim();
+            let edited = trimmed != base.borrow().trim();
+            let again = sent.borrow().as_deref() == Some(trimmed);
+            if edited && !again && trimmed != Effect::untrack(|| value()).trim() {
+                sent.replace(Some(trimmed.to_string()));
+                commit(typed);
+                return true;
+            }
+            false
+        })
+    };
+
+    let show_file: Rc<dyn Fn()> = {
+        let (value, base, replace_doc) = (value.clone(), base.clone(), replace_doc.clone());
+        Rc::new(move || {
+            let now = Effect::untrack(|| value());
+            if draft.get_untracked() != now {
+                draft.set(now.clone());
+                replace_doc(&now);
+            }
+            base.replace(now);
+        })
+    };
+
+    let focused = RwSignal::new(false);
+    let writable = page.clone();
+    let box_writable = page.clone();
+    let (gained, lost, cleanup) = (typing.clone(), typing.clone(), typing);
+    let (send_lost, send_key, send_cleanup) = (send.clone(), send.clone(), send);
+    let revert = show_file.clone();
+
+    let id = editor.view_id();
+    let editor = editor
+        .pre_command(move |cmd| {
+            if crate::review::threads::cmd_enter(&cmd) {
+                send_key();
+                return CommandExecuted::Yes;
+            }
+            CommandExecuted::No
+        })
+        .update(move |update| {
+            if let Some(ed) = update.editor {
+                draft.set(ed.doc().text().to_string());
+            }
+        })
+        .on_event_cont(el::FocusGained, move |_, _| {
+            gained.set(true);
+            focused.set(true);
+            editing.set(Some(id));
+        })
+        .on_event_cont(el::FocusLost, move |_, _| {
+            lost.set(false);
+            focused.set(false);
+            if editing.get_untracked() == Some(id) {
+                editing.set(None);
+            }
+            if !send_lost() && sent.borrow().is_none() {
+                show_file();
+            }
+        })
+        .on_event_with_config(
+            el::KeyDown,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE,
+            },
+            move |_, key: &KeyboardEvent| {
+                if key.code == Code::Escape && key.modifiers.is_empty() && !key.is_composing {
+                    revert();
+                    id.clear_focus();
+                    EventPropagation::Stop
+                } else {
+                    EventPropagation::Continue
+                }
+            },
+        )
+        .on_cleanup(move || {
+            if cleanup.get() {
+                if editing.try_get_untracked() == Some(Some(id)) {
+                    editing.set(None);
+                }
+                send_cleanup();
+            }
+        })
+        .style(move |s| {
+            s.size_full()
+                .font_family(theme::FONT_STACK.to_string())
+                .font_size(theme::TEXT_META)
+                .set_disabled(!writable.writable())
+        })
+        .debug_name(debug);
+
+    Container::new(editor).style(move |s| {
+        let disabled = !box_writable.writable();
+        s.width_full()
+            .height(height)
+            .padding_horiz(10.0)
+            .padding_vert(8.0)
+            .background(theme::canvas())
+            .border(1.0)
+            .border_color(if focused.get() {
+                theme::accent()
+            } else {
+                theme::border()
+            })
+            .border_radius(theme::RADIUS)
+            .apply_if(disabled, |s| s.color(theme::fg_subtle()))
+    })
+}
+
 /// A one-line box with a button after it, for something to add rather
 /// than a setting to change: Enter or the button hands what was typed to
 /// `submit`, and letting go of the box sends nothing, so a name half

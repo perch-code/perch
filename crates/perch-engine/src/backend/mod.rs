@@ -19098,12 +19098,18 @@ async fn ask_as(
     } else {
         crate::ask::follow_up_prompt(&input)
     };
-    if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
-        *system = crate::ask::framing_with_knowledge(
-            framing,
-            knowledge_dir.as_deref(),
-            &external_knowledge_dirs,
-        );
+    if let Some(system) = prompt.system.as_mut() {
+        let prompts = &ctx.config().prompts;
+        if let Some((_, framing, _)) = &work {
+            *system = crate::ask::framing_with_knowledge(
+                framing,
+                knowledge_dir.as_deref(),
+                &external_knowledge_dirs,
+            );
+            crate::ask::append_user_instructions(system, prompts.work());
+        } else {
+            crate::ask::append_user_instructions(system, prompts.ask());
+        }
     }
     // A resumed session keeps the framing it began with, and the reader
     // may have let Work commit since.
@@ -20938,11 +20944,16 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         external_knowledge_dirs: &external_knowledge_dirs,
         since: None,
     };
-    let reconstructed_prompt = if resume.is_none() {
+    let mut reconstructed_prompt = if resume.is_none() {
         crate::ask::first_prompt(&input)
     } else {
         crate::ask::follow_up_prompt(&input)
     };
+    if work.is_none() {
+        if let Some(system) = reconstructed_prompt.system.as_mut() {
+            crate::ask::append_user_instructions(system, ctx.config().prompts.ask());
+        }
+    }
     let mut prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
     if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
         *system = crate::ask::framing_with_knowledge(
@@ -20950,6 +20961,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
             knowledge_dir.as_deref(),
             &external_knowledge_dirs,
         );
+        crate::ask::append_user_instructions(system, ctx.config().prompts.work());
     }
     let mut spec = crate::ask::run_spec(
         &ctx.config().agent,

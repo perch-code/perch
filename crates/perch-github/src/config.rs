@@ -37,6 +37,12 @@ pub struct Config {
     /// `[work]`: how new work is set up in every repository.
     #[serde(default)]
     pub work: WorkDefaults,
+    /// `[prompts]`: optional prompt customizations. Ask, Work, and Code Review
+    /// are appended as user preferences; summary and draft prompts replace
+    /// the editorial body while Perch keeps its read-only, untrusted-data,
+    /// and output-format boundaries.
+    #[serde(default)]
+    pub prompts: PromptsConfig,
     /// `[lsp]`: the language servers Perch runs.
     #[serde(default)]
     pub lsp: LspConfig,
@@ -684,6 +690,241 @@ impl DisplayConfig {
             self.code_font_size = size;
         }
         warnings
+    }
+}
+
+/// Style rules modeled on Winston Churchill's 1940-08-09 "Brevity" memorandum
+/// to the War Cabinet (https://gist.github.com/hynek/ef638a39722cb35eab98).
+macro_rules! brevity_guidance {
+    () => {
+        "Follow Winston Churchill's 1940 \"Brevity\" memorandum:\n\
+1. Short, crisp paragraphs: set out the main points directly. Start straight into the point — no \
+`## Summary` heading and no repeating the title or line counts already shown above.\n\
+2. Appendix for heavy detail: if understanding the item genuinely requires detailed analysis, \
+numbers, migration tables, or long logs/repros, fold them into a collapsed appendix at the very \
+end (with a blank line after `</summary>`):\n\
+   <details>\n\
+   <summary>Appendix: ...</summary>\n\n\
+   ...\n\n\
+   </details>\n\
+   Omit the appendix altogether for straightforward items.\n\
+3. Aide-memoire over full-dress report: match length to complexity. Simple changes or issues \
+should be 2-4 crisp sentences or a flat list of a few short bullets — never nested bullet trees \
+and never a multi-section essay. Only add section headings when distinct themes genuinely need \
+separation.\n\
+4. Cut woolly padding: drop throat-clearing and officialese (\"This PR introduces...\", \"It is \
+also of importance to bear in mind...\", \"It is worth noting that...\", \"In order to...\", \
+\"Consideration should be given to...\", \"Overall, this is a clean...\", \"worth prioritizing\"). \
+Use short, expressive, conversational English. Never say the same thing twice across sections."
+    };
+}
+
+/// Default editorial instructions for automatic PR description rewrites
+/// (`[prompts] pr_summary`). Perch wraps this with its read-only,
+/// untrusted-data, and Markdown-only output boundaries.
+pub const DEFAULT_PR_SUMMARY_PROMPT: &str = concat!(
+    "Ground the rewrite in the actual diff rather than parroting the author. Say what changes, \
+why, and any non-obvious behavior or author context (e.g. `Closes #123`, screenshots, caveats, \
+or deliberate follow-ups). Do NOT write a file-by-file changelog or list every edited path, \
+helper, or minor cleanup — the reviewer has the file tree and diff right beside this text. Cite \
+a file or symbol in backticks only when pointing to a key entry point or risk (backticks render \
+as clickable links, so too many create visual noise). Drop PR template boilerplate (checklists, \
+template instructions, AI disclosure tables).\n\n",
+    brevity_guidance!(),
+    "\n\n",
+    "End with `## Model Assessment` (before any Appendix): 1-3 crisp sentences or short bullets \
+calling out only real risks, silent edge cases, design tradeoffs, or open questions worth a \
+reviewer's eye. Never praise or rubber-stamp the PR, never restate diff stats, and never repeat \
+anything already stated above. If nothing risky or non-obvious stands out, say so in one short \
+sentence."
+);
+
+/// Default editorial instructions for automatic GitHub issue description
+/// rewrites (`[prompts] issue_summary`). Perch wraps this with its read-only,
+/// untrusted-data, and Markdown-only output boundaries.
+pub const DEFAULT_ISSUE_SUMMARY_PROMPT: &str = concat!(
+    "Cover the core problem or request, why it matters, and only the essential context (expected \
+vs. actual behavior, key constraints, screenshots, or minimal repro steps if present). Drop issue \
+template boilerplate (blank sections, checklists, unfilled environment blocks). Fold long stack \
+traces, logs, or config dumps into a collapsed `<details>` appendix only when useful.\n\n",
+    brevity_guidance!(),
+    "\n\n",
+    "End with `## Model Assessment` (before any Appendix): 1-3 crisp sentences or short bullets on \
+scope, likely code entry point (if you checked the repo), tradeoffs, or open questions. Never \
+repeat what is already stated above and avoid generic filler."
+);
+
+/// Default editorial instructions for drafting a new pull request's title and
+/// description (`[prompts] pr_description`). Perch wraps this with its
+/// read-only, untrusted-data, and title/body output format boundaries.
+pub const DEFAULT_PR_DESCRIPTION_PROMPT: &str = "Write the title yourself from the whole change, \
+in under 72 characters, saying what it does for someone scanning a list of pull requests; don't \
+copy a commit's subject unless it already says that. Write the description in GitHub Markdown for \
+the people who will review it: what changed, why, and anything they should look at closely.";
+
+/// Default editorial instructions for drafting a GitHub issue when closing a
+/// pull request as an issue (`[prompts] issue_draft`). Perch wraps this with
+/// its read-only, untrusted-data, and title/body output format boundaries.
+pub const DEFAULT_ISSUE_DRAFT_PROMPT: &str = "Describe the bug as it stands on the base branch, \
+in your own words: what goes wrong, how to reproduce it when you can tell, and where it is, as \
+paths and line numbers on the base. Don't copy the pull request's description, don't repeat its \
+links, and don't present its patch as the fix.";
+
+/// One customizable prompt key under `[prompts]` in `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    Ask,
+    Work,
+    Review,
+    PrSummary,
+    IssueSummary,
+    PrDescription,
+    IssueDraft,
+}
+
+impl PromptKind {
+    pub const ALL: [Self; 7] = [
+        Self::Ask,
+        Self::Work,
+        Self::Review,
+        Self::PrSummary,
+        Self::IssueSummary,
+        Self::PrDescription,
+        Self::IssueDraft,
+    ];
+
+    /// The key name under `[prompts]` in `config.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Work => "work",
+            Self::Review => "review",
+            Self::PrSummary => "pr_summary",
+            Self::IssueSummary => "issue_summary",
+            Self::PrDescription => "pr_description",
+            Self::IssueDraft => "issue_draft",
+        }
+    }
+
+    /// Dotted key as `present_keys` reports it.
+    pub fn present_key(self) -> &'static str {
+        match self {
+            Self::Ask => "prompts.ask",
+            Self::Work => "prompts.work",
+            Self::Review => "prompts.review",
+            Self::PrSummary => "prompts.pr_summary",
+            Self::IssueSummary => "prompts.issue_summary",
+            Self::PrDescription => "prompts.pr_description",
+            Self::IssueDraft => "prompts.issue_draft",
+        }
+    }
+
+    /// Built-in editorial default for replaceable prompts; `None` for additive
+    /// prompts (Ask, Work, Review).
+    pub fn default_body(self) -> Option<&'static str> {
+        match self {
+            Self::Ask | Self::Work | Self::Review => None,
+            Self::PrSummary => Some(DEFAULT_PR_SUMMARY_PROMPT),
+            Self::IssueSummary => Some(DEFAULT_ISSUE_SUMMARY_PROMPT),
+            Self::PrDescription => Some(DEFAULT_PR_DESCRIPTION_PROMPT),
+            Self::IssueDraft => Some(DEFAULT_ISSUE_DRAFT_PROMPT),
+        }
+    }
+}
+
+/// `[prompts]`: optional prompt customizations in `config.toml`.
+///
+/// `ask`, `work`, and `review` are additive instructions appended after
+/// Perch's built-in framing and safety boundaries. `pr_summary`,
+/// `issue_summary`, `pr_description`, and `issue_draft` replace the
+/// editorial body while Perch keeps its read-only, untrusted-data, and
+/// output-format wrappers.
+#[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_draft: Option<String>,
+}
+
+fn non_empty_trimmed(value: &Option<String>) -> Option<&str> {
+    value.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+impl PromptsConfig {
+    pub fn ask(&self) -> Option<&str> {
+        non_empty_trimmed(&self.ask)
+    }
+
+    pub fn work(&self) -> Option<&str> {
+        non_empty_trimmed(&self.work)
+    }
+
+    pub fn review(&self) -> Option<&str> {
+        non_empty_trimmed(&self.review)
+    }
+
+    pub fn pr_summary(&self) -> Option<&str> {
+        non_empty_trimmed(&self.pr_summary)
+    }
+
+    pub fn issue_summary(&self) -> Option<&str> {
+        non_empty_trimmed(&self.issue_summary)
+    }
+
+    pub fn pr_description(&self) -> Option<&str> {
+        non_empty_trimmed(&self.pr_description)
+    }
+
+    pub fn issue_draft(&self) -> Option<&str> {
+        non_empty_trimmed(&self.issue_draft)
+    }
+
+    pub fn pr_summary_or_default(&self) -> &str {
+        self.pr_summary().unwrap_or(DEFAULT_PR_SUMMARY_PROMPT)
+    }
+
+    pub fn issue_summary_or_default(&self) -> &str {
+        self.issue_summary().unwrap_or(DEFAULT_ISSUE_SUMMARY_PROMPT)
+    }
+
+    pub fn pr_description_or_default(&self) -> &str {
+        self.pr_description()
+            .unwrap_or(DEFAULT_PR_DESCRIPTION_PROMPT)
+    }
+
+    pub fn issue_draft_or_default(&self) -> &str {
+        self.issue_draft().unwrap_or(DEFAULT_ISSUE_DRAFT_PROMPT)
+    }
+
+    pub fn get(&self, kind: PromptKind) -> Option<&str> {
+        match kind {
+            PromptKind::Ask => self.ask(),
+            PromptKind::Work => self.work(),
+            PromptKind::Review => self.review(),
+            PromptKind::PrSummary => self.pr_summary(),
+            PromptKind::IssueSummary => self.issue_summary(),
+            PromptKind::PrDescription => self.pr_description(),
+            PromptKind::IssueDraft => self.issue_draft(),
+        }
+    }
+
+    /// What the Settings editor shows for `kind`: the configured override if
+    /// set, otherwise the built-in editorial default (or empty string for
+    /// additive prompts).
+    pub fn effective_text(&self, kind: PromptKind) -> &str {
+        self.get(kind).or_else(|| kind.default_body()).unwrap_or("")
     }
 }
 
@@ -1500,6 +1741,7 @@ impl Config {
             repo: Vec::new(),
             knowledge: Vec::new(),
             work: WorkDefaults::default(),
+            prompts: PromptsConfig::default(),
             lsp: LspConfig::default(),
             display: DisplayConfig::default(),
             ui: UiConfig::default(),

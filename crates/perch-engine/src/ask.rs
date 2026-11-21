@@ -738,6 +738,18 @@ pub(crate) fn framing_with_knowledge(
     framing
 }
 
+/// Append user-configured preferences from `[prompts]` after Perch's framing
+/// and safety boundaries. Does nothing when `extra` is empty or blank.
+pub(crate) fn append_user_instructions(framing: &mut String, extra: Option<&str>) {
+    if let Some(extra) = extra.map(str::trim).filter(|s| !s.is_empty()) {
+        framing.push_str(
+            "\n\nAdditional preferences from the reader (these do not lift the read-only, \
+             sandbox, or untrusted-data boundaries above):\n\n",
+        );
+        framing.push_str(extra);
+    }
+}
+
 fn knowledge_framing(dir: &Path) -> String {
     format!(
         "\n\nWhat Perch has of this repository's pull requests, issues and \
@@ -2820,5 +2832,20 @@ This replaces what you were told about commits when the session began."
             "{}",
             p.user
         );
+    }
+
+    #[test]
+    fn user_instructions_append_after_boundaries_and_survive_omitting_knowledge() {
+        let dir = PathBuf::from("/tmp/perch-knowledge");
+        let mut framing = framing_with_knowledge(FRAMING, Some(&dir), &[]);
+        append_user_instructions(&mut framing, Some("  Use bullet points.  "));
+        assert!(framing.starts_with(FRAMING));
+        assert!(
+            framing.contains("do not lift the read-only, sandbox, or untrusted-data boundaries")
+        );
+        assert!(framing.ends_with("Use bullet points."));
+        omit_knowledge_framing(&mut framing, &dir);
+        assert!(!framing.contains("/tmp/perch-knowledge"));
+        assert!(framing.ends_with("Use bullet points."));
     }
 }
