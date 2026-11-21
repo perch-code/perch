@@ -34,6 +34,18 @@ struct ParsedCheck {
 struct SuiteRef {
     id: u64,
     done: bool,
+    run_number: Option<u64>,
+    run_attempt: u64,
+    created_at: Option<Timestamp>,
+    updated_at: Option<Timestamp>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RollupSeverity {
+    Unknown,
+    Passing,
+    Running,
+    Failing,
 }
 
 /// What Perch needs to check out and describe a pull request.
@@ -483,6 +495,10 @@ query PullRequestOverview($owner: String!, $name: String!, $number: Int!, $conte
                 status
                 workflow_run: workflowRun {
                   event
+                  run_number: runNumber
+                  run_attempt: runAttempt
+                  created_at: createdAt
+                  updated_at: updatedAt
                   workflow {
                     id
                     name
@@ -760,7 +776,7 @@ enum CheckContextPayload {
         #[serde(default)]
         completed_at: Option<Timestamp>,
         #[serde(default)]
-        check_suite: Option<CheckSuitePayload>,
+        check_suite: Option<Box<CheckSuitePayload>>,
     },
     StatusContext {
         #[serde(default)]
@@ -790,6 +806,14 @@ struct CheckSuitePayload {
 struct WorkflowRunRefPayload {
     #[serde(default)]
     event: Option<String>,
+    #[serde(default)]
+    run_number: Option<u64>,
+    #[serde(default)]
+    run_attempt: Option<u64>,
+    #[serde(default)]
+    created_at: Option<Timestamp>,
+    #[serde(default)]
+    updated_at: Option<Timestamp>,
     #[serde(default)]
     workflow: Option<WorkflowRefPayload>,
 }
@@ -827,8 +851,6 @@ fn checks_from_contexts(
     let mut runs = Vec::<Check>::new();
     let mut check_run_keys = std::collections::HashMap::<CheckRunKey, usize>::new();
     let mut superseded = Vec::<(CheckRunKey, Check)>::new();
-    // A failed job a newer run replaced. GitHub's aggregate still counts it.
-    let mut replaced_failure = false;
     for ParsedCheck { check, key, suite } in &parsed {
         // A workflow run on the same commit, for the same event, that
         // started later stands for the workflow. While it runs, a job it
@@ -855,7 +877,6 @@ fn checks_from_contexts(
                         },
                     ));
                 }
-                replaced_failure |= check.state.is_failing();
                 continue;
             }
         }
@@ -863,10 +884,9 @@ fn checks_from_contexts(
         if let Some(key) = key.clone() {
             match check_run_keys.get(&key).copied() {
                 Some(index) if is_newer_check(&check, &runs[index]) => {
-                    replaced_failure |= runs[index].state.is_failing();
                     runs[index] = check;
                 }
-                Some(_) => replaced_failure |= check.state.is_failing(),
+                Some(_) => {}
                 None => {
                     check_run_keys.insert(key, runs.len());
                     runs.push(check);
@@ -884,31 +904,24 @@ fn checks_from_contexts(
         }
     }
 
-    // When the only failures are ones a newer run replaced (slatedb#2145:
-    // a job cancelled as the next run began), the rows say what the
-    // checks are, not the aggregate.
-    let replaced_only = replaced_failure
-        && runs
-            .iter()
-            .all(|check| check.state.is_passing() || check.state.is_pending());
-    let state = match aggregate_state.as_str() {
-        "SUCCESS" => CheckState::Passing,
-        "PENDING" | "EXPECTED" => CheckState::Running,
-        "FAILURE" | "ERROR" if replaced_only => {
-            if runs.iter().any(|check| check.state.is_pending()) {
-                CheckState::Running
-            } else {
-                CheckState::Passing
-            }
-        }
-        "FAILURE" | "ERROR" => CheckState::Failing {
+    // Derive the state from the selected rows unless GitHub's aggregate is
+    // strictly worse than every raw row combined (for instance, a required
+    // check that has not reported yet, or a failure not present in the rows).
+    let aggregate = aggregate_severity(&aggregate_state);
+    let raw = fold_severity(parsed.iter().map(|p| p.check.state));
+    let selected = fold_severity(runs.iter().map(|check| check.state));
+    let effective = if aggregate > raw { aggregate } else { selected };
+    let state = match effective {
+        RollupSeverity::Passing => CheckState::Passing,
+        RollupSeverity::Running => CheckState::Running,
+        RollupSeverity::Failing => CheckState::Failing {
             workflow: runs
                 .iter()
                 .find(|check| check.state.is_failing())
                 .and_then(|check| check.workflow.clone().or_else(|| Some(check.name.clone())))
                 .unwrap_or_else(|| "checks".into()),
         },
-        _ => CheckState::Unknown,
+        RollupSeverity::Unknown => CheckState::Unknown,
     };
     let preferred = match state {
         CheckState::Failing { .. } => runs.iter().find(|check| check.state.is_failing()),
@@ -923,19 +936,81 @@ fn checks_from_contexts(
     Checks { state, url, runs }
 }
 
-/// Per workflow and event, the run that stands for it: one still running
-/// before one that is done, else the one whose jobs started last.
+fn aggregate_severity(state: &str) -> RollupSeverity {
+    match state {
+        "SUCCESS" => RollupSeverity::Passing,
+        "PENDING" | "EXPECTED" => RollupSeverity::Running,
+        "FAILURE" | "ERROR" => RollupSeverity::Failing,
+        _ => RollupSeverity::Unknown,
+    }
+}
+
+fn fold_severity(states: impl IntoIterator<Item = CheckRunState>) -> RollupSeverity {
+    let mut severity = RollupSeverity::Unknown;
+    for state in states {
+        let next = if state.is_failing() {
+            RollupSeverity::Failing
+        } else if state.is_pending() {
+            RollupSeverity::Running
+        } else if state.is_passing() {
+            RollupSeverity::Passing
+        } else {
+            RollupSeverity::Unknown
+        };
+        if next > severity {
+            severity = next;
+        }
+    }
+    severity
+}
+
+/// When a suite's latest attempt began. A first-attempt run uses the
+/// workflow run's own creation time so cancelled downstream placeholders
+/// stamped later cannot outrank a newer run; a re-run (`run_attempt > 1`,
+/// as on slatedb#2122) advances to when its jobs actually started (or
+/// `updated_at` while queued). Fixtures without `created_at` fall back to
+/// `started_at`.
+fn suite_started_at(suite: SuiteRef, check: &Check) -> Option<Timestamp> {
+    let Some(created_at) = suite.created_at else {
+        return check.started_at;
+    };
+    if suite.run_attempt <= 1 {
+        return Some(created_at);
+    }
+    let cancelled_placeholder = check.state == CheckRunState::Cancelled
+        && check
+            .started_at
+            .zip(check.completed_at)
+            .is_some_and(|(started, completed)| completed <= started);
+    let job_started = (!cancelled_placeholder)
+        .then_some(check.started_at)
+        .flatten();
+    let queued_rerun = (!suite.done && job_started.is_none())
+        .then_some(suite.updated_at)
+        .flatten();
+    [Some(created_at), job_started, queued_rerun]
+        .into_iter()
+        .flatten()
+        .max()
+}
+
+/// Per workflow and event, the run that stands for it: the one whose latest
+/// attempt began last, tie-broken by run number and suite id.
 fn current_suites<'a>(
     parsed: &'a [ParsedCheck],
 ) -> std::collections::HashMap<(&'a WorkflowId, &'a str), SuiteRef> {
-    type Rank = (bool, Option<Timestamp>, u64);
+    type Rank = (Option<Timestamp>, Option<u64>, u64);
     let mut latest =
         std::collections::HashMap::<(&'a WorkflowId, &'a str), (Rank, SuiteRef)>::new();
     for p in parsed {
         let (Some(suite), Some((workflow, event, _))) = (p.suite, &p.key) else {
             continue;
         };
-        let rank = (!suite.done, p.check.started_at, suite.id);
+        let rank = (
+            suite_started_at(suite, &p.check),
+            suite.run_number,
+            suite.id,
+        );
         let entry = latest
             .entry((workflow, event.as_str()))
             .or_insert((rank, suite));
@@ -969,12 +1044,17 @@ impl CheckContextPayload {
                     ),
                     None => (None, false, None),
                 };
-                let suite = suite_id
-                    .filter(|_| workflow_run.is_some())
-                    .map(|id| SuiteRef {
+                let suite = suite_id.and_then(|id| {
+                    let run = workflow_run.as_ref()?;
+                    Some(SuiteRef {
                         id,
                         done: suite_done,
-                    });
+                        run_number: run.run_number,
+                        run_attempt: run.run_attempt.unwrap_or(1),
+                        created_at: run.created_at,
+                        updated_at: run.updated_at,
+                    })
+                });
                 let workflow_id = workflow_run
                     .as_ref()
                     .and_then(|run| run.workflow.as_ref())
@@ -1576,6 +1656,202 @@ mod tests {
             serde_json::from_value(contexts).unwrap(),
         );
         assert!(matches!(checks.state, CheckState::Failing { .. }));
+    }
+
+    #[test]
+    fn an_unreported_required_check_keeps_the_rollup_running() {
+        let contexts = serde_json::json!([{
+            "__typename": "CheckRun",
+            "name": "test",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }]);
+        let checks = checks_from_contexts(
+            Some("EXPECTED".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
+        assert_eq!(checks.state, CheckState::Running);
+    }
+
+    #[test]
+    fn a_stuck_pending_older_run_does_not_outrank_a_newer_finished_run() {
+        let contexts = serde_json::json!([
+            {
+                "__typename": "CheckRun",
+                "name": "deploy",
+                "status": "WAITING",
+                "conclusion": null,
+                "started_at": "2026-11-15T19:08:52Z",
+                "check_suite": {
+                    "database_id": 100,
+                    "status": "IN_PROGRESS",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "run_number": 8715,
+                        "run_attempt": 1,
+                        "created_at": "2026-11-15T19:08:50Z",
+                        "updated_at": "2026-11-15T19:08:52Z",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "deploy",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "started_at": "2026-11-15T19:18:10Z",
+                "completed_at": "2026-11-15T19:18:15Z",
+                "check_suite": {
+                    "database_id": 200,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "run_number": 8716,
+                        "run_attempt": 1,
+                        "created_at": "2026-11-15T19:18:06Z",
+                        "updated_at": "2026-11-15T19:18:15Z",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            },
+        ]);
+        let checks = checks_from_contexts(
+            Some("PENDING".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
+        assert_eq!(checks.state, CheckState::Passing);
+        assert_eq!(checks.runs.len(), 1);
+        assert_eq!(checks.runs[0].state, CheckRunState::Success);
+    }
+
+    #[test]
+    fn a_late_cancelled_placeholder_timestamp_does_not_outrank_a_fast_newer_run() {
+        let contexts = serde_json::json!([
+            {
+                "__typename": "CheckRun",
+                "name": "tests (cross)",
+                "status": "COMPLETED",
+                "conclusion": "CANCELLED",
+                "started_at": "2026-11-15T19:18:22Z",
+                "completed_at": "2026-11-15T19:18:21Z",
+                "check_suite": {
+                    "database_id": 100,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "run_number": 8715,
+                        "run_attempt": 1,
+                        "created_at": "2026-11-15T19:08:50Z",
+                        "updated_at": "2026-11-15T19:18:22Z",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "tests",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "started_at": "2026-11-15T19:18:10Z",
+                "completed_at": "2026-11-15T19:18:15Z",
+                "check_suite": {
+                    "database_id": 200,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "run_number": 8716,
+                        "run_attempt": 1,
+                        "created_at": "2026-11-15T19:18:06Z",
+                        "updated_at": "2026-11-15T19:18:15Z",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            },
+        ]);
+        let checks = checks_from_contexts(
+            Some("FAILURE".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
+        assert_eq!(checks.state, CheckState::Passing);
+        assert_eq!(checks.runs.len(), 1);
+        assert_eq!(checks.runs[0].name, "tests");
+    }
+
+    /// slatedb#2122: run #8390 was re-run (attempt #2) after #8391 had already
+    /// finished on the same commit. The lower run number's newer attempt still
+    /// stands for the workflow.
+    #[test]
+    fn rerunning_an_older_run_number_outranks_a_higher_run_numbers_first_attempt() {
+        let contexts = serde_json::json!([
+            {
+                "__typename": "CheckRun",
+                "name": "tests",
+                "status": "IN_PROGRESS",
+                "conclusion": null,
+                "started_at": "2026-10-01T18:54:58Z",
+                "check_suite": {
+                    "database_id": 99966954553_u64,
+                    "status": "IN_PROGRESS",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "run_number": 8390,
+                        "run_attempt": 2,
+                        "created_at": "2026-10-01T18:23:31Z",
+                        "updated_at": "2026-10-01T18:54:58Z",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "tests",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "started_at": "2026-10-01T18:23:36Z",
+                "completed_at": "2026-10-01T18:37:39Z",
+                "check_suite": {
+                    "database_id": 99966954627_u64,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "run_number": 8391,
+                        "run_attempt": 1,
+                        "created_at": "2026-10-01T18:23:31Z",
+                        "updated_at": "2026-10-01T18:51:38Z",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "bindings-go",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "started_at": "2026-10-01T18:37:43Z",
+                "completed_at": "2026-10-01T18:47:52Z",
+                "check_suite": {
+                    "database_id": 99966954627_u64,
+                    "status": "COMPLETED",
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "run_number": 8391,
+                        "run_attempt": 1,
+                        "created_at": "2026-10-01T18:23:31Z",
+                        "updated_at": "2026-10-01T18:51:38Z",
+                        "workflow": { "id": "W_pr_checks", "name": "PR Checks" },
+                    },
+                },
+            },
+        ]);
+        let checks = checks_from_contexts(
+            Some("PENDING".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
+        assert_eq!(checks.state, CheckState::Running);
+        let row = |name: &str| checks.runs.iter().find(|c| c.name == name).unwrap();
+        assert_eq!(row("tests").state, CheckRunState::Pending);
+        assert_eq!(row("bindings-go").state, CheckRunState::Waiting);
     }
 
     #[test]
