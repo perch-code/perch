@@ -838,6 +838,7 @@ def render_page(
         site_name=site_name,
         prefix=prefix, page_class="guide-page" if guide else "tour-page",
         guide_current=current, install_id="footer-install" if guide else "install",
+        install_url=f"{PUBLIC_ORIGIN}/install.sh",
         page_css=f'<link rel="stylesheet" href="{prefix}{stylesheet}">',
         content=content.strip(), page_scripts=scripts,
     )

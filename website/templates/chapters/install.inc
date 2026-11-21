@@ -6,7 +6,7 @@
 <p>Perch can use your GitHub CLI login even when you launch it outside a terminal. For token settings and permissions, see <a href="authentication.html">Authentication</a>.</p>
 
 <h2 id="install">2. Install Perch</h2>
-<pre><code>curl https://perch.code/install.sh | sh</code></pre>
+<pre><code>curl -fsSL https://perch.chat/install.sh | sh</code></pre>
 <p>On macOS, the installer puts the signed and notarized <code>Perch.app</code> in <code>/Applications</code>. On Linux, it installs Perch in <code>~/.local/share/perch</code>. Both create a launcher at <code>~/.local/bin/perch</code>. Set <code>PERCH_NO_MODIFY_PATH=1</code> if you manage your shell’s <code>PATH</code> yourself.</p>
 <p>You can also download the archive for your platform from <a href="https://github.com/perch-code/perch/releases/latest">Releases</a>.</p>
 

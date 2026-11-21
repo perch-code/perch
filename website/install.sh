@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install or update Perch from the latest release:
-#   curl -fsSL https://raw.githubusercontent.com/perch-code/perch/main/install.sh | sh
+#   curl -fsSL https://perch.chat/install.sh | sh
 #
 # On a Mac this puts Perch.app in /Applications. On Linux it unpacks Perch
 # into ~/.local/share/perch. Either way it links ~/.local/bin/perch to the

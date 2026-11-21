@@ -32,7 +32,7 @@ You need:
 Then install the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/perch-code/perch/main/install.sh | sh
+curl -fsSL https://perch.chat/install.sh | sh
 ```
 
 On a Mac, install.sh puts Perch.app in `/Applications`. On Linux, it unpacks Perch
