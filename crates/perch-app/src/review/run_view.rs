@@ -456,7 +456,7 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
         }),
     ))
     .debug_name("run-header")
-    .style(|s| s.items_center().width_full().height(28.0));
+    .style(|s| s.items_center().width_full().min_width(0.0).height(28.0));
     cards::track_hover(row, hovered)
 }
 
@@ -466,11 +466,15 @@ pub fn doing_row(doing: Memo<(String, String, bool)>) -> impl IntoView {
     Stack::horizontal((
         spinner(theme::fg_muted)
             .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32).margin_right(8.0)),
-        Label::derived(move || doing.get().0).style(|s| {
+        // A step no verb matched, such as an approval prompt, is all verb:
+        // it gives way at the edge instead of the missing argument.
+        Label::derived(move || doing.get().0).style(move |s| {
+            let alone = doing.with(|(_, arg, _)| arg.is_empty());
             s.font_size(theme::TEXT_META)
                 .color(theme::fg())
                 .selectable(false)
-                .flex_shrink(0.0_f32)
+                .apply_if(alone, |s| s.text_ellipsis().min_width(0.0))
+                .apply_if(!alone, |s| s.flex_shrink(0.0_f32))
         }),
         Label::derived(move || doing.get().1).style(move |s| {
             let (_, arg, code) = doing.get();
@@ -487,6 +491,7 @@ pub fn doing_row(doing: Memo<(String, String, bool)>) -> impl IntoView {
             .apply_if(arg.is_empty(), |s| s.hide())
         }),
     ))
+    .debug_name("run-doing")
     .style(|s| s.items_center().min_width(0.0))
 }
 
@@ -893,6 +898,7 @@ pub fn run_fold(state: ReviewState, run: &RunRecord, mut steps: Vec<RunStep>) ->
     let run_id = run.id.clone();
     let open = Memo::new(move |_| state.expanded_runs.with(|e| e.contains(&run_id)));
     let (main, detail) = fold_words(run, &steps);
+    let alone = detail.is_empty();
     let toggle_id = run.id.clone();
     let steps = Rc::new(steps);
     Stack::vertical((
@@ -915,20 +921,22 @@ pub fn run_fold(state: ReviewState, run: &RunRecord, mut steps: Vec<RunStep>) ->
             // Flush with the prose, and as wide as the running line's
             // spinner, so the words start where they did.
             .style(|s| s.width(12.0).items_center().flex_shrink(0.0_f32)),
-            Label::derived(move || main.clone()).style(|s| {
+            Label::derived(move || main.clone()).style(move |s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::fg_muted())
                     .margin_left(8.0)
                     .selectable(false)
-                    .flex_shrink(0.0_f32)
+                    .apply_if(alone, |s| s.text_ellipsis().min_width(0.0))
+                    .apply_if(!alone, |s| s.flex_shrink(0.0_f32))
             }),
-            Label::derived(move || detail.clone()).style(|s| {
+            Label::derived(move || detail.clone()).style(move |s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::fg_subtle())
                     .margin_left(5.0)
                     .selectable(false)
                     .text_ellipsis()
                     .min_width(0.0)
+                    .apply_if(alone, |s| s.hide())
             }),
         ))
         .on_event_stop(el::Click, move |_, _| {
@@ -939,7 +947,13 @@ pub fn run_fold(state: ReviewState, run: &RunRecord, mut steps: Vec<RunStep>) ->
             })
         })
         .debug_name("run-fold")
-        .style(|s| clickable(s).items_center().width_full().height(24.0)),
+        .style(|s| {
+            clickable(s)
+                .items_center()
+                .width_full()
+                .min_width(0.0)
+                .height(24.0)
+        }),
         dyn_container(
             move || open.get(),
             move |open| {
@@ -1185,5 +1199,85 @@ mod tests {
             widest <= right + 0.5,
             "a view ends at {widest}, past {right}"
         );
+    }
+
+    /// A long running step — whether its line matched a verb or not, such
+    /// as an approval prompt — stops before the elapsed time and Stop, and
+    /// never runs past the edge of its card.
+    #[test]
+    fn a_long_running_step_stays_inside_its_header() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let run = RwSignal::new(RunRecord {
+            status: RunStatus::Running,
+            steps: vec![step(
+                "Asked: Run outside the sandbox: git log -n 5 --oneline && rg -i \"SST_FORMAT_VERSION|format_version|FormatVersion|FullCompaction|compaction\" crates/slatedb/src",
+                true,
+            )],
+            ..RunRecord::default()
+        });
+        let live = Memo::new(move |_| run.get());
+        let view = Container::new(run_header(app, Rc::new(Backend::detached()), live))
+            .debug_name("page")
+            .style(|s| s.width(300.0).height_full());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 600.0, 120.0);
+
+        let check_bounds = |harness: &mut HeadlessHarness, label: &str| {
+            for _ in 0..2 {
+                harness.rebuild();
+                harness.paint();
+            }
+            let right = crate::review::header::tests::rect(harness, "page").x1;
+            let elapsed = crate::review::header::tests::rect(harness, "run-elapsed");
+            let stop = crate::review::header::tests::rect(harness, "run-stop");
+            let doing =
+                crate::review::header::tests::named(harness.root_id(), "run-doing").unwrap();
+
+            fn max_x1(id: floem::ViewId) -> f64 {
+                id.children()
+                    .into_iter()
+                    .map(max_x1)
+                    .fold(id.get_visual_rect_no_clip().x1, f64::max)
+            }
+
+            let page = crate::review::header::tests::named(harness.root_id(), "page").unwrap();
+            let widest = max_x1(page);
+            assert!(
+                widest <= right + 0.5,
+                "{label}: a view ends at {widest}, past {right}"
+            );
+            let doing_right = max_x1(doing);
+            assert!(
+                doing_right <= elapsed.x0 + 0.5,
+                "{label}: doing ends at {doing_right}, overlapping elapsed at {}",
+                elapsed.x0
+            );
+            assert!(
+                elapsed.x1 <= stop.x0 + 0.5,
+                "{label}: elapsed ends at {}, overlapping stop at {}",
+                elapsed.x1,
+                stop.x0
+            );
+        };
+
+        check_bounds(&mut harness, "unmatched step");
+
+        run.update(|r| {
+            r.steps = vec![step(
+                "Ran git log -n 5 --oneline && rg -i \"SST_FORMAT_VERSION|format_version|FormatVersion|FullCompaction|compaction\" crates/slatedb/src",
+                true,
+            )];
+        });
+        check_bounds(&mut harness, "matched step");
+
+        run.update(|r| {
+            r.steps = vec![step(
+                "Asked: Run outside the sandbox: git log -n 5 --oneline && rg -i \"SST_FORMAT_VERSION|format_version|FormatVersion|FullCompaction|compaction\" crates/slatedb/src",
+                true,
+            )];
+        });
+        check_bounds(&mut harness, "back to unmatched step");
     }
 }
