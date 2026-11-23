@@ -108,6 +108,18 @@ impl ServerKind {
         }
     }
 
+    /// The arguments that ask this server's binary for its version.
+    /// gopls takes a `version` subcommand and exits 2 on `--version`.
+    pub fn version_args(self) -> &'static [&'static str] {
+        match self {
+            ServerKind::Gopls => &["version"],
+            ServerKind::RustAnalyzer
+            | ServerKind::TypescriptLanguageServer
+            | ServerKind::Jdtls
+            | ServerKind::Ty => &["--version"],
+        }
+    }
+
     /// Whether the server says on its own, with `$/progress`, when it is
     /// ready. One that doesn't is ready once it has answered the
     /// handshake.
@@ -188,11 +200,7 @@ impl Status {
             Status::Indexing { percent: Some(p) } => format!("{name} indexing {p}%"),
             Status::Indexing { percent: None } => format!("{name} indexing"),
             Status::Ready => format!("{name} ready"),
-            // Its first line: rust-analyzer puts the tool output it failed
-            // on under it, a usage text and all.
-            Status::Unhealthy { message } => {
-                format!("{name}: {}", message.lines().next().unwrap_or(message))
-            }
+            Status::Unhealthy { message } => format!("{name}: {}", summary_line(message)),
             Status::Failed { reason } => format!("{name} failed: {reason}"),
             Status::Held => format!("{name} waits for you to trust this code"),
         }
@@ -207,6 +215,28 @@ impl Status {
     pub fn is_loading(&self) -> bool {
         matches!(self, Status::Starting | Status::Indexing { .. })
     }
+}
+
+/// The one line of a server's message fit for a toast, status line, or
+/// feedback problem list. Tool output and usage text follow a complete
+/// heading or a blank line, so only the first line is kept—unless it ends
+/// in `:` and introduces the detail on the very next line (as
+/// rust-analyzer's `invalid config value:\ncheck/overrideCommand: …` does).
+pub fn summary_line(message: &str) -> String {
+    let mut lines = message.lines().skip_while(|line| line.trim().is_empty());
+    let Some(first) = lines.next().map(str::trim) else {
+        return String::new();
+    };
+    if first.ends_with(':') {
+        if let Some(detail) = lines
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && *line != ";")
+        {
+            return format!("{first} {detail}");
+        }
+    }
+    first.to_string()
 }
 
 /// Where `find` looks, apart from the checkout: the `PATH` to search, the
@@ -2150,9 +2180,50 @@ mod tests {
             "rust-analyzer: Failed to load workspaces"
         );
         assert_eq!(
+            Status::Unhealthy {
+                message: "invalid config value:\ncheck/overrideCommand: unexpected field\n;".into()
+            }
+            .describe(rust),
+            "rust-analyzer: invalid config value: check/overrideCommand: unexpected field"
+        );
+        assert_eq!(
             Status::Held.describe(rust),
             "rust-analyzer waits for you to trust this code"
         );
+    }
+
+    #[test]
+    fn summary_line_keeps_colon_detail_and_drops_usage_paragraphs() {
+        assert_eq!(
+            summary_line("invalid config value:\ncheck/overrideCommand: unexpected field\n;"),
+            "invalid config value: check/overrideCommand: unexpected field"
+        );
+        assert_eq!(
+            summary_line("Failed to load workspaces\n\nUsage: cargo metadata"),
+            "Failed to load workspaces"
+        );
+        assert_eq!(
+            summary_line("Failed to load workspaces:\n\nUsage: cargo metadata"),
+            "Failed to load workspaces:"
+        );
+        assert_eq!(
+            summary_line("invalid config value:\n;"),
+            "invalid config value:"
+        );
+        assert_eq!(summary_line("\n  boom  \n"), "boom");
+        assert_eq!(summary_line("   \n"), "");
+    }
+
+    #[test]
+    fn version_args_match_each_servers_cli() {
+        assert_eq!(ServerKind::Gopls.version_args(), &["version"]);
+        assert_eq!(ServerKind::RustAnalyzer.version_args(), &["--version"]);
+        assert_eq!(
+            ServerKind::TypescriptLanguageServer.version_args(),
+            &["--version"]
+        );
+        assert_eq!(ServerKind::Jdtls.version_args(), &["--version"]);
+        assert_eq!(ServerKind::Ty.version_args(), &["--version"]);
     }
 
     #[test]

@@ -35903,6 +35903,31 @@ model = \"opus\"\n",
         assert_eq!(rev.as_deref(), Some("main"));
     }
 
+    #[tokio::test]
+    async fn review_dashboard_loads_for_a_pull_request_shown_before_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let pull = Arc::new(pull_request(2287));
+        let item = Item::new("a/b", Timestamp::now());
+
+        // Brand-new pull request: not in the cache yet, only in the review
+        // slot while its checkout is being made.
+        let nav = ctx.navigation_requests.begin_item(&item.id);
+        assert!(show_pull_request_early(&ctx, &item, pull, nav));
+        assert!(ctx.item(&item.id).is_none());
+
+        let (bases, _prefs, groups, findings) = reviews::dashboard(&ctx, &item.id)
+            .await
+            .expect("early-shown pull request should not fail dashboard load");
+        assert!(bases.is_empty());
+        assert!(groups.is_empty());
+        assert!(findings.is_empty());
+
+        // An item that is neither in the cache nor open in the slot is still gone.
+        let err = reviews::dashboard(&ctx, "missing-item").await.unwrap_err();
+        assert_eq!(err, "That worktree is gone");
+    }
+
     /// A root on `main` with a bare `origin` that has `main`, and a
     /// worktree of it on `feature` one commit past, as a branch row of
     /// `a/b`. The remote is a directory, so the push is real and local.

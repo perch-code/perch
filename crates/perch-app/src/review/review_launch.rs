@@ -29,16 +29,22 @@ use crate::ui::widgets::{
 pub(crate) fn watch(app: AppState, state: ReviewState, backend: Rc<Backend>) {
     // History and an in-flight group's progress belong in the worktree view,
     // not behind the popover's first click. Reload when the open item
-    // changes; opening the popover performs an explicit refresh.
-    Effect::new(move |previous: Option<Option<String>>| {
-        let item_id = current_item_id(state);
-        if previous.as_ref() != Some(&item_id) {
-            if let Some(item_id) = item_id.as_deref() {
+    // changes or its checkout arrives on disk (after an early pull-request
+    // show); opening the popover performs an explicit refresh.
+    Effect::new(move |previous: Option<Option<(String, bool)>>| {
+        let key = state.item.with(|item| {
+            item.as_ref().map(|item| {
+                let on_disk = item.checkout.as_ref().is_some_and(|c| c.on_disk);
+                (item.id.clone(), on_disk)
+            })
+        });
+        if previous.as_ref() != Some(&key) {
+            if let Some((item_id, _)) = key.as_ref() {
                 app.begin_review_dashboard_load(item_id);
                 backend.load_review_dashboard(item_id);
             }
         }
-        item_id
+        key
     });
 
     Effect::new(move |_| {
@@ -1791,5 +1797,59 @@ mod tests {
         harness.paint();
         assert!(!state.review_open.get());
         assert!(harness.is_focused(control));
+    }
+
+    #[test]
+    fn dashboard_reloads_when_an_early_pull_requests_checkout_arrives() {
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let (backend, mut commands) = Backend::recording();
+        let backend = Rc::new(backend);
+        let root = TestRoot::new();
+        let view = crate::review::review_menu::control(app, state, backend);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 800.0);
+        let loads =
+            |commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::backend::Command>| {
+                let mut ids = Vec::new();
+                while let Ok(command) = commands.try_recv() {
+                    if let crate::backend::Command::LoadReviewDashboard { item_id } = command {
+                        ids.push(item_id);
+                    }
+                }
+                ids
+            };
+
+        let mut item = perch_github::Item::new(
+            "local/perch",
+            "2026-09-19T12:00:00Z".parse::<Timestamp>().unwrap(),
+        );
+        item.id = "pr-2287".into();
+
+        // Shown before its checkout is ready.
+        state.item.set(Some(std::sync::Arc::new(item.clone())));
+        harness.rebuild();
+        assert_eq!(loads(&mut commands), vec!["pr-2287"]);
+
+        // Checkout lands for the same item: reload so base refs are picked up.
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "perch/pr-2287".into(),
+            base_ref: "main".into(),
+            head_sha: "abcdef0123456789".into(),
+            path: std::path::PathBuf::from("/tmp/perch-review-ui-test"),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        state.item.set(Some(std::sync::Arc::new(item.clone())));
+        harness.rebuild();
+        assert_eq!(loads(&mut commands), vec!["pr-2287"]);
+
+        // Same item and checkout state again does not reload redundantly.
+        state.item.set(Some(std::sync::Arc::new(item)));
+        harness.rebuild();
+        assert!(loads(&mut commands).is_empty());
     }
 }

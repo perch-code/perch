@@ -2574,10 +2574,8 @@ impl AppState {
                 message,
             } => {
                 if self.accepts_navigation(navigation_id) {
-                    // Its first line: rust-analyzer puts the tool output it
-                    // failed on under it, which the log keeps.
-                    let first = message.lines().next().unwrap_or(&message);
-                    self.notify(format!("{}: {first}", kind.name()), Tone::Warning);
+                    let summary = perch_lsp::summary_line(&message);
+                    self.notify(format!("{}: {summary}", kind.name()), Tone::Warning);
                 }
             }
             Event::LspHover { token, markdown } => {
@@ -6079,6 +6077,20 @@ mod tests {
             Some("rust-analyzer: Failed to read Cargo metadata: unexpected argument")
         );
         assert!(review.lsp_status.get().usable_for("src/lib.rs"));
+
+        // A warning whose first line ends in `:` keeps the detail line under it.
+        app.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 81,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
+                message: "invalid config value:\ncheck/overrideCommand: unexpected field\n;".into(),
+            },
+            review,
+        );
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("rust-analyzer: invalid config value: check/overrideCommand: unexpected field")
+        );
 
         // One from a checkout since left says nothing.
         app.notify("", Tone::Error);

@@ -60,7 +60,13 @@ pub(super) async fn load_dashboard(ctx: &Ctx, item_id: &str) {
                 findings,
             });
         }
-        Err(message) => launch_failed(ctx, item_id, message),
+        Err(message) => {
+            tracing::warn!(item = item_id, %message, "could not load review dashboard");
+            let _ = ctx.events.send(Event::ReviewLaunchFailed {
+                item_id: item_id.to_string(),
+                message,
+            });
+        }
     }
 }
 
@@ -1566,67 +1572,82 @@ pub(super) async fn dashboard(
     ),
     String,
 > {
-    let item = ctx
-        .item(item_id)
-        .ok_or_else(|| "That worktree is gone".to_string())?;
+    let item = ctx.item(item_id);
+    // A brand-new pull request shown before its checkout is in the review
+    // slot before its row is written to the cache. Return its preferences
+    // and empty base refs instead of treating it as gone; the dashboard
+    // reloads once the checkout lands.
+    let open_early = item.is_none()
+        && ctx
+            .slot
+            .lock()
+            .ok()
+            .is_some_and(|slot| slot.as_ref().is_some_and(|open| open.item_id == item_id));
+    if item.is_none() && !open_early {
+        return Err("That worktree is gone".to_string());
+    }
     // History belongs to retained snapshots, not to the source checkout.
     // Base discovery is therefore best-effort: an externally removed
     // checkout disables a new launch without hiding durable old reviews.
     let mut base_refs = Vec::new();
-    if let Some(checkout) = item
-        .checkout
-        .as_ref()
-        .filter(|checkout| checkout.on_disk && checkout.path.join(".git").exists())
-    {
-        match ctx
-            .preparer
-            .git()
-            .run(
-                Some(&checkout.path),
-                [
-                    "for-each-ref",
-                    "--format=%(refname:short)",
-                    "refs/heads",
-                    "refs/remotes",
-                    "refs/tags",
-                ],
-                GIT_QUERY_TIMEOUT,
-            )
-            .await
+    if let Some(item) = item.as_ref() {
+        if let Some(checkout) = item
+            .checkout
+            .as_ref()
+            .filter(|checkout| checkout.on_disk && checkout.path.join(".git").exists())
         {
-            Ok(output) => {
-                let mut refs = output
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty() && !line.ends_with("/HEAD"))
-                    .map(str::to_string)
-                    .collect::<BTreeSet<_>>();
-                for preferred in [
-                    Some(checkout.base_ref.as_str()),
-                    item.pull_request().map(|pull| pull.base_ref.as_str()),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if base_rev(ctx, &item, checkout, preferred).await.is_some() {
-                        refs.insert(preferred.to_string());
+            match ctx
+                .preparer
+                .git()
+                .run(
+                    Some(&checkout.path),
+                    [
+                        "for-each-ref",
+                        "--format=%(refname:short)",
+                        "refs/heads",
+                        "refs/remotes",
+                        "refs/tags",
+                    ],
+                    GIT_QUERY_TIMEOUT,
+                )
+                .await
+            {
+                Ok(output) => {
+                    let mut refs = output
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty() && !line.ends_with("/HEAD"))
+                        .map(str::to_string)
+                        .collect::<BTreeSet<_>>();
+                    for preferred in [
+                        Some(checkout.base_ref.as_str()),
+                        item.pull_request().map(|pull| pull.base_ref.as_str()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if base_rev(ctx, item, checkout, preferred).await.is_some() {
+                            refs.insert(preferred.to_string());
+                        }
                     }
-                }
-                for preferred in [
-                    item.pull_request().map(|pull| pull.base_ref.as_str()),
-                    Some(checkout.base_ref.as_str()),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if refs.remove(preferred) && !base_refs.iter().any(|value| value == preferred) {
-                        base_refs.push(preferred.to_string());
+                    for preferred in [
+                        item.pull_request().map(|pull| pull.base_ref.as_str()),
+                        Some(checkout.base_ref.as_str()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        if refs.remove(preferred)
+                            && !base_refs.iter().any(|value| value == preferred)
+                        {
+                            base_refs.push(preferred.to_string());
+                        }
                     }
+                    base_refs.extend(refs);
                 }
-                base_refs.extend(refs);
-            }
-            Err(error) => {
-                tracing::warn!(item = item_id, %error, "could not list local review base refs");
+                Err(error) => {
+                    tracing::warn!(item = item_id, %error, "could not list local review base refs");
+                }
             }
         }
     }

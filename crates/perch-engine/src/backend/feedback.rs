@@ -710,7 +710,7 @@ fn problem_line(problem: &Problem, seed: Option<&Problem>) -> String {
     format!(
         "{} {tone}: {}{marked}",
         clock(Some(problem.at)),
-        problem.text.lines().next().unwrap_or("")
+        perch_lsp::summary_line(&problem.text)
     )
 }
 
@@ -785,7 +785,9 @@ async fn language_servers(ctx: &Ctx, request: &PrepareRequest) -> Vec<String> {
             binary.display(),
             binary_source(binary)
         ));
-        let version = run(binary, &["--version"]).await.unwrap_or_else(|why| why);
+        let version = run(binary, kind.version_args())
+            .await
+            .unwrap_or_else(|why| why);
         lines.push(format!("  Version: {version}"));
         if kind == perch_lsp::ServerKind::RustAnalyzer {
             lines.push(format!("  Toolchain pin: {}", toolchain_pin(client.root())));
@@ -1103,6 +1105,24 @@ paths = ["/tmp"]
         assert_eq!(
             binary_source(Path::new("/opt/homebrew/bin/rust-analyzer")),
             "PATH"
+        );
+    }
+
+    #[test]
+    fn problem_line_keeps_colon_detail_and_marks_seed() {
+        let problem = Problem {
+            at: "2026-11-23T17:42:42Z".parse().unwrap(),
+            tone: crate::feedback::Tone::Warning,
+            text:
+                "rust-analyzer: invalid config value:\ncheck/overrideCommand: unexpected field\n;"
+                    .into(),
+        };
+        let line = problem_line(&problem, Some(&problem));
+        assert!(
+            line.ends_with(
+                "warning: rust-analyzer: invalid config value: check/overrideCommand: unexpected field (reported)"
+            ),
+            "{line}"
         );
     }
 
