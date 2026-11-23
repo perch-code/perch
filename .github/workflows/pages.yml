@@ -18,11 +18,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
     steps:
       - uses: actions/checkout@v5
 
@@ -35,10 +34,24 @@ jobs:
 
       - uses: actions/configure-pages@v5
 
+      - name: Name artifact
+        id: artifact
+        run: echo "name=github-pages-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-pages-artifact@v3
         with:
+          name: ${{ steps.artifact.outputs.name }}
           path: _site
 
+  deploy:
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build.outputs.artifact_name }}
