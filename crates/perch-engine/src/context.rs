@@ -223,10 +223,15 @@ pub fn select(
     asked_in: Option<u64>,
     budget: usize,
 ) -> Selection {
+    let header = if asked_in.is_some() {
+        OTHER_HEADER
+    } else {
+        HEADER
+    };
     let candidates = candidates(archive, anchor, asked_in, |_| true);
     let checks = checks_block(archive);
-    let (shown, omitted) = fill(&candidates, budget, checks.len(), true);
-    let text = compose(&candidates, &shown, &omitted, &checks);
+    let (shown, omitted) = fill(&candidates, budget, checks.len(), header.len(), true);
+    let text = compose(&candidates, &shown, &omitted, &checks, header);
     Selection {
         shown: shown.iter().map(|&i| candidates[i].key).collect(),
         omitted: omitted.iter().map(|&i| candidates[i].key).collect(),
@@ -331,12 +336,17 @@ fn candidates(
             .filter(|m| !m.is_bot())
             .map(|m| format!("{}: {}", label(&m.author), cut(&m.body, key)))
             .collect();
+        let thread_kind = if asked_in.is_some() {
+            "other thread"
+        } else {
+            "thread"
+        };
         out.push(Candidate {
             key,
             rank: (tier, order.2),
             block: untrusted_block(
                 &format!(
-                    "thread by {} on {}, {}",
+                    "{thread_kind} by {} on {}, {}",
                     label(thread.author()),
                     label(&thread.location()),
                     thread.state()
@@ -389,9 +399,10 @@ fn fill(
     candidates: &[Candidate],
     budget: usize,
     already: usize,
+    header_len: usize,
     index: bool,
 ) -> (Vec<usize>, Vec<usize>) {
-    let mut used = already + HEADER.len();
+    let mut used = already + header_len;
     let mut shown = Vec::new();
     let mut omitted: Vec<usize> = Vec::new();
     for (i, candidate) in candidates.iter().enumerate() {
@@ -416,6 +427,8 @@ fn fill(
 }
 
 const HEADER: &str = "What was said on GitHub, as much as fits:\n";
+const OTHER_HEADER: &str =
+    "Other discussion on GitHub (background context only, not this thread), as much as fits:\n";
 const INDEX_HEADER: &str = "Not shown above, most relevant first:\n";
 
 /// The index of what was left out, at most [`MAX_INDEX_LINES`] of it.
@@ -434,7 +447,13 @@ fn index_block(lines: &[&str]) -> String {
     format!("{INDEX_HEADER}{}", untrusted_block("index", &text))
 }
 
-fn compose(candidates: &[Candidate], shown: &[usize], omitted: &[usize], checks: &str) -> String {
+fn compose(
+    candidates: &[Candidate],
+    shown: &[usize],
+    omitted: &[usize],
+    checks: &str,
+    header: &str,
+) -> String {
     let mut order: Vec<usize> = shown.to_vec();
     // By tier, in the order they filled, except that the threads read
     // together and the conversation tab comes last, oldest first.
@@ -459,7 +478,7 @@ fn compose(candidates: &[Candidate], shown: &[usize], omitted: &[usize], checks:
         out.push_str(checks);
     }
     if !out.is_empty() {
-        out.insert_str(0, HEADER);
+        out.insert_str(0, header);
     }
     let lines: Vec<&str> = omitted
         .iter()
@@ -503,7 +522,7 @@ pub fn since(
         previous.changed(&now, archive, key)
     });
     let budget = MAX_DISCUSSION_CHARS.saturating_sub(previous.spent + out.len());
-    let (shown, _) = fill(&changed, budget, 0, false);
+    let (shown, _) = fill(&changed, budget, 0, HEADER.len(), false);
     let mut order = shown.clone();
     order.sort_by_key(|&i| changed[i].rank);
     for i in order {
@@ -997,6 +1016,38 @@ mod tests {
         );
         assert!(!sel.shown.contains(&EntryKey::Thread(10)));
         assert!(!sel.omitted.contains(&EntryKey::Thread(10)));
+        assert!(
+            sel.text.starts_with(OTHER_HEADER),
+            "asked-in thread should label other discussion as background context:\n{}",
+            sel.text
+        );
+        assert!(
+            sel.text.contains(
+                "[BEGIN untrusted text: other thread by alice on src/sync.rs:100, unresolved]"
+            ),
+            "other threads should be labeled as other threads:\n{}",
+            sel.text
+        );
+        assert!(
+            !sel.text.contains("[BEGIN untrusted text: thread by "),
+            "no other thread should use the unscoped thread label:\n{}",
+            sel.text
+        );
+        // Budget still holds to the character with the longer OTHER_HEADER.
+        let budget = sel.text.len() - 1;
+        let tight = select(
+            &archive,
+            Some(&anchor("src/sync.rs", 190, 190)),
+            Some(10),
+            budget,
+        );
+        assert!(!tight.shown.is_empty() && !tight.omitted.is_empty());
+        assert!(
+            tight.text.len() <= budget,
+            "{} > {budget}\n{}",
+            tight.text.len(),
+            tight.text
+        );
     }
 
     #[test]
