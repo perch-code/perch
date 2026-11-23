@@ -623,6 +623,8 @@ fn window(env: &Environment, settings: Option<AppState>) -> (AppState, ReviewSta
     state.place = env.model.place;
     state.feedback = env.model.feedback;
     state.recent_problems = env.model.recent_problems;
+    state.seen_lsp_warnings = env.model.seen_lsp_warnings;
+    state.muted_lsp_warnings = env.model.muted_lsp_warnings;
     state.seed_from(&env.model, settings.as_ref().unwrap_or(&env.model));
     let review = state.review.get_untracked().unwrap();
     if app.open_box_on_open.replace(false) {

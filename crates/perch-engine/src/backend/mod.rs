@@ -59,9 +59,13 @@ const AVATAR_CONCURRENCY: usize = 6;
 /// reliably change when inbox membership does. Periodically fetch the whole
 /// representation so a stale cached list heals without a restart or click.
 const NOTIFICATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Persisted JSON array of language-server warnings the reader muted via
+/// "Don't show again".
+pub const MUTED_LSP_WARNINGS_META_KEY: &str = "lsp.muted_warnings";
+
 /// Settings the UI keeps between launches. Sent back at startup. Show
 /// whole is not here: it is the open tab's, and every file opens folded.
-pub const UI_META_KEYS: [&str; 7] = [
+pub const UI_META_KEYS: [&str; 8] = [
     "item_filters",
     "review.layout",
     "review.wrap",
@@ -69,6 +73,7 @@ pub const UI_META_KEYS: [&str; 7] = [
     "drawer.width",
     "viewer.login",
     "viewer.avatar_url",
+    MUTED_LSP_WARNINGS_META_KEY,
 ];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

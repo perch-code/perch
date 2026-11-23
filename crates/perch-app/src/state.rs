@@ -4,7 +4,7 @@
 //! view closure without lifetime plumbing. Derived lists are plain functions
 //! over these signals, recomputed by whichever effect reads them.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -81,11 +81,13 @@ pub enum ToastKind {
     /// An agent run reached a terminal state.
     AgentRun(String),
     /// A line of news: something that could not be done, or was. One
-    /// with `open` goes somewhere when clicked.
+    /// with `open` goes somewhere when clicked; one with `mute_key` offers
+    /// "Don't show again" and persists the mute in `meta`.
     Message {
         text: String,
         tone: Tone,
         open: Option<ToastOpen>,
+        mute_key: Option<String>,
     },
     /// A language server that isn't there, or is out of date, with the
     /// button that installs it; one held back until the reader trusts the
@@ -414,6 +416,12 @@ pub struct AppState {
     /// The session's last errors and warnings, for a report. Shared as
     /// `feedback` is.
     pub recent_problems: RwSignal<VecDeque<crate::feedback::Problem>>,
+    /// Language server warnings already toasted this session, so switching
+    /// items does not repeat the same warning. Shared across windows.
+    pub seen_lsp_warnings: RwSignal<HashSet<String>>,
+    /// Language server warnings muted via "Don't show again", persisted in
+    /// `meta` under `MUTED_LSP_WARNINGS_META_KEY`. Shared across windows.
+    pub muted_lsp_warnings: RwSignal<BTreeSet<String>>,
 
     /// Review capability/preferences are global; bases, groups, and launch
     /// errors are keyed by their stable item id so opening another item never
@@ -588,6 +596,8 @@ impl AppState {
             trusted_servers: RwSignal::new(Vec::new()),
             feedback: RwSignal::new(None),
             recent_problems: RwSignal::new(VecDeque::new()),
+            seen_lsp_warnings: RwSignal::new(HashSet::new()),
+            muted_lsp_warnings: RwSignal::new(BTreeSet::new()),
             review_capabilities: RwSignal::new(Arc::new(Vec::new())),
             review_preferences: RwSignal::new(Arc::new(Vec::new())),
             review_base_refs: RwSignal::new(HashMap::new()),
@@ -799,6 +809,13 @@ impl AppState {
                 )),
                 Some(Err(e)) => tracing::warn!(error = %e, "ignoring saved drawer width"),
                 None => self.drawer_width.set(crate::theme::DRAWER_WIDTH),
+            },
+            crate::backend::MUTED_LSP_WARNINGS_META_KEY => match value.as_deref() {
+                Some(raw) => match serde_json::from_str::<BTreeSet<String>>(raw) {
+                    Ok(muted) => self.muted_lsp_warnings.set(muted),
+                    Err(e) => tracing::warn!(error = %e, "ignoring saved muted LSP warnings"),
+                },
+                None => self.muted_lsp_warnings.set(BTreeSet::new()),
             },
             // The two arrive one after the other; whichever comes second
             // completes the pair. No login is nobody known.
@@ -1113,7 +1130,44 @@ impl AppState {
         if tone != Tone::Success {
             self.remember_problem(&text, tone);
         }
-        self.show_toast(ToastKind::Message { text, tone, open });
+        self.show_toast(ToastKind::Message {
+            text,
+            tone,
+            open,
+            mute_key: None,
+        });
+    }
+
+    /// Surface a language-server warning once per session unless muted,
+    /// offering "Don't show again" on the toast.
+    fn notify_lsp_warning(&self, text: String) {
+        self.drop_toasts(|kind| matches!(kind, ToastKind::Message { .. }));
+        if text.is_empty() {
+            return;
+        }
+        self.remember_problem(&text, Tone::Warning);
+        self.show_toast(ToastKind::Message {
+            mute_key: Some(text.clone()),
+            text,
+            tone: Tone::Warning,
+            open: None,
+        });
+    }
+
+    /// Permanently mute an LSP warning, dismiss its toast, and return the
+    /// serialized set to persist under `MUTED_LSP_WARNINGS_META_KEY`.
+    pub fn mute_lsp_warning(&self, token: u64, key: &str) -> String {
+        self.seen_lsp_warnings
+            .update(|seen| _ = seen.insert(key.to_string()));
+        let mut serialized = String::from("[]");
+        self.muted_lsp_warnings.update(|muted| {
+            muted.insert(key.to_string());
+            if let Ok(json) = serde_json::to_string(muted) {
+                serialized = json;
+            }
+        });
+        self.dismiss_toast(token);
+        serialized
     }
 
     /// Keep an error or warning for Send Feedback. Every window hears a
@@ -2575,7 +2629,18 @@ impl AppState {
             } => {
                 if self.accepts_navigation(navigation_id) {
                     let summary = perch_lsp::summary_line(&message);
-                    self.notify(format!("{}: {summary}", kind.name()), Tone::Warning);
+                    let text = format!("{}: {summary}", kind.name());
+                    let suppressed = self
+                        .muted_lsp_warnings
+                        .with_untracked(|muted| muted.contains(&text))
+                        || self
+                            .seen_lsp_warnings
+                            .with_untracked(|seen| seen.contains(&text));
+                    if !suppressed {
+                        self.seen_lsp_warnings
+                            .update(|seen| _ = seen.insert(text.clone()));
+                        self.notify_lsp_warning(text);
+                    }
                 }
             }
             Event::LspHover { token, markdown } => {
@@ -6091,6 +6156,57 @@ mod tests {
             app.notice().as_deref(),
             Some("rust-analyzer: invalid config value: check/overrideCommand: unexpected field")
         );
+        let problems_after_first = app.recent_problems.with(|p| p.len());
+
+        // The same warning again in the same session does not re-toast or
+        // add another problem.
+        app.notify("", Tone::Error);
+        app.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 81,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
+                message: "invalid config value:\ncheck/overrideCommand: unexpected field\n;".into(),
+            },
+            review,
+        );
+        assert_eq!(app.notice(), None);
+        assert_eq!(app.recent_problems.with(|p| p.len()), problems_after_first);
+
+        // A muted warning loaded from meta stays silent on a fresh session,
+        // while a different warning still surfaces.
+        let fresh = AppState::new();
+        let fresh_review = ReviewState::new();
+        fresh.begin_item_review(fresh_review, "Open", "b", 82);
+        fresh.apply_with_review(review_ready("b", 82), fresh_review);
+        let muted = serde_json::to_string(&[
+            "rust-analyzer: invalid config value: check/overrideCommand: unexpected field",
+        ])
+        .unwrap();
+        fresh.apply(Event::Meta {
+            key: crate::backend::MUTED_LSP_WARNINGS_META_KEY.into(),
+            value: Some(muted),
+        });
+        fresh.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 82,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
+                message: "invalid config value:\ncheck/overrideCommand: unexpected field\n;".into(),
+            },
+            fresh_review,
+        );
+        assert_eq!(fresh.notice(), None);
+        fresh.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 82,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
+                message: "a different warning".into(),
+            },
+            fresh_review,
+        );
+        assert_eq!(
+            fresh.notice().as_deref(),
+            Some("rust-analyzer: a different warning")
+        );
 
         // One from a checkout since left says nothing.
         app.notify("", Tone::Error);
@@ -7928,6 +8044,7 @@ mod tests {
                 text: "Merged a/b#1 (squash)".into(),
                 tone: Tone::Success,
                 open: None,
+                mute_key: None,
             })
         );
     }

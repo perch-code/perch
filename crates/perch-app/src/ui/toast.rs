@@ -69,12 +69,27 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                     }
                     None => return Empty::new().into_any(),
                 },
-                ToastKind::Message { text, tone, open } => {
+                ToastKind::Message {
+                    text,
+                    tone,
+                    open,
+                    mute_key,
+                } => {
                     let reportable = tone != Tone::Success && open.is_none();
                     let go =
                         open.map(|open| destination(state, review, backend.clone(), token, open));
                     (
-                        message(state, review, token, text, tone, reportable).into_any(),
+                        message(
+                            state,
+                            review,
+                            backend.clone(),
+                            token,
+                            text,
+                            tone,
+                            reportable,
+                            mute_key,
+                        )
+                        .into_any(),
                         go,
                     )
                 }
@@ -161,13 +176,16 @@ fn destination(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn message(
     state: AppState,
     review: ReviewState,
+    backend: Rc<Backend>,
     token: u64,
     text: String,
     tone: Tone,
     reportable: bool,
+    mute_key: Option<String>,
 ) -> impl IntoView {
     let color: fn() -> Color = match tone {
         Tone::Error => theme::closed,
@@ -180,40 +198,65 @@ fn message(
         || true,
         move || state.dismiss_toast(token),
     );
+    let action_style = |s: floem::style::Style| {
+        widgets::clickable(s)
+            .font_size(theme::TEXT_BADGE)
+            .font_weight(theme::weight_emphasis())
+            .color(theme::fg_muted())
+            .padding_horiz(7.0)
+            .height(22.0)
+            .items_center()
+            .flex_shrink(0.0_f32)
+            .border_radius(5.0)
+            .hover(|s| s.color(theme::fg()).background(theme::badge_bg()))
+    };
     let reported = text.clone();
     let report = Label::derived(|| "Report".to_string())
         .on_event_stop(el::Click, move |_, _| {
             state.dismiss_toast(token);
             crate::ui::feedback::report(state, review, reported.clone(), tone);
         })
-        .style(move |s| {
-            widgets::clickable(s)
-                .font_size(theme::TEXT_BADGE)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg_muted())
-                .padding_horiz(7.0)
-                .height(22.0)
-                .items_center()
-                .flex_shrink(0.0_f32)
-                .border_radius(5.0)
-                .hover(|s| s.color(theme::fg()).background(theme::badge_bg()))
-                .apply_if(!reportable, |s| s.hide())
-        })
+        .style(move |s| action_style(s).apply_if(!reportable, |s| s.hide()))
         .debug_name("Report problem");
-    Stack::horizontal((
-        dot(color),
-        Label::derived(move || text.clone()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::fg())
-                .text_wrap()
-                .min_width(0.0)
-                .flex_grow(1.0_f32)
-                .flex_basis(0.0)
-        }),
-        report,
-        dismiss,
-    ))
-    .style(|s| s.items_center().width_full().gap(9.0))
+    let line = Label::derived(move || text.clone()).style(|s| {
+        s.font_size(theme::TEXT_BODY)
+            .color(theme::fg())
+            .text_wrap()
+            .min_width(0.0)
+            .flex_grow(1.0_f32)
+            .flex_basis(0.0)
+    });
+    if let Some(key) = mute_key {
+        let lift = (28.0 - FIRST_LINE) / 2.0;
+        let top = Stack::horizontal((
+            dot(color).style(move |s| s.margin_top(lift + (FIRST_LINE - 9.0) / 2.0)),
+            line.style(move |s| s.padding_top(lift)),
+            dismiss,
+        ))
+        .style(|s| s.items_start().width_full().gap(9.0));
+        let mute = Label::derived(|| "Don't show again".to_string())
+            .on_event_stop(el::Click, move |_, _| {
+                let serialized = state.mute_lsp_warning(token, &key);
+                backend.set_meta(crate::backend::MUTED_LSP_WARNINGS_META_KEY, &serialized);
+            })
+            .style(action_style)
+            .debug_name("Don't show again");
+        let actions = Stack::horizontal((mute, report)).style(|s| {
+            s.width_full()
+                .justify_end()
+                .items_center()
+                .gap(4.0)
+                .padding_right(6.0)
+                .margin_top(6.0)
+        });
+        Stack::vertical((top, actions))
+            .style(|s| s.width_full().padding_bottom(2.0))
+            .into_any()
+    } else {
+        Stack::horizontal((dot(color), line, report, dismiss))
+            .style(|s| s.items_center().width_full().gap(9.0))
+            .into_any()
+    }
 }
 
 /// An offer to install a language server, to start one that isn't
@@ -795,5 +838,85 @@ mod tests {
             state.trust_everywhere.get_untracked().is_empty(),
             "a new ask starts empty"
         );
+    }
+
+    /// Clicking "Don't show again" on an LSP warning dismisses the toast,
+    /// persists the exact warning under `lsp.muted_warnings`, and keeps it
+    /// silent on later sessions.
+    #[test]
+    fn dont_show_again_mutes_an_lsp_warning_and_persists_it() {
+        use std::rc::Rc;
+
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::prelude::*;
+
+        use crate::backend::{Backend, Command, Event, MUTED_LSP_WARNINGS_META_KEY};
+        use crate::review::model::ReviewState;
+        use crate::state::AppState;
+
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = crate::ui::app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let settle = |harness: &mut HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+
+        state.begin_item_review(review, "Open", "pr", 91);
+        state.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 91,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
+                message: "invalid config value:\ncheck/overrideCommand: unexpected field\n;".into(),
+            },
+            review,
+        );
+        settle(&mut harness);
+
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        let mute = named(toast, "Don't show again").expect("no Don't show again button");
+        assert!(named(toast, "Report problem").is_some());
+        let at = mute.get_visual_rect_no_clip().center();
+        harness.click(at.x, at.y);
+        settle(&mut harness);
+        assert!(state.current_toast().is_none(), "toast dismissed");
+
+        let saved: Vec<(String, String)> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::SetMeta { key, value } if key == MUTED_LSP_WARNINGS_META_KEY => {
+                    Some((key, value))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(saved.len(), 1);
+        let expected =
+            "rust-analyzer: invalid config value: check/overrideCommand: unexpected field";
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&saved[0].1).unwrap(),
+            vec![expected]
+        );
+
+        // Reloading the saved meta into a new session keeps that warning muted.
+        let reloaded = AppState::new();
+        let reloaded_review = ReviewState::new();
+        reloaded.apply(Event::Meta {
+            key: MUTED_LSP_WARNINGS_META_KEY.into(),
+            value: Some(saved[0].1.clone()),
+        });
+        reloaded.begin_item_review(reloaded_review, "Open", "pr", 92);
+        reloaded.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 92,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
+                message: "invalid config value:\ncheck/overrideCommand: unexpected field\n;".into(),
+            },
+            reloaded_review,
+        );
+        assert!(reloaded.current_toast().is_none());
     }
 }
