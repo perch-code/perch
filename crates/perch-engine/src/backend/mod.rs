@@ -560,6 +560,11 @@ pub enum Command {
         id: String,
         name: Option<String>,
     },
+    EditWorktreeSummary {
+        id: String,
+        title: String,
+        description: String,
+    },
     /// Add a `[[repo]]` for the repository a folder is in.
     AddRepository {
         path: PathBuf,
@@ -3738,6 +3743,14 @@ impl Backend {
         });
     }
 
+    pub fn edit_worktree_summary(&self, id: String, title: String, description: String) {
+        let _ = self.commands.send(Command::EditWorktreeSummary {
+            id,
+            title,
+            description,
+        });
+    }
+
     pub fn rename_item(&self, id: &str, name: Option<String>) {
         let _ = self.commands.send(Command::RenameItem {
             id: id.to_string(),
@@ -5560,6 +5573,15 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                     item.pinned_at = pinned.then(Timestamp::now);
                 });
             }
+            Command::EditWorktreeSummary {
+                id,
+                title,
+                description,
+            } => match ctx.with_cache(|c| c.edit_worktree_summary(&id, &title, &description)) {
+                Some(Ok(true)) => ctx.send_items(),
+                Some(Err(e)) => ctx.notice(format!("Could not save the worktree summary: {e}")),
+                _ => ctx.notice("Could not save the worktree summary"),
+            },
             Command::RenameItem { id, name } => {
                 edit_item(&ctx, &id, |item| {
                     item.name = name.clone().filter(|n| !n.trim().is_empty());
@@ -14343,6 +14365,8 @@ async fn start_work_on_issue(
         divergence: None,
         source: None,
     });
+    item.worktree_title = Some(issue.title.clone());
+    item.worktree_description = Some(issue.body.clone());
     item.from_item_id = Some(issue_item.id.clone());
     let untrusted = cut_starts_untrusted(ctx, &issue_item);
     ctx.with_cache(|c| c.insert_cut_item(&item, untrusted))
@@ -36334,7 +36358,7 @@ model = \"opus\"\n",
         let dir = tempfile::tempdir().unwrap();
         let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
         owned_clone(&ctx, dir.path());
-        let issue = store_issue(&ctx, 5);
+        let issue = store_editable_issue(&ctx, 5);
         let navigation_id = ctx.navigation_requests.begin_current();
 
         start_work_and_open(ctx.clone(), Ok(issue.id.clone()), navigation_id, None).await;
@@ -36346,6 +36370,13 @@ model = \"opus\"\n",
         let ready = events
             .iter()
             .position(|event| matches!(event, Event::ReviewReady { item, .. } if item.from_item_id.as_deref() == Some(issue.id.as_str())));
+        let work = ctx
+            .with_cache(|c| c.find_item_by_branch("a/b", "perch/issue-5"))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(work.title(), "t");
+        assert_eq!(work.worktree_description.as_deref(), Some("As written"));
         assert!(draft.is_some(), "the prompt went");
         assert!(ready.is_some(), "the worktree opened");
         assert!(draft < ready, "the prompt went first");

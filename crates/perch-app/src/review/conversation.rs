@@ -3915,6 +3915,32 @@ mod tests {
     }
 
     #[test]
+    fn an_issue_worktree_edits_its_local_summary() {
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let (mut harness, _, _) = app_harness_prepared(backend, discussion(), |state| {
+            state.pull_request.set(None);
+            state.discussion.set(None);
+            state.item.update(|item| {
+                let item = Arc::make_mut(item.as_mut().unwrap());
+                item.subject = None;
+                item.worktree_title = Some("Fence the manifest".into());
+                item.worktree_description = Some("Compare both versions.".into());
+            });
+        });
+        assert!(shown(&harness, "Fence the manifest"));
+        let edit = find(harness.root_id(), "edit worktree summary").unwrap();
+        click_on(&mut harness, edit);
+        let save = find(harness.root_id(), "save worktree summary").unwrap();
+        while commands.try_recv().is_ok() {}
+        click_on(&mut harness, save);
+        assert!(
+            matches!(commands.try_recv(), Ok(crate::backend::Command::EditWorktreeSummary {
+            id, title, description
+        }) if id == "wt" && title == "Fence the manifest" && description == "Compare both versions.")
+        );
+    }
+
+    #[test]
     fn a_bare_branch_says_so_under_the_composer() {
         let (mut harness, _, state) = app_harness();
         state.pull_request.set(None);

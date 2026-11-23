@@ -51,10 +51,11 @@ pub use history_store::{history_subject_id, HISTORY_SUBJECT_ID_PREFIX};
 /// what comes back to it starts empty. Version 38 keeps who approved a
 /// Work run's requests as it was admitted. Version 39 stores GitHub
 /// history snapshots for the archive. Version 40 caches model-rewritten
-/// PR and issue descriptions. Schemas 13 through 23
+/// PR and issue descriptions. Version 41 seeds local worktree summaries
+/// from their source issues. Schemas 13 through 23
 /// migrate in place so local conversations and agent history are never
 /// discarded.
-pub const SCHEMA_VERSION: u32 = 40;
+pub const SCHEMA_VERSION: u32 = 41;
 
 const DESCRIPTION_REWRITE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS description_rewrites (
@@ -327,6 +328,8 @@ CREATE TABLE items (
     last_seen_head   TEXT,
     source_path      TEXT,
     divergence       TEXT,
+    worktree_title   TEXT,
+    worktree_description TEXT,
     CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
 );
 CREATE UNIQUE INDEX items_subject ON items(subject_repo, subject_kind, subject_number)
@@ -589,6 +592,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             37 => add_run_approvals_column(&tx)?,
             38 => tx.execute_batch(history_store::HISTORY_SCHEMA)?,
             39 => tx.execute_batch(DESCRIPTION_REWRITE_SCHEMA)?,
+            40 => add_worktree_summary(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -894,6 +898,29 @@ fn add_divergence_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
     if !present {
         tx.execute("ALTER TABLE items ADD COLUMN divergence TEXT", [])?;
     }
+    Ok(())
+}
+
+fn add_worktree_summary(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    for column in ["worktree_title", "worktree_description"] {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('items') WHERE name=?1)",
+            [column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            tx.execute(&format!("ALTER TABLE items ADD COLUMN {column} TEXT"), [])?;
+        }
+    }
+    tx.execute(
+        "UPDATE items AS work SET
+            worktree_title=json_extract(issue.subject_json, '$.title'),
+            worktree_description=coalesce(json_extract(issue.subject_json, '$.body'), '')
+         FROM items AS issue WHERE work.from_item_id=issue.id
+            AND issue.subject_kind='issue' AND json_valid(issue.subject_json)
+            AND work.subject_kind IS NULL AND work.worktree_title IS NULL",
+        [],
+    )?;
     Ok(())
 }
 
@@ -4259,8 +4286,8 @@ impl Cache {
              (id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
               saved, pinned_at, archived_at, created_at, last_opened_at, additions, deletions,
-              subject_repo, last_seen_head, source_path, divergence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+              subject_repo, last_seen_head, source_path, divergence, worktree_title, worktree_description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 item.id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
@@ -4278,9 +4305,25 @@ impl Cache {
                 c.last_seen_head,
                 c.source_path,
                 c.divergence,
+                item.worktree_title,
+                item.worktree_description,
             ],
         )?;
         Ok(())
+    }
+
+    /// Save both fields together, only while this is a checkout with a local summary.
+    pub fn edit_worktree_summary(
+        &self,
+        id: &str,
+        title: &str,
+        description: &str,
+    ) -> Result<bool, CacheError> {
+        Ok(self.conn.execute(
+            "UPDATE items SET name=nullif(?2, worktree_title), worktree_description=?3
+             WHERE id=?1 AND subject_kind IS NULL AND worktree_title IS NOT NULL AND ?2<>''",
+            params![id, title.trim(), description],
+        )? == 1)
     }
 
     /// Rewrite every column of an item that can move.
@@ -4302,7 +4345,7 @@ impl Cache {
                 owned = ?10, on_disk = ?11, from_item_id = ?12, name = ?13, saved = ?14,
                 pinned_at = ?15, archived_at = ?16, last_opened_at = ?17,
                 additions = ?18, deletions = ?19, subject_repo = ?20, last_seen_head = ?21,
-                source_path = ?22, divergence = ?23
+                source_path = ?22, divergence = ?23, worktree_title = ?24, worktree_description = ?25
              WHERE id = ?1",
             params![
                 item.id,
@@ -4328,6 +4371,8 @@ impl Cache {
                 c.last_seen_head,
                 c.source_path,
                 c.divergence,
+                item.worktree_title,
+                item.worktree_description,
             ],
         )?;
         Ok(())
@@ -5060,7 +5105,7 @@ fn hash(s: &str) -> String {
 const ITEM_COLUMNS: &str = "id, repo_full_name, subject_kind, subject_number, subject_json,
     branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
     pinned_at, archived_at, created_at, last_opened_at, additions, deletions, last_seen_head,
-    source_path, divergence";
+    source_path, divergence, worktree_title, worktree_description";
 
 /// An item's optional parts as columns.
 struct ItemColumns {
@@ -5175,6 +5220,8 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         checkout,
         from_item_id: r.get(11)?,
         name: r.get(12)?,
+        worktree_title: r.get(23)?,
+        worktree_description: r.get(24)?,
         pinned_at: stamp(r.get(14)?),
         archived_at: stamp(r.get(15)?),
         created_at: created.parse().unwrap_or(Timestamp::UNIX_EPOCH),
@@ -6634,6 +6681,43 @@ mod tests {
 
     fn stamp_of(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn schema_40_seeds_an_issue_worktree_and_keeps_its_custom_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let mut branch = branch_item("perch/issue-7");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.conn.execute(
+                "INSERT INTO items (id, repo_full_name, subject_kind, subject_number, subject_json, created_at, last_opened_at)
+                 VALUES ('source', 'acme/widgets', 'issue', 7, ?1, ?2, ?2)",
+                params![r#"{"kind":"issue","title":"Fence the manifest","body":"Original body"}"#, branch.created_at.to_string()],
+            ).unwrap();
+            branch.from_item_id = Some("source".into());
+            branch.name = Some("My work".into());
+            cache.insert_item(&branch).unwrap();
+            cache
+                .conn
+                .execute_batch(
+                    "ALTER TABLE items DROP COLUMN worktree_title;
+                                      ALTER TABLE items DROP COLUMN worktree_description;",
+                )
+                .unwrap();
+            cache.set_meta("schema_version", "40").unwrap();
+        }
+        let cache = Cache::open(&path, None).unwrap();
+        let work = cache.load_item(&branch.id).unwrap().unwrap();
+        assert_eq!(work.title(), "My work");
+        assert_eq!(work.given_title(), "Fence the manifest");
+        assert_eq!(work.worktree_description.as_deref(), Some("Original body"));
+        assert!(cache
+            .edit_worktree_summary(&work.id, "Revised title", "")
+            .unwrap());
+        let saved = cache.load_item(&work.id).unwrap().unwrap();
+        assert_eq!(saved.title(), "Revised title");
+        assert_eq!(saved.worktree_description.as_deref(), Some(""));
     }
 
     #[test]

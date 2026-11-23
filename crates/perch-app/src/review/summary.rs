@@ -6,9 +6,8 @@
 //! it can go in as one group of the checks, the review and the merge, each
 //! its glyph and its word, and the churn with its meter. See `card_head`.
 //! The checks list every check in their menu, and the item bar's Merge
-//! has the rest. A worktree of the reader's own has no description, and
-//! has the summary's one line instead: its repository, who opened it, its
-//! churn, and the checks at its end.
+//! has the rest. A worktree shows its repository, churn, and checks.
+//! One cut from an issue also has an editable local title and description.
 //! The notices, and the way back from a retained snapshot, sit over the
 //! head; on Code the notice is in the tab bar and the way back in the
 //! rail, since the summary is Conversation's alone.
@@ -53,8 +52,7 @@ use crate::ui::widgets::{
 };
 
 /// Whether the description's head says what the item is, rather than the
-/// summary's line: a pull request and an issue have a description, and a
-/// worktree of the reader's own has none.
+/// summary's line: pull requests and issues use their GitHub description card.
 fn head_in_description(state: ReviewState) -> bool {
     state.pull_request.with(Option::is_some) || state.issue.with(Option::is_some)
 }
@@ -77,14 +75,19 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     // Asked as the item opens, so the details have them when they open.
     ask(app, state, &backend);
     Stack::vertical((
-        notices(app, state, backend),
+        notices(app, state, backend.clone()),
         dyn_container(
             move || in_card.get(),
             move |in_card| {
                 if in_card {
                     Empty::new().into_any()
                 } else {
-                    line(app, state, author).into_any()
+                    Stack::vertical((
+                        worktree_summary(state, backend.clone()),
+                        line(app, state, author),
+                    ))
+                    .style(|s| s.width_full())
+                    .into_any()
                 }
             },
         )
@@ -104,6 +107,108 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             .padding_bottom(under)
             .apply_if(!shown.get(), |s| s.hide())
     })
+}
+
+/// The worktree owns this copy of the issue text from the moment it is cut.
+fn worktree_summary(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let summary = Memo::new(move |_| {
+        state.item.with(|item| {
+            let item = item.as_ref()?;
+            Some((
+                item.id.clone(),
+                item.title().to_owned(),
+                item.worktree_description.clone()?,
+            ))
+        })
+    });
+    dyn_container(
+        move || summary.get(),
+        move |summary| {
+            let Some((id, title, description)) = summary else {
+                return Empty::new().into_any();
+            };
+            let editing = RwSignal::new(false);
+            let backend = backend.clone();
+            dyn_container(
+                move || editing.get(),
+                move |edit| {
+                    if edit {
+                        let draft = RwSignal::new(title.clone());
+                        let editor = crate::ui::widgets::prose_editor(
+                            description.clone(),
+                            "Add a description…",
+                            Some(state.next_token()),
+                        );
+                        let document = editor.editor().doc();
+                        let backend = backend.clone();
+                        let id = id.clone();
+                        Stack::vertical((
+                            floem::views::TextInput::new(draft).style(|s| s.width_full()),
+                            crate::ui::widgets::editor_box(editor, || (100.0, 240.0), true),
+                            Stack::horizontal((
+                                action_button(
+                                    || "Save".into(),
+                                    "save worktree summary",
+                                    true,
+                                    move || draft.with(|s| !s.trim().is_empty()),
+                                    move || {
+                                        backend.edit_worktree_summary(
+                                            id.clone(),
+                                            draft.get_untracked(),
+                                            document.text().to_string(),
+                                        );
+                                        editing.set(false);
+                                    },
+                                ),
+                                action_button(
+                                    || "Cancel".into(),
+                                    "cancel worktree edit",
+                                    false,
+                                    || true,
+                                    move || editing.set(false),
+                                ),
+                            ))
+                            .style(|s| s.col_gap(8.0)),
+                        ))
+                        .style(|s| s.width_full().row_gap(8.0))
+                        .into_any()
+                    } else {
+                        Stack::vertical((
+                            Stack::horizontal((
+                                Label::new(title.clone()).style(|s| {
+                                    s.font_size(theme::TEXT_ITEM_TITLE)
+                                        .font_weight(theme::weight_strong())
+                                        .text_wrap()
+                                        .min_width(0.0)
+                                        .flex_grow(1.0_f32)
+                                }),
+                                action_button(
+                                    || "Edit".into(),
+                                    "edit worktree summary",
+                                    false,
+                                    || true,
+                                    move || editing.set(true),
+                                ),
+                            ))
+                            .style(|s| s.width_full().items_start().col_gap(12.0)),
+                            crate::review::markdown::render_document(
+                                if description.is_empty() {
+                                    "No description."
+                                } else {
+                                    &description
+                                },
+                                state,
+                            ),
+                        ))
+                        .style(|s| s.width_full().row_gap(8.0))
+                        .into_any()
+                    }
+                },
+            )
+            .style(|s| s.width_full().padding_bottom(12.0))
+            .into_any()
+        },
+    )
 }
 
 /// The description's head, as a document's: the item's title with the

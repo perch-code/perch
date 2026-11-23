@@ -371,6 +371,9 @@ pub struct Item {
     pub from_item_id: Option<String>,
     /// A name of the reader's own, from Rename.
     pub name: Option<String>,
+    /// Local defaults copied when work starts on an issue.
+    pub worktree_title: Option<String>,
+    pub worktree_description: Option<String>,
     pub pinned_at: Option<Timestamp>,
     pub archived_at: Option<Timestamp>,
     pub created_at: Timestamp,
@@ -387,6 +390,8 @@ impl Item {
             checkout: None,
             from_item_id: None,
             name: None,
+            worktree_title: None,
+            worktree_description: None,
             pinned_at: None,
             archived_at: None,
             created_at: now,
@@ -399,20 +404,14 @@ impl Item {
         if let Some(name) = self.name.as_deref().filter(|n| !n.trim().is_empty()) {
             return name;
         }
-        if let Some(subject) = &self.subject {
-            return subject.title();
-        }
-        self.checkout
-            .as_ref()
-            .map(|c| c.branch.as_str())
-            .unwrap_or("")
+        self.given_title()
     }
 
     /// The title before any Rename.
     pub fn given_title(&self) -> &str {
         match (&self.subject, &self.checkout) {
             (Some(s), _) => s.title(),
-            (None, Some(c)) => &c.branch,
+            (None, Some(c)) => self.worktree_title.as_deref().unwrap_or(&c.branch),
             (None, None) => "",
         }
     }
