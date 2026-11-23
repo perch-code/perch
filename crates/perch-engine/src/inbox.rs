@@ -1,9 +1,9 @@
 //! The Inbox list: GitHub's threads, and a row for each worktree without
-//! a pull request where an agent run or a review ended, under the View,
-//! repository, State, Unread Only and search the sidebar has picked.
-//! GitHub's order is kept and the local rows are fitted in by time, or
-//! the whole list turned over for Oldest first; filtering only removes
-//! rows from it.
+//! a GitHub subject (pull request or issue) where an agent run or a review
+//! ended, under the View, repository, State, Unread Only and search the
+//! sidebar has picked. GitHub's order is kept and the local rows are fitted
+//! in by time, or the whole list turned over for Oldest first; filtering
+//! only removes rows from it.
 
 use std::collections::HashMap;
 
@@ -42,10 +42,11 @@ impl InboxRow {
 }
 
 /// The inbox: `threads` in GitHub's order, with the visible activity of
-/// items that have no pull request fitted in by time. An item with a
-/// pull request has GitHub's notifications instead, so a row it had
-/// before one was opened goes. `threads` is the whole list, before any
-/// filter, so a row's place doesn't depend on what is hidden.
+/// items that have no GitHub subject (pull request or issue) fitted in by
+/// time. An item with a pull request or issue has GitHub's notifications
+/// instead, so a row it had before one was opened goes. `threads` is the
+/// whole list, before any filter, so a row's place doesn't depend on what
+/// is hidden.
 pub fn rows(
     threads: &[Thread],
     activity: &HashMap<String, ItemActivity>,
@@ -56,7 +57,7 @@ pub fn rows(
         .values()
         .filter(|a| a.is_visible())
         .filter_map(|a| items.get(a.item_id.as_str()).map(|item| (a, *item)))
-        .filter(|(_, item)| item.pull_request().is_none())
+        .filter(|(_, item)| item.subject.is_none())
         .collect();
     // Newest first; ties by item id so the order is stable.
     local.sort_by(|a, b| b.0.at.cmp(&a.0.at).then_with(|| a.1.id.cmp(&b.1.id)));
@@ -852,6 +853,41 @@ mod tests {
             ["item:b"],
             "and the chip"
         );
+    }
+
+    #[test]
+    fn items_with_a_github_subject_do_not_produce_local_rows() {
+        let mut issue_item = Item::new("org/one", "2026-09-19T12:00:00Z".parse().unwrap());
+        issue_item.id = "issue".into();
+        let mut issue = crate::test_support::issue("");
+        issue.repo_full_name = "org/one".into();
+        issue_item.subject = Some(perch_github::ItemSubject::Issue(issue));
+
+        let mut pr_item = branch("pr");
+        pr_item.subject = Some(perch_github::ItemSubject::PullRequest(
+            crate::test_support::pull_request(9),
+        ));
+
+        let branch_item = branch("branch");
+        let items = vec![issue_item, pr_item, branch_item];
+        let activity: HashMap<String, ItemActivity> = [
+            ran("issue", "2026-09-21T00:00:00Z", ActivityOutcome::Completed),
+            ran("pr", "2026-09-21T00:00:00Z", ActivityOutcome::Completed),
+            ran("branch", "2026-09-20T00:00:00Z", ActivityOutcome::Completed),
+        ]
+        .into_iter()
+        .map(|a| (a.item_id.clone(), a))
+        .collect();
+        let threads = vec![thread(
+            "7",
+            "org/one",
+            "Issue",
+            SubjectKind::Issue,
+            Reason::Mention,
+            false,
+        )];
+        let built = rows(&threads, &activity, &items);
+        assert_eq!(keys(&built), ["item:branch", "thread:7"]);
     }
 
     #[test]

@@ -4241,9 +4241,9 @@ impl AppState {
     }
 
     /// Whether the item has local activity the reader hasn't opened it
-    /// since, with no pull request to have notifications instead.
+    /// since, with no pull request or issue to have notifications instead.
     pub fn activity_unread(&self, item: &Item) -> bool {
-        item.pull_request().is_none()
+        item.subject.is_none()
             && self
                 .item_activity
                 .with(|all| all.get(&item.id).is_some_and(|a| a.is_unread()))

@@ -1,5 +1,5 @@
 //! The Inbox's rows: GitHub's notifications, and a row for each worktree
-//! without a pull request where an agent run or a review ended.
+//! without a pull request or issue where an agent run or a review ended.
 //!
 //! The order is the order from GitHub, with the local rows fitted in by
 //! time; filtering (`crate::inbox`) only removes rows from that order.
@@ -182,9 +182,10 @@ pub fn visible_notifications(state: AppState) -> Vec<InboxRow> {
     state.visible_inbox()
 }
 
-/// The row for an item without a pull request where a run or a review
-/// ended: its glyph and title as Worktrees draws them, the branch and what
-/// happened in the byline. Opening it opens the item, which reads it.
+/// The row for an item without a pull request or issue where a run or a
+/// review ended: its glyph and title as Worktrees draws them, the branch
+/// and what happened in the byline. Opening it opens the item, which reads
+/// it.
 fn local_row(
     state: AppState,
     backend: Rc<Backend>,
@@ -450,9 +451,8 @@ fn inbox_row_of(state: AppState, item: &Item) -> Option<InboxRow> {
     row_about(rows, item)
 }
 
-/// GitHub's notification first: an issue a run ended on has a row of
-/// each, the run's above when it is the newer, and the notification is
-/// the one with more to do about it.
+/// GitHub's notification first when one is present, else the local row
+/// for a branch without a GitHub subject.
 fn row_about(rows: Vec<InboxRow>, item: &Item) -> Option<InboxRow> {
     let about = |row: &InboxRow| match row {
         InboxRow::Thread(thread) => item.subject.as_ref().is_some_and(|subject| {
@@ -985,10 +985,10 @@ mod tests {
     use super::*;
     use perch_github::{Reason, Repository, Subject};
 
-    /// An issue a run ended on has two rows in the inbox, the run's first
-    /// when it is the newer. Its details act on GitHub's notification,
-    /// which can be snoozed and unsubscribed from, and Mark Unread there
-    /// is that row's alone.
+    /// An issue's run never creates a local inbox row, so even with stored
+    /// activity it has no duplicate row and stands only by GitHub's
+    /// notification. A branch without a GitHub subject still stands by its
+    /// local row.
     #[test]
     fn an_item_with_a_run_and_a_notification_stands_by_the_notification() {
         use crate::backend::Command;
@@ -999,32 +999,38 @@ mod tests {
         let mut issue = perch_engine::test_support::issue("");
         issue.repo_full_name = "a/b".into();
         item.subject = Some(perch_github::ItemSubject::Issue(issue));
+        let mut branch = Item::new("a/b", "2026-09-19T12:00:00Z".parse().unwrap());
+        branch.id = "branch".into();
         let at: Timestamp = "2026-09-20T12:00:00Z".parse().unwrap();
-        state.items.set(vec![item.clone()]);
+        state.items.set(vec![item.clone(), branch.clone()]);
+        let activity = |item_id: &str| ItemActivity {
+            item_id: item_id.into(),
+            at,
+            event: perch_github::ActivityEvent::Review {
+                group_id: "g".into(),
+                outcome: perch_github::ActivityOutcome::Completed,
+                findings: 0,
+            },
+            read_at: Some(at),
+            done_at: None,
+            local_unread: false,
+        };
         state.item_activity.update(|all| {
-            all.insert(
-                "issue".into(),
-                ItemActivity {
-                    item_id: "issue".into(),
-                    at,
-                    event: perch_github::ActivityEvent::Review {
-                        group_id: "g".into(),
-                        outcome: perch_github::ActivityOutcome::Completed,
-                        findings: 0,
-                    },
-                    read_at: Some(at),
-                    done_at: None,
-                    local_unread: false,
-                },
-            );
+            all.insert("issue".into(), activity("issue"));
+            all.insert("branch".into(), activity("branch"));
         });
         assert_eq!(
-            standing(state, &item),
+            standing(state, &branch),
             Some(InboxStanding::Here {
                 notification: false,
                 read: true
             }),
-            "the run alone"
+            "a branch without a GitHub subject stands by its local row"
+        );
+        assert_eq!(
+            standing(state, &item),
+            None,
+            "an issue's activity makes no local row"
         );
 
         state.notifications.set(vec![thread(
@@ -1035,12 +1041,14 @@ mod tests {
             Reason::Mention,
             false,
         )]);
-        assert!(
-            matches!(
-                state.inbox_rows(InboxView::Inbox).first(),
-                Some(InboxRow::Local { .. })
-            ),
-            "the run's row is not the first"
+        assert_eq!(
+            state
+                .inbox_rows(InboxView::Inbox)
+                .iter()
+                .map(InboxRow::key)
+                .collect::<Vec<_>>(),
+            ["item:branch", "thread:7"],
+            "no duplicate local row for the issue"
         );
         assert_eq!(
             standing(state, &item),

@@ -190,7 +190,7 @@ struct Unread {
 
 impl Unread {
     fn of(state: AppState, item: &Item) -> Self {
-        let activity = item.pull_request().is_none()
+        let activity = item.subject.is_none()
             && state.item_activity.with_untracked(|all| {
                 all.get(&item.id)
                     .is_some_and(|a| a.is_visible() && !a.is_unread())

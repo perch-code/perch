@@ -7716,14 +7716,14 @@ impl Ctx {
     }
 
     /// Record the latest thing that happened on an item, unless it has a
-    /// pull request, whose notifications say what happens there, or the
-    /// reader is looking at it: open in a window that is key. Whether it
-    /// was recorded.
+    /// GitHub subject (pull request or issue), whose notifications say what
+    /// happens there, or the reader is looking at it: open in a window that
+    /// is key. Whether it was recorded.
     fn record_activity(&self, item_id: &str, event: perch_github::ActivityEvent) -> bool {
         let Some(item) = self.item(item_id) else {
             return false;
         };
-        if item.pull_request().is_some() {
+        if item.subject.is_some() {
             return false;
         }
         let watched = self.views().iter().any(|ctx| {
@@ -37844,7 +37844,7 @@ model = \"opus\"\n",
         .await;
         assert!(activity(&ctx, &item.id).unwrap().is_visible());
 
-        // A pull request's run isn't recorded at all.
+        // A pull request's or an issue's run isn't recorded at all.
         let mut pull = worktree_item("pull");
         pull.subject = Some(ItemSubject::PullRequest(pull_request(7)));
         ctx.with_cache(|c| c.insert_item(&pull).unwrap());
@@ -37855,6 +37855,18 @@ model = \"opus\"\n",
         )
         .await;
         assert_eq!(activity(&ctx, &pull.id), None);
+
+        let mut issue_item = Item::new("a/b", "2026-09-19T12:00:00Z".parse().unwrap());
+        issue_item.id = "issue".into();
+        issue_item.subject = Some(ItemSubject::Issue(crate::test_support::issue("")));
+        ctx.with_cache(|c| c.insert_item(&issue_item).unwrap());
+        record_run_activity(
+            &ctx,
+            &issue_item.id,
+            &ended(RunStatus::Completed, TerminalReason::Completed),
+        )
+        .await;
+        assert_eq!(activity(&ctx, &issue_item.id), None);
     }
 
     /// A review is news once, when its last reviewer ends.

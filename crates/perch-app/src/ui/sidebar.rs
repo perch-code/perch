@@ -1645,10 +1645,10 @@ mod tests {
         }
     }
 
-    /// A run that ends on a worktree with no pull request is a row of its
-    /// own, newest first among GitHub's, and bolds the worktree's row
-    /// until it is read. A pull request's runs never make one: GitHub's
-    /// notifications are its signal.
+    /// A run that ends on a worktree with no pull request or issue is a row
+    /// of its own, newest first among GitHub's, and bolds the worktree's
+    /// row until it is read. A pull request's or issue's runs never make
+    /// one: GitHub's notifications are their signal.
     #[test]
     fn a_run_that_ends_on_a_branch_is_an_inbox_row_and_a_pull_request_s_is_not() {
         use floem::style::FontWeight;
@@ -1657,6 +1657,7 @@ mod tests {
         state.item_activity.update(|all| {
             all.insert("quiet".into(), ran("quiet", "2026-09-20T11:00:00Z"));
             all.insert("pr".into(), ran("pr", "2026-09-20T11:30:00Z"));
+            all.insert("mine".into(), ran("mine", "2026-09-20T11:45:00Z"));
         });
         repaint(&mut harness);
         let worktree = find(harness.root_id(), "item row:quiet").unwrap();
@@ -1682,6 +1683,10 @@ mod tests {
         assert!(
             find(harness.root_id(), "notification row:item:pr").is_none(),
             "a pull request's run makes no row"
+        );
+        assert!(
+            find(harness.root_id(), "notification row:item:mine").is_none(),
+            "an issue's run makes no row"
         );
         let thread = find(harness.root_id(), "notification row:12").unwrap();
         assert!(local.get_visual_rect_no_clip().y0 < thread.get_visual_rect_no_clip().y0);
