@@ -180,7 +180,7 @@ actions! {
     ToggleAgents { id: "toggle_agents", title: "Toggle Agents", group: General, context: Window, keys: ["super+shift+a"] },
     SendFeedback { id: "send_feedback", title: "Send Feedback", group: General, context: Window, keys: [] },
 
-    ToggleSidebar { id: "toggle_sidebar", title: "Toggle Sidebar", group: Sidebar, context: Window, keys: ["super+\\"] },
+    ToggleSidebar { id: "toggle_sidebar", title: "Toggle Sidebar", group: Sidebar, context: Window, keys: ["super+b"] },
     FocusSearch { id: "focus_search", title: "Search the Sidebar", group: Sidebar, context: Window, keys: ["super+shift+f", "/"] },
     Inbox { id: "inbox", title: "Show Inbox", group: Sidebar, context: Window, keys: ["ctrl+1"], other_keys: ["alt+1"] },
     Worktrees { id: "worktrees", title: "Show Worktrees", group: Sidebar, context: Window, keys: ["ctrl+2"], other_keys: ["alt+2"] },

@@ -562,7 +562,7 @@ The tables use the same groups and action IDs as Settings.
 
 | Action | Default | What it does |
 |---|---|---|
-| `toggle_sidebar` | `super+\` | Shows or hides the sidebar |
+| `toggle_sidebar` | `super+b` | Shows or hides the sidebar. In the composer, this shortcut formats text as bold. |
 | `focus_search` | `super+shift+f`, `/` | Opens the sidebar and focuses its search box |
 | `inbox` | `ctrl+1` (macOS), `alt+1` (other) | Shows the Inbox, opening the sidebar if needed |
 | `worktrees` | `ctrl+2` (macOS), `alt+2` (other) | Shows Worktrees, opening the sidebar if needed |
