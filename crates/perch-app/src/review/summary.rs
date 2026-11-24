@@ -20,9 +20,11 @@
 //! on the row it is about: Done on Inbox, the branch's name copied from
 //! Branch, Start Work on Worktree.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
@@ -36,9 +38,15 @@ pub(crate) use perch_engine::review::summary::closes;
 use crate::backend::{Backend, StateChange};
 use crate::icons::{self, SidebarIcon};
 use crate::keymap::{self, Action};
-use crate::review::cards::{avatar_url_for, tip, tip_with, verdict_glyph};
+use crate::review::cards::{
+    avatar_url_for, clamped, edit_action, more_button, tip, tip_with, track_hover, verdict_glyph,
+    More,
+};
 use crate::review::model::ReviewState;
 use crate::review::start_work::can_start_work;
+use crate::review::threads::{
+    cmd_enter, resizable_editor_box, resize_cursor_sheet, send_button, Grip,
+};
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
@@ -64,11 +72,18 @@ fn head_in_description(state: ReviewState) -> bool {
 pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let author = Memo::new(move |_| github_data(app, state).author);
     let in_card = Memo::new(move |_| head_in_description(state));
+    let has_worktree_summary = Memo::new(move |_| {
+        state.item.with(|item| {
+            item.as_ref()
+                .is_some_and(|item| item.worktree_description.is_some())
+        })
+    });
     let shown = Memo::new(move |_| {
         state.historical_review.with(Option::is_some)
             || notice_text(state).is_some()
             || (!in_card.get()
-                && (!repo_of(state).is_empty()
+                && (has_worktree_summary.get()
+                    || !repo_of(state).is_empty()
                     || churn_of(state).is_some()
                     || author.with(Option::is_some)))
     });
@@ -82,12 +97,7 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 if in_card {
                     Empty::new().into_any()
                 } else {
-                    Stack::vertical((
-                        worktree_summary(state, backend.clone()),
-                        line(app, state, author),
-                    ))
-                    .style(|s| s.width_full())
-                    .into_any()
+                    worktree_summary(app, state, author, backend.clone()).into_any()
                 }
             },
         )
@@ -95,9 +105,10 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     ))
     .debug_name("item summary")
     .style(move |s| {
-        // Over the description, a notice is a card's gap from it; the
-        // line alone heads the page, and keeps a title's room under it.
-        let under = if in_card.get() {
+        // Over the description, a notice is a card's gap from it; a local
+        // worktree summary ends with its own hairline; the line alone heads
+        // the page, and keeps a title's room under it.
+        let under = if in_card.get() || has_worktree_summary.get() {
             theme::CARD_GAP
         } else {
             theme::CONVERSATION_TITLE_GAP
@@ -110,7 +121,15 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
 }
 
 /// The worktree owns this copy of the issue text from the moment it is cut.
-fn worktree_summary(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// Drawn as the description card is on a pull request or issue: the title
+/// with its hover `⋯` menu, the summary line under it, the clamped markdown
+/// body (swapping to the composer box while editing), and the hairline foot.
+fn worktree_summary(
+    app: AppState,
+    state: ReviewState,
+    author: Memo<Option<(String, String, Option<jiff::Timestamp>)>>,
+    backend: Rc<Backend>,
+) -> impl IntoView {
     let summary = Memo::new(move |_| {
         state.item.with(|item| {
             let item = item.as_ref()?;
@@ -125,90 +144,383 @@ fn worktree_summary(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         move || summary.get(),
         move |summary| {
             let Some((id, title, description)) = summary else {
-                return Empty::new().into_any();
+                return line(app, state, author).into_any();
             };
+            let hovered = RwSignal::new(false);
             let editing = RwSignal::new(false);
-            let backend = backend.clone();
-            dyn_container(
-                move || editing.get(),
-                move |edit| {
-                    if edit {
-                        let draft = RwSignal::new(title.clone());
-                        let editor = crate::ui::widgets::prose_editor(
-                            description.clone(),
-                            "Add a description…",
-                            Some(state.next_token()),
-                        );
-                        let document = editor.editor().doc();
-                        let backend = backend.clone();
-                        let id = id.clone();
-                        Stack::vertical((
-                            floem::views::TextInput::new(draft).style(|s| s.width_full()),
-                            crate::ui::widgets::editor_box(editor, || (100.0, 240.0), true),
-                            Stack::horizontal((
-                                action_button(
-                                    || "Save".into(),
-                                    "save worktree summary",
-                                    true,
-                                    move || draft.with(|s| !s.trim().is_empty()),
-                                    move || {
-                                        backend.edit_worktree_summary(
-                                            id.clone(),
-                                            draft.get_untracked(),
-                                            document.text().to_string(),
-                                        );
+            let whole = RwSignal::new(false);
+            let title_draft = RwSignal::new(title.clone());
+            let body_draft = RwSignal::new(description.clone());
+            let title_focused = Rc::new(Cell::new(false));
+            let body_focused = Rc::new(Cell::new(false));
+            let sync_focus: Rc<dyn Fn()> = {
+                let title_focused = title_focused.clone();
+                let body_focused = body_focused.clone();
+                Rc::new(move || {
+                    state
+                        .composer_focused
+                        .set(title_focused.get() || body_focused.get());
+                })
+            };
+            let start_edit: Rc<dyn Fn()> = {
+                let title = title.clone();
+                let description = description.clone();
+                Rc::new(move || {
+                    title_draft.set(title.clone());
+                    body_draft.set(description.clone());
+                    editing.set(true);
+                })
+            };
+            let save: Rc<dyn Fn()> = {
+                let backend = backend.clone();
+                let id = id.clone();
+                Rc::new(move || {
+                    let next_title = title_draft.get_untracked();
+                    if next_title.trim().is_empty() {
+                        return;
+                    }
+                    let next_body = body_draft.get_untracked().trim_end().to_string();
+                    backend.edit_worktree_summary(id.clone(), next_title, next_body);
+                    editing.set(false);
+                })
+            };
+
+            let title_row = {
+                let title = title.clone();
+                let start_edit = start_edit.clone();
+                let save = save.clone();
+                let title_focused = title_focused.clone();
+                let sync_focus = sync_focus.clone();
+                dyn_container(
+                    move || editing.get(),
+                    move |edit| {
+                        if edit {
+                            let gained_flag = title_focused.clone();
+                            let gained_sync = sync_focus.clone();
+                            let lost_flag = title_focused.clone();
+                            let lost_sync = sync_focus.clone();
+                            let gone_flag = title_focused.clone();
+                            let gone_sync = sync_focus.clone();
+                            let save = save.clone();
+                            floem::views::TextInput::new(title_draft)
+                                .placeholder("Title")
+                                .debug_name("worktree-summary-title")
+                                .on_event_cont(el::FocusGained, move |_, _| {
+                                    gained_flag.set(true);
+                                    gained_sync();
+                                })
+                                .on_event_cont(el::FocusLost, move |_, _| {
+                                    lost_flag.set(false);
+                                    lost_sync();
+                                })
+                                .on_cleanup(move || {
+                                    if gone_flag.replace(false) {
+                                        gone_sync();
+                                    }
+                                })
+                                .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+                                    if key.code == Code::Escape && key.modifiers.is_empty() {
                                         editing.set(false);
-                                    },
-                                ),
-                                action_button(
-                                    || "Cancel".into(),
-                                    "cancel worktree edit",
-                                    false,
-                                    || true,
-                                    move || editing.set(false),
-                                ),
-                            ))
-                            .style(|s| s.col_gap(8.0)),
-                        ))
-                        .style(|s| s.width_full().row_gap(8.0))
-                        .into_any()
-                    } else {
-                        Stack::vertical((
+                                        return EventPropagation::Stop;
+                                    }
+                                    if matches!(key.code, Code::Enter | Code::NumpadEnter)
+                                        && (key.modifiers.meta() || key.modifiers.ctrl())
+                                    {
+                                        save();
+                                        return EventPropagation::Stop;
+                                    }
+                                    EventPropagation::Continue
+                                })
+                                .style(|s| {
+                                    s.width_full()
+                                        .height(TITLE_LINE)
+                                        .font_size(theme::TEXT_BODY)
+                                        .font_weight(theme::weight_emphasis())
+                                        .padding_horiz(10.0)
+                                        .background(theme::canvas())
+                                        .border(1.0)
+                                        .border_color(theme::border())
+                                        .border_radius(theme::RADIUS)
+                                        .focus(|s| s.border_color(theme::accent()))
+                                })
+                                .into_any()
+                        } else {
+                            let title = title.clone();
+                            let start_edit = start_edit.clone();
                             Stack::horizontal((
-                                Label::new(title.clone()).style(|s| {
+                                Label::new(title).debug_name("item heading").style(|s| {
                                     s.font_size(theme::TEXT_ITEM_TITLE)
                                         .font_weight(theme::weight_strong())
+                                        .line_height(
+                                            (TITLE_LINE / theme::TEXT_ITEM_TITLE as f64) as f32,
+                                        )
+                                        .color(theme::fg())
                                         .text_wrap()
-                                        .min_width(0.0)
                                         .flex_grow(1.0_f32)
+                                        .flex_basis(0.0)
+                                        .min_width(0.0)
                                 }),
-                                action_button(
-                                    || "Edit".into(),
-                                    "edit worktree summary",
-                                    false,
-                                    || true,
-                                    move || editing.set(true),
-                                ),
+                                Container::new(
+                                    more_button(
+                                        hovered,
+                                        More {
+                                            edit: Some(edit_action(|| true, start_edit)),
+                                            ..More::default()
+                                        },
+                                    )
+                                    .style(|s| s.margin_right(-4.0)),
+                                )
+                                .style(|s| {
+                                    s.height(TITLE_LINE)
+                                        .min_width(ACTIONS_WIDTH)
+                                        .items_center()
+                                        .justify_end()
+                                        .flex_shrink(0.0_f32)
+                                }),
                             ))
-                            .style(|s| s.width_full().items_start().col_gap(12.0)),
-                            crate::review::markdown::render_document(
-                                if description.is_empty() {
-                                    "No description."
-                                } else {
-                                    &description
-                                },
-                                state,
-                            ),
-                        ))
-                        .style(|s| s.width_full().row_gap(8.0))
+                            .debug_name("title row")
+                            .style(|s| s.items_start().width_full().min_width(0.0).col_gap(16.0))
+                            .into_any()
+                        }
+                    },
+                )
+                .style(|s| s.width_full())
+            };
+
+            let body_shown = {
+                let body_view = if description.trim().is_empty() {
+                    Label::derived(|| "No description.".to_string())
+                        .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_subtle()))
                         .into_any()
-                    }
-                },
+                } else {
+                    crate::review::markdown::render_document(&description, state).into_any()
+                };
+                clamped(state, body_view, whole)
+                    .style(move |s| s.width_full().apply_if(editing.get(), |s| s.hide()))
+            };
+
+            let body_editor = {
+                let backend = backend.clone();
+                let save = save.clone();
+                let body_focused = body_focused.clone();
+                let sync_focus = sync_focus.clone();
+                dyn_container(
+                    move || editing.get(),
+                    move |edit| {
+                        if edit {
+                            worktree_summary_editor(
+                                app,
+                                state,
+                                backend.clone(),
+                                title_draft,
+                                body_draft,
+                                editing,
+                                save.clone(),
+                                body_focused.clone(),
+                                sync_focus.clone(),
+                            )
+                            .into_any()
+                        } else {
+                            Empty::new().into_any()
+                        }
+                    },
+                )
+                .debug_name("comment-editor")
+                .style(move |s| s.width_full().apply_if(!editing.get(), |s| s.hide()))
+            };
+
+            track_hover(
+                Stack::vertical((
+                    title_row,
+                    line(app, state, author).style(|s| s.margin_top(theme::DESCRIPTION_BYLINE_GAP)),
+                    Stack::vertical((body_shown, body_editor)).style(|s| {
+                        s.flex_col()
+                            .width_full()
+                            .margin_top(theme::DESCRIPTION_BODY_GAP)
+                    }),
+                    Empty::new().debug_name("description foot").style(|s| {
+                        s.width_full()
+                            .height(1.0)
+                            .margin_top(theme::DESCRIPTION_FOOT)
+                            .background(theme::border_muted())
+                    }),
+                ))
+                .debug_name("worktree-summary")
+                .style(|s| s.flex_col().width_full()),
+                hovered,
             )
-            .style(|s| s.width_full().padding_bottom(12.0))
             .into_any()
         },
     )
+}
+
+/// The inline composer for editing a worktree's local description, styled
+/// like `threads::composer_view` on a pull request description: Write and
+/// Preview tabs with markdown formatting tools and a close button, a
+/// resizable editor with `@`-mentions, and the primary Save button.
+#[allow(clippy::too_many_arguments)]
+fn worktree_summary_editor(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    title_draft: RwSignal<String>,
+    body_draft: RwSignal<String>,
+    editing: RwSignal<bool>,
+    save: Rc<dyn Fn()>,
+    body_focused: Rc<Cell<bool>>,
+    sync_focus: Rc<dyn Fn()>,
+) -> impl IntoView {
+    use floem::views::editor::command::CommandExecuted;
+    use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
+    use floem::views::editor::core::selection::Selection;
+
+    let initial = body_draft.get_untracked();
+    let editor = crate::ui::widgets::prose_editor(
+        initial.clone(),
+        "Add a description…",
+        Some(state.next_token()),
+    );
+    let mentioner = crate::review::mention::attach(app, state, backend, editor.editor(), |path| {
+        format!("`{path}` ")
+    });
+    let focus_mentioner = mentioner.clone();
+    let blur_mentioner = mentioner.clone();
+    let key_mentioner = mentioner.clone();
+    let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), || false);
+    let key_tabs = tabs.clone();
+
+    if !initial.is_empty() {
+        let end = editor.editor().doc().text().len();
+        editor.editor().cursor.set(Cursor::new(
+            CursorMode::Insert(Selection::caret(end, CursorAffinity::Backward)),
+            None,
+            None,
+        ));
+    }
+
+    let inner = editor.editor().editor_view_id;
+    let asked = Rc::new(Cell::new(false));
+    let key_save = save.clone();
+    let gained_flag = body_focused.clone();
+    let gained_sync = sync_focus.clone();
+    let lost_flag = body_focused.clone();
+    let lost_sync = sync_focus.clone();
+    let gone_flag = body_focused;
+    let gone_sync = sync_focus;
+
+    let editor = editor
+        .pre_command(move |cmd| {
+            if cmd_enter(&cmd) {
+                key_save();
+                return CommandExecuted::Yes;
+            }
+            CommandExecuted::No
+        })
+        .update(move |update| {
+            if let Some(editor) = update.editor {
+                body_draft.set(editor.doc().text().to_string());
+            }
+        })
+        .on_event_cont(el::FocusGained, move |_, _| {
+            gained_flag.set(true);
+            gained_sync();
+            focus_mentioner.focus(true);
+        })
+        .on_event_cont(el::FocusLost, move |_, _| {
+            lost_flag.set(false);
+            lost_sync();
+            blur_mentioner.focus(false);
+        })
+        .on_event_with_config(
+            el::KeyDown,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE,
+            },
+            move |_, key: &KeyboardEvent| {
+                if key_mentioner.key(key) || key_tabs.key(key) {
+                    return EventPropagation::Stop;
+                }
+                if key.code == Code::Escape && key.modifiers.is_empty() {
+                    editing.set(false);
+                    return EventPropagation::Stop;
+                }
+                EventPropagation::Continue
+            },
+        )
+        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+            if asked.replace(true) {
+                return;
+            }
+            if state.composer_autofocus.get_untracked() {
+                if let Some(id) = inner.get_untracked() {
+                    id.request_focus();
+                }
+            }
+        })
+        .on_cleanup(move || {
+            mentioner.cleanup();
+            if gone_flag.replace(false) {
+                gone_sync();
+            }
+        })
+        .style(|s| {
+            s.size_full()
+                .font_family(theme::FONT_STACK.to_string())
+                .font_size(theme::TEXT_BODY)
+        });
+
+    let close = icon_button(
+        || SidebarIcon::Close,
+        theme::fg_subtle,
+        move || {
+            editing.set(false);
+        },
+    )
+    .debug_name("composer-close")
+    .style(|s| s.size(theme::THREAD_MENU, theme::THREAD_MENU));
+
+    let save_button = send_button(|| "Save".to_string(), save)
+        .debug_name("composer-send")
+        .style(move |s| {
+            let empty = title_draft.with(|t| t.trim().is_empty());
+            s.apply_if(empty, |s| {
+                s.background(theme::fg_subtle())
+                    .cursor(CursorStyle::Default)
+                    .hover(|s| s.background(theme::fg_subtle()))
+            })
+        });
+
+    let footer = Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), save_button))
+        .debug_name("composer-edit-footer")
+        .style(|s| {
+            s.items_center()
+                .width_full()
+                .gap(6.0)
+                .margin_top(theme::COMPOSER_GAP)
+        });
+
+    Stack::vertical((
+        tabs.view_titled(
+            state,
+            resizable_editor_box(Grip::composer(state), editor, false),
+            theme::COMPOSER_MAX_HEIGHT,
+            Empty::new(),
+            close,
+        ),
+        footer,
+        resize_cursor_sheet(Grip::composer(state)),
+    ))
+    .debug_name("composer-box")
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .padding_horiz(12.0)
+            .padding_vert(theme::COMPOSER_GAP)
+            .border(1.0)
+            .border_radius(14.0)
+            .background(theme::canvas_subtle())
+            .border_color(theme::border_muted())
+    })
 }
 
 /// The description's head, as a document's: the item's title with the

@@ -806,7 +806,7 @@ pub(crate) struct Grip {
 
 impl Grip {
     /// The composer's box, five lines tall until dragged.
-    fn composer(state: ReviewState) -> Self {
+    pub(crate) fn composer(state: ReviewState) -> Self {
         Self {
             height: state.composer_height,
             resizing: state.composer_resizing,
@@ -1418,7 +1418,10 @@ fn send_label(state: ReviewState) -> String {
 /// `Send` to an agent; `Add to review` when the text is bound for GitHub;
 /// `Reply` under GitHub's thread; `Comment`, then `Post`, for an issue
 /// comment.
-fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> impl IntoView {
+pub(crate) fn send_button(
+    label: impl Fn() -> String + 'static,
+    on_click: Rc<dyn Fn()>,
+) -> impl IntoView {
     Container::new(
         Stack::horizontal((
             Label::derived(label).style(|s| {

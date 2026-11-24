@@ -1892,7 +1892,11 @@ pub const DESCRIPTION_CLAMP: f64 = 320.0;
 /// under its top, and cutting it takes all that from over the reader:
 /// the page, kept at its offset, would show them the timeline far below.
 /// So the cut text comes back into view once it is laid out.
-fn clamped(state: ReviewState, text: floem::AnyView, whole: RwSignal<bool>) -> impl IntoView {
+pub(crate) fn clamped(
+    state: ReviewState,
+    text: floem::AnyView,
+    whole: RwSignal<bool>,
+) -> impl IntoView {
     // The text's own height: it does not shrink to the cut, which only
     // clips it.
     let height = RwSignal::new(0.0_f64);

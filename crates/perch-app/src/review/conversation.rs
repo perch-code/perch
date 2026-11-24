@@ -3928,9 +3928,29 @@ mod tests {
             });
         });
         assert!(shown(&harness, "Fence the manifest"));
-        let edit = find(harness.root_id(), "edit worktree summary").unwrap();
-        click_on(&mut harness, edit);
-        let save = find(harness.root_id(), "save worktree summary").unwrap();
+        let summary = find(harness.root_id(), "worktree-summary").unwrap();
+        assert_eq!(
+            crate::review::cards::more::rows(&mut harness, summary),
+            ["Edit"]
+        );
+        crate::review::cards::more::pick(&mut harness, summary, "Edit");
+        let editor = find(summary, "comment-editor").expect("the summary holds the editor");
+        assert!(harness.get_layout_rect(editor).height() > 0.0);
+        assert!(find(editor, "composer-box").is_some());
+        assert!(find(editor, "composer-tabs").is_some());
+        assert!(find(summary, "worktree-summary-title").is_some());
+
+        // Closing cancels without saving.
+        let close = find(editor, "composer-close").expect("close button");
+        while commands.try_recv().is_ok() {}
+        click_on(&mut harness, close);
+        assert!(!shown(&harness, "comment-editor"));
+        assert!(commands.try_recv().is_err());
+
+        // Re-open via the `⋯` menu and save.
+        crate::review::cards::more::pick(&mut harness, summary, "Edit");
+        let editor = find(summary, "comment-editor").expect("editor reopened");
+        let save = find(editor, "composer-send").expect("Save button");
         while commands.try_recv().is_ok() {}
         click_on(&mut harness, save);
         assert!(
@@ -3938,6 +3958,7 @@ mod tests {
             id, title, description
         }) if id == "wt" && title == "Fence the manifest" && description == "Compare both versions.")
         );
+        assert!(!shown(&harness, "comment-editor"));
     }
 
     #[test]
