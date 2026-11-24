@@ -9214,18 +9214,35 @@ async fn reconcile_checkouts(ctx: &Ctx) {
         if !checkout.owned || (item.is_archived() && !checkout.on_disk) {
             continue;
         }
+        let mut recovered_source = None;
         let present = match owned_checkout_present(&ctx.preparer, item).await {
-            Ok(present) => present,
+            Ok(true) => true,
+            Ok(false) => {
+                recovered_source = recover_root_source(ctx, item).await;
+                recovered_source.is_some()
+            }
             Err(error) => {
                 tracing::warn!(id = %item.id, %error, "could not verify checkout presence");
                 continue;
             }
         };
-        if checkout.on_disk != present {
-            tracing::info!(id = %item.id, path = %checkout.path.display(), present, "checkout presence changed");
+        if checkout.on_disk != present || recovered_source.is_some() {
+            if let Some(source) = &recovered_source {
+                tracing::info!(
+                    id = %item.id,
+                    path = %checkout.path.display(),
+                    source = %source.display(),
+                    "recovered root source for checkout"
+                );
+            } else {
+                tracing::info!(id = %item.id, path = %checkout.path.display(), present, "checkout presence changed");
+            }
             let mut updated = item.clone();
             if let Some(c) = updated.checkout.as_mut() {
                 c.on_disk = present;
+                if let Some(source) = recovered_source {
+                    c.source = Some(source);
+                }
             }
             ctx.with_cache(|c| c.update_item(&updated));
             changed = true;
@@ -10137,6 +10154,7 @@ fn show_retained_review_owner(ctx: &Ctx, item: Item, navigation_id: u64) -> bool
             keep_context(&ctx.kept_contexts, slot.as_ref());
             *slot = Some(ReviewContext {
                 checkout,
+                checkout_state: CheckoutState::Ready,
                 files: Arc::new(Vec::new()),
                 scope: perch_git::Scope::Branch,
                 since: None,
@@ -10296,6 +10314,15 @@ async fn open_owned_branch(
     repo: &RepoId,
     checkout: &ItemCheckout,
 ) -> Result<perch_git::Checkout, perch_git::Error> {
+    open_owned_branch_against(ctx, repo, checkout, &checkout.base_ref).await
+}
+
+async fn open_owned_branch_against(
+    ctx: &Ctx,
+    repo: &RepoId,
+    checkout: &ItemCheckout,
+    base_ref: &str,
+) -> Result<perch_git::Checkout, perch_git::Error> {
     let source = match &checkout.source {
         Some(root) => root.clone(),
         None => ctx.preparer.ensure_bare(repo, |_| {}).await?,
@@ -10338,7 +10365,7 @@ async fn open_owned_branch(
         .await?;
     }
     if checkout.source.is_some() {
-        return open_own_checkout(ctx, repo, checkout, &checkout.base_ref).await;
+        return open_own_checkout(ctx, repo, checkout, base_ref).await;
     }
     let head_sha = git
         .run(
@@ -10523,6 +10550,7 @@ async fn finish_open(
             keep_context(&ctx.kept_contexts, guard.as_ref());
             *guard = Some(ReviewContext {
                 checkout,
+                checkout_state: CheckoutState::Ready,
                 files: files.clone(),
                 scope: scope.clone(),
                 since: since.clone(),
@@ -10720,6 +10748,7 @@ fn show_pull_request_early(
             keep_context(&ctx.kept_contexts, guard.as_ref());
             *guard = Some(ReviewContext {
                 checkout,
+                checkout_state: CheckoutState::Pending,
                 files: Arc::new(Vec::new()),
                 scope: perch_git::Scope::Branch,
                 since: None,
@@ -14115,6 +14144,28 @@ async fn owned_checkout_present(
         .await
 }
 
+/// Recover a root-cut pull request checkout whose `source` was cleared by an
+/// earlier version: the row is active, owned, has a pull request, lost its
+/// `source`, and its recorded path is still a linked worktree of the
+/// repository's configured root on the recorded branch.
+async fn recover_root_source(ctx: &Ctx, item: &Item) -> Option<PathBuf> {
+    if item.is_archived() || item.pull_request().is_none() {
+        return None;
+    }
+    let checkout = item
+        .checkout
+        .as_ref()
+        .filter(|checkout| checkout.owned && checkout.source.is_none())?;
+    let root = root_of(ctx, &item.repo_full_name)?;
+    let repo_dir = ctx.preparer.repository_of(&root).await.ok()?;
+    let owned = ctx
+        .preparer
+        .owns_worktree(&repo_dir, &checkout.path, &checkout.branch, false)
+        .await
+        .ok()?;
+    owned.then_some(repo_dir)
+}
+
 /// A repository's root, when it is a checkout, where a branch of the
 /// reader's own clone is cut.
 fn root_of(ctx: &Ctx, identity: &str) -> Option<PathBuf> {
@@ -15079,6 +15130,7 @@ fn keep_context(kept: &KeptContexts, leaving: Option<&ReviewContext>) {
     let Some(leaving) = leaving else { return };
     if leaving.review_snapshot_id.is_some()
         || leaving.review_group_id.is_some()
+        || leaving.checkout_state != CheckoutState::Ready
         || (leaving.issue.is_none() && leaving.checkout.head_sha.is_empty())
     {
         return;
@@ -15091,10 +15143,20 @@ fn keep_context(kept: &KeptContexts, leaving: Option<&ReviewContext>) {
     }
 }
 
+/// Whether an open context's checkout is ready, still being prepared behind a
+/// pull request shown early, or failed to prepare.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CheckoutState {
+    Ready,
+    Pending,
+    Failed(String),
+}
+
 /// What an open review needs in order to read and diff its files.
 #[derive(Clone)]
 struct ReviewContext {
     checkout: perch_git::Checkout,
+    checkout_state: CheckoutState,
     /// The changed list under `scope`.
     files: Arc<Vec<perch_git::ChangedFile>>,
     /// What the diff is over. The reader's last pick when the item
@@ -17124,6 +17186,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             keep_context(&ctx.kept_contexts, guard.as_ref());
             *guard = Some(ReviewContext {
                 checkout,
+                checkout_state: CheckoutState::Ready,
                 files: Arc::new(Vec::new()),
                 scope: perch_git::Scope::Branch,
                 since: None,
@@ -17403,7 +17466,7 @@ async fn open_pull_request(
     // The item's lock, to the end of the open. The row is read again under
     // it: an archive or a delete may have finished while this waited.
     let mut _item_lock = None;
-    let existing = match existing {
+    let mut existing = match existing {
         Some(item) => {
             _item_lock = Some(ctx.lock_item(&item.id).await);
             ctx.item(&item.id)
@@ -17417,7 +17480,28 @@ async fn open_pull_request(
     {
         Some((item, checkout)) if checkout.owned => {
             match owned_checkout_present(&ctx.preparer, item).await {
-                Ok(present) => present,
+                Ok(true) => true,
+                Ok(false) => {
+                    if let Some(source) = recover_root_source(ctx, item).await {
+                        tracing::info!(
+                            id = %item.id,
+                            path = %checkout.path.display(),
+                            source = %source.display(),
+                            "recovered root source for checkout"
+                        );
+                        if let Some(item) = existing.as_mut() {
+                            if let Some(c) = item.checkout.as_mut() {
+                                c.source = Some(source);
+                                c.on_disk = true;
+                            }
+                            ctx.with_cache(|c| c.update_item(item));
+                            ctx.send_items();
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
                 Err(error) => fail!("{error}"),
             }
         }
@@ -17506,7 +17590,7 @@ async fn open_pull_request_ahead(
         .filter(|_| {
             item.checkout
                 .as_ref()
-                .is_none_or(|c| c.owned && c.branch == pr_branch)
+                .is_none_or(|c| c.owned && c.source.is_none() && c.branch == pr_branch)
         });
     let prefetch = async {
         let clone = clone.as_ref()?;
@@ -17674,6 +17758,13 @@ fn fail_pull_request_open(
     message: String,
 ) -> bool {
     tracing::warn!(repo = %repo_full_name, number, %message, "could not open pull request");
+    if let Ok(mut guard) = ctx.slot.lock() {
+        if let Some(open) = guard.as_mut().filter(|open| {
+            open.navigation_id == navigation_id && open.checkout_state == CheckoutState::Pending
+        }) {
+            open.checkout_state = CheckoutState::Failed(message.clone());
+        }
+    }
     ctx.send_navigation_event(
         navigation_id,
         Event::ReviewFailed {
@@ -17753,8 +17844,27 @@ async fn open_pull_request_at(
             if !matches!(owned_checkout_present(&ctx.preparer, &item).await, Ok(true)) {
                 fail!("The saved worktree is unavailable");
             }
-            let path = kept.as_ref().map(|c| c.path.clone());
-            reopen_from_disk(ctx, &clone, number, &branch, path).await
+            if let Some(owned) = kept.as_ref().filter(|c| c.source.is_some()) {
+                open_own_checkout(ctx, &clone, owned, &pull_request.base_ref).await
+            } else {
+                let path = kept.as_ref().map(|c| c.path.clone());
+                reopen_from_disk(ctx, &clone, number, &branch, path).await
+            }
+        }
+        // Cut by Perch in one of the reader's roots, and since pushed as
+        // this pull request: back into that root if it was archived, then
+        // read as a root's checkout is, without touching Perch's bare clone
+        // or fetching into the reader's repository.
+        Some(owned) if owned.source.is_some() => {
+            ctx.send_navigation_event(
+                navigation_id,
+                Event::ReviewProgress {
+                    navigation_id,
+                    message: "Checking out the files".into(),
+                    percent: None,
+                },
+            );
+            open_owned_branch_against(ctx, &clone, owned, &pull_request.base_ref).await
         }
         // Cut for something else, an issue most likely, and since pushed
         // as this pull request. Read as it is, or fast-forwarded when that
@@ -17832,7 +17942,7 @@ async fn open_pull_request_at(
         // to.
         last_seen_head: Some(checkout.head_sha.clone()).filter(|h| !h.is_empty()),
         divergence: None,
-        source: None,
+        source: kept.as_ref().and_then(|c| c.source.clone()),
     });
     item.archived_at = None;
     item.last_opened_at = now;
@@ -18789,6 +18899,7 @@ async fn ask_as(
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
             (
                 c.checkout.clone(),
+                c.checkout_state.clone(),
                 c.pull_request.clone(),
                 c.body.clone(),
                 c.issue.clone(),
@@ -18798,7 +18909,17 @@ async fn ask_as(
             )
         })
     });
-    let Some((mut checkout, pull_request, body, issue, scope, snapshot_id, group_id)) = open else {
+    let Some((
+        mut checkout,
+        checkout_state,
+        pull_request,
+        body,
+        issue,
+        scope,
+        snapshot_id,
+        group_id,
+    )) = open
+    else {
         let _ = ctx
             .events
             .send(Event::Notice("That item is no longer open".into()));
@@ -18892,7 +19013,13 @@ async fn ask_as(
         checkout = retained;
     }
     if !checkout.worktree.join(".git").exists() {
-        ctx.notice("There is no checkout to ask in");
+        match checkout_state {
+            CheckoutState::Pending => ctx.notice("The checkout is still being prepared"),
+            CheckoutState::Failed(error) => {
+                ctx.notice(format!("Could not check out the files: {error}"))
+            }
+            CheckoutState::Ready => ctx.notice("There is no checkout to ask in"),
+        }
         return;
     }
     // Read once, so the framing, the commit note and the process agree
@@ -26634,6 +26761,7 @@ mod tests {
                 stale: None,
                 merge_base: "m".into(),
             },
+            checkout_state: CheckoutState::Ready,
             files: Arc::new(Vec::new()),
             scope: perch_git::Scope::Branch,
             since: None,
@@ -37779,6 +37907,244 @@ model = \"opus\"\n",
         delete_item(&ctx, &item.id, false).await.unwrap();
         assert!(ctx.item(&item.id).is_none());
         assert_eq!(git(&path, &["rev-parse", "HEAD"]), foreign_head);
+    }
+
+    /// A worktree Perch cut in a configured root keeps its `source` when
+    /// opened as a pull request (online, offline, and restored from archive)
+    /// and never needs a bare clone in Perch's store.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_root_cut_worktree_keeps_its_source_across_pull_request_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("widgets");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("one.txt"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "one"]);
+        git(
+            &root,
+            &["remote", "add", "origin", "https://github.com/a/b.git"],
+        );
+        let root = root.canonicalize().unwrap();
+
+        let mut entry = rooted(Some("a/b"), &root);
+        entry.resolve(None);
+        let head = Arc::new(Mutex::new(String::new()));
+        let (base, release) = held_pull(12, head.clone());
+        release.send(()).unwrap();
+        let (ctx, received) = ctx_declaring(dir.path(), &base, vec![entry]);
+
+        let work = NewWork {
+            repo: "a/b".into(),
+            base: perch_git::BaseBranch::local("main"),
+            branch: "feature".into(),
+            run: None,
+        };
+        let id = create_worktree(&ctx, &work, 1).await.unwrap();
+        let mut item = ctx.item(&id).unwrap();
+        let worktree = item.checkout.as_ref().unwrap().path.clone();
+        assert_eq!(
+            item.checkout.as_ref().unwrap().source.as_deref(),
+            Some(root.as_path())
+        );
+
+        std::fs::write(worktree.join("two.txt"), "two\n").unwrap();
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-q", "-m", "two"]);
+        let commit = git(&worktree, &["rev-parse", "HEAD"]);
+        *head.lock().unwrap() = commit.clone();
+
+        let mut pr = pull_request(12);
+        pr.head_sha = commit.clone();
+        pr.head_ref = "feature".into();
+        pr.head_repo_full_name = Some("a/b".into());
+        item.subject = Some(ItemSubject::PullRequest(pr));
+        item.checkout.as_mut().unwrap().head_sha = commit.clone();
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+
+        let bare = ctx
+            .preparer
+            .store()
+            .bare_path(&RepoId::parse("a/b").unwrap());
+
+        // Opening twice must keep `source`, stay on disk, and never touch the bare clone.
+        for _ in 0..2 {
+            let nav = ctx.navigation_requests.begin_current();
+            assert!(open_pull_request(&ctx, "a/b".into(), 12, nav).await);
+            let stored = ctx.item(&id).unwrap();
+            let checkout = stored.checkout.as_ref().unwrap();
+            assert!(checkout.owned);
+            assert!(checkout.on_disk);
+            assert_eq!(checkout.source.as_deref(), Some(root.as_path()));
+            assert!(!bare.exists(), "a root-cut PR checkout needs no bare clone");
+            let ready = open_events(&received).into_iter().find_map(|e| match e {
+                Event::ReviewReady { files, .. } => Some(files),
+                _ => None,
+            });
+            assert!(
+                ready
+                    .as_ref()
+                    .is_some_and(|f| f.iter().any(|file| file.path == "two.txt")),
+                "{ready:?}"
+            );
+        }
+
+        // Archiving removes the worktree from the root; reopening restores it in the root.
+        archive_item(&ctx, &id, None).await.unwrap();
+        assert!(!worktree.exists());
+        let nav = ctx.navigation_requests.begin_current();
+        assert!(open_pull_request(&ctx, "a/b".into(), 12, nav).await);
+        assert!(worktree.join(".git").is_file());
+        let restored = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_eq!(restored.source.as_deref(), Some(root.as_path()));
+        assert!(restored.on_disk);
+        assert!(!bare.exists());
+
+        // Offline reopening also works from the root without a bare clone.
+        *ctx.session.write().unwrap() = None;
+        let nav = ctx.navigation_requests.begin_current();
+        assert!(open_pull_request(&ctx, "a/b".into(), 12, nav).await);
+        let offline = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_eq!(offline.source.as_deref(), Some(root.as_path()));
+        assert!(!bare.exists());
+    }
+
+    /// A pull request row whose root `source` was lost by an earlier version
+    /// is healed back to its configured root during reconciliation and on open,
+    /// without reclaiming archived rows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconcile_and_open_recover_root_source_lost_on_a_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("widgets");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("one.txt"), "one\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "one"]);
+        git(
+            &root,
+            &["remote", "add", "origin", "https://github.com/a/b.git"],
+        );
+        let root = root.canonicalize().unwrap();
+
+        let mut entry = rooted(Some("a/b"), &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+
+        let work = NewWork {
+            repo: "a/b".into(),
+            base: perch_git::BaseBranch::local("main"),
+            branch: "feature".into(),
+            run: None,
+        };
+        let id = create_worktree(&ctx, &work, 1).await.unwrap();
+        let mut item = ctx.item(&id).unwrap();
+        let head = item.checkout.as_ref().unwrap().head_sha.clone();
+        let mut pr = pull_request(15);
+        pr.head_sha = head;
+        pr.head_ref = "feature".into();
+        pr.head_repo_full_name = Some("a/b".into());
+        item.subject = Some(ItemSubject::PullRequest(pr));
+        // Simulate the corrupted row left by the earlier bug.
+        item.checkout.as_mut().unwrap().source = None;
+        item.checkout.as_mut().unwrap().on_disk = false;
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+
+        reconcile_checkouts(&ctx).await;
+
+        let healed = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_eq!(healed.source.as_deref(), Some(root.as_path()));
+        assert!(healed.on_disk);
+
+        // Opening also recovers if reconciliation has not run yet.
+        let mut broken_again = ctx.item(&id).unwrap();
+        broken_again.checkout.as_mut().unwrap().source = None;
+        broken_again.checkout.as_mut().unwrap().on_disk = false;
+        ctx.with_cache(|c| c.update_item(&broken_again))
+            .unwrap()
+            .unwrap();
+        let nav = ctx.navigation_requests.begin_current();
+        assert!(open_pull_request(&ctx, "a/b".into(), 15, nav).await);
+        let reopened = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_eq!(reopened.source.as_deref(), Some(root.as_path()));
+        assert!(reopened.on_disk);
+
+        // An archived item with no `source` is never reclaimed.
+        let mut archived = ctx.item(&id).unwrap();
+        archived.archived_at = Some(Timestamp::now());
+        archived.checkout.as_mut().unwrap().source = None;
+        archived.checkout.as_mut().unwrap().on_disk = false;
+        ctx.with_cache(|c| c.update_item(&archived))
+            .unwrap()
+            .unwrap();
+        reconcile_checkouts(&ctx).await;
+        let still_archived = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_eq!(still_archived.source, None);
+        assert!(!still_archived.on_disk);
+    }
+
+    /// Asking on a pull request shown early tells the reader when the checkout
+    /// is still being prepared, and surfaces the checkout error if it failed.
+    #[tokio::test]
+    async fn asking_on_an_early_pull_request_reports_pending_or_failed_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let item = store_pull(&ctx, 21);
+        let pull = Arc::new(pull_request(21));
+        let nav = ctx.navigation_requests.begin_current();
+        assert!(show_pull_request_early(&ctx, &item, pull, nav));
+        received.try_iter().for_each(drop);
+
+        ask(
+            &ctx,
+            item.id.clone(),
+            None,
+            None,
+            "why?".into(),
+            perch_agent::Backend::ClaudeCode,
+            "m".into(),
+            perch_agent::Effort::Medium,
+            RunMode::Ask,
+        )
+        .await;
+        let pending_notice = received.try_iter().find_map(|e| match e {
+            Event::Notice(message) => Some(message),
+            _ => None,
+        });
+        assert_eq!(
+            pending_notice.as_deref(),
+            Some("The checkout is still being prepared")
+        );
+
+        assert!(!fail_pull_request_open(
+            &ctx,
+            "a/b",
+            21,
+            nav,
+            "worktree is already occupied".into()
+        ));
+        received.try_iter().for_each(drop);
+
+        ask(
+            &ctx,
+            item.id.clone(),
+            None,
+            None,
+            "why?".into(),
+            perch_agent::Backend::ClaudeCode,
+            "m".into(),
+            perch_agent::Effort::Medium,
+            RunMode::Ask,
+        )
+        .await;
+        let failed_notice = received.try_iter().find_map(|e| match e {
+            Event::Notice(message) => Some(message),
+            _ => None,
+        });
+        assert_eq!(
+            failed_notice.as_deref(),
+            Some("Could not check out the files: worktree is already occupied")
+        );
     }
 
     fn branch_item(name: &str) -> Item {

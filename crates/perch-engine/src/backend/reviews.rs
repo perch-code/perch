@@ -776,6 +776,7 @@ pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
                 let mut slot = ctx.slot.lock().ok()?;
                 *slot = Some(super::ReviewContext {
                     checkout,
+                    checkout_state: super::CheckoutState::Ready,
                     files: files.clone(),
                     scope,
                     since: None,
