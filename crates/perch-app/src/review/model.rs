@@ -1513,6 +1513,11 @@ pub struct ReviewState {
     /// may not, and absent until GitHub says. Kept per item, not per
     /// repository, since whoever took part in one can be assigned to it.
     pub assignable: RwSignal<HashMap<String, Option<Arc<Vec<perch_github::MentionableUser>>>>>,
+    /// Who each open pull request can request a review from, by
+    /// `assignable_key`, when the reader may request reviewers; none when
+    /// they may not, and absent until GitHub says.
+    pub requestable_reviewers:
+        RwSignal<HashMap<String, Option<Arc<Vec<perch_github::MentionableUser>>>>>,
     /// The destination last sent from each face, by `ThreadFace::index`:
     /// inline in the code, and on Conversation. A new composer on lines
     /// starts on its face's. Kept for the app's life, as `agent_last` is.
@@ -1908,6 +1913,7 @@ impl ReviewState {
             approvals: RwSignal::new(Vec::new()),
             grants: RwSignal::new(HashMap::new()),
             assignable: RwSignal::new(HashMap::new()),
+            requestable_reviewers: RwSignal::new(HashMap::new()),
             last_destination: [RwSignal::new(None), RwSignal::new(None)],
             agent: RwSignal::new(perch_github::AgentConfig::default()),
             hovered_line: RwSignal::new(None),

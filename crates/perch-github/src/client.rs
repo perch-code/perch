@@ -1930,6 +1930,85 @@ impl GitHub {
         })
     }
 
+    /// Who pull request `number` can request a review from: GitHub's
+    /// suggested reviewers for the pull request, then the repository's
+    /// assignable users (at most `first` of those), excluding the pull
+    /// request's author, when the pull request is open and the reader may
+    /// request reviewers; none otherwise. GitHub lets triage access and
+    /// more, or the pull request's author, request reviewers.
+    pub async fn requestable_reviewers(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        first: usize,
+    ) -> Result<Option<Vec<crate::MentionableUser>>, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let payload = serde_json::json!({
+            "query": crate::reviewers::requestable_query(),
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "number": number,
+                "first": first.clamp(1, 100),
+            },
+        });
+        // `suggestedReviewers` can error on its own without invalidating
+        // `assignableUsers` and the permission fields beside it.
+        let (data, problems) = self
+            .graphql_partial::<crate::reviewers::RequestableData>(&payload, "requestable reviewers")
+            .await?;
+        let Some(data) = data else {
+            return Err(if problems.is_empty() {
+                Error::Decode("GitHub's GraphQL response had no data".into())
+            } else {
+                Error::Graphql(problems.join("; "))
+            });
+        };
+        Ok(data.into_requestable())
+    }
+
+    /// Request a review from `logins` on pull request `number`, or cancel
+    /// their review request when `request` is false: `POST` or `DELETE
+    /// /pulls/{number}/requested_reviewers`, which leave other requested
+    /// reviewers as they were and answer with the pull request.
+    pub async fn set_requested_reviewers(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        logins: &[String],
+        request: bool,
+    ) -> Result<crate::RequestedReviewers, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            reviewers: &'a [String],
+        }
+
+        let path = format!("/repos/{owner}/{name}/pulls/{number}/requested_reviewers");
+        let body_req = Request { reviewers: logins };
+        let _request_guard = self.api_permit().await;
+        self.check_rate_limit()?;
+        let (response, method, expected) = if request {
+            let response = self.write(Write::Post, &path, Some(&body_req)).await;
+            (response, "POST", StatusCode::CREATED)
+        } else {
+            let response = self.write(Write::Delete, &path, Some(&body_req)).await;
+            (response, "DELETE", StatusCode::OK)
+        };
+        let response = response?;
+        let body = self
+            .finish_response(
+                response,
+                &[expected, StatusCode::OK],
+                &format!("{method} {path}"),
+            )
+            .await?;
+        let payload: crate::reviewers::RequestedReviewersPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.into_requested())
+    }
+
     /// Whether a number in a repository is a pull request or an issue.
     /// GitHub numbers the two together, and the issues endpoint answers
     /// for both, with a `pull_request` key on a pull request.

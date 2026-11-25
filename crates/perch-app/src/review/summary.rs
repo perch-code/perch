@@ -597,6 +597,9 @@ struct Asked {
     grants: Memo<Vec<(String, String)>>,
     /// Who the item can be assigned to, when the reader may assign.
     assignable: Memo<Option<Arc<Vec<MentionableUser>>>>,
+    /// Who an open pull request can request a review from, when the
+    /// reader may request reviewers.
+    requestable_reviewers: Memo<Option<Arc<Vec<MentionableUser>>>>,
 }
 
 fn ask(app: AppState, state: ReviewState, backend: &Rc<Backend>) -> Asked {
@@ -661,7 +664,48 @@ fn ask(app: AppState, state: ReviewState, backend: &Rc<Backend>) -> Asked {
             })
         })
     });
-    Asked { grants, assignable }
+    // Who an open pull request can request a review from, when the reader
+    // may request reviewers: asked as an open pull request opens.
+    let open_pull = |pr: &perch_github::PullRequest| {
+        (pr.state.eq_ignore_ascii_case("open") && !pr.merged)
+            .then(|| (pr.repo_full_name.clone(), pr.number))
+    };
+    let request_item = Memo::new(move |_| {
+        if let Some(result) = state
+            .pull_request
+            .with(|pr| pr.as_ref().map(|pr| open_pull(pr)))
+        {
+            return result;
+        }
+        state
+            .item
+            .with(|item| match item.as_ref()?.subject.as_ref()? {
+                perch_github::ItemSubject::PullRequest(pr) => open_pull(pr),
+                perch_github::ItemSubject::Issue(_) => None,
+            })
+    });
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            if let Some((repo, number)) = request_item.get() {
+                backend.requestable_reviewers(&repo, number);
+            }
+        });
+    }
+    let requestable_reviewers = Memo::new(move |_| {
+        request_item.get().and_then(|(repo, number)| {
+            state.requestable_reviewers.with(|all| {
+                all.get(&crate::review::model::assignable_key(&repo, number))
+                    .cloned()
+                    .flatten()
+            })
+        })
+    });
+    Asked {
+        grants,
+        assignable,
+        requestable_reviewers,
+    }
 }
 
 /// The rest of what there is to say about the item, and what can be done
@@ -671,7 +715,11 @@ fn ask(app: AppState, state: ReviewState, backend: &Rc<Backend>) -> Asked {
 /// the block with them.
 pub(crate) fn details(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let data = Memo::new(move |_| github_data(app, state));
-    let Asked { grants, assignable } = ask(app, state, &backend);
+    let Asked {
+        grants,
+        assignable,
+        requestable_reviewers,
+    } = ask(app, state, &backend);
     let standing = Memo::new(move |_| {
         state.item.with(|item| {
             item.as_deref()
@@ -685,9 +733,11 @@ pub(crate) fn details(app: AppState, state: ReviewState, backend: Rc<Backend>) -
             || data.with(|d| d.has_details())
             || grants.with(|g| !g.is_empty())
             || assignable.with(Option::is_some)
+            || requestable_reviewers.with(Option::is_some)
     });
     let shown = Memo::new(move |_| rows_shown.get() || url_of(state).is_some());
     let inbox_backend = backend.clone();
+    let request_backend = backend.clone();
     let grants_backend = backend.clone();
     let assign_backend = backend.clone();
     let closes_backend = backend.clone();
@@ -730,12 +780,33 @@ pub(crate) fn details(app: AppState, state: ReviewState, backend: Rc<Backend>) -
                     .row_gap(4.0)
             }),
         ),
+        // Shown with nobody in it too when the reader may request
+        // reviewers, for the Request menu.
         dyn_row(
             SidebarIcon::Person,
             "Reviewers",
-            move || data.with(|d| d.reviewers.clone()),
-            |r| !r.is_empty(),
-            move |reviewers| reviewers_view(app, reviewers),
+            move || {
+                (
+                    data.with(|d| d.reviewers.clone()),
+                    requestable_reviewers.with(Option::is_some),
+                )
+            },
+            |(reviewers, may_request)| !reviewers.is_empty() || *may_request,
+            move |(reviewers, may_request)| {
+                let nobody = reviewers.is_empty();
+                Stack::horizontal((
+                    reviewers_view(app, reviewers)
+                        .style(move |s| s.min_width(0.0).apply_if(nobody, |s| s.hide())),
+                    request_reviewer_button(state, request_backend.clone(), requestable_reviewers)
+                        .style(move |s| s.apply_if(!may_request, |s| s.hide())),
+                ))
+                .style(|s| {
+                    s.items_center()
+                        .flex_wrap(floem::taffy::FlexWrap::Wrap)
+                        .gap(10.0)
+                        .min_width(0.0)
+                })
+            },
         ),
         dyn_row(
             SidebarIcon::Check,
@@ -3487,6 +3558,125 @@ fn reviewers_view(
     })
 }
 
+/// Who has an active review request on the open pull request.
+fn requested_reviewers_of(state: ReviewState) -> Vec<String> {
+    state
+        .pull_request
+        .with_untracked(|p| {
+            p.as_ref().map(|p| {
+                p.requested_reviewers
+                    .iter()
+                    .map(|r| r.login.clone())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Who has already submitted a review on the pull request (so they can be
+/// re-requested easily from the Request menu).
+fn past_reviewers_of(state: ReviewState) -> Vec<String> {
+    let author = pull_request_author(state).unwrap_or_default();
+    state
+        .discussion
+        .with_untracked(|d| {
+            d.as_ref().map(|d| {
+                verdicts(&d.reviews, &author)
+                    .into_iter()
+                    .map(|(user, _)| user.to_string())
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// The pull request's author login, who GitHub forbids requesting to review.
+fn pull_request_author(state: ReviewState) -> Option<String> {
+    state
+        .pull_request
+        .with_untracked(|p| p.as_ref().map(|p| p.author_login.clone()))
+        .filter(|login| !login.is_empty())
+}
+
+/// Request, after the reviewers: a menu of who can be requested to review.
+fn request_reviewer_button(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    requestable: Memo<Option<Arc<Vec<MentionableUser>>>>,
+) -> impl IntoView {
+    menu_chip(None, "Request", "request reviewer menu", move || {
+        let users = requestable.get_untracked().unwrap_or_default();
+        let author = pull_request_author(state);
+        let item_id = state
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+            .unwrap_or_default();
+        let backend = backend.clone();
+        request_reviewer_menu(
+            author.as_deref(),
+            &requested_reviewers_of(state),
+            &past_reviewers_of(state),
+            &users,
+            Rc::new(move |login: String, request: bool| {
+                backend.set_requested_reviewer(&item_id, &login, request);
+            }),
+        )
+    })
+}
+
+/// The Request menu: currently requested reviewers first, then past
+/// reviewers on the pull request, then GitHub's suggested reviewers and
+/// the repository's assignable users, excluding the pull request's
+/// author. Each row is checked while currently requested; picking one
+/// requests or cancels their review and leaves the menu up for the next.
+/// GitHub lets fifteen reviewers be requested at most, so with fifteen
+/// the rest are greyed.
+fn request_reviewer_menu(
+    author: Option<&str>,
+    requested: &[String],
+    past_reviewers: &[String],
+    users: &[MentionableUser],
+    set: Rc<dyn Fn(String, bool)>,
+) -> Menu {
+    let name_of = |login: &str| {
+        users
+            .iter()
+            .find(|u| u.login.eq_ignore_ascii_case(login))
+            .and_then(|u| u.name.clone())
+    };
+    let mut people: Vec<(String, Option<String>)> = Vec::new();
+    let candidates = requested
+        .iter()
+        .map(String::as_str)
+        .chain(past_reviewers.iter().map(String::as_str))
+        .chain(users.iter().map(|u| u.login.as_str()));
+    for login in candidates {
+        if login.is_empty()
+            || author.is_some_and(|a| a.eq_ignore_ascii_case(login))
+            || people.iter().any(|(l, _)| l.eq_ignore_ascii_case(login))
+        {
+            continue;
+        }
+        people.push((login.to_string(), name_of(login)));
+    }
+    let menu = Menu::new()
+        .filter("Filter reviewers")
+        .most_checked(perch_github::MAX_REVIEWERS);
+    people.into_iter().fold(menu, |menu, (login, name)| {
+        let on = requested.iter().any(|r| r.eq_ignore_ascii_case(&login));
+        let set = set.clone();
+        menu.item(login.clone(), move |item| {
+            let item = item
+                .checked(on)
+                .toggle(move |request| set(login.clone(), request));
+            match name {
+                Some(name) => item.detail(name),
+                None => item,
+            }
+        })
+    })
+}
+
 /// Avatar and login of each assignee. GitHub names an assignee by login
 /// alone, so the face is whichever one the item already has for them: as
 /// its author, a reviewer or a commenter, or in the Assign menu.
@@ -4358,6 +4548,134 @@ pub(crate) mod tests {
             );
         }
         assert!(asked, "who may be assigned is asked as the issue opens");
+    }
+
+    #[test]
+    fn the_request_reviewer_menu_lists_requested_then_past_then_suggested_excluding_author_and_toggles(
+    ) {
+        let picked = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let set: Rc<dyn Fn(String, bool)> = {
+            let picked = picked.clone();
+            Rc::new(move |login, request| picked.borrow_mut().push((login, request)))
+        };
+        let users = [
+            user("criccomini", Some("Chris")),
+            user("agavra", Some("Almog")),
+            user("cadonna", None),
+            user("rohan", None),
+        ];
+        // rohan is currently requested; bob already reviewed earlier and can be re-requested;
+        // criccomini is the PR author and must be excluded.
+        let requested = ["rohan".to_string()];
+        let past = ["bob".to_string(), "rohan".to_string()];
+        let menu =
+            request_reviewer_menu(Some("criccomini"), &requested, &past, &users, set.clone());
+        assert_eq!(menu.outline(), ["✓ rohan", "bob", "agavra", "cadonna"]);
+        menu.choose("bob");
+        menu.choose("rohan");
+        menu.choose("agavra");
+        assert_eq!(
+            *picked.borrow(),
+            [
+                ("bob".to_string(), true),
+                ("rohan".to_string(), false),
+                ("agavra".to_string(), true),
+            ]
+        );
+        assert_eq!(menu.outline(), ["rohan", "✓ bob", "✓ agavra", "cadonna"]);
+
+        // Fifteen requested is GitHub's most: the rest are greyed, and unchecking frees them.
+        let fifteen: Vec<String> = (0..15).map(|n| format!("u{n}")).collect();
+        let menu = request_reviewer_menu(Some("criccomini"), &fifteen, &[], &users, set);
+        let outline = menu.outline();
+        assert_eq!(outline[0], "✓ u0");
+        assert_eq!(outline.last().unwrap(), "(rohan)");
+        menu.choose("u0");
+        assert_eq!(menu.outline().last().unwrap(), "rohan");
+    }
+
+    #[test]
+    fn the_reviewers_row_offers_request_on_open_pull_requests_once_github_says_the_reader_may() {
+        let mut pull = pull_request(812);
+        pull.requested_reviewers.clear();
+        let (mut harness, _, state) = pull_request_harness_with(pull);
+        open_details(&mut harness, state);
+        assert!(
+            !rows_shown(&harness).contains(&"Reviewers".to_string()),
+            "nobody requested and no word from GitHub: no row"
+        );
+        // No permission: still no row.
+        state.requestable_reviewers.update(|all| {
+            all.insert("slatedb/slatedb#812".into(), None);
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(!rows_shown(&harness).contains(&"Reviewers".to_string()));
+
+        state.requestable_reviewers.update(|all| {
+            all.insert(
+                "slatedb/slatedb#812".into(),
+                Some(Arc::new(vec![user("agavra", Some("Almog"))])),
+            );
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(rows_shown(&harness).contains(&"Reviewers".to_string()));
+        let row = rect(&harness, "summary row Reviewers");
+        let button = rect(&harness, "request reviewer menu");
+        assert!(
+            within(button, row),
+            "Request at {button:?} is outside {row:?}"
+        );
+        assert_eq!(
+            button.x0,
+            row.x0 + theme::SUMMARY_NAME_WIDTH,
+            "with no reviewers yet, Request is where the values start"
+        );
+
+        // Once the PR is merged, Request is hidden and the empty row disappears.
+        state.pull_request.update(|pr| {
+            if let Some(pr) = pr.as_mut() {
+                let pr = Arc::make_mut(pr);
+                pr.merged = true;
+                pr.state = "closed".into();
+            }
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(!rows_shown(&harness).contains(&"Reviewers".to_string()));
+    }
+
+    #[test]
+    fn who_may_be_requested_is_asked_as_an_open_pull_request_opens() {
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+        let mut item = Item::new("slatedb/slatedb", now);
+        item.subject = Some(ItemSubject::PullRequest(pull_request(2294)));
+        state.item.set(Some(Arc::new(item)));
+        state.ready.set(true);
+        state.phase.set(crate::review::model::Phase::Ready);
+        state.composer_autofocus.set(false);
+        let (backend, mut commands) = Backend::recording();
+        let root = floem::headless::TestRoot::new();
+        let view = crate::ui::app_view(app, state, Rc::new(backend));
+        let mut harness =
+            floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let mut asked = false;
+        while let Ok(command) = commands.try_recv() {
+            asked |= matches!(
+                command,
+                crate::backend::Command::RequestableReviewers { ref repo_full_name, number }
+                    if repo_full_name == "slatedb/slatedb" && number == 2294
+            );
+        }
+        assert!(
+            asked,
+            "who may be requested is asked as an open pull request opens"
+        );
     }
 
     #[test]

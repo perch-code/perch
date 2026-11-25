@@ -21,6 +21,7 @@ pub mod reactions;
 pub mod references;
 pub mod releases;
 mod responses;
+pub mod reviewers;
 pub mod reviews;
 pub mod search;
 mod subjects;
@@ -79,6 +80,7 @@ pub use pulls::{
 pub use reactions::{ReactionGroup, ReactionKind, Reactions};
 pub use references::IssueReference;
 pub use releases::{Release, ReleaseAsset};
+pub use reviewers::{RequestedReviewers, MAX_REVIEWERS};
 pub use reviews::{
     AnchorMapping, AnchorMappingMethod, AnchorMappingStatus, DeletedReviewHistory, Finding,
     FindingAuditAction, FindingAuditEntry, FindingDisposition, FindingSeverity, FindingTarget,

@@ -766,6 +766,123 @@ async fn assigning_posts_and_unassigning_deletes_and_github_answers_who_is_assig
     }
 }
 
+#[tokio::test]
+async fn who_may_be_requested_to_review_is_asked_with_permission_and_suggestions() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"viewer":{"login":"criccomini"},"repository":{"viewer_permission":"READ","assignable_users":{"nodes":[{"login":"rohan","name":"Rohan","avatar_url":"https://avatars/2"},{"login":"criccomini","name":"Chris","avatar_url":"https://avatars/1"}]},"pull_request":{"state":"OPEN","author":{"login":"criccomini"},"suggested_reviewers":[{"reviewer":{"login":"agavra","name":"Almog","avatar_url":"https://avatars/3"}}]}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"viewer":{"login":"outsider"},"repository":{"viewer_permission":"READ","assignable_users":{"nodes":[]},"pull_request":{"state":"OPEN","author":{"login":"criccomini"},"suggested_reviewers":[]}}}}"#,
+        ),
+        // Partial GraphQL error on suggestedReviewers still yields assignableUsers.
+        Response::new(
+            "200 OK",
+            r#"{"data":{"viewer":{"login":"criccomini"},"repository":{"viewer_permission":"WRITE","assignable_users":{"nodes":[{"login":"rohan","name":null,"avatar_url":"https://avatars/2"}]},"pull_request":{"state":"OPEN","author":{"login":"cadonna"},"suggested_reviewers":null}}},"errors":[{"message":"suggestedReviewers unavailable"}]}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let users = github
+        .requestable_reviewers("a/b", 7, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    let logins: Vec<&str> = users.iter().map(|u| u.login.as_str()).collect();
+    assert_eq!(logins, ["agavra", "rohan"]);
+    assert_eq!(
+        github.requestable_reviewers("a/b", 7, 100).await.unwrap(),
+        None
+    );
+    let partial = github
+        .requestable_reviewers("a/b", 7, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(partial.len(), 1);
+    assert_eq!(partial[0].login, "rohan");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].path, "/graphql");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    let query = body["query"].as_str().unwrap();
+    assert!(query.contains("viewerPermission") && query.contains("assignableUsers"));
+    assert!(query.contains("suggestedReviewers"));
+    assert_eq!(
+        body["variables"],
+        serde_json::json!({ "owner": "a", "name": "b", "number": 7, "first": 100 })
+    );
+}
+
+#[tokio::test]
+async fn requesting_reviewers_posts_and_removing_deletes_and_github_answers_who_is_requested() {
+    let pr = |reviewers: &str| {
+        format!(
+            r#"{{"number":7,"title":"t","state":"open","requested_reviewers":[{reviewers}],"requested_teams":[],"updated_at":"2026-10-03T10:00:00Z"}}"#
+        )
+    };
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "201 Created",
+            pr(
+                r#"{"login":"rohan","avatar_url":"https://avatars/2"},{"login":"agavra","avatar_url":"https://avatars/3"}"#,
+            ),
+        ),
+        Response::new(
+            "200 OK",
+            pr(r#"{"login":"rohan","avatar_url":"https://avatars/2"}"#),
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let requested = github
+        .set_requested_reviewers("a/b", 7, &["agavra".to_string()], true)
+        .await
+        .unwrap();
+    assert_eq!(
+        requested
+            .requested_reviewers
+            .iter()
+            .map(|r| r.login.as_str())
+            .collect::<Vec<_>>(),
+        ["rohan", "agavra"]
+    );
+    assert!(requested.review_requested);
+
+    let removed = github
+        .set_requested_reviewers("a/b", 7, &["agavra".to_string()], false)
+        .await
+        .unwrap();
+    assert_eq!(
+        removed
+            .requested_reviewers
+            .iter()
+            .map(|r| r.login.as_str())
+            .collect::<Vec<_>>(),
+        ["rohan"]
+    );
+    assert_eq!(
+        removed.updated_at,
+        Some("2026-10-03T10:00:00Z".parse::<jiff::Timestamp>().unwrap())
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        (requests[0].method.as_str(), requests[0].path.as_str()),
+        ("POST", "/repos/a/b/pulls/7/requested_reviewers")
+    );
+    assert_eq!(
+        (requests[1].method.as_str(), requests[1].path.as_str()),
+        ("DELETE", "/repos/a/b/pulls/7/requested_reviewers")
+    );
+    for request in requests.iter() {
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body, serde_json::json!({ "reviewers": ["agavra"] }));
+    }
+}
+
 /// A write GitHub may have carried out before failing is not sent again:
 /// a merge that went through and answered 502 would be retried into
 /// "not mergeable", and a review would post twice.

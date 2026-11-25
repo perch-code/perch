@@ -302,6 +302,20 @@ pub enum Command {
         login: String,
         assign: bool,
     },
+    /// Whether the reader may request reviewers on open pull request
+    /// `number`, and who can be requested, for the summary's Reviewers.
+    /// `RequestableReviewers` answers.
+    RequestableReviewers {
+        repo_full_name: String,
+        number: u64,
+    },
+    /// Request a review from `login` on the item's pull request, or
+    /// cancel their review request when `request` is false.
+    SetRequestedReviewer {
+        item_id: String,
+        login: String,
+        request: bool,
+    },
     /// The issues and pull requests of the item's repository that
     /// `query` names, for the `#` a composer is suggesting them for.
     /// `IssueReferences` answers.
@@ -1503,6 +1517,13 @@ pub enum Event {
         number: u64,
         users: Option<Arc<Vec<perch_github::MentionableUser>>>,
     },
+    /// Who open pull request `number` can request a review from, when the
+    /// reader may request reviewers; none when they may not.
+    RequestableReviewers {
+        repo_full_name: String,
+        number: u64,
+        users: Option<Arc<Vec<perch_github::MentionableUser>>>,
+    },
     /// The issues and pull requests of the item's repository that
     /// matched `query`. Nothing when GitHub could not be asked.
     IssueReferences {
@@ -1924,6 +1945,7 @@ impl Event {
                 | Event::LspNames { .. }
                 | Event::MentionableUsers { .. }
                 | Event::AssignableUsers { .. }
+                | Event::RequestableReviewers { .. }
                 | Event::IssueReferences { .. }
                 | Event::Notice(_)
                 | Event::Done(_)
@@ -3457,6 +3479,27 @@ impl Backend {
         });
     }
 
+    /// Ask GitHub whether the reader may request reviewers on pull request
+    /// `number`, and who can be requested. `RequestableReviewers` answers;
+    /// nothing does when GitHub could not be asked.
+    pub fn requestable_reviewers(&self, repo_full_name: &str, number: u64) {
+        let _ = self.commands.send(Command::RequestableReviewers {
+            repo_full_name: repo_full_name.to_string(),
+            number,
+        });
+    }
+
+    /// Request a review from `login` on the item's pull request, or
+    /// cancel their request. The item comes back with GitHub's requested
+    /// reviewers; a refusal is a notice.
+    pub fn set_requested_reviewer(&self, item_id: &str, login: &str, request: bool) {
+        let _ = self.commands.send(Command::SetRequestedReviewer {
+            item_id: item_id.to_string(),
+            login: login.to_string(),
+            request,
+        });
+    }
+
     /// Ask GitHub which issues and pull requests of the item's
     /// repository `query` names, for a composer's `#`. `IssueReferences`
     /// answers, empty when GitHub could not be asked.
@@ -4814,6 +4857,7 @@ async fn run(
         root_cuts: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
         assignments: Arc::default(),
+        reviewer_requests: Arc::default(),
         seen_notifications: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         reading_notifications: Default::default(),
@@ -5438,6 +5482,25 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     set_assigned(&ctx, &item_id, &login, assign).await;
+                });
+            }
+            Command::RequestableReviewers {
+                repo_full_name,
+                number,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    requestable_reviewers(&ctx, &repo_full_name, number).await;
+                });
+            }
+            Command::SetRequestedReviewer {
+                item_id,
+                login,
+                request,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    set_requested_reviewer(&ctx, &item_id, &login, request).await;
                 });
             }
             Command::IssueReferences {
@@ -7148,6 +7211,8 @@ struct Ctx {
     /// Held while assignees change. GitHub answers each change with the
     /// whole list, so answers taken out of order would undo a change.
     assignments: Arc<tokio::sync::Mutex<()>>,
+    /// Held while requested reviewers change, for the same reason.
+    reviewer_requests: Arc<tokio::sync::Mutex<()>>,
     /// Notifications already acted on, by id and time, so one GitHub keeps
     /// returning does not refresh an open item again on every poll.
     seen_notifications: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
@@ -12380,6 +12445,103 @@ async fn set_assigned(ctx: &Ctx, item_id: &str, login: &str, assign: bool) {
             install_pull_request_snapshot(ctx, item_id, pr, None);
         }
         None => {}
+    }
+}
+
+/// Whether the reader may request reviewers on pull request `number`,
+/// and who can be requested: GitHub's suggested reviewers as well as the
+/// repository's assignable users. A failure is quiet: the row stays as it
+/// was, without the menu.
+async fn requestable_reviewers(ctx: &Ctx, repo_full_name: &str, number: u64) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    match github
+        .requestable_reviewers(repo_full_name, number, ASSIGNABLE_USERS)
+        .await
+    {
+        Ok(users) => {
+            if let Some(users) = &users {
+                ctx.want_avatars(users.iter().map(|u| u.avatar_url.clone()));
+            }
+            let _ = ctx.events.send(Event::RequestableReviewers {
+                repo_full_name: repo_full_name.to_string(),
+                number,
+                users: users.map(Arc::new),
+            });
+        }
+        Err(error) => {
+            tracing::info!(
+                repo = repo_full_name,
+                number,
+                %error,
+                "requestable reviewers not read"
+            );
+        }
+    }
+}
+
+/// Request a review from `login` on the item's pull request, or cancel
+/// their request, and put GitHub's answer in the item. One change at a
+/// time, as the Request menu sends several.
+async fn set_requested_reviewer(ctx: &Ctx, item_id: &str, login: &str, request: bool) {
+    let _one_at_a_time = ctx.reviewer_requests.lock().await;
+    let Some(item) = ctx.item(item_id) else {
+        return;
+    };
+    let (repo_full_name, number) = match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => (pr.repo_full_name.clone(), pr.number),
+        _ => return,
+    };
+    let Some(github) = ctx.github() else {
+        return ctx.notice("GitHub is unavailable while Perch is offline");
+    };
+    let logins = [login.to_string()];
+    let requested = match github
+        .set_requested_reviewers(&repo_full_name, number, &logins, request)
+        .await
+    {
+        Ok(requested) => requested,
+        Err(error) => {
+            let doing = if request {
+                "request review from"
+            } else {
+                "remove review request for"
+            };
+            tracing::info!(item = item_id, login, %error, "requested reviewers not changed");
+            return ctx.notice(format!("GitHub could not {doing} {login}: {error}"));
+        }
+    };
+    let now_requested = requested
+        .requested_reviewers
+        .iter()
+        .any(|r| r.login.eq_ignore_ascii_case(login));
+    if now_requested != request {
+        let doing = if request {
+            "request review from"
+        } else {
+            "remove review request for"
+        };
+        ctx.notice(format!("GitHub did not {doing} {login}"));
+    }
+    ctx.want_avatars(
+        requested
+            .requested_reviewers
+            .iter()
+            .map(|r| r.avatar_url.clone()),
+    );
+    // Read again: the item may have moved while GitHub answered.
+    let Some(item) = ctx.item(item_id) else {
+        return;
+    };
+    if let Some(ItemSubject::PullRequest(pr)) = &item.subject {
+        let mut pr = pr.clone();
+        pr.requested_reviewers = requested.requested_reviewers;
+        pr.review_requested = requested.review_requested;
+        if let Some(updated_at) = requested.updated_at {
+            pr.updated_at = Some(pr.updated_at.map_or(updated_at, |at| at.max(updated_at)));
+        }
+        install_pull_request_snapshot(ctx, item_id, pr, None);
     }
 }
 
@@ -23661,6 +23823,7 @@ mod tests {
             root_cuts: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
             assignments: Arc::default(),
+            reviewer_requests: Arc::default(),
             seen_notifications: Default::default(),
             refreshing: Default::default(),
             reading_notifications: Default::default(),
@@ -32069,6 +32232,109 @@ read eof || true
             sent[0].ends_with(r#"{"assignees":["criccomini"]}"#),
             "{sent:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn requesting_and_removing_reviewers_puts_githubs_answer_in_the_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = sent.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            seen.lock().unwrap().push(format!("{method} {path} {body}"));
+            let answer = |reviewers: &[&str]| {
+                serde_json::json!({
+                    "number": 9,
+                    "title": "t",
+                    "state": "open",
+                    "requested_reviewers": reviewers
+                        .iter()
+                        .map(|l| serde_json::json!({ "login": l, "avatar_url": format!("https://avatars/{l}") }))
+                        .collect::<Vec<_>>(),
+                    "requested_teams": [],
+                    "updated_at": "2026-10-03T10:00:00Z",
+                })
+                .to_string()
+            };
+            match (method, path) {
+                ("POST", "/repos/a/b/pulls/9/requested_reviewers") if body.contains("agavra") => {
+                    ("201 Created", answer(&["agavra"]))
+                }
+                ("DELETE", "/repos/a/b/pulls/9/requested_reviewers") => ("200 OK", answer(&[])),
+                // Someone GitHub will not request: the PR as it was.
+                ("POST", "/repos/a/b/pulls/9/requested_reviewers") => ("201 Created", answer(&[])),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+
+        let pull = store_pull(&ctx, 9);
+        open_in_slot(&ctx, &pull);
+
+        set_requested_reviewer(&ctx, &pull.id, "agavra", true).await;
+        let updated = ctx.item(&pull.id).unwrap().pull_request().cloned().unwrap();
+        assert_eq!(
+            updated
+                .requested_reviewers
+                .iter()
+                .map(|r| r.login.as_str())
+                .collect::<Vec<_>>(),
+            ["agavra"]
+        );
+        assert!(updated.review_requested);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::PullRequestUpdated { pull_request, .. }
+                    if pull_request.requested_reviewers.len() == 1
+                        && pull_request.requested_reviewers[0].login == "agavra"
+                        && pull_request.review_requested
+            )),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Notice(_))),
+            "{events:?}"
+        );
+
+        set_requested_reviewer(&ctx, &pull.id, "agavra", false).await;
+        let updated = ctx.item(&pull.id).unwrap().pull_request().cloned().unwrap();
+        assert!(updated.requested_reviewers.is_empty());
+        assert!(!updated.review_requested);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::PullRequestUpdated { pull_request, .. }
+                    if pull_request.requested_reviewers.is_empty() && !pull_request.review_requested
+            )),
+            "{events:?}"
+        );
+
+        set_requested_reviewer(&ctx, &pull.id, "stranger", true).await;
+        assert_eq!(
+            notices(&received),
+            ["GitHub did not request review from stranger"]
+        );
+
+        let sent: Vec<String> = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains("/requested_reviewers"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            sent.iter()
+                .map(|r| r.split(' ').take(2).collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>(),
+            [
+                "POST /repos/a/b/pulls/9/requested_reviewers",
+                "DELETE /repos/a/b/pulls/9/requested_reviewers",
+                "POST /repos/a/b/pulls/9/requested_reviewers",
+            ]
+        );
+        assert!(sent[0].ends_with(r#"{"reviewers":["agavra"]}"#), "{sent:?}");
     }
 
     /// Marking a draft ready asks GitHub by the pull request's node id and

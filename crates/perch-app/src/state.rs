@@ -3735,6 +3735,20 @@ impl AppState {
                     });
                 }
             }
+            Event::RequestableReviewers {
+                repo_full_name,
+                number,
+                users,
+            } => {
+                if let Some(review) = self.review.get_untracked() {
+                    review.requestable_reviewers.update(|all| {
+                        all.insert(
+                            crate::review::model::assignable_key(&repo_full_name, number),
+                            users,
+                        );
+                    });
+                }
+            }
             Event::RunChanges { run_id, counts } => {
                 if let Some(review) = self.review.get_untracked() {
                     review.run_changes.update(|changes| {
