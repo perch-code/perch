@@ -100,9 +100,26 @@ pub fn open_in_browser(url: &str) {
     #[cfg(test)]
     OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
     #[cfg(not(test))]
-    if let Err(e) = std::process::Command::new(OPENER).arg(url).spawn() {
+    if let Err(e) = spawn_detached(std::process::Command::new(OPENER).arg(url)) {
         tracing::warn!(url, error = %e, "could not open link");
     }
+}
+
+/// Start a program that runs on its own, such as the opener or a terminal,
+/// without waiting for it. A thread waits instead, so that when it exits it
+/// is reaped rather than left a zombie until Perch quits. Gives the child's
+/// pid.
+pub(crate) fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<u32> {
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    // The child has started whatever happens to the thread: a failure here
+    // costs one zombie, not a second window from the next terminal tried.
+    let _ = std::thread::Builder::new()
+        .name("reap-child".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(pid)
 }
 
 /// What hands a link or a folder to the app the desktop picks for it.
@@ -282,7 +299,7 @@ pub fn reveal_here(path: &std::path::Path) {
     if cfg!(target_os = "macos") {
         command.arg("-R");
     }
-    if let Err(e) = command.arg(path).spawn() {
+    if let Err(e) = spawn_detached(command.arg(path)) {
         tracing::warn!(path = %path.display(), error = %e, "could not show folder");
     }
 }
@@ -310,7 +327,7 @@ pub fn open_in_editor_here(path: &std::path::Path) {
         OPENED.with(|opened| opened.borrow_mut().push(path.display().to_string()));
     }
     #[cfg(not(test))]
-    if let Err(e) = command.arg(path).spawn() {
+    if let Err(e) = spawn_detached(command.arg(path)) {
         tracing::warn!(path = %path.display(), error = %e, "could not open in an editor");
     }
 }
@@ -329,11 +346,12 @@ pub fn open_in_terminal(state: AppState, path: &std::path::Path) {
 /// starts in the directory it is spawned in.
 fn open_terminal_here(path: &std::path::Path) {
     if cfg!(target_os = "macos") {
-        let _ = std::process::Command::new("open")
-            .arg("-a")
-            .arg("Terminal")
-            .arg(path)
-            .spawn();
+        let _ = spawn_detached(
+            std::process::Command::new("open")
+                .arg("-a")
+                .arg("Terminal")
+                .arg(path),
+        );
         return;
     }
     let chosen = std::env::var("TERMINAL")
@@ -356,10 +374,11 @@ fn open_terminal_here(path: &std::path::Path) {
         let Some(program) = words.next() else {
             continue;
         };
-        let spawned = std::process::Command::new(program)
-            .args(words)
-            .current_dir(path)
-            .spawn();
+        let spawned = spawn_detached(
+            std::process::Command::new(program)
+                .args(words)
+                .current_dir(path),
+        );
         if spawned.is_ok() {
             return;
         }
@@ -1211,7 +1230,32 @@ pub fn news_pill(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_browser_url, profile_url, Name};
+    use super::{is_browser_url, profile_url, spawn_detached, Name};
+
+    /// A program handed off and forgotten is still reaped when it exits,
+    /// not left in the process table as a zombie.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_detached_child_is_reaped_when_it_exits() {
+        let pid = spawn_detached(&mut std::process::Command::new("true")).unwrap();
+        let stat = format!("/proc/{pid}/stat");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            // Gone from /proc once reaped; a zombie stays there in state Z.
+            let Ok(line) = std::fs::read_to_string(&stat) else {
+                return;
+            };
+            let state = line
+                .rsplit(')')
+                .next()
+                .and_then(|rest| rest.split_whitespace().next());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid} was not reaped (state {state:?})"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn a_login_leads_to_its_page_on_github() {

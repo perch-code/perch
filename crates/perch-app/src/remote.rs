@@ -267,10 +267,9 @@ pub fn open_terminal_on(host: &str, path: &Path) {
     let ssh = perch_engine::wire::provision::ssh_program();
     let line = terminal_line(&ssh.to_string_lossy(), host, path);
     if cfg!(target_os = "macos") {
-        if let Err(e) = std::process::Command::new("osascript")
-            .args(terminal_script(&line))
-            .spawn()
-        {
+        if let Err(e) = crate::ui::widgets::spawn_detached(
+            std::process::Command::new("osascript").args(terminal_script(&line)),
+        ) {
             tracing::warn!(host, path = %path.display(), error = %e, "could not open Terminal");
             crate::windows::notice(format!("Could not open Terminal: {e}"));
         }
@@ -291,10 +290,14 @@ pub fn open_terminal_on(host: &str, path: &Path) {
         let Some(program) = words.next() else {
             continue;
         };
-        let spawned = std::process::Command::new(program)
-            .args(words)
-            .args([run_flag(program), "sh", "-c", &line])
-            .spawn();
+        let spawned = crate::ui::widgets::spawn_detached(
+            std::process::Command::new(program).args(words).args([
+                run_flag(program),
+                "sh",
+                "-c",
+                &line,
+            ]),
+        );
         if spawned.is_ok() {
             return;
         }
@@ -317,7 +320,9 @@ pub fn open_editor_on(host: &str, path: &Path) {
         return;
     }
     let (program, args) = editor_command(host, path, zed.as_deref());
-    if let Err(e) = std::process::Command::new(&program).args(&args).spawn() {
+    if let Err(e) =
+        crate::ui::widgets::spawn_detached(std::process::Command::new(&program).args(&args))
+    {
         tracing::warn!(
             host,
             path = %path.display(),
