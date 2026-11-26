@@ -150,6 +150,9 @@ pub enum Block {
         items: Vec<Item>,
     },
     /// Fenced or indented code, with the fence's language if it named one.
+    /// A `suggestion` fence keeps its text as written, trailing blank
+    /// lines, spaces and the newline that ends the fence all, since the
+    /// lines it suggests are exactly those.
     Code {
         lang: Option<String>,
         text: String,
@@ -157,8 +160,9 @@ pub enum Block {
     /// A review comment's suggested change: a fence named `suggestion`,
     /// with the lines it replaces where they are known. Only
     /// [`render_suggesting`] makes one, from a fence under a line.
+    /// `lines` are the ones it puts in, none when it takes them out.
     Suggestion {
-        text: String,
+        lines: Vec<String>,
         original: Option<Original>,
     },
     Table {
@@ -908,6 +912,9 @@ impl<'a> Builder<'a> {
                 Event::End(TagEnd::CodeBlock) => break,
                 _ => {}
             }
+        }
+        if lang.as_deref() == Some("suggestion") {
+            return Block::Code { lang, text };
         }
         let text = text.trim_end().to_string();
         if lang.as_deref() == Some("math") {
@@ -2117,6 +2124,18 @@ pub fn render_suggesting(
     }))
 }
 
+/// The lines a `suggestion` fence's text puts in, as
+/// [`suggestion::only_suggestion`](crate::review::suggestion::only_suggestion)
+/// reads them: an empty fence suggests none, taking the lines out; a
+/// fence holding one blank line suggests that.
+fn suggested_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    text.split('\n').map(str::to_string).collect()
+}
+
 /// The blocks with each `suggestion` fence made a suggested change to
 /// `original`, in quotes and lists too, as github.com finds one there.
 fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
@@ -2127,7 +2146,7 @@ fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
                 lang: Some(lang),
                 text,
             } if lang == "suggestion" => Block::Suggestion {
-                text,
+                lines: suggested_lines(&text),
                 original: original.clone(),
             },
             Block::Quote { alert, blocks } => Block::Quote {
@@ -2311,8 +2330,12 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             lang: Some(lang),
             text,
         } if is_mermaid(&lang) => diagram_view(text, lang, ctx),
+        // A `suggestion` fence drawn as code ends where any fence does.
+        Block::Code { lang, text } if lang.as_deref() == Some("suggestion") => {
+            code_view(text.trim_end().to_string(), lang, ctx)
+        }
         Block::Code { lang, text } => code_view(text, lang, ctx),
-        Block::Suggestion { text, original } => suggestion_view(text, original, ctx.foot),
+        Block::Suggestion { lines, original } => suggestion_view(lines, original, ctx.foot),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
         Block::Rule => Empty::new()
             .style(|s| {
@@ -2747,7 +2770,7 @@ fn diagram_view(text: String, lang: String, ctx: Ctx) -> AnyView {
 /// added, each numbered from the first commented line. Without the
 /// lines it replaces, what it puts in is all there is to show. `foot`
 /// goes under the lines, inside the frame.
-fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>) -> AnyView {
+fn suggestion_view(lines: Vec<String>, original: Option<Original>, foot: Option<Foot>) -> AnyView {
     use crate::review::cards::{code_row, CodeLine, Tint};
     let first = original.as_ref().map(|o| o.first as usize);
     let line = |i: usize, tint: Tint, text: &str| CodeLine {
@@ -2761,10 +2784,8 @@ fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>)
         rows.push(code_row(line(i, Tint::Removed, old)).into_any());
     }
     // An empty fence suggests taking the lines out.
-    if !text.is_empty() {
-        for (i, new) in text.split('\n').enumerate() {
-            rows.push(code_row(line(i, Tint::Added, new)).into_any());
-        }
+    for (i, new) in lines.iter().enumerate() {
+        rows.push(code_row(line(i, Tint::Added, new)).into_any());
     }
     let header = Label::new("Suggested change").style(|s| {
         s.width_full()
@@ -2777,11 +2798,6 @@ fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>)
             .border_color(theme::border_muted())
             .selectable(false)
     });
-    let lines = if text.is_empty() {
-        Vec::new()
-    } else {
-        text.split('\n').map(str::to_string).collect()
-    };
     let foot = match foot {
         Some(foot) => foot.build(lines),
         None => Empty::new().into_any(),
@@ -4345,6 +4361,34 @@ mod tests {
                 lang: None,
                 text: "y".into()
             }
+        );
+    }
+
+    /// A suggestion's lines are the fence's as written: a fence holding
+    /// one blank line suggests that, not taking the line out, and
+    /// trailing blank lines and spaces are kept, as the Suggest button
+    /// and github.com read them.
+    #[test]
+    fn a_suggestion_keeps_its_blank_lines_and_trailing_spaces() {
+        let lines = |text: &str| -> Option<Vec<String>> {
+            match suggesting(parse(text), &None).into_iter().next()? {
+                Block::Suggestion { lines, .. } => Some(lines),
+                _ => None,
+            }
+        };
+        let strs = |l: &[&str]| Some(l.iter().map(|s| s.to_string()).collect());
+        assert_eq!(lines("```suggestion\n```"), Some(Vec::new()));
+        assert_eq!(lines("```suggestion\n\n```"), strs(&[""]));
+        assert_eq!(lines("```suggestion\nfoo\n\n```"), strs(&["foo", ""]));
+        assert_eq!(lines("```suggestion\nfoo  \n```"), strs(&["foo  "]));
+        // The block keeps the fence as written; drawn as code, it ends
+        // where any fence does.
+        assert_eq!(
+            parse("```suggestion\nfoo\n\n```"),
+            vec![Block::Code {
+                lang: Some("suggestion".into()),
+                text: "foo\n\n".into()
+            }]
         );
     }
 

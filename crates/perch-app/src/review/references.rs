@@ -248,10 +248,12 @@ enum Row {
     },
     /// A line of a file. Carries the symbol, so asking about another
     /// symbol on the same line draws the row again with the new emphasis.
+    /// `base` says the line is counted in the file's base side.
     Location {
         path: String,
         line: usize,
         character: usize,
+        base: bool,
         text: String,
         symbol: String,
     },
@@ -280,6 +282,7 @@ fn rows(references: &References) -> Vec<Row> {
             path: r.path,
             line: r.line,
             character: r.character,
+            base: r.base,
             text: r.text,
             symbol: references.symbol.clone(),
         }));
@@ -438,9 +441,10 @@ fn list(state: ReviewState, open_file: OpenFile) -> impl IntoView {
                 path,
                 line,
                 character,
+                base,
                 text,
                 symbol,
-            } => location_row(state, path, line, character, text, symbol).into_any(),
+            } => location_row(state, path, line, character, base, text, symbol).into_any(),
         },
     )
     .style(|s| s.flex_col().width_full().padding_bottom(6.0))
@@ -538,12 +542,14 @@ fn file_row(
 
 /// One line: its number, right-aligned in a column of its own, then its
 /// text with the symbol emphasised. Click opens the file there, as a jump
-/// the history remembers.
+/// the history remembers, on the base side when the line is counted
+/// there.
 fn location_row(
     state: ReviewState,
     path: String,
     line: usize,
     character: usize,
+    base: bool,
     text: String,
     symbol: String,
 ) -> impl IntoView {
@@ -560,7 +566,11 @@ fn location_row(
         line_text(text, symbol),
     ))
     .on_event_stop(el::Click, move |_, _| {
-        state.navigate_to(&path, line.saturating_sub(1), character);
+        if base {
+            state.navigate_to_base(&path, line.saturating_sub(1), character);
+        } else {
+            state.navigate_to(&path, line.saturating_sub(1), character);
+        }
     })
     .style(|s| {
         clickable(s)
@@ -931,6 +941,24 @@ mod tests {
         let a = rows(&references("a", locations.clone(), false));
         let b = rows(&references("b", locations, false));
         assert_ne!(a[1], b[1]);
+    }
+
+    /// A line counted in the base side keeps saying so, so a click opens
+    /// the base side rather than the head line with the same number.
+    #[test]
+    fn rows_keep_whether_a_line_is_on_the_base_side() {
+        let mut removed = reference("a.rs", 120, 4, "gone();");
+        removed.base = true;
+        let locations = vec![removed, reference("b.rs", 3, 0, "gone();")];
+        let rows = rows(&references("gone", locations, false));
+        let base: Vec<bool> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Location { base, .. } => Some(*base),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(base, vec![true, false]);
     }
 
     /// References the server said it was still loading for say so, and are
