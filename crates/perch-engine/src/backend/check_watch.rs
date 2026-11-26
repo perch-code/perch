@@ -13,7 +13,7 @@
 //! for `QUIET`, and a required check that has not reported holds the
 //! rollup at pending for as long as it is missing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +43,9 @@ struct Watch {
     moved: Timestamp,
     every: Duration,
     due: Instant,
+    /// The navigations showing this item at the last tick. One that is
+    /// none of them is a fresh open, however soon after the last.
+    navs: HashSet<u64>,
 }
 
 impl Watch {
@@ -54,8 +57,29 @@ impl Watch {
             moved: Timestamp::now(),
             every: FASTEST,
             due: Instant::now(),
+            navs: HashSet::new(),
         }
     }
+}
+
+/// The watch on `item_id` as it is shown now, by `navs` at `head`. A new
+/// head starts afresh, and so does an item none of whose navigations last
+/// seen are still showing it: closed and opened again between two ticks.
+/// Another window keeping it open keeps its watch.
+fn watch_for<'a>(
+    watches: &'a mut HashMap<String, Watch>,
+    item_id: &str,
+    head: &str,
+    navs: &HashSet<u64>,
+) -> &'a mut Watch {
+    let watch = watches
+        .entry(item_id.to_string())
+        .or_insert_with(|| Watch::new(head));
+    if watch.head != head || (!watch.navs.is_empty() && watch.navs.is_disjoint(navs)) {
+        *watch = Watch::new(head);
+    }
+    watch.navs = navs.clone();
+    watch
 }
 
 /// Follow every window's open pull request for as long as Perch runs.
@@ -73,27 +97,28 @@ pub(super) fn spawn(ctx: &Ctx) {
 }
 
 async fn tick(base: &Ctx, watches: &mut HashMap<String, Watch>) {
-    let open: Vec<(Ctx, String, Arc<PullRequest>)> = base
+    let open: Vec<(Ctx, String, u64, Arc<PullRequest>)> = base
         .views()
         .into_iter()
         .filter_map(|ctx| {
-            let (item_id, pr) = ctx.slot.lock().ok().and_then(|slot| {
-                slot.as_ref()
-                    .and_then(|c| Some((c.item_id.clone(), c.pull_request.clone()?)))
+            let (item_id, nav, pr) = ctx.slot.lock().ok().and_then(|slot| {
+                slot.as_ref().and_then(|c| {
+                    Some((c.item_id.clone(), c.navigation_id, c.pull_request.clone()?))
+                })
             })?;
-            Some((ctx, item_id, pr))
+            Some((ctx, item_id, nav, pr))
         })
         .collect();
     // Closing an item ends its watch, so opening it again starts afresh.
-    watches.retain(|item_id, _| open.iter().any(|(_, id, _)| id == item_id));
+    // An open between two ticks is told by its navigation; see `watch_for`.
+    watches.retain(|item_id, _| open.iter().any(|(_, id, _, _)| id == item_id));
+    let mut showing: HashMap<String, HashSet<u64>> = HashMap::new();
+    for (_, item_id, nav, _) in &open {
+        showing.entry(item_id.clone()).or_default().insert(*nav);
+    }
 
-    for (ctx, item_id, pr) in open {
-        let watch = watches
-            .entry(item_id.clone())
-            .or_insert_with(|| Watch::new(&pr.head_sha));
-        if watch.head != pr.head_sha {
-            *watch = Watch::new(&pr.head_sha);
-        }
+    for (ctx, item_id, _, pr) in open {
+        let watch = watch_for(watches, &item_id, &pr.head_sha, &showing[&item_id]);
         if Instant::now() < watch.due {
             continue;
         }
@@ -262,6 +287,50 @@ mod tests {
         );
         assert!(may_move(&green, ago(now, 60), now));
         assert!(!may_move(&green, ago(now, 600), now));
+    }
+
+    fn navs(ids: &[u64]) -> HashSet<u64> {
+        ids.iter().copied().collect()
+    }
+
+    /// A watch that has stood still a while, as one long open has.
+    fn settle(watch: &mut Watch) {
+        watch.moved = ago(Timestamp::now(), 3600);
+        watch.every = SLOWEST;
+    }
+
+    #[test]
+    fn opening_an_item_again_between_two_ticks_starts_its_watch_afresh() {
+        let mut watches = HashMap::new();
+        settle(watch_for(&mut watches, "a", "head", &navs(&[1])));
+
+        // Still showing under the same open: the watch goes on.
+        let watch = watch_for(&mut watches, "a", "head", &navs(&[1]));
+        assert_eq!(watch.every, SLOWEST);
+
+        // Left for another item and back before the next tick: a new open.
+        let watch = watch_for(&mut watches, "a", "head", &navs(&[3]));
+        assert_eq!(watch.every, FASTEST);
+        assert!(Timestamp::now().duration_since(watch.moved).as_secs() < 60);
+    }
+
+    #[test]
+    fn another_window_opening_an_item_keeps_the_watch_one_still_shows() {
+        let mut watches = HashMap::new();
+        settle(watch_for(&mut watches, "a", "head", &navs(&[1])));
+        let watch = watch_for(&mut watches, "a", "head", &navs(&[1, 7]));
+        assert_eq!(watch.every, SLOWEST);
+        let watch = watch_for(&mut watches, "a", "head", &navs(&[7]));
+        assert_eq!(watch.every, SLOWEST);
+    }
+
+    #[test]
+    fn a_new_head_starts_the_watch_afresh() {
+        let mut watches = HashMap::new();
+        settle(watch_for(&mut watches, "a", "one", &navs(&[1])));
+        let watch = watch_for(&mut watches, "a", "two", &navs(&[1]));
+        assert_eq!(watch.head, "two");
+        assert_eq!(watch.every, FASTEST);
     }
 
     #[test]

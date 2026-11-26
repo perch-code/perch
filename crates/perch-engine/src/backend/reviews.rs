@@ -356,16 +356,24 @@ fn historical_finding_summaries(
             if let Some(snapshot) =
                 cache(ctx, |cache| cache.load_review_snapshot(&latest.snapshot_id))?
             {
-                finding.last_checked_head_sha = Some(snapshot.head_sha.clone());
-                if matches!(
-                    latest.kind,
-                    ObservationKind::Reported
-                        | ObservationKind::VerifiedPresent
-                        | ObservationKind::VerifiedFixed
-                ) {
-                    finding.last_verified_snapshot_id = Some(snapshot.id);
-                    finding.last_verified_head_sha = Some(snapshot.head_sha);
-                }
+                finding.last_checked_head_sha = Some(snapshot.head_sha);
+            }
+        }
+        // As the live projection does, an observation that does not verify
+        // keeps the last commit one did: the newest verifying one wins.
+        if let Some(verified) = observations.iter().rev().find(|observation| {
+            matches!(
+                observation.kind,
+                ObservationKind::Reported
+                    | ObservationKind::VerifiedPresent
+                    | ObservationKind::VerifiedFixed
+            )
+        }) {
+            if let Some(snapshot) = cache(ctx, |cache| {
+                cache.load_review_snapshot(&verified.snapshot_id)
+            })? {
+                finding.last_verified_snapshot_id = Some(snapshot.id);
+                finding.last_verified_head_sha = Some(snapshot.head_sha);
             }
         }
 
@@ -4246,6 +4254,167 @@ mod tests {
         let parsed: VerificationEnvelope = serde_json::from_str(candidate).unwrap();
         assert_eq!(parsed.verifications.len(), 1);
         assert_eq!(parsed.verifications[0].finding_id, "f1");
+    }
+
+    /// A review that could not verify a finding leaves it checked at its own
+    /// commit but verified at the earlier one, in History as it is live.
+    #[tokio::test]
+    async fn history_keeps_the_last_verified_commit_past_one_that_did_not_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _events) =
+            super::super::tests::ctx(dir.path(), &super::super::tests::nowhere(), &[]);
+        let mut item = perch_github::Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "chris/readme".into(),
+            base_ref: "main".into(),
+            head_sha: "def".into(),
+            path: dir.path().join("worktree"),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
+        let start = Timestamp::now() - jiff::SignedDuration::from_secs(600);
+        let at = |minutes: i64| start + jiff::SignedDuration::from_secs(minutes * 60);
+
+        let review = |group: &str, head: &str, minutes: i64, finding: FindingTarget, kind| {
+            let attempt = format!("{group}-attempt");
+            let snapshot = format!("{group}-snapshot");
+            let output = format!("{group}-output");
+            ctx.with_cache(|c| {
+                c.admit_review_group(&ReviewAdmission {
+                    group_id: group.into(),
+                    snapshot: ReviewSnapshot {
+                        id: snapshot.clone(),
+                        item_id: item.id.clone(),
+                        repository: "a/b".into(),
+                        branch_label: None,
+                        requested_base_ref: "main".into(),
+                        base_tip_sha: "base".into(),
+                        merge_base_sha: "base".into(),
+                        head_sha: head.into(),
+                        dirty_edits_excluded: false,
+                        retention_key: format!("{group}-retention"),
+                        retained_ref: None,
+                        manifest_path: None,
+                        diff_path: None,
+                        created_at: at(minutes),
+                        worktree_parent_sha: None,
+                    },
+                    attempts: vec![NewReviewerAttempt {
+                        id: attempt.clone(),
+                        run_id: None,
+                        backend: "codex".into(),
+                        executable: None,
+                        executable_version: None,
+                        model: "test".into(),
+                        effort: "low".into(),
+                        adapter_version: "1".into(),
+                        output_format_version: "1".into(),
+                        created_at: at(minutes),
+                    }],
+                    admitted_at: at(minutes),
+                    instructions: None,
+                })
+                .unwrap();
+                c.transition_review_group(group, ReviewGroupStatus::Reviewing, at(minutes))
+                    .unwrap();
+                c.transition_reviewer_attempt(&attempt, ReviewerPhase::Reviewing, at(minutes))
+                    .unwrap();
+                c.save_reviewer_output(&StoredReviewerOutput {
+                    attempt_id: attempt.clone(),
+                    output_id: output.clone(),
+                    raw_result: "bug".into(),
+                    diagnostics: None,
+                    verification_input: ReviewVerificationInput::default(),
+                    saved_at: at(minutes),
+                })
+                .unwrap();
+                c.ingest_review_output(&ReviewIngestion {
+                    attempt_id: attempt.clone(),
+                    output_id: output,
+                    result_kind: ReviewResultKind::Findings,
+                    observations: vec![ReconciledObservation {
+                        finding,
+                        observation: NewObservation {
+                            id: format!("{group}-observation"),
+                            source_output_id: "source".into(),
+                            kind,
+                            title: "The freeze flag can drift".into(),
+                            body: "It always equals result_tx.is_none().".into(),
+                            severity: perch_github::FindingSeverity::Medium,
+                            anchor: None,
+                            evidence: ReviewEvidence::default(),
+                            additional_message: None,
+                            created_at: at(minutes),
+                        },
+                    }],
+                    anchor_mappings: vec![],
+                    completed_at: at(minutes),
+                })
+                .unwrap();
+                c.transition_reviewer_attempt(&attempt, ReviewerPhase::Completed, at(minutes))
+                    .unwrap();
+                c.transition_review_group(group, ReviewGroupStatus::Reconciling, at(minutes))
+                    .unwrap();
+                c.finish_review_group(group, ReviewGroupStatus::Completed, at(minutes))
+                    .unwrap();
+            })
+            .unwrap();
+        };
+        review(
+            "g1",
+            "abc",
+            0,
+            FindingTarget::New(Box::new(NewFinding {
+                id: "f1".into(),
+                stable_key: "stable".into(),
+                thread_id: "t1".into(),
+                initial_message: ReviewThreadMessage {
+                    id: "m1".into(),
+                    body: "The freeze flag can drift".into(),
+                },
+                draft: false,
+                possible_duplicate_of: None,
+                possible_duplicate_evidence: ReviewEvidence::default(),
+            })),
+            ObservationKind::Reported,
+        );
+        review(
+            "g2",
+            "def",
+            1,
+            FindingTarget::Existing {
+                finding_id: "f1".into(),
+            },
+            ObservationKind::NotVerified,
+        );
+
+        let live = ctx
+            .with_cache(|c| c.load_finding("f1").unwrap().unwrap())
+            .unwrap();
+        assert_eq!(live.last_verified_head_sha.as_deref(), Some("abc"));
+        assert_eq!(live.last_checked_head_sha.as_deref(), Some("def"));
+
+        let group = ctx
+            .with_cache(|c| c.load_review_group("g2").unwrap().unwrap())
+            .unwrap();
+        let history = historical_finding_summaries(&ctx, &group).unwrap();
+        assert_eq!(history.len(), 1);
+        let finding = &history[0].finding;
+        assert_eq!(
+            finding.verification,
+            perch_github::FindingVerification::NotVerified
+        );
+        assert_eq!(finding.last_checked_head_sha.as_deref(), Some("def"));
+        assert_eq!(finding.last_verified_head_sha.as_deref(), Some("abc"));
+        assert_eq!(
+            finding.last_verified_snapshot_id,
+            live.last_verified_snapshot_id
+        );
     }
 
     #[test]
