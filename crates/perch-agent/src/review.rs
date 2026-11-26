@@ -1040,41 +1040,52 @@ impl ReviewManifest {
         }
         let direct = raw.trim_start_matches("./");
         // Native reviewers sometimes report an absolute path in the private
-        // checkout. Resolve it only when exactly one manifest path is a suffix.
+        // checkout, so a manifest path that is a suffix also matches. An exact
+        // path outranks any suffix and a longer suffix outranks a shorter one,
+        // so `crates/x/Cargo.toml` is not confused with `Cargo.toml`.
         let normalized = raw.replace('\\', "/");
-        let matches_path = |candidate: &str| {
-            direct == candidate
-                || normalized == candidate
-                || normalized.ends_with(&format!("/{candidate}"))
+        let match_rank = |candidate: &str| {
+            if direct == candidate || normalized == candidate {
+                Some(usize::MAX)
+            } else if normalized.ends_with(&format!("/{candidate}")) {
+                Some(candidate.len())
+            } else {
+                None
+            }
         };
         let mut matches = Vec::new();
         for entry in &self.files {
             let left_path = entry.old_path.as_deref().unwrap_or(&entry.path);
-            let right_matches = entry.head_blob.is_some() && matches_path(&entry.path);
-            let left_matches = entry.base_blob.is_some() && matches_path(left_path);
-            match requested_side {
-                Some(ReviewSide::Right) if right_matches => {
-                    matches.push((entry, ReviewSide::Right, entry.path.clone()));
+            let right_rank = entry
+                .head_blob
+                .as_ref()
+                .and_then(|_| match_rank(&entry.path));
+            let left_rank = entry.base_blob.as_ref().and_then(|_| match_rank(left_path));
+            match (requested_side, right_rank, left_rank) {
+                (Some(ReviewSide::Right), Some(rank), _) => {
+                    matches.push((entry, ReviewSide::Right, entry.path.clone(), rank));
                 }
-                Some(ReviewSide::Left) if left_matches => {
-                    matches.push((entry, ReviewSide::Left, left_path.to_string()));
+                (Some(ReviewSide::Left), _, Some(rank)) => {
+                    matches.push((entry, ReviewSide::Left, left_path.to_string(), rank));
                 }
-                None if right_matches => {
-                    // Prefer the current side when both sides retain the same
-                    // path. It is the native reviewers' default location.
-                    matches.push((entry, ReviewSide::Right, entry.path.clone()));
+                (None, Some(right), left) if left.is_none_or(|left| right >= left) => {
+                    // Prefer the current side when both sides match equally
+                    // well. It is the native reviewers' default location.
+                    matches.push((entry, ReviewSide::Right, entry.path.clone(), right));
                 }
-                None if left_matches => {
-                    matches.push((entry, ReviewSide::Left, left_path.to_string()));
+                (None, _, Some(rank)) => {
+                    matches.push((entry, ReviewSide::Left, left_path.to_string(), rank));
                 }
                 _ => {}
             }
         }
+        let best = matches.iter().map(|found| found.3).max();
+        matches.retain(|found| Some(found.3) == best);
         if requested_side.is_none() {
             matches.dedup_by(|left, right| std::ptr::eq(left.0, right.0) && left.2 == right.2);
         }
         match matches.as_slice() {
-            [(entry, side, path)] => Ok((*entry, *side, path.clone())),
+            [(entry, side, path, _)] => Ok((*entry, *side, path.clone())),
             [] => Err(format!(
                 "the finding path is not in the captured snapshot: {raw}"
             )),
@@ -2916,6 +2927,57 @@ mod tests {
             result.findings[1].location.as_ref().unwrap().side,
             ReviewSide::Left
         );
+    }
+
+    #[test]
+    fn an_exact_or_longer_suffix_path_outranks_a_shorter_manifest_suffix() {
+        let entry = |path: &str| ReviewManifestEntry {
+            path: path.into(),
+            old_path: None,
+            base_blob: Some("base".into()),
+            head_blob: Some("head".into()),
+            base_lines: Some(10),
+            head_lines: Some(10),
+        };
+        let manifest = ReviewManifest {
+            files: vec![entry("Cargo.toml"), entry("crates/foo/Cargo.toml")],
+        };
+        for (raw, expected) in [
+            ("crates/foo/Cargo.toml", "crates/foo/Cargo.toml"),
+            ("/checkout/crates/foo/Cargo.toml", "crates/foo/Cargo.toml"),
+            ("Cargo.toml", "Cargo.toml"),
+            ("./Cargo.toml", "Cargo.toml"),
+        ] {
+            for side in [None, Some(ReviewSide::Right), Some(ReviewSide::Left)] {
+                let (found, _, path) = manifest.resolve_path(raw, side).unwrap();
+                assert_eq!(found.path, expected, "{raw}");
+                assert_eq!(path, expected, "{raw}");
+            }
+        }
+        // A bare absolute path still resolves to its only suffix match.
+        let (found, side, _) = manifest.resolve_path("/checkout/Cargo.toml", None).unwrap();
+        assert_eq!(
+            (found.path.as_str(), side),
+            ("Cargo.toml", ReviewSide::Right)
+        );
+
+        // Two different entries tied at the best rank remain ambiguous: a
+        // file renamed away from `old.rs` and a new file added at `old.rs`.
+        let mut renamed = entry("new.rs");
+        renamed.old_path = Some("old.rs".into());
+        let mut added = entry("old.rs");
+        added.base_blob = None;
+        let manifest = ReviewManifest {
+            files: vec![renamed, added],
+        };
+        assert!(manifest
+            .resolve_path("/checkout/old.rs", None)
+            .unwrap_err()
+            .contains("ambiguous"));
+        let (found, side, _) = manifest
+            .resolve_path("/checkout/old.rs", Some(ReviewSide::Left))
+            .unwrap();
+        assert_eq!((found.path.as_str(), side), ("new.rs", ReviewSide::Left));
     }
 
     #[test]

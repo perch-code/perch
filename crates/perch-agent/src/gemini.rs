@@ -822,14 +822,53 @@ fn is_sandbox_error(message: &str) -> bool {
     lower.contains("sandbox server") || lower.contains("sbox:")
 }
 
-fn result_denied_without_output(r: &Value) -> bool {
+/// Whether a step's state is one it ended in without finishing.
+fn step_errored(state: &str) -> bool {
+    matches!(
+        state,
+        "ERROR" | "INVALID" | "CANCELED" | "CANCELLED" | "INTERRUPTED" | "HALTED"
+    )
+}
+
+/// A tool step's name, from the step or its `tool_info`.
+fn step_tool_name(s: &Value, info: &Value) -> String {
+    match str_of(s, "tool_name") {
+        n if n.is_empty() => str_of(info, "name"),
+        n => n,
+    }
+}
+
+/// Why a finished tool step failed, or `None` if it did not.
+fn tool_failure(name: &str, info: &Value, state: &str) -> Option<String> {
+    if info.get("error").is_some_and(|e| !e.is_null()) {
+        Some(error_line(info))
+    } else if step_errored(state) {
+        Some(state.to_ascii_lowercase())
+    } else if name == "run_command" {
+        command_failed(&str_of(info, "output"))
+    } else {
+        None
+    }
+}
+
+/// The sandbox startup failure a finished `run_command` step ended in.
+fn sandbox_failure(name: &str, failure: Option<&str>) -> Option<String> {
+    failure
+        .filter(|msg| name == "run_command" && is_sandbox_error(msg))
+        .map(str::to_string)
+}
+
+/// A `SUCCESS` result that still failed the turn: agy answered nothing
+/// after a permission denial or a sandbox that could not start. The
+/// parser and the print host both judge a turn by this.
+fn result_failed_without_output(r: &Value, sandbox_error: bool) -> bool {
     let has_structured = r.get("structured_output").is_some_and(|v| !v.is_null());
     let has_response = !str_of(r, "response").trim().is_empty();
     let has_denied = r
         .get("denied_actions")
         .and_then(Value::as_array)
         .is_some_and(|actions| !actions.is_empty());
-    !has_structured && !has_response && has_denied
+    !has_structured && !has_response && (sandbox_error || has_denied)
 }
 
 // ---------------------------------------------------------------------
@@ -896,11 +935,7 @@ impl GeminiParser {
     fn step(&mut self, s: &Value) -> Vec<RunEvent> {
         let index = s.get("step_index").and_then(Value::as_u64).unwrap_or(0);
         let state = str_of(s, "state");
-        let errored = matches!(
-            state.as_str(),
-            "ERROR" | "INVALID" | "CANCELED" | "CANCELLED" | "INTERRUPTED" | "HALTED"
-        );
-        let done = state == "DONE" || errored;
+        let done = state == "DONE" || step_errored(&state);
         let parent = s
             .pointer("/subagent_info/parent_step_index")
             .and_then(Value::as_u64);
@@ -925,10 +960,7 @@ impl GeminiParser {
             }
             "tool" => {
                 let info = s.get("tool_info").cloned().unwrap_or(Value::Null);
-                let name = match str_of(s, "tool_name") {
-                    n if n.is_empty() => str_of(&info, "name"),
-                    n => n,
-                };
+                let name = step_tool_name(s, &info);
                 let id = match parent {
                     Some(p) => format!("step-{p}-{index}"),
                     None => format!("step-{index}"),
@@ -944,20 +976,9 @@ impl GeminiParser {
                     events.push(call);
                 }
                 if done && self.ended.insert(key) {
-                    let output = str_of(&info, "output");
-                    let failure = if info.get("error").is_some_and(|e| !e.is_null()) {
-                        Some(error_line(&info))
-                    } else if errored {
-                        Some(state.to_ascii_lowercase())
-                    } else if name == "run_command" {
-                        command_failed(&output)
-                    } else {
-                        None
-                    };
-                    if let Some(ref msg) = failure {
-                        if name == "run_command" && is_sandbox_error(msg) {
-                            self.sandbox_error.get_or_insert_with(|| msg.clone());
-                        }
+                    let failure = tool_failure(&name, &info, &state);
+                    if let Some(msg) = sandbox_failure(&name, failure.as_deref()) {
+                        self.sandbox_error.get_or_insert(msg);
                     }
                     events.push(RunEvent::ToolResult {
                         id,
@@ -977,17 +998,12 @@ impl GeminiParser {
         // A structured result is the run's answer: what a review is read
         // from. It goes as the last thing said, fenced, so the review's
         // reader finds it after whatever prose came first.
-        let has_structured =
-            if let Some(structured) = r.get("structured_output").filter(|v| !v.is_null()) {
-                events.push(RunEvent::Text(format!(
-                    "```json\n{}\n```",
-                    serde_json::to_string_pretty(structured).unwrap_or_default()
-                )));
-                true
-            } else {
-                false
-            };
-        let has_answer = has_structured || !str_of(r, "response").trim().is_empty();
+        if let Some(structured) = r.get("structured_output").filter(|v| !v.is_null()) {
+            events.push(RunEvent::Text(format!(
+                "```json\n{}\n```",
+                serde_json::to_string_pretty(structured).unwrap_or_default()
+            )));
+        }
         // What agy refused without a step to show for it, like a read
         // outside the workspace. Without these a turn can end in silence.
         let mut denied_tools = Vec::new();
@@ -1030,7 +1046,7 @@ impl GeminiParser {
             // response when a permission denial (including an unsandboxed
             // retry after the sandbox failed) aborts the turn. Treat that as a
             // failure so the run does not pass as completed with nothing found.
-            "SUCCESS" if !has_answer && (sandbox_error.is_some() || !denied_tools.is_empty()) => {
+            "SUCCESS" if result_failed_without_output(r, sandbox_error.is_some()) => {
                 let message = if sandbox_error.is_some() {
                     "Gemini's (agy) terminal sandbox could not start, so the run stopped without answering. On a container or throwaway VM where the machine is itself the boundary, turn Gemini's sandbox off in Settings > Agents > Gemini (Antigravity) ([agent.gemini] sandbox = false).".to_string()
                 } else if denied_tools.is_empty() {
@@ -1075,6 +1091,9 @@ pub(crate) struct GeminiHost {
     sent: VecDeque<String>,
     /// `user_input` steps seen; the first is the prompt.
     inputs: usize,
+    /// Whether a command in the current turn failed because agy's
+    /// sandbox could not start, which the parser fails the turn on.
+    sandbox_error: bool,
 }
 
 impl GeminiHost {
@@ -1084,6 +1103,7 @@ impl GeminiHost {
             queued: VecDeque::new(),
             sent: VecDeque::new(),
             inputs: 0,
+            sandbox_error: false,
         }
     }
 
@@ -1100,6 +1120,14 @@ impl GeminiHost {
         match v.get("event").and_then(Value::as_str) {
             Some("step_update") => {
                 let s = v.get("step_update").unwrap_or(&Value::Null);
+                let state = str_of(s, "state");
+                if str_of(s, "step_type") == "tool" && (state == "DONE" || step_errored(&state)) {
+                    let info = s.get("tool_info").unwrap_or(&Value::Null);
+                    let name = step_tool_name(s, info);
+                    let failure = tool_failure(&name, info, &state);
+                    self.sandbox_error |= sandbox_failure(&name, failure.as_deref()).is_some();
+                    return Reply::default();
+                }
                 if str_of(s, "step_type") != "user_input"
                     || str_of(s, "state") != "DONE"
                     || s.get("subagent_info").is_some_and(|i| !i.is_null())
@@ -1122,8 +1150,9 @@ impl GeminiHost {
             }
             Some("result") => {
                 let result = v.get("result").unwrap_or(&Value::Null);
-                let failed =
-                    str_of(result, "status") != "SUCCESS" || result_denied_without_output(result);
+                let sandbox_error = std::mem::take(&mut self.sandbox_error);
+                let failed = str_of(result, "status") != "SUCCESS"
+                    || result_failed_without_output(result, sandbox_error);
                 match self.queued.pop_front() {
                     Some(next) if !failed => {
                         let write = user_message(&next);
@@ -2493,6 +2522,47 @@ mod tests {
         assert_eq!(read.events, vec![RunEvent::Steered("And how?".into())]);
         let end = host.after_line(&line(r#"{"event":"result","result":{"status":"SUCCESS"}}"#));
         assert!(end.close && !end.more);
+    }
+
+    #[test]
+    fn the_print_host_does_not_steer_after_a_sandbox_failed_turn() {
+        let sandbox_failed = r#"{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"git log -1"},"output":"Command failed to run: connecting to sandbox server: read unix @->@: recvmsg: connection reset by peer.\n\nNo output from the command."}}}"#;
+        let empty = r#"{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":""}}"#;
+        // The parser fails this turn, so the host must not send the steer.
+        let mut p = GeminiParser::new();
+        p.parse_line(sandbox_failed);
+        assert!(matches!(
+            p.parse_line(empty).last(),
+            Some(RunEvent::Failed { .. })
+        ));
+        let mut host = GeminiHost::new("Why?".into());
+        host.opening();
+        host.steer("And how?");
+        assert_eq!(host.after_line(&line(sandbox_failed)), Reply::default());
+        let turn = host.after_line(&line(empty));
+        assert!(
+            turn.close && !turn.more && turn.writes.is_empty(),
+            "{turn:?}"
+        );
+
+        // A turn that answered anyway passes, and the failure belongs to
+        // its turn: the next one, with no failed command, takes its steer.
+        let mut host = GeminiHost::new("Why?".into());
+        host.steer("And how?");
+        host.steer("And when?");
+        host.after_line(&line(sandbox_failed));
+        let turn = host.after_line(&line(
+            r#"{"event":"result","result":{"status":"SUCCESS","response":"Answered anyway."}}"#,
+        ));
+        assert!(
+            turn.more && !turn.close && turn.writes.len() == 1,
+            "{turn:?}"
+        );
+        let turn = host.after_line(&line(empty));
+        assert!(
+            turn.more && !turn.close && turn.writes.len() == 1,
+            "{turn:?}"
+        );
     }
 
     #[test]
