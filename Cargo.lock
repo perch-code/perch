@@ -3705,6 +3705,7 @@ dependencies = [
  "perch-engine",
  "perch-git",
  "perch-github",
+ "perch-knowledge",
  "perch-lsp",
  "perch-syntax",
  "pulldown-cmark",

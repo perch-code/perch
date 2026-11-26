@@ -114,13 +114,15 @@ pub fn insert(text: &str, (start, end): (usize, usize), lines: &[String]) -> (St
     } else {
         "\n"
     };
-    let open = format!("{before}```suggestion\n");
     let body = lines.join("\n");
+    let fence = perch_knowledge::sanitize::fence_around(&body);
+    let open = format!("{before}{fence}suggestion\n");
     let mut out = String::with_capacity(text.len() + open.len() + body.len() + 8);
     out.push_str(&text[..start]);
     out.push_str(&open);
     out.push_str(&body);
-    out.push_str("\n```");
+    out.push('\n');
+    out.push_str(&fence);
     out.push_str(after);
     out.push_str(&text[end..]);
     (out, start + open.len() + body.len())
@@ -234,6 +236,15 @@ mod tests {
 
         let (out, _) = insert("above\nbelow", (6, 6), &code);
         assert_eq!(out, "above\n```suggestion\n    mut manifest,\n```\nbelow");
+    }
+
+    #[test]
+    fn a_suggestion_can_replace_lines_containing_a_markdown_fence() {
+        let code = lines(&["```rust", "fn example() {}", "```", "More text"]);
+        let (body, at) = insert("", (0, 0), &code);
+        assert_eq!(only_suggestion(&body), Some(code));
+        assert!(has_suggestion(&body));
+        assert!(body[..at].ends_with("More text"));
     }
 
     #[test]

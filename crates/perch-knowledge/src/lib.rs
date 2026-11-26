@@ -291,7 +291,12 @@ pub fn render_review(review: &ReviewArchive) -> String {
             {
                 let fence = fence_around(&evidence);
                 writeln!(output, "\n<details><summary>Original evidence</summary>\n").unwrap();
-                writeln!(output, "{fence}text\n{}\n{fence}", evidence.trim()).unwrap();
+                writeln!(output, "{fence}text").unwrap();
+                output.push_str(&evidence);
+                if !evidence.ends_with('\n') {
+                    output.push('\n');
+                }
+                writeln!(output, "{fence}").unwrap();
                 writeln!(output, "\n</details>").unwrap();
             }
         }
@@ -317,7 +322,15 @@ fn table_text(value: &str) -> String {
 }
 
 fn markdown_link(value: &str) -> String {
-    value.replace(' ', "%20").replace(['(', ')'], "")
+    let mut link = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            link.push(char::from(byte));
+        } else {
+            write!(link, "%{byte:02X}").unwrap();
+        }
+    }
+    link
 }
 
 fn short_sha(value: &str) -> String {
@@ -400,6 +413,22 @@ mod tests {
         assert_eq!(rendered.matches("### [high] Bounds panic").count(), 1);
         assert_eq!(rendered.matches("#### Observation").count(), 1);
         assert_eq!(rendered.matches("#### Disposition").count(), 1);
+    }
+
+    #[test]
+    fn snapshot_links_point_to_the_original_filesystem_path() {
+        let mut value = archive();
+        value.groups[0].snapshot.link = Some("/tmp/review (v2)/fix#1%20?.patch".into());
+        assert!(render_review(&value).contains(
+            "[Retained snapshot snapshot-1](/tmp/review%20%28v2%29/fix%231%2520%3F.patch)"
+        ));
+    }
+
+    #[test]
+    fn original_evidence_keeps_code_indentation_and_trailing_spaces() {
+        let mut value = archive();
+        value.findings[0].entries[0].evidence = Some("    first()\n    second()  \n".into());
+        assert!(render_review(&value).contains("```text\n    first()\n    second()  \n```"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ sha2 = "0.10"
 [dependencies]
 perch-github = { path = "../perch-github" }
 perch-git = { path = "../perch-git" }
+perch-knowledge = { path = "../perch-knowledge" }
 perch-syntax = { path = "../perch-syntax" }
 perch-lsp = { path = "../perch-lsp" }
 perch-agent = { path = "../perch-agent" }

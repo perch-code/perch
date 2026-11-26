@@ -145,3 +145,36 @@ async fn a_read_that_came_without_a_tag_is_asked_for_whole_next_time() {
     let requests = requests.lock().unwrap();
     assert!(requests.iter().all(|r| r.if_none_match.is_none()));
 }
+
+#[tokio::test]
+async fn a_truncated_read_is_retried_without_its_etag() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for attempt in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream).unwrap();
+            if request.if_none_match.is_some() {
+                write!(
+                    stream,
+                    "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            } else {
+                let body = if attempt == 0 { "{" } else { RUNS };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nETag: \"runs\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    RUNS.len()
+                )
+                .unwrap();
+            }
+        }
+    });
+    let gh = GitHub::with_base_uri("t", &base).unwrap();
+    let first = gh.list_recent_workflow_runs("a/b").await;
+    let second = gh.list_recent_workflow_runs("a/b").await;
+    server.join().unwrap();
+    assert_eq!(second.unwrap()[0].status, "in_progress");
+    assert!(matches!(first, Err(perch_github::Error::Network(_))));
+}

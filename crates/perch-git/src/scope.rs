@@ -11,7 +11,7 @@
 //! works there as well as in the clone, and the index and the working
 //! tree are only reachable from there.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
@@ -309,7 +309,7 @@ pub async fn changed_files(
     let raw = diff(git, worktree, &["--raw", "--no-abbrev"], &revs).await?;
     let numstat = diff(git, worktree, &["--numstat"], &revs).await?;
     let raw = parse_raw(&raw);
-    let irregular: std::collections::HashSet<String> = raw
+    let mut irregular: HashSet<String> = raw
         .iter()
         .filter(|c| !c.regular)
         .map(|c| c.path.clone())
@@ -317,7 +317,7 @@ pub async fn changed_files(
     let mut files = assemble(raw, parse_numstat(&numstat));
 
     if head == Rev::Worktree {
-        add_untracked(git, worktree, &mut files).await?;
+        add_untracked(git, worktree, &mut files, &mut irregular).await?;
         // git prints the null sha for a working tree file rather than
         // hashing it, so the head blobs are taken from disk.
         hash_on_disk(git, worktree, &mut files, &irregular).await?;
@@ -351,6 +351,7 @@ async fn add_untracked(
     git: &Git,
     worktree: &Path,
     files: &mut Vec<ChangedFile>,
+    irregular: &mut HashSet<String>,
 ) -> Result<(), Error> {
     let out = git
         .run(
@@ -364,9 +365,17 @@ async fn add_untracked(
         if files.iter().any(|f| f.path == path) {
             continue;
         }
-        let (additions, binary) = match tokio::fs::read(worktree.join(path)).await {
-            Ok(bytes) => count_lines(&bytes),
-            Err(_) => (0, false),
+        let (additions, binary) = match worktree_blob(&worktree.join(path)).await {
+            Ok((bytes, kind)) => {
+                if !kind.is_file() {
+                    irregular.insert(path.to_string());
+                }
+                count_lines(&bytes)
+            }
+            Err(_) => {
+                irregular.insert(path.to_string());
+                (0, false)
+            }
         };
         files.push(ChangedFile {
             path: path.to_string(),
@@ -379,6 +388,26 @@ async fn add_untracked(
         });
     }
     Ok(())
+}
+
+/// Read a working-tree file before any clean filters. For a symlink the
+/// file content is its target path, even when the target does not exist.
+async fn worktree_blob(path: &Path) -> std::io::Result<(Vec<u8>, std::fs::FileType)> {
+    let kind = tokio::fs::symlink_metadata(path).await?.file_type();
+    let bytes = if kind.is_symlink() {
+        tokio::fs::read_link(path)
+            .await?
+            .into_os_string()
+            .into_encoded_bytes()
+    } else if kind.is_file() {
+        tokio::fs::read(path).await?
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a file or symlink", path.display()),
+        ));
+    };
+    Ok((bytes, kind))
 }
 
 /// Lines in a file as `--numstat` would count them, and whether git would
@@ -400,7 +429,7 @@ async fn hash_on_disk(
     git: &Git,
     worktree: &Path,
     files: &mut [ChangedFile],
-    irregular: &std::collections::HashSet<String>,
+    irregular: &HashSet<String>,
 ) -> Result<(), Error> {
     // Only a regular file has a blob to hash: a submodule is a commit and
     // a symlink's blob is its target text, which hash-object would not
@@ -554,8 +583,8 @@ pub async fn read_side(
         Rev::Sha(sha) => format!("{sha}:{path}"),
         Rev::Index => format!(":{path}"),
         Rev::Worktree => {
-            return match tokio::fs::read(worktree.join(path)).await {
-                Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            return match worktree_blob(&worktree.join(path)).await {
+                Ok((bytes, _)) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(Error::Io(e.to_string())),
             };

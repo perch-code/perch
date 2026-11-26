@@ -205,9 +205,10 @@ fn fence(text: &str, (start, end): (usize, usize)) -> (String, (usize, usize)) {
     } else {
         "\n"
     };
-    let open = format!("{before}```\n");
     let code = &text[start..end];
-    let out = splice(text, (start, end), &format!("{open}{code}\n```{after}"));
+    let fence = perch_knowledge::sanitize::fence_around(code);
+    let open = format!("{before}{fence}\n");
+    let out = splice(text, (start, end), &format!("{open}{code}\n{fence}{after}"));
     let at = start + open.len();
     (out, (at, at + code.len()))
 }
@@ -904,6 +905,10 @@ mod tests {
             "see \n```\n[a\nb]\n```\n then"
         );
         assert_eq!(run(Format::Code, "[a\nb]"), "```\n[a\nb]\n```");
+        assert_eq!(
+            run(Format::Code, "[```rust\ncode\n```]"),
+            "````\n[```rust\ncode\n```]\n````"
+        );
     }
 
     #[test]

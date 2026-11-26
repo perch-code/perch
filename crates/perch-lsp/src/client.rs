@@ -1781,11 +1781,15 @@ pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
 /// is no block. A server that answers flat, with no nesting, gives each
 /// symbol's range whole.
 pub fn blocks(response: DocumentSymbolResponse) -> Vec<(usize, usize)> {
+    fn block(first: u32, end: Position) -> Option<(usize, usize)> {
+        // LSP's end is exclusive: column zero belongs to the following line.
+        let last = end.line.saturating_sub(u32::from(end.character == 0));
+        (last > first).then_some((first as usize, last as usize))
+    }
     fn walk(symbols: &[DocumentSymbol], out: &mut Vec<(usize, usize)>) {
         for symbol in symbols {
-            let (first, last) = (symbol.selection_range.start.line, symbol.range.end.line);
-            if last > first {
-                out.push((first as usize, last as usize));
+            if let Some(lines) = block(symbol.selection_range.start.line, symbol.range.end) {
+                out.push(lines);
             }
             walk(symbol.children.as_deref().unwrap_or_default(), out);
         }
@@ -1796,13 +1800,7 @@ pub fn blocks(response: DocumentSymbolResponse) -> Vec<(usize, usize)> {
         DocumentSymbolResponse::Flat(symbols) => out.extend(
             symbols
                 .iter()
-                .map(|s| {
-                    (
-                        s.location.range.start.line as usize,
-                        s.location.range.end.line as usize,
-                    )
-                })
-                .filter(|(first, last)| last > first),
+                .filter_map(|s| block(s.location.range.start.line, s.location.range.end)),
         ),
     }
     out.sort_by_key(|&(first, last)| (first, std::cmp::Reverse(last)));
@@ -2369,6 +2367,22 @@ while True:
         ]))
         .unwrap();
         assert_eq!(blocks(response), vec![(0, 20), (4, 10), (22, 25)]);
+    }
+
+    #[test]
+    fn blocks_end_before_a_range_ending_at_the_next_lines_start() {
+        let range = |a, b| json!({"start": {"line": a, "character": 0}, "end": {"line": b, "character": 0}});
+        let nested = json!([
+            {"name": "f", "kind": 12, "range": range(2, 5), "selectionRange": range(2, 2)},
+            {"name": "N", "kind": 14, "range": range(5, 6), "selectionRange": range(5, 5)},
+        ]);
+        let flat = json!([
+            {"name": "f", "kind": 12, "location": {"uri": "file:///src", "range": range(2, 5)}},
+            {"name": "N", "kind": 14, "location": {"uri": "file:///src", "range": range(5, 6)}},
+        ]);
+        for response in [nested, flat] {
+            assert_eq!(blocks(serde_json::from_value(response).unwrap()), [(2, 4)]);
+        }
     }
 
     #[test]

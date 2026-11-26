@@ -358,6 +358,31 @@ async fn an_untracked_binary_file_is_marked_and_not_counted() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn worktree_changes_show_symlink_targets_as_git_stores_them() {
+    use std::os::unix::fs::symlink;
+
+    let f = Fixture::new();
+    symlink("scratch.txt", f.repo.join("link")).unwrap();
+    symlink("missing", f.repo.join("dangling")).unwrap();
+
+    let files = f.files(Scope::Unstaged).await;
+    for (name, target) in [("link", "scratch.txt"), ("dangling", "missing")] {
+        let row = files.iter().find(|file| file.path == name).unwrap();
+        assert_eq!(row.additions, 1);
+        assert!(!row.binary);
+        assert_eq!(row.head_blob, None);
+        assert_eq!(
+            read_side(&f.git, &f.repo, &Rev::Worktree, name)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(target)
+        );
+    }
+}
+
 #[tokio::test]
 async fn sha_scopes_read_the_same_from_a_linked_worktree() {
     let f = Fixture::new();

@@ -2074,7 +2074,13 @@ impl GitHub {
             );
         };
         if !status.is_success() {
-            let error = classify(status, remaining, reset, retry_after, body);
+            let error = classify(
+                status,
+                remaining,
+                reset,
+                retry_after,
+                body.unwrap_or_default(),
+            );
             if let Error::RateLimited {
                 reset_epoch,
                 retry_after_secs,
@@ -2087,6 +2093,7 @@ impl GitHub {
         if remaining == Some(0) || retry_after.is_some() {
             spent(reset, retry_after);
         }
+        let body = body.map_err(map_octocrab_error)?;
         let payload: crate::search::SearchPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(payload.into_page(page, per_page))
@@ -2518,14 +2525,20 @@ impl GitHub {
 
         let body = body_text(response).await;
         if !status.is_success() {
-            let error = classify(status, remaining, reset, retry_after, body);
+            let error = classify(
+                status,
+                remaining,
+                reset,
+                retry_after,
+                body.unwrap_or_default(),
+            );
             self.remember_rate_limit(&error);
             return Err(error);
         }
         Ok(Fetched {
             status,
             headers,
-            body,
+            body: body.map_err(map_octocrab_error)?,
         })
     }
 
@@ -2608,7 +2621,7 @@ impl GitHub {
         what: &str,
     ) -> Result<(), Error>
     where
-        B: http_body::Body<Data = Bytes>,
+        B: http_body::Body<Data = Bytes, Error = octocrab::Error>,
     {
         self.finish_response(response, accepted, what)
             .await
@@ -2624,7 +2637,7 @@ impl GitHub {
         what: &str,
     ) -> Result<String, Error>
     where
-        B: http_body::Body<Data = Bytes>,
+        B: http_body::Body<Data = Bytes, Error = octocrab::Error>,
     {
         self.finish_costed(response, accepted, what, |_| None).await
     }
@@ -2639,7 +2652,7 @@ impl GitHub {
         cost: fn(&str) -> Option<i64>,
     ) -> Result<String, Error>
     where
-        B: http_body::Body<Data = Bytes>,
+        B: http_body::Body<Data = Bytes, Error = octocrab::Error>,
     {
         let status = response.status();
         let headers = response.headers().clone();
@@ -2647,13 +2660,20 @@ impl GitHub {
         self.remember_rate_headers(&headers, remaining, reset, retry_after);
         let body = body_text(response).await;
         if spend_logged() {
-            self.note_spend(what, status, &headers, cost(&body));
+            let cost = body.as_deref().ok().and_then(cost);
+            self.note_spend(what, status, &headers, cost);
         }
 
         if accepted.contains(&status) {
-            return Ok(body);
+            return body.map_err(map_octocrab_error);
         }
-        let error = classify(status, remaining, reset, retry_after, body);
+        let error = classify(
+            status,
+            remaining,
+            reset,
+            retry_after,
+            body.unwrap_or_default(),
+        );
         self.remember_rate_limit(&error);
         Err(error)
     }
@@ -3147,11 +3167,11 @@ fn rate_limit_deadline(reset_epoch: Option<i64>, retry_after_secs: Option<u64>) 
         .unwrap_or_else(|| now.saturating_add(60))
 }
 
-async fn body_text(response: http::Response<impl http_body::Body<Data = Bytes>>) -> String {
-    match response.into_body().collect().await {
-        Ok(collected) => String::from_utf8_lossy(&collected.to_bytes()).into_owned(),
-        Err(_) => String::new(),
-    }
+async fn body_text<B: http_body::Body<Data = Bytes>>(
+    response: http::Response<B>,
+) -> Result<String, B::Error> {
+    let collected = response.into_body().collect().await?;
+    Ok(String::from_utf8_lossy(&collected.to_bytes()).into_owned())
 }
 
 fn classify(
