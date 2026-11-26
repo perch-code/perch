@@ -5609,7 +5609,7 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if let Err(message) =
-                        archive_item(&ctx, &id, suspended_navigation.as_ref()).await
+                        archive_item(&ctx, &id, suspended_navigation.as_ref(), None).await
                     {
                         tracing::warn!(id, %message, "could not archive item");
                         let _ = ctx.events.send(Event::Notice(message));
@@ -5954,7 +5954,9 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
                 tokio::spawn(async move {
                     let result = github_anchor(&ctx, &item_id, &picked, anchor)
                         .await
-                        .map(|anchor| save_draft(&ctx, &item_id, None, Some(anchor), body, None));
+                        .and_then(|anchor| {
+                            write_draft(&ctx, &item_id, None, Some(anchor), body, None)
+                        });
                     let _ = ctx.events.send(Event::DraftSaved {
                         item_id,
                         token,
@@ -7844,17 +7846,18 @@ impl Ctx {
     /// Find who acted last on these pull requests and issues, for the
     /// item and Browse rows' faces, fifty to a request, off the caller.
     /// Each is asked after once for each time it moves; one GitHub could
-    /// not resolve is not asked after again until then.
+    /// not resolve is not asked after again until then. A request that
+    /// fails gives back its subjects and those of the requests after it,
+    /// which were never sent, so the next look asks after them again.
     fn look_at_participants(&self, subjects: Vec<(String, u64, Timestamp)>) {
         let Some(github) = self.github() else { return };
-        let wanted: Vec<(String, u64)> = {
+        let wanted: Vec<(String, u64, Timestamp)> = {
             let Ok(mut asked) = self.asked_participants.lock() else {
                 return;
             };
             subjects
                 .into_iter()
                 .filter(|subject| asked.insert(subject.clone()))
-                .map(|(repo, number, _)| (repo, number))
                 .collect()
         };
         if wanted.is_empty() {
@@ -7862,8 +7865,12 @@ impl Ctx {
         }
         let ctx = self.clone();
         tokio::spawn(async move {
-            for batch in wanted.chunks(SUBJECTS_PER_LOOK) {
-                match github.look_at_participants(batch).await {
+            for (i, batch) in wanted.chunks(SUBJECTS_PER_LOOK).enumerate() {
+                let pairs: Vec<(String, u64)> = batch
+                    .iter()
+                    .map(|(repo, number, _)| (repo.clone(), *number))
+                    .collect();
+                match github.look_at_participants(&pairs).await {
                     Ok(found) => {
                         ctx.want_avatars(found.iter().flat_map(|(_, participants)| {
                             participants.iter().map(|p| p.avatar_url.clone())
@@ -7875,6 +7882,11 @@ impl Ctx {
                     }
                     Err(e) => {
                         tracing::info!(error = %e, "could not look at who acted on the items");
+                        if let Ok(mut asked) = ctx.asked_participants.lock() {
+                            for subject in &wanted[i * SUBJECTS_PER_LOOK..] {
+                                asked.remove(subject);
+                            }
+                        }
                         return;
                     }
                 }
@@ -9427,7 +9439,7 @@ async fn sweep_items(ctx: &Ctx) {
                 continue;
             }
         }
-        match archive_item(ctx, &item.id, None).await {
+        match archive_item(ctx, &item.id, None, Some(cutoff)).await {
             Ok(()) => tracing::info!(id = %item.id, "removed a worktree nobody needs"),
             // Dirty since, most likely. It stays; the next sweep looks again.
             Err(message) => tracing::info!(id = %item.id, %message, "left a worktree alone"),
@@ -9722,10 +9734,15 @@ fn spawn_sweep(ctx: &Ctx) {
 
 /// Leave Active. The row, branch, discussions, and run history stay. An
 /// executing agent keeps its checkout until the owner's final run exits.
+///
+/// With `sweep_cutoff`, the sweep's, the item is looked at again under its
+/// lock: one opened or set to work since the sweep looked is left for a
+/// later sweep.
 async fn archive_item(
     ctx: &Ctx,
     id: &str,
     suspended_navigation: Option<&SuspendedNavigation>,
+    sweep_cutoff: Option<Timestamp>,
 ) -> Result<(), String> {
     let lifecycle = ctx.lock_item(id).await;
     if suspended_navigation
@@ -9739,6 +9756,14 @@ async fn archive_item(
         }
         return Err("That item is gone".into());
     };
+    if let Some(cutoff) = sweep_cutoff {
+        if !sweep_due(&item, cutoff)
+            || ctx.is_open_anywhere(id)
+            || ctx.runs.has_active_owner(id, None)
+        {
+            return Err("opened or busy since the sweep looked".into());
+        }
+    }
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned && c.on_disk) {
         let check_dirty = async {
             if !owned_checkout_present(&ctx.preparer, &item).await? {
@@ -10514,7 +10539,11 @@ fn record_open(cache: &Cache, item: &mut Item, is_new: bool) -> Result<(), Cache
     if !stored_is_newer(stored, fetched.as_ref().and_then(ItemSubject::updated_at)) {
         found.subject = fetched;
     }
-    found.checkout = item.checkout.take();
+    // Only an open's own checkout moves onto the row; one with none, such
+    // as a row made to start work from, leaves the row's where it is.
+    if let Some(checkout) = item.checkout.take() {
+        found.checkout = Some(checkout);
+    }
     found.archived_at = None;
     found.last_opened_at = item.last_opened_at;
     cache.update_item(&found)?;
@@ -14413,7 +14442,9 @@ async fn start_work_and_open(
 
 /// The item for a notification's pull request or issue, to start work
 /// from: the row it has, else one made from GitHub's answer with no
-/// checkout, as a first open makes it.
+/// checkout, as a first open makes it. The subject is held from the look
+/// to the write, as an open holds it, so an open that cuts a worktree for
+/// it meanwhile is not raced.
 async fn subject_item(
     ctx: &Ctx,
     repo_full_name: &str,
@@ -14421,6 +14452,7 @@ async fn subject_item(
     number: u64,
     navigation_id: u64,
 ) -> Result<String, String> {
+    let _subject = ctx.lock_subject(repo_full_name, kind, number).await;
     let found = ctx
         .with_cache(|c| {
             c.find_item_by_subject(repo_full_name, kind, number)
@@ -14991,10 +15023,26 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
     };
     let local = perch_github::is_local(&source.repo_full_name);
     let git = ctx.preparer.git();
-    // A root's branch: check it is still what the row says, and take its
-    // head from disk, since the row's may be behind.
+    // The head comes from disk, since the row's may be behind: an agent or
+    // the reader may have committed while the item was not open. A root's
+    // branch is checked to be still what the row says first.
     let head = if checkout.owned {
-        checkout.head_sha.clone()
+        // Perch's own worktree shares its clone's objects, so whatever it
+        // is at can be cut from there. One gone from disk has the row's.
+        let on_disk = if checkout.path.exists() {
+            git.run(
+                Some(&checkout.path),
+                ["rev-parse", "HEAD"],
+                Duration::from_secs(30),
+            )
+            .await
+            .ok()
+            .map(|head| head.trim().to_string())
+            .filter(|head| !head.is_empty())
+        } else {
+            None
+        };
+        on_disk.unwrap_or_else(|| checkout.head_sha.clone())
     } else {
         // The root may have been switched since the row was made; a fork
         // of another branch under this one's name would be a lie.
@@ -21058,12 +21106,16 @@ fn captured_retry_prompt(
     reconstructed
 }
 
+/// With `allow_resume` false, as for a review finding's follow-up, which
+/// `ask_as` never resumes, the retry starts afresh with the whole history
+/// before its request, as its original attempt did.
 fn retry_conversation_context(
     thread: &CommentThread,
     request_id: &str,
     backend: &str,
     purpose: RunPurpose,
     mode: RunMode,
+    allow_resume: bool,
 ) -> Option<RetryConversationContext> {
     let request_index = thread
         .messages
@@ -21082,7 +21134,7 @@ fn retry_conversation_context(
         .rev()
         .filter_map(|message| message.run.as_ref())
         .find(|run| run.status == RunStatus::Completed)
-        .filter(|run| run.backend == backend && run.mode == mode)
+        .filter(|run| allow_resume && run.backend == backend && run.mode == mode)
         .and_then(|run| run.session_id.clone());
     let history = if resume.is_some() {
         Vec::new()
@@ -21211,9 +21263,26 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         None
     };
     let approvals = work.as_ref().map(|(_, _, approvals)| *approvals);
-    let Some((history, resume)) =
-        retry_conversation_context(&thread, &request_id, backend.name(), old.purpose, old.mode)
-    else {
+    // A finding's follow-up starts afresh, whatever session the thread
+    // holds, so its retry does too.
+    let finding_thread = ctx
+        .with_cache(|cache| {
+            cache.list_findings(&item_id, None).map(|findings| {
+                findings
+                    .iter()
+                    .any(|finding| finding.thread_id == thread_id)
+            })
+        })
+        .and_then(Result::ok)
+        .unwrap_or(false);
+    let Some((history, resume)) = retry_conversation_context(
+        &thread,
+        &request_id,
+        backend.name(),
+        old.purpose,
+        old.mode,
+        !finding_thread,
+    ) else {
         ctx.notice("The original request is gone");
         return;
     };
@@ -21443,6 +21512,14 @@ async fn delete_private_messages(ctx: &Ctx, thread_id: &str) {
         }
     };
     ctx.runs.cancel_owner(&item_id, Some(thread_id)).await;
+    // The runs go with the messages, so their Work refs go first, while
+    // the rows that name them are still there.
+    let runs = ctx
+        .with_cache(|c| c.runs_for_discussion(thread_id))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let item = ctx.item(&item_id);
+    drop_work_refs(ctx, &runs, item.as_ref()).await;
     let context_before = context_dirs(ctx);
     if let Some(Err(e)) = ctx.with_cache(|c| c.delete_private_messages(thread_id)) {
         let _ = ctx
@@ -21589,7 +21666,7 @@ async fn github_anchor(
 /// it, since a reply to it will be a new review thread there; with no
 /// thread, a new one is made on `anchor`, already GitHub's though not yet
 /// on it. A draft with nowhere to land is refused, which the composer
-/// never offers.
+/// never offers. Why it was not kept is said as a notice.
 fn save_draft(
     ctx: &Ctx,
     item_id: &str,
@@ -21598,14 +21675,31 @@ fn save_draft(
     body: String,
     editing: Option<String>,
 ) {
+    if let Err(e) = write_draft(ctx, item_id, thread_id, anchor, body, editing) {
+        ctx.notice(e);
+    }
+}
+
+/// `save_draft`, with why the draft was not kept handed back instead of
+/// said, for a composer that waits to hear whether its text was kept. With
+/// no cache nothing is kept, and that is not taken for a saved draft.
+fn write_draft(
+    ctx: &Ctx,
+    item_id: &str,
+    thread_id: Option<String>,
+    anchor: Option<Anchor>,
+    body: String,
+    editing: Option<String>,
+) -> Result<(), String> {
+    const UNSAVED: &str = "The draft could not be saved";
     if let Some(message_id) = editing {
-        if let Some(Err(e)) = ctx.with_cache(|c| c.update_comment_message_body(&message_id, &body))
-        {
-            ctx.notice(format!("Could not save the draft: {e}"));
-            return;
+        match ctx.with_cache(|c| c.update_comment_message_body(&message_id, &body)) {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => return Err(format!("Could not save the draft: {e}")),
+            None => return Err(UNSAVED.into()),
         }
         ctx.send_threads(item_id);
-        return;
+        return Ok(());
     }
     let now = Timestamp::now();
     let draft = |thread_id: String| CommentMessage {
@@ -21631,20 +21725,17 @@ fn save_draft(
                 .and_then(Result::ok)
                 .and_then(|all| all.into_iter().find(|t| t.id == id))
             else {
-                ctx.notice("That thread is gone");
-                return;
+                return Err("That thread is gone".into());
             };
             if thread.anchor.is_none() && thread.github_id.is_none() {
-                ctx.notice("That thread has no lines for GitHub to put a comment on");
-                return;
+                return Err("That thread has no lines for GitHub to put a comment on".into());
             }
             let draft = draft(id);
             ctx.with_cache(|c| c.insert_draft(&draft))
         }
         None => {
             let Some(anchor) = anchor else {
-                ctx.notice("A comment for GitHub needs lines to go on");
-                return;
+                return Err("A comment for GitHub needs lines to go on".into());
             };
             let id = perch_github::comments::new_id();
             let thread = CommentThread {
@@ -21663,11 +21754,13 @@ fn save_draft(
             ctx.with_cache(|c| c.insert_comment_thread(&thread))
         }
     };
-    if let Some(Err(e)) = written {
-        ctx.notice(format!("Could not save the draft: {e}"));
-        return;
+    match written {
+        Some(Ok(_)) => {}
+        Some(Err(e)) => return Err(format!("Could not save the draft: {e}")),
+        None => return Err(UNSAVED.into()),
     }
     ctx.send_threads(item_id);
+    Ok(())
 }
 
 /// Put the reader's words in place of a reviewer's.
@@ -28560,6 +28653,19 @@ while True:
 
     #[tokio::test]
     async fn a_work_run_records_what_it_changed_and_its_refs_go_with_its_thread() {
+        work_run_refs_go_when_deleted(false).await;
+    }
+
+    /// Deleting only Perch's messages under a thread, as under one turned
+    /// towards GitHub, deletes their runs, and their refs go with them.
+    #[tokio::test]
+    async fn a_work_runs_refs_go_with_perchs_messages() {
+        work_run_refs_go_when_deleted(true).await;
+    }
+
+    /// A Work run in a root's checkout, then its thread deleted, or with
+    /// `private`, only Perch's messages under it.
+    async fn work_run_refs_go_when_deleted(private: bool) {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("notes");
@@ -28633,7 +28739,17 @@ while True:
             "the worktree's own index was not touched"
         );
 
-        delete_comment_thread(&ctx, &thread.id).await;
+        if private {
+            delete_private_messages(&ctx, &thread.id).await;
+        } else {
+            delete_comment_thread(&ctx, &thread.id).await;
+        }
+        assert!(
+            ctx.with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+                .unwrap()
+                .is_empty(),
+            "the run went"
+        );
         assert!(
             git(&root, &["for-each-ref", "refs/perch/runs/"]).is_empty(),
             "the run's refs went with its thread"
@@ -30109,6 +30225,73 @@ read eof || true
         assert!(!context_root.join(&runs[2].id).exists());
     }
 
+    /// A retry resumes the session its request came after only when its
+    /// original attempt could have; a finding's follow-up never does, so
+    /// its retry starts afresh with the conversation before it.
+    #[test]
+    fn a_retry_resumes_only_where_its_original_attempt_could_have() {
+        let message =
+            |id: &str, author: Author, body: &str, run: Option<RunRecord>| CommentMessage {
+                id: id.into(),
+                thread_id: "t1".into(),
+                origin: ThreadOrigin::Local,
+                author,
+                body: body.into(),
+                created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+                run,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            };
+        let answered = RunRecord {
+            status: RunStatus::Completed,
+            backend: "claude-code".into(),
+            mode: RunMode::Ask,
+            session_id: Some("s1".into()),
+            ..RunRecord::default()
+        };
+        let agent = Author::Agent {
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+        };
+        let thread = CommentThread {
+            id: "t1".into(),
+            worktree_id: "i".into(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+            messages: vec![
+                message("q1", Author::User, "why?", None),
+                message("a1", agent, "because", Some(answered)),
+                message("q2", Author::User, "and now?", None),
+            ],
+        };
+        let context = |allow_resume| {
+            retry_conversation_context(
+                &thread,
+                "q2",
+                "claude-code",
+                RunPurpose::FollowUp,
+                RunMode::Ask,
+                allow_resume,
+            )
+            .unwrap()
+        };
+
+        assert_eq!(context(true), (Vec::new(), Some("s1".into())));
+        let (history, resume) = context(false);
+        assert_eq!(resume, None, "a finding's follow-up is not resumed");
+        let bodies: Vec<_> = history.iter().map(|(_, body)| body.as_str()).collect();
+        assert_eq!(bodies, ["why?", "because"]);
+    }
+
     /// A kept discussion with one review comment on a line, `PRRC_31`,
     /// which the cache keeps as the thread `gh-31`.
     fn store_line_commented_discussion(ctx: &Ctx, item: &Item) {
@@ -30351,6 +30534,36 @@ read eof || true
         assert_eq!(t.origin, ThreadOrigin::Local);
         assert_eq!(t.messages.len(), 1);
         assert_eq!(threads_sent(&received).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_draft_that_was_not_kept_is_not_said_to_be_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+
+        // Refused: the composer that waits hears why, and no notice says it twice.
+        assert_eq!(
+            write_draft(&ctx, &item.id, None, None, "where?".into(), None),
+            Err("A comment for GitHub needs lines to go on".into())
+        );
+        assert!(notices(&received).is_empty());
+
+        // With no cache nothing is kept, so nothing is said to be.
+        let mut uncached = ctx.clone();
+        uncached.cache = None;
+        assert!(write_draft(
+            &uncached,
+            &item.id,
+            None,
+            Some(lines(3, 4)),
+            "please".into(),
+            None
+        )
+        .is_err());
+        assert!(threads_of(&ctx, &item).is_empty());
+        assert!(threads_sent(&received).is_empty());
     }
 
     #[tokio::test]
@@ -33021,6 +33234,29 @@ read eof || true
         assert_eq!(paths.lock().unwrap().len(), 2);
     }
 
+    /// A look GitHub never answered is not taken for one: the subjects of
+    /// the request that failed, and of the ones after it that were never
+    /// sent, are asked after again by the next look.
+    #[tokio::test]
+    async fn a_failed_look_gives_back_every_subject_it_did_not_hear_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let at: Timestamp = "2026-09-09T00:00:00Z".parse().unwrap();
+        let wanted: Vec<_> = (1..=SUBJECTS_PER_LOOK as u64 + 10)
+            .map(|number| ("org/one".to_string(), number, at))
+            .collect();
+
+        ctx.look_at_participants(wanted);
+        let asked = |ctx: &Ctx| ctx.asked_participants.lock().unwrap().len();
+        for _ in 0..500 {
+            if asked(&ctx) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(asked(&ctx), 0, "every subject is asked after again");
+    }
+
     /// Merging on github.com moves no thread for whoever merged, so a row
     /// last found open is looked at again every so often, and one found
     /// merged or closed is left alone. A look that finds nothing new
@@ -34710,10 +34946,13 @@ read eof || true
         let admission = ctx.runs.admit(run).unwrap();
         let lease = ctx.runs.start(admission).await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id, None))
-            .await
-            .expect("archive did not wait on the active run")
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            archive_item(&ctx, &item.id, None, None),
+        )
+        .await
+        .expect("archive did not wait on the active run")
+        .unwrap();
         let archived = ctx.item(&item.id).unwrap();
         assert!(archived.is_archived());
         assert!(archived.checkout.as_ref().unwrap().on_disk);
@@ -35012,7 +35251,7 @@ read eof || true
         let items = || ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
         let found = items().remove(0);
 
-        archive_item(&ctx, &found.id, None).await.unwrap();
+        archive_item(&ctx, &found.id, None, None).await.unwrap();
         assert!(
             !scan_roots(&ctx).await,
             "the scan leaves a hidden row alone"
@@ -36045,6 +36284,34 @@ model = \"opus\"\n",
             items[0].title(),
             "seven, renamed",
             "the later snapshot stands over the one fetched before the clone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_made_with_no_checkout_leaves_the_checkout_an_open_cut_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        // Start work found no row; while it read #7, an open stored it with
+        // the worktree it cut.
+        let mut listed = store_pull(&ctx, 7);
+        listed.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            owned: true,
+            ..root_checkout("perch/pr-7")
+        });
+        ctx.with_cache(|c| c.update_item(&listed)).unwrap().unwrap();
+        let mut made = Item::new("a/b", "2026-09-18T12:00:00Z".parse().unwrap());
+        made.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+
+        ctx.with_cache(|c| record_open(c, &mut made, true))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(made.id, listed.id);
+        assert_eq!(
+            ctx.item(&listed.id).unwrap().checkout,
+            listed.checkout,
+            "the open's worktree is still the row's"
         );
     }
 
@@ -37537,7 +37804,7 @@ model = \"opus\"\n",
 
         let archived = tokio::time::timeout(
             Duration::from_millis(200),
-            archive_item(&ctx, &pull.id, None),
+            archive_item(&ctx, &pull.id, None, None),
         )
         .await;
         assert!(archived.is_err(), "the pull request's own archive waits");
@@ -38132,7 +38399,7 @@ model = \"opus\"\n",
         let bare = owned_clone(&ctx, dir.path());
         let branch = "feature";
         let (item, path) = owned_worktree(&ctx, &bare, branch, branch_item(branch), 0);
-        archive_item(&ctx, &item.id, None).await.unwrap();
+        archive_item(&ctx, &item.id, None, None).await.unwrap();
         assert!(!path.exists());
 
         // A different repository now has a clean worktree on the same
@@ -38256,7 +38523,7 @@ model = \"opus\"\n",
         }
 
         // Archiving removes the worktree from the root; reopening restores it in the root.
-        archive_item(&ctx, &id, None).await.unwrap();
+        archive_item(&ctx, &id, None, None).await.unwrap();
         assert!(!worktree.exists());
         let nav = ctx.navigation_requests.begin_current();
         assert!(open_pull_request(&ctx, "a/b".into(), 12, nav).await);
@@ -38662,6 +38929,74 @@ model = \"opus\"\n",
                 branch
             );
         }
+    }
+
+    /// The sweep looks at a worktree, then at whether git holds all of it,
+    /// and only then takes it. One the reader opened in between is left.
+    #[tokio::test]
+    async fn the_sweep_leaves_a_worktree_opened_while_it_looked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let bare = owned_clone(&ctx, dir.path());
+        let cutoff = Timestamp::now() - jiff::SignedDuration::try_from(CHECKOUT_MAX_AGE).unwrap();
+
+        let (reopened, reopened_dir) =
+            owned_worktree(&ctx, &bare, "chris/reopened", branch_item("reopened"), 15);
+        let (showing, showing_dir) =
+            owned_worktree(&ctx, &bare, "chris/showing", branch_item("showing"), 15);
+        assert!(sweep_due(&reopened, cutoff) && sweep_due(&showing, cutoff));
+        // The sweep picked both; then one was opened, and one is in a window.
+        let mut opened = reopened.clone();
+        opened.last_opened_at = Timestamp::now();
+        ctx.with_cache(|c| c.update_item(&opened)).unwrap().unwrap();
+        open_in_slot(&ctx, &showing);
+
+        assert!(archive_item(&ctx, &reopened.id, None, Some(cutoff))
+            .await
+            .is_err());
+        assert!(archive_item(&ctx, &showing.id, None, Some(cutoff))
+            .await
+            .is_err());
+
+        assert!(!removed(&ctx, &reopened, &reopened_dir), "opened since");
+        assert!(!removed(&ctx, &showing, &showing_dir), "open in a window");
+    }
+
+    /// Start work on a worktree Perch made cuts from where the worktree
+    /// is, not where its row last saw it: an agent may have committed
+    /// there while the item was not open.
+    #[tokio::test]
+    async fn start_work_on_a_worktree_cuts_from_its_head_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let bare = owned_clone(&ctx, dir.path());
+        let (source, source_dir) =
+            owned_worktree(&ctx, &bare, "chris/agent", branch_item("agent"), 0);
+        std::fs::write(source_dir.join("two.txt"), "two\n").unwrap();
+        git(&source_dir, &["add", "."]);
+        git(
+            &source_dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "two",
+            ],
+        );
+        let committed = git(&source_dir, &["rev-parse", "HEAD"]);
+        assert_ne!(committed, source.checkout.as_ref().unwrap().head_sha);
+
+        let id = start_work(&ctx, &source.id, 0)
+            .await
+            .expect("work starts from the worktree");
+
+        let fork = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_eq!(fork.head_sha, committed);
+        assert_eq!(git(&fork.path, &["rev-parse", "HEAD"]), committed);
     }
 
     /// The sweep never takes what git doesn't hold, nor a worktree the
