@@ -47,25 +47,72 @@ pub(crate) fn watch(app: AppState, state: ReviewState, backend: Rc<Backend>) {
         key
     });
 
-    Effect::new(move |_| {
+    // A rebuild while the popover stays open keeps what the reader picked:
+    // their base, and their reviewers unless what those are built from
+    // (capabilities, preferences, the agent) has arrived since.
+    Effect::new(move |previous: Option<Option<Built>>| {
         let open = state.review_open.get();
-        let _capabilities = app.review_capabilities.get();
-        let _preferences = app.review_preferences.get();
-        let _agent = app.agent.get();
+        let capabilities = app.review_capabilities.get();
+        let preferences = app.review_preferences.get();
+        let agent = app.agent.get();
         let item_id = state
             .item
             .with(|item| item.as_ref().map(|item| item.id.clone()));
-        let _base_refs = item_id
+        let base_refs = item_id
             .as_deref()
             .map(|item_id| app.review_base_refs_for(item_id));
-        if open {
-            if let Some(item_id) = item_id {
-                state
-                    .review_launcher_draft
-                    .set(build_draft(app, state, &item_id));
+        if !open {
+            return None;
+        }
+        let item_id = item_id?;
+        let mut draft = build_draft(app, state, &item_id);
+        let built = Built {
+            base_ref: draft.as_ref().and_then(|draft| draft.base_ref.clone()),
+            capabilities,
+            preferences,
+            agent,
+        };
+        let shown = state.review_launcher_draft.get_untracked();
+        if let (Some(draft), Some(shown), Some(Some(before))) =
+            (draft.as_mut(), shown, previous.as_ref())
+        {
+            if shown.item_id == draft.item_id {
+                let refs = base_refs.unwrap_or_default();
+                let picked = shown
+                    .base_ref
+                    .filter(|base| Some(base.as_str()) != before.base_ref.as_deref());
+                if let Some(base) = picked {
+                    if refs.is_empty() || refs.contains(&base) {
+                        draft.base_ref = Some(base);
+                    }
+                }
+                if before.same_choices(&built) {
+                    draft.choices = shown.choices;
+                }
             }
         }
+        state.review_launcher_draft.set(draft);
+        Some(built)
     });
+}
+
+/// What the open launcher's draft was last built from, so a rebuild can
+/// tell the reader's picks from what it filled in itself.
+struct Built {
+    /// The base the draft started with, before any pick.
+    base_ref: Option<String>,
+    capabilities: std::sync::Arc<Vec<perch_agent::ReviewCapability>>,
+    preferences: std::sync::Arc<Vec<perch_github::ReviewPreference>>,
+    agent: perch_github::AgentConfig,
+}
+
+impl Built {
+    /// Whether the reviewer choices would be built from the same things.
+    fn same_choices(&self, other: &Built) -> bool {
+        std::sync::Arc::ptr_eq(&self.capabilities, &other.capabilities)
+            && std::sync::Arc::ptr_eq(&self.preferences, &other.preferences)
+            && self.agent == other.agent
+    }
 }
 
 /// The agents' part of the Review popover. Over the reader's own review
@@ -1851,5 +1898,76 @@ mod tests {
         state.item.set(Some(std::sync::Arc::new(item)));
         harness.rebuild();
         assert!(loads(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn the_readers_base_and_reviewers_outlast_a_refresh_while_open() {
+        let (app, state) = item_state();
+        app.review_base_refs.update(|refs| {
+            refs.insert(
+                "worktree".into(),
+                std::sync::Arc::new(vec!["main".into(), "release-1.4".into()]),
+            );
+        });
+        let (backend, _commands) = Backend::recording();
+        watch(app, state, Rc::new(backend));
+        state.review_open.set(true);
+        let base = || {
+            state
+                .review_launcher_draft
+                .with(|draft| draft.as_ref().and_then(|draft| draft.base_ref.clone()))
+        };
+        let codex = || {
+            state.review_launcher_draft.with(|draft| {
+                draft.as_ref().and_then(|draft| {
+                    draft
+                        .choices
+                        .iter()
+                        .find(|choice| choice.backend == perch_agent::Backend::Codex)
+                        .map(|choice| choice.enabled)
+                })
+            })
+        };
+        assert_eq!(base().as_deref(), Some("main"));
+        assert_eq!(codex(), Some(false));
+
+        state.review_launcher_draft.update(|draft| {
+            let draft = draft.as_mut().unwrap();
+            draft.base_ref = Some("release-1.4".into());
+        });
+        update_choice(state, perch_agent::Backend::Codex, |choice| {
+            choice.enabled = true;
+        });
+
+        // A poll rewrites the open item.
+        state.item.update(|item| {
+            std::sync::Arc::make_mut(item.as_mut().unwrap()).last_opened_at =
+                "2026-09-19T12:05:00Z".parse().unwrap();
+        });
+        assert_eq!(base().as_deref(), Some("release-1.4"));
+        assert_eq!(codex(), Some(true));
+
+        // The dashboard lands again with the same bases: the pick stays.
+        app.review_base_refs.update(|refs| {
+            refs.insert(
+                "worktree".into(),
+                std::sync::Arc::new(vec!["main".into(), "release-1.4".into()]),
+            );
+        });
+        assert_eq!(base().as_deref(), Some("release-1.4"));
+
+        // A pick that is no longer offered goes back to the checkout's.
+        app.review_base_refs.update(|refs| {
+            refs.insert("worktree".into(), std::sync::Arc::new(vec!["main".into()]));
+        });
+        assert_eq!(base().as_deref(), Some("main"));
+
+        // Opening afresh starts from the checkout again.
+        state.review_launcher_draft.update(|draft| {
+            draft.as_mut().unwrap().base_ref = Some("release-1.4".into());
+        });
+        state.review_open.set(false);
+        state.review_open.set(true);
+        assert_eq!(base().as_deref(), Some("main"));
     }
 }

@@ -29,6 +29,10 @@ pub struct PullRequestReadiness {
     pub branch: String,
     /// The pull request's base, a branch name on GitHub.
     pub base: String,
+    /// The branch's own base, which `base` is unless the reader picked
+    /// another; `None` when it can't be worked out.
+    #[serde(default)]
+    pub default_base: Option<String>,
     /// Commits on the branch the base doesn't have.
     pub ahead: u32,
     /// Files with uncommitted changes. Opening commits them unless the
@@ -59,9 +63,12 @@ pub(super) async fn readiness(
 ) -> Result<PullRequestReadiness, String> {
     let item = ctx.item(item_id).ok_or("The item is gone")?;
     let checkout = branch_checkout(&item)?;
-    let base = match base {
-        Some(base) => base,
-        None => default_base(ctx, &item, checkout).await?,
+    let (base, own_base) = match base {
+        Some(base) => (base, default_base(ctx, &item, checkout).await.ok()),
+        None => {
+            let base = default_base(ctx, &item, checkout).await?;
+            (base.clone(), Some(base))
+        }
     };
     let git = ctx.preparer.git();
     let base_ref = resolve_base(ctx, &item, checkout, &base)
@@ -77,6 +84,7 @@ pub(super) async fn readiness(
     Ok(PullRequestReadiness {
         branch: checkout.branch.clone(),
         base,
+        default_base: own_base,
         ahead: ready.ahead,
         dirty_files: ready.dirty_files,
         head_branch: ready.head_branch,

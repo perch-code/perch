@@ -250,10 +250,24 @@ fn unavailable_note(state: ReviewState) -> Option<(String, bool)> {
             true,
         ))
     } else {
-        Some((
-            "The pull request has new commits. Update it to submit; the drafts are kept.".into(),
-            false,
-        ))
+        // Held by the worktree's own commits rather than the pull
+        // request's, the way out is the one the branch offers.
+        let diverged = state
+            .stale_head
+            .with(Option::is_none)
+            .then(|| state.item.with(|i| i.as_ref().and_then(|i| i.divergence())))
+            .flatten();
+        let note = match diverged.map(|d| (d.ahead.unwrap_or(0), d.behind)) {
+            Some((ahead, Some(0))) if ahead > 0 => {
+                "The worktree has unpushed commits. Push them to submit; the drafts are kept."
+            }
+            Some((ahead, Some(behind))) if ahead > 0 && behind > 0 => {
+                "The worktree and the pull request have each moved on. Rebase to submit; \
+                 the drafts are kept."
+            }
+            _ => "The pull request has new commits. Update it to submit; the drafts are kept.",
+        };
+        Some((note.into(), false))
     }
 }
 
@@ -1208,6 +1222,33 @@ mod tests {
         // The reader's worktree has a commit the pull request hasn't.
         with_pr_head("head-41");
         assert!(!is_available(state));
+    }
+
+    #[test]
+    fn drafts_held_by_unpushed_commits_say_to_push_not_update() {
+        let _root = TestRoot::new();
+        let state = review_state();
+        let diverge = |ahead: u32, behind: u32| {
+            let mut item = state.item.get_untracked().unwrap().as_ref().clone();
+            let mut pr = pull();
+            pr.head_sha = "head-41".into();
+            item.subject = Some(perch_github::ItemSubject::PullRequest(pr));
+            let checkout = item.checkout.as_mut().unwrap();
+            checkout.divergence = Some(perch_github::items::Divergence {
+                head: checkout.head_sha.clone(),
+                pr_head: "head-41".into(),
+                ahead,
+                behind,
+            });
+            state.item.set(Some(Arc::new(item)));
+        };
+        let note = || unavailable_note(state).map(|(note, _)| note).unwrap();
+        diverge(2, 0);
+        assert!(note().contains("unpushed commits. Push"), "{}", note());
+        diverge(2, 3);
+        assert!(note().contains("Rebase"), "{}", note());
+        diverge(0, 3);
+        assert!(note().contains("new commits. Update"), "{}", note());
     }
 
     #[test]

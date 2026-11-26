@@ -672,7 +672,7 @@ fn base_chip(app: AppState, state: ReviewState, item_id: String) -> impl IntoVie
 
 fn base_menu(app: AppState, state: ReviewState, item_id: String) -> Menu {
     let current = base_of(app, state, &item_id);
-    let own = ready(state).map(|r| r.base);
+    let own = ready(state).and_then(|r| r.default_base);
     let mut menu = Menu::new();
     match state.pull_bases.get_untracked() {
         None => {
@@ -688,10 +688,7 @@ fn base_menu(app: AppState, state: ReviewState, item_id: String) -> Menu {
                 let own = own.clone();
                 menu = menu.item(base, move |item| {
                     item.checked(checked).action(move || {
-                        // The branch's own base is no pick at all, so the
-                        // form follows it if the branch moves.
-                        let pick =
-                            (own.as_deref() != Some(picked.as_str())).then(|| picked.clone());
+                        let pick = base_pick(own.as_deref(), &picked);
                         update_draft(app, &item_id, |draft| draft.base = pick);
                     })
                 });
@@ -699,6 +696,14 @@ fn base_menu(app: AppState, state: ReviewState, item_id: String) -> Menu {
         }
     }
     menu
+}
+
+/// What picking `picked` stores as the draft's base. The branch's own
+/// base is no pick at all, so the form follows it if the branch moves.
+/// `own` is the branch's default, not the base the readiness was asked
+/// against, which is the current pick once there is one.
+fn base_pick(own: Option<&str>, picked: &str) -> Option<String> {
+    (own != Some(picked)).then(|| picked.to_string())
 }
 
 fn draft_box(app: AppState, item_id: String) -> impl IntoView {
@@ -893,6 +898,7 @@ mod tests {
         PullRequestReadiness {
             branch: "feature".into(),
             base: "main".into(),
+            default_base: Some("main".into()),
             ahead,
             dirty_files: 0,
             head_branch: Some("feature".into()),
@@ -1367,6 +1373,28 @@ mod tests {
             state.composer_height.get(),
             None,
             "a comment's box is its own"
+        );
+    }
+
+    #[test]
+    fn picking_a_base_compares_against_the_branchs_default_not_the_current_pick() {
+        // The readiness for a `develop` pick reports `develop` as its base,
+        // but the branch's own base is still `main`.
+        let picked = PullRequestReadiness {
+            base: "develop".into(),
+            ..readiness(2)
+        };
+        let own = picked.default_base.as_deref();
+        assert_eq!(
+            base_pick(own, "develop"),
+            Some("develop".into()),
+            "re-picking the checked base keeps it"
+        );
+        assert_eq!(base_pick(own, "main"), None, "the default is no pick");
+        assert_eq!(
+            base_pick(None, "main"),
+            Some("main".into()),
+            "an unknown default makes every base a pick"
         );
     }
 }
