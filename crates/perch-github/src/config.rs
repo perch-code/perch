@@ -1130,9 +1130,11 @@ pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
 /// tables under it and the comment lines just above it. The rest of the
 /// file's text stays as the reader left it. False when no table in the
 /// file reads as `entry`. The file is replaced whole, keeping its
-/// permissions, and only once what is left still loads with one
-/// repository fewer.
+/// permissions and any symlink, and only once what is left still loads
+/// every other repository it loaded before.
 pub fn remove_repo(config: &Path, entry: &RepoConfig) -> std::io::Result<bool> {
+    let _guard = crate::config_edit::config_write_guard();
+
     let text = std::fs::read_to_string(config)?;
     let Some(cut) = repo_table(&text, entry) else {
         return Ok(false);
@@ -1144,19 +1146,34 @@ pub fn remove_repo(config: &Path, entry: &RepoConfig) -> std::io::Result<bool> {
             left.push('\n');
         }
     }
-    let had = Config::parse(&text).map(|c| c.repo.len()).unwrap_or(0);
-    match Config::parse(&left) {
-        Ok(c) if c.repo.len() + 1 == had => {}
-        _ => {
-            return Err(std::io::Error::other(
-                "the file would not have read as one repository fewer, so it was left alone",
-            ))
+    // Every repository that loaded before, but the one taken out, has to
+    // load after. One that was skipped may come back, as when taking out
+    // `alice/x` settles its clash with `bob/x`, or a duplicate takes the
+    // removed one's place.
+    let same = |a: &RepoConfig, b: &RepoConfig| {
+        a.github.as_deref().map(str::to_lowercase) == b.github.as_deref().map(str::to_lowercase)
+            && a.root == b.root
+            && a.name == b.name
+    };
+    let kept = match (Config::parse(&text), Config::parse(&left)) {
+        (Ok(before), Ok(after)) => {
+            let mut removed = false;
+            before.repo.iter().all(|b| {
+                if !removed && same(b, entry) {
+                    removed = true;
+                    return true;
+                }
+                after.repo.iter().any(|a| same(a, b))
+            })
         }
+        _ => false,
+    };
+    if !kept {
+        return Err(std::io::Error::other(
+            "what was left would not have loaded the other repositories, so the file was left alone",
+        ));
     }
-    let temp = config.with_extension("toml.removing");
-    std::fs::write(&temp, &left)?;
-    std::fs::set_permissions(&temp, std::fs::metadata(config)?.permissions())?;
-    std::fs::rename(&temp, config)?;
+    crate::config_edit::replace_file(config, &left)?;
     Ok(true)
 }
 
@@ -1966,6 +1983,51 @@ repos = ["*"]
             .clone();
         assert!(remove_repo(&path, &one).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    }
+
+    #[test]
+    fn taking_out_a_repository_lets_the_one_it_clashed_with_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "[[repo]]\ngithub = \"alice/x\"\n\n[[repo]]\ngithub = \"bob/x\"\n";
+        std::fs::write(&path, text).unwrap();
+        // Both would show as "x", so only alice/x loads.
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.declared(), ["alice/x"]);
+        let alice = config.repo[0].clone();
+
+        assert!(remove_repo(&path, &alice).unwrap());
+        let left = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(left, "[[repo]]\ngithub = \"bob/x\"\n");
+        assert_eq!(Config::parse(&left).unwrap().declared(), ["bob/x"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn taking_out_a_repository_writes_through_a_symlinked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("dotfiles.toml");
+        std::fs::write(
+            &real,
+            "[[repo]]\ngithub = \"a/one\"\n\n[[repo]]\ngithub = \"a/two\"\n",
+        )
+        .unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let two = Config::parse(&std::fs::read_to_string(&link).unwrap())
+            .unwrap()
+            .repo[1]
+            .clone();
+
+        assert!(remove_repo(&link, &two).unwrap());
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "[[repo]]\ngithub = \"a/one\"\n"
+        );
     }
 
     #[test]

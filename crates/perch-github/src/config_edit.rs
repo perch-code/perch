@@ -1100,7 +1100,7 @@ fn collect_key(key: &str, item: &Item, keys: &mut BTreeSet<String>) {
 /// never sees half of it. The new file has the old one's permissions, or
 /// is the owner's alone when there was none. A symlinked config is written
 /// through to its target, so the link stays.
-fn replace_file(path: &Path, text: &str) -> std::io::Result<()> {
+pub(crate) fn replace_file(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     let target = match std::fs::symlink_metadata(path) {

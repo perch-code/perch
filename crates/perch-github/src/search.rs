@@ -42,7 +42,12 @@ impl SearchHit {
             (SubjectKind::PullRequest, false) if self.merged => SubjectState::PrMerged,
             (SubjectKind::PullRequest, false) => SubjectState::PrClosed,
             (SubjectKind::Issue, true) => SubjectState::IssueOpen,
-            (SubjectKind::Issue, false) if self.state_reason.as_deref() == Some("not_planned") => {
+            (SubjectKind::Issue, false)
+                if matches!(
+                    self.state_reason.as_deref(),
+                    Some("not_planned" | "duplicate")
+                ) =>
+            {
                 SubjectState::IssueNotPlanned
             }
             (SubjectKind::Issue, false) => SubjectState::IssueClosed,
@@ -164,6 +169,9 @@ mod tests {
              "pull_request": {"merged_at": "2026-09-19T10:00:00Z"}},
             {"number": 9, "title": "Wontfix", "state": "closed", "state_reason": "not_planned",
              "draft": null, "updated_at": "2026-09-18T10:00:00Z",
+             "repository_url": "https://api.github.com/repos/a/b"},
+            {"number": 10, "title": "Again", "state": "closed", "state_reason": "duplicate",
+             "updated_at": "2026-09-17T10:00:00Z",
              "repository_url": "https://api.github.com/repos/a/b"}
         ]}"#;
         let payload: SearchPayload = serde_json::from_str(body).unwrap();
@@ -175,6 +183,7 @@ mod tests {
             [
                 SubjectState::PrDraft,
                 SubjectState::PrMerged,
+                SubjectState::IssueNotPlanned,
                 SubjectState::IssueNotPlanned
             ]
         );
