@@ -646,6 +646,7 @@ impl AppState {
         }
         copy(self.avatars, data.avatars);
         copy(self.repos, data.repos);
+        copy(self.repos_known, data.repos_known);
         copy(self.trusted_servers, data.trusted_servers);
         copy(self.github_hosts, data.github_hosts);
         copy(self.settings_file, data.settings_file);
@@ -654,6 +655,9 @@ impl AppState {
         copy(self.browse, data.browse);
         copy(self.items, data.items);
         copy(self.notifications, data.notifications);
+        copy(self.done_notifications, data.done_notifications);
+        copy(self.snoozed_notifications, data.snoozed_notifications);
+        copy(self.participants, data.participants);
         copy(self.item_activity, data.item_activity);
         copy(self.notifications_polled, data.notifications_polled);
         copy(self.agent, data.agent);
@@ -1214,21 +1218,22 @@ impl AppState {
     fn show_toast(&self, kind: ToastKind) {
         let token = self.toast_token.get_untracked().wrapping_add(1);
         self.toast_token.set(token);
-        let was_empty = self.toasts.with_untracked(VecDeque::is_empty);
-        // News goes in front of an offer that is waiting to be answered,
-        // which comes back once the news has gone.
-        let over_offer = !kind.waits()
-            && self
-                .toasts
-                .with_untracked(|toasts| toasts.front().is_some_and(|toast| toast.kind.waits()));
+        // News goes in front of any offer waiting to be answered, behind
+        // news already ahead of it, and the offer comes back once the news
+        // has gone.
+        let over_offer = if kind.waits() {
+            None
+        } else {
+            self.toasts
+                .with_untracked(|toasts| toasts.iter().position(|toast| toast.kind.waits()))
+        };
+        let mut front = false;
         self.toasts.update(|toasts| {
-            if over_offer {
-                toasts.push_front(Toast { kind, token });
-            } else {
-                toasts.push_back(Toast { kind, token });
-            }
+            let index = over_offer.unwrap_or(toasts.len());
+            toasts.insert(index, Toast { kind, token });
+            front = index == 0;
         });
-        if was_empty || over_offer {
+        if front {
             self.schedule_toast_dismissal(token);
         }
     }
@@ -2172,15 +2177,20 @@ impl AppState {
                     );
                     return;
                 }
-                let retained_threads: HashSet<_> =
-                    threads.iter().map(|thread| thread.id.as_str()).collect();
-                self.retain_agent_runs(|run| {
-                    run.item_id.as_deref() != Some(item_id.as_str())
-                        || run
-                            .thread_id
-                            .as_deref()
-                            .is_none_or(|thread_id| retained_threads.contains(thread_id))
-                });
+                // Only the live view has every thread: a past review's
+                // leaves out the ones that came after it, which may still
+                // have runs.
+                if expected_historical.is_none() {
+                    let retained_threads: HashSet<_> =
+                        threads.iter().map(|thread| thread.id.as_str()).collect();
+                    self.retain_agent_runs(|run| {
+                        run.item_id.as_deref() != Some(item_id.as_str())
+                            || run
+                                .thread_id
+                                .as_deref()
+                                .is_none_or(|thread_id| retained_threads.contains(thread_id))
+                    });
+                }
                 let open = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
                 if open.as_deref() == Some(item_id.as_str()) {
                     review.set_comment_threads(Arc::new(threads));
@@ -5769,6 +5779,30 @@ mod tests {
         assert_eq!(offers(&app)[0].text, "No definition found for `x`: …");
     }
 
+    /// News that comes while earlier news is over an offer shows next,
+    /// and the offer comes back only once all of it has gone.
+    #[test]
+    fn news_after_news_over_an_offer_shows_before_the_offer() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        app.offer_server(ServerOffer::missing(&missing_rust(), None), true);
+        app.complain("Could not post");
+        app.show_agent_completion("run".into());
+
+        let news = app.current_toast().unwrap().token;
+        app.dismiss_toast(news);
+        assert!(matches!(
+            app.current_toast().unwrap().kind,
+            ToastKind::AgentRun(ref id) if id == "run"
+        ));
+        let news = app.current_toast().unwrap().token;
+        app.dismiss_toast(news);
+        assert!(matches!(
+            app.current_toast().unwrap().kind,
+            ToastKind::Server(_)
+        ));
+    }
+
     /// The offer to start a server comes down once the server says
     /// anything, as when a file of its language opening starts it.
     #[test]
@@ -7877,6 +7911,44 @@ mod tests {
         assert_eq!(app.notice().as_deref(), Some("group B failed"));
     }
 
+    /// A past review's threads leave out the ones that came after it, so
+    /// they say nothing of whether a run on one of those is gone.
+    #[test]
+    fn a_past_reviews_threads_keep_the_runs_on_later_threads() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        app.update_agent_run(&perch_github::RunRecord {
+            id: "run".into(),
+            owner: perch_github::RunOwner::Discussion {
+                item_id: "wt".into(),
+                thread_id: "later-thread".into(),
+                request_id: "request".into(),
+            },
+            status: perch_github::RunStatus::Running,
+            queued_at: "2026-09-19T10:00:00Z".parse().unwrap(),
+            ..perch_github::RunRecord::default()
+        });
+        let threads = |group: Option<&str>, request: Option<u64>| Event::CommentThreads {
+            item_id: "wt".into(),
+            threads: Vec::new(),
+            review_group_id: group.map(str::to_string),
+            review_request_id: request,
+        };
+
+        review
+            .historical_review
+            .set(Some(historical_summary("group-a")));
+        review.historical_review_request.set(Some(7));
+        app.apply_with_review(threads(Some("group-a"), Some(7)), review);
+        assert!(app.agent_run("run").is_some());
+
+        // The live threads have every one, so the run's is gone.
+        review.historical_review.set(None);
+        review.historical_review_request.set(None);
+        app.apply_with_review(threads(None, None), review);
+        assert!(app.agent_run("run").is_none());
+    }
+
     #[test]
     fn viewed_ready_carries_the_reveals_into_the_open_item() {
         let app = AppState::new();
@@ -8113,6 +8185,33 @@ mod tests {
         assert!(app.is_live());
         scope.dispose();
         assert!(!app.is_live());
+    }
+
+    /// A new window starts with what the backend sends only when it
+    /// changes: the Done and Snoozed lists, the participants, and whether
+    /// the repos have been heard.
+    #[test]
+    fn a_new_window_is_seeded_with_marked_notifications_and_participants() {
+        let data = AppState::new();
+        data.apply(Event::Repos(Vec::new()));
+        data.done_notifications
+            .set(vec![notification("done", false)]);
+        data.snoozed_notifications
+            .set(vec![notification("snoozed", false)]);
+        data.participants.set(HashMap::from([(
+            ("slatedb/slatedb".to_string(), 7),
+            vec![perch_github::Participant {
+                login: "u".into(),
+                avatar_url: "https://example.com/u.png".into(),
+            }],
+        )]));
+
+        let window = AppState::new();
+        window.seed_from(&data, &data);
+        assert!(window.repos_known.get());
+        assert_eq!(window.done_notifications.get()[0].id, "done");
+        assert_eq!(window.snoozed_notifications.get()[0].id, "snoozed");
+        assert_eq!(window.participants.get().len(), 1);
     }
 
     #[test]
