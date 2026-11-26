@@ -87,10 +87,10 @@ pub fn open_file(state: ReviewState, backend: Rc<Backend>) -> OpenFile {
 }
 
 /// Ask the backend for a file's content. A file outside the worktree has
-/// no place in the tree, and is read from where it is; the loader's
-/// limits still apply.
+/// no place in the tree, and is read from where it is, a class file from
+/// jdtls; the loader's limits still apply.
 pub fn load_file(backend: &Backend, path: &str) {
-    if std::path::Path::new(path).is_absolute() {
+    if crate::review::model::is_outside_path(path) {
         backend.open_outside_file(path);
     } else {
         backend.open_file(path);

@@ -50,7 +50,14 @@ pub fn apply(file: &str, original: &Original, lines: &[String]) -> Result<String
     {
         return Err(changed());
     }
-    let ending = if rows[first].ends_with("\r\n") {
+    // Only the file's last row can lack an ending; replacing it alone,
+    // the row above says how the file's lines end.
+    let ended = if rows[first].ends_with('\n') {
+        rows[first]
+    } else {
+        first.checked_sub(1).map_or("", |i| rows[i])
+    };
+    let ending = if ended.ends_with("\r\n") {
         "\r\n"
     } else {
         "\n"
@@ -106,6 +113,29 @@ mod tests {
             "no ending at the end"
         );
         assert_eq!(apply("a\nb\nc", &original, &[]), Ok("a".into()));
+        assert_eq!(
+            apply(
+                "a\r\nb\r\nc",
+                &Original {
+                    first: 3,
+                    lines: lines(&["c"]),
+                },
+                &lines(&["x", "y"])
+            ),
+            Ok("a\r\nb\r\nx\r\ny".into()),
+            "an unended last line takes the ending of the one above"
+        );
+        assert_eq!(
+            apply(
+                "c",
+                &Original {
+                    first: 1,
+                    lines: lines(&["c"]),
+                },
+                &lines(&["x", "y"])
+            ),
+            Ok("x\ny".into())
+        );
         assert!(
             apply("a\nb2\nc\n", &original, &[]).is_err(),
             "changed since"

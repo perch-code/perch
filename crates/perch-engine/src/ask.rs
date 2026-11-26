@@ -259,9 +259,10 @@ pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
 /// The model the picker starts on, given what discovery found: the file's,
 /// unless Claude Code is missing, when GPT-6.1-Sol stands in if Codex
 /// offers it, or with only agy, agy's first model. For a new `[agent]
-/// model` on an agent already discovered.
+/// model` on an agent already discovered. A model another installed
+/// agent offers, Codex's, agy's or OpenCode's, is kept.
 pub fn settle_model(agent: &mut perch_github::AgentConfig) {
-    if agent.backend_of(&agent.model) == perch_github::OPENCODE {
+    if agent.backend_of(&agent.model) != perch_github::CLAUDE_CODE {
         return;
     }
     if agent.models.is_empty()
@@ -1960,6 +1961,29 @@ This replaces what you were told about commits when the session began."
             ("gemini-4-carbon", "high"),
             "with only agy, its first model"
         );
+    }
+
+    #[test]
+    fn a_chosen_agy_model_is_kept_without_claude() {
+        let mut agent = perch_github::AgentConfig {
+            models: vec![],
+            model: "gemini-4-flash".into(),
+            ..Default::default()
+        };
+        agent.gemini.models = vec!["gemini-4-carbon".into(), "gemini-4-flash".into()];
+        agent.codex.models = vec![];
+        agent.opencode.models = vec![];
+        settle_model(&mut agent);
+        assert_eq!(agent.model, "gemini-4-flash", "not agy's first");
+
+        agent.codex.models = vec!["gpt-6-astra".into(), "gpt-6.1-sol".into()];
+        settle_model(&mut agent);
+        assert_eq!(agent.model, "gemini-4-flash", "not Codex's default");
+
+        // A Claude model still gives way.
+        agent.model = "opus".into();
+        settle_model(&mut agent);
+        assert_eq!(agent.model, "gpt-6.1-sol");
     }
 
     #[tokio::test]

@@ -17,9 +17,9 @@ use perch_github::{
 };
 
 pub use perch_engine::review::model::{
-    AgentChoice, Call, Direction, Highlights, LoadedFile, Located, Origin, Outline, Picked,
-    ReviewFindingSummary, ReviewGroupSummary, ReviewLaunchChoice, ReviewLaunchRequest,
-    ReviewPreferenceChoice, Symbol,
+    is_outside_path, AgentChoice, Call, Direction, Highlights, LoadedFile, Located, Origin,
+    Outline, Picked, ReviewFindingSummary, ReviewGroupSummary, ReviewLaunchChoice,
+    ReviewLaunchRequest, ReviewPreferenceChoice, Symbol,
 };
 
 use crate::review::code_refs::{Found, NameAsk, Named};
@@ -3887,7 +3887,7 @@ impl ReviewState {
     /// alone, as is one the listing lacks, in an ignored directory say:
     /// the filter would come off for a tree that still does not show it.
     pub fn show_in_tree(&self, path: &str) {
-        if std::path::Path::new(path).is_absolute() {
+        if is_outside_path(path) {
             return;
         }
         let changed = self
@@ -7921,6 +7921,16 @@ mod tests {
                 label: "/opt/vendor/src/lib.rs".into()
             },
             "the tab carries the origin before the file has loaded"
+        );
+
+        // A class file jdtls names is outside too, and read from jdtls.
+        let class_file = "jdt://contents/java.base/java.util/List.class";
+        state.open_tab(class_file);
+        assert_eq!(
+            state.tabs.get()[1].origin,
+            Origin::Outside {
+                label: "JDK".into()
+            }
         );
     }
 

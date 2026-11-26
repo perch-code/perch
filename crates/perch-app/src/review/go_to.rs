@@ -806,7 +806,7 @@ pub fn candidates(tree: &[TreeEntry], changed: &[ChangedFile]) -> Vec<String> {
 }
 
 fn is_outside(path: &str) -> bool {
-    std::path::Path::new(path).is_absolute()
+    crate::review::model::is_outside_path(path)
 }
 
 /// A path's name and its directory, without the slash between.

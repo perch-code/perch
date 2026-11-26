@@ -21,17 +21,23 @@ pub enum Origin {
     },
 }
 
+/// Whether a path is a file outside the worktree: an absolute path, or a
+/// class file jdtls names by its `jdt://` URI, which is no path on disk
+/// and is read from jdtls. Everything else is relative to the worktree.
+pub fn is_outside_path(path: &str) -> bool {
+    std::path::Path::new(path).is_absolute() || path.starts_with("jdt://")
+}
+
 impl Origin {
     /// The origin a path says: a worktree file's path is relative to the
-    /// worktree, and an outside file's is absolute. The two cannot
-    /// collide, which is why `files` and the tabs are keyed by the path
-    /// alone.
+    /// worktree, and an outside file's is absolute, or a `jdt://` class
+    /// file's. The two cannot collide, which is why `files` and the tabs
+    /// are keyed by the path alone.
     pub fn of_path(path: &str) -> Origin {
-        let path = std::path::Path::new(path);
-        if path.is_absolute() {
+        if is_outside_path(path) {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             Origin::Outside {
-                label: outside_label(path, home.as_deref()),
+                label: outside_label(std::path::Path::new(path), home.as_deref()),
             }
         } else {
             Origin::Worktree
@@ -695,6 +701,21 @@ pub struct Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_class_file_from_jdtls_is_outside_the_worktree() {
+        let path = "jdt://contents/java.base/java.util/List.class";
+        assert!(is_outside_path(path));
+        assert_eq!(
+            Origin::of_path(path),
+            Origin::Outside {
+                label: "JDK".to_string()
+            }
+        );
+        assert!(is_outside_path("/opt/vendor/src/lib.rs"));
+        assert!(!is_outside_path("src/lib.rs"));
+        assert_eq!(Origin::of_path("src/lib.rs"), Origin::Worktree);
+    }
 
     #[test]
     fn an_outside_path_is_labelled_by_where_it_is_from() {
