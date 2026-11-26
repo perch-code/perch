@@ -200,6 +200,10 @@ fn outline_lines(file: &LoadedFile) -> impl Iterator<Item = &str> {
         .map(|(line, _)| line)
 }
 
+pub(crate) fn file_lines_hash(file: &LoadedFile) -> u64 {
+    lines_hash(outline_lines(file))
+}
+
 /// How many lines may be pinned in a view this tall: no more than a third
 /// of it, so the code is never all header.
 fn max_for(height: f64, line_height: f64) -> usize {

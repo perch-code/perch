@@ -297,16 +297,13 @@ pub async fn detect_review_capability(backend: Backend, binary: &Path) -> Review
 }
 
 async fn run_probe(binary: &Path, args: &[&str]) -> Result<String, String> {
-    let output = tokio::time::timeout(
-        CAPABILITY_TIMEOUT,
-        tokio::process::Command::new(binary)
-            .args(args)
-            .stdin(Stdio::null())
-            .output(),
-    )
-    .await
-    .map_err(|_| format!("{} did not answer within ten seconds", binary.display()))?
-    .map_err(|error| format!("could not run {}: {error}", binary.display()))?;
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.args(args).stdin(Stdio::null()).kill_on_drop(true);
+    crate::scrub_env(&mut cmd);
+    let output = tokio::time::timeout(CAPABILITY_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| format!("{} did not answer within ten seconds", binary.display()))?
+        .map_err(|error| format!("could not run {}: {error}", binary.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let diagnostic = stderr
@@ -1271,39 +1268,48 @@ pub fn extract_review(
     }
 }
 
+/// Find the byte range `(start, end)` of the first or last line-anchored
+/// ` ```json ` fenced block. A real fence opens or closes a line of its own
+/// (allowing trailing spaces or `\r`), so escaped `` ``` `` inside JSON string
+/// literals never prematurely closes the fence.
+fn fenced_json_span(raw: &str, last: bool) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    let mut start = None;
+    for line in raw.split_inclusive('\n') {
+        let next = offset + line.len();
+        if line.trim_end() == "```json" {
+            start = Some(next);
+            if !last {
+                break;
+            }
+        }
+        offset = next;
+    }
+    let start = start?;
+    let mut end = None;
+    let mut offset = start;
+    for line in raw[start..].split_inclusive('\n') {
+        if line.trim_end() == "```" {
+            let body = &raw[start..offset];
+            let body = body.strip_suffix('\n').unwrap_or(body);
+            let body = body.strip_suffix('\r').unwrap_or(body);
+            end = Some(start + body.len());
+            break;
+        }
+        offset += line.len();
+    }
+    Some((start, end.unwrap_or(raw.len())))
+}
+
 /// Gemini's answer is the structured result agy held it to, which Perch
 /// adds as the last fenced block after whatever the model said; OpenCode
 /// writes its review block in freeform Markdown, where trailing prose or a
 /// code snippet may follow it. Read the last fenced `json` block from its
 /// opening fence line to its own closing fence line.
 fn extract_fenced_review(raw_response: &str, manifest: &ReviewManifest) -> ReviewExtraction {
-    // A real fence opens or closes a line of its own (allowing trailing
-    // spaces or `\r`). A fence quoted inside a JSON string uses escaped `\n`
-    // (`\` + `n`), never a literal newline byte, so it never starts a line.
-    let mut offset = 0;
-    let mut start = None;
-    for line in raw_response.split_inclusive('\n') {
-        let next = offset + line.len();
-        if line.trim_end() == "```json" {
-            start = Some(next);
-        }
-        offset = next;
-    }
-    let Some(start) = start else {
+    let Some((start, end)) = fenced_json_span(raw_response, true) else {
         return extract_generic_review(raw_response, manifest);
     };
-    let mut end = raw_response.len();
-    let mut offset = start;
-    for line in raw_response[start..].split_inclusive('\n') {
-        if line.trim_end() == "```" {
-            let body = &raw_response[start..offset];
-            let body = body.strip_suffix('\n').unwrap_or(body);
-            let body = body.strip_suffix('\r').unwrap_or(body);
-            end = start + body.len();
-            break;
-        }
-        offset += line.len();
-    }
     let mut extraction = extract_generic_review(&raw_response[start..end], manifest);
     for finding in &mut extraction.findings {
         finding.evidence.start += start;
@@ -1322,43 +1328,93 @@ fn extract_generic_review(raw_response: &str, manifest: &ReviewManifest) -> Revi
     if let Some((_, report)) = raw_response.split_once(REPORT_DELIMITER) {
         return extract_reported_review(raw_response, report, manifest);
     }
-    if let Some(candidate) = structured_candidate(raw_response) {
+    if let Some((candidate, from_fence)) = structured_candidate(raw_response) {
         if candidate.starts_with('[') {
             let evidence_start = raw_response.find(candidate).unwrap_or(0);
-            return match serde_json::from_str::<Vec<ReportedFinding>>(candidate) {
-                Ok(findings) => reported_review(raw_response, findings, evidence_start, manifest),
-                Err(error) => ReviewExtraction::incomplete(
-                    raw_response,
-                    format!("the printed findings array was invalid: {error}"),
-                ),
-            };
+            match serde_json::from_str::<Vec<ReportedFinding>>(candidate) {
+                Ok(findings) => {
+                    return reported_review(raw_response, findings, evidence_start, manifest);
+                }
+                Err(error) => {
+                    if from_fence {
+                        let text = extract_text_review(raw_response, manifest);
+                        if !text.findings.is_empty() || text.explicit_clean {
+                            return text;
+                        }
+                    }
+                    return ReviewExtraction::incomplete(
+                        raw_response,
+                        format!("the printed findings array was invalid: {error}"),
+                    );
+                }
+            }
         }
-        match serde_json::from_str::<WireOutput>(candidate) {
-            Ok(output) => return normalize_wire(output, raw_response, candidate, manifest),
-            Err(error) => {
-                let mut text = extract_text_review(raw_response, manifest);
-                text.incomplete = true;
-                text.diagnostics
-                    .insert(0, format!("structured review output was invalid: {error}"));
-                return text;
+        let is_review_object = serde_json::from_str::<serde_json::Value>(candidate)
+            .ok()
+            .and_then(|v| {
+                v.as_object().map(|obj| {
+                    obj.contains_key("status")
+                        || obj.contains_key("clean")
+                        || obj.contains_key("findings")
+                })
+            });
+        // An illustrative ```json { ... } ``` snippet in prose that carries
+        // none of the review schema keys is not a structured review payload.
+        if !(from_fence && is_review_object == Some(false)) {
+            match serde_json::from_str::<WireOutput>(candidate) {
+                Ok(output) => return normalize_wire(output, raw_response, candidate, manifest),
+                Err(error) => {
+                    let mut text = extract_text_review(raw_response, manifest);
+                    if !from_fence || (text.findings.is_empty() && !text.explicit_clean) {
+                        text.incomplete = true;
+                        text.diagnostics
+                            .insert(0, format!("structured review output was invalid: {error}"));
+                    }
+                    return text;
+                }
             }
         }
     }
     extract_text_review(raw_response, manifest)
 }
 
-fn structured_candidate(raw: &str) -> Option<&str> {
+fn structured_candidate(raw: &str) -> Option<(&str, bool)> {
     let trimmed = raw.trim();
     if (trimmed.starts_with('{') && trimmed.ends_with('}'))
         || (trimmed.starts_with('[') && trimmed.ends_with(']'))
     {
-        return Some(trimmed);
+        return Some((trimmed, false));
     }
-    let marker = "```json";
-    let start = raw.find(marker)? + marker.len();
-    let tail = &raw[start..];
-    let end = tail.find("```")?;
-    Some(tail[..end].trim())
+    let (start, end) = fenced_json_span(raw, false)?;
+    let body = raw[start..end].trim();
+    if body.is_empty() {
+        return None;
+    }
+    Some((body, true))
+}
+
+/// Whether `raw` contains a JSON block intended as structured review output
+/// (rather than an illustrative ` ```json ` example inside clean prose).
+fn has_structured_review(raw: &str) -> bool {
+    let Some((candidate, from_fence)) = structured_candidate(raw) else {
+        return false;
+    };
+    if !from_fence {
+        return true;
+    }
+    if candidate.starts_with('[') {
+        return serde_json::from_str::<Vec<ReportedFinding>>(candidate).is_ok();
+    }
+    serde_json::from_str::<serde_json::Value>(candidate)
+        .ok()
+        .and_then(|v| {
+            v.as_object().map(|obj| {
+                obj.contains_key("status")
+                    || obj.contains_key("clean")
+                    || obj.contains_key("findings")
+            })
+        })
+        .unwrap_or(true)
 }
 
 fn normalize_wire(
@@ -1683,7 +1739,7 @@ fn extract_codex_review(raw: &str, manifest: &ReviewManifest) -> ReviewExtractio
     let generic = extract_generic_review(raw, manifest);
     if !generic.findings.is_empty()
         || generic.explicit_clean
-        || structured_candidate(raw).is_some()
+        || has_structured_review(raw)
         || !finding_sections(raw).is_empty()
     {
         return generic;
@@ -3455,5 +3511,45 @@ mod tests {
             serde_json::json!(["status", "findings"])
         );
         assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn fenced_json_with_embedded_code_fences_and_illustrative_json_blocks_extract_cleanly() {
+        // 1. Embedded ```rust fence inside a JSON string must not close the outer ```json fence.
+        let embedded = concat!(
+            "Review:\n```json\n",
+            "[{\"file\":\"src/lib.rs\",\"line\":4,\"summary\":\"Bad call\",",
+            "\"failure_scenario\":\"Use:\\n```rust\\nfoo();\\n```\"}]\n",
+            "```\n"
+        );
+        let res = extract_review(Backend::ClaudeCode, embedded, &manifest());
+        assert!(!res.incomplete, "{:?}", res.diagnostics);
+        assert_eq!(res.findings.len(), 1);
+        assert_eq!(res.findings[0].title, "Bad call");
+
+        // 2. Illustrative ```json object inside a Markdown review must not hijack extraction.
+        let md_with_obj = concat!(
+            "### [P1] Broken sandbox config (`src/lib.rs:4`)\n",
+            "Example payload:\n```json\n{\"sandbox\": {}}\n```\n"
+        );
+        let res = extract_review(Backend::ClaudeCode, md_with_obj, &manifest());
+        assert!(!res.incomplete, "{:?}", res.diagnostics);
+        assert_eq!(res.findings.len(), 1);
+
+        // 3. Illustrative ```json array inside a Markdown review falls back to text extraction.
+        let md_with_arr = concat!(
+            "### [P1] Broken list (`src/lib.rs:4`)\n",
+            "Example:\n```json\n[\"a\", \"b\"]\n```\n"
+        );
+        let res = extract_review(Backend::ClaudeCode, md_with_arr, &manifest());
+        assert!(!res.incomplete, "{:?}", res.diagnostics);
+        assert_eq!(res.findings.len(), 1);
+
+        // 4. Clean Codex prose with an illustrative ```json object remains explicit_clean.
+        let codex_clean = "Looks good! The config:\n```json\n{\"sandbox\": {}}\n```\nis valid.\n";
+        let res = extract_review(Backend::Codex, codex_clean, &manifest());
+        assert!(!res.incomplete, "{:?}", res.diagnostics);
+        assert!(res.explicit_clean);
+        assert!(res.findings.is_empty());
     }
 }

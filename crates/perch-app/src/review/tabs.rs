@@ -448,16 +448,27 @@ pub fn jump_to_change(state: ReviewState, forward: bool) {
     };
     if let Some(display_line) = target {
         state.cursor_line.set(display_line);
-        // The editor scrolls by head line, so translate back through the
-        // row table; a ghost line has none, so use the line after.
-        let head = file
+        // The editor scrolls by head line; when a change has a head line
+        // at or after `display_line`, land on it (removed lines sit above it
+        // in the top context). When there is no head line left (a deleted
+        // file or a pure deletion at EOF), jump by base line so `wire_jump`
+        // does not fall back to EOF.
+        if let Some(head) = file
             .buffer
             .rows
             .iter()
             .skip(display_line)
             .find_map(|r| r.head_line())
-            .unwrap_or(display_line);
-        state.jump_to_line.set(Some(head));
+        {
+            state.jump_base.set(false);
+            state.jump_to_line.set(Some(head));
+        } else if let Some(perch_git::Row::Deleted { base_line }) = file.buffer.row(display_line) {
+            state.jump_base.set(true);
+            state.jump_to_line.set(Some(base_line));
+        } else {
+            state.jump_base.set(false);
+            state.jump_to_line.set(Some(display_line));
+        }
     }
 }
 
@@ -1152,5 +1163,48 @@ mod tests {
         assert!(!state.folded("src/b.rs"));
         state.close();
         assert!(state.whole.get().is_empty());
+    }
+
+    #[test]
+    fn jump_to_change_uses_base_line_for_deleted_files_and_deleted_hunks() {
+        // Purely deleted file: jumping lands on base line 0, not EOF.
+        let state = ReviewState::new();
+        let deleted = Arc::new(crate::backend::build_loaded_file(
+            "gone.rs".into(),
+            String::new(),
+            "one\ntwo\nthree\n".into(),
+            Some(perch_git::ChangeStatus::Deleted),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+        state.open_tab("gone.rs");
+        state.files.update(|f| {
+            f.insert("gone.rs".into(), deleted);
+        });
+        state.cursor_line.set(2);
+        jump_to_change(state, false);
+        assert!(state.jump_base.get());
+        assert_eq!(state.jump_to_line.get(), Some(0));
+
+        // Pure deletion at EOF: jumping lands on the deleted base line.
+        let state2 = ReviewState::new();
+        let eof_del = Arc::new(crate::backend::build_loaded_file(
+            "eof.rs".into(),
+            "keep1\nkeep2\n".into(),
+            "keep1\nkeep2\ndrop1\ndrop2\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+        state2.open_tab("eof.rs");
+        state2.files.update(|f| {
+            f.insert("eof.rs".into(), eof_del);
+        });
+        state2.cursor_line.set(0);
+        jump_to_change(state2, true);
+        assert!(state2.jump_base.get());
+        assert_eq!(state2.jump_to_line.get(), Some(2));
     }
 }

@@ -2698,18 +2698,30 @@ async fn read_stderr_tail(
 ) -> String {
     use std::collections::VecDeque;
     let mut tail = VecDeque::with_capacity(3);
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(mut line)) = lines.next_line().await {
-        if let Some(transcript) = &mut transcript {
-            transcript.line(&line);
+    let mut reader = BufReader::new(stderr);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                    buf.pop();
+                }
+                let mut line = String::from_utf8_lossy(&buf).into_owned();
+                if let Some(transcript) = &mut transcript {
+                    transcript.line(&line);
+                }
+                if line.chars().count() > 512 {
+                    line = line.chars().take(511).collect::<String>() + "…";
+                }
+                if tail.len() == 3 {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+            Err(_) => break,
         }
-        if line.chars().count() > 512 {
-            line = line.chars().take(511).collect::<String>() + "…";
-        }
-        if tail.len() == 3 {
-            tail.pop_front();
-        }
-        tail.push_back(line);
     }
     tail.into_iter().collect::<Vec<_>>().join(" ")
 }
@@ -4216,5 +4228,23 @@ mod tests {
         let ns = gemini_sandbox_refusal_for(GeminiSandboxBlock::UserNamespace);
         assert!(ns.contains("user namespaces"), "{ns}");
         assert!(ns.contains("[agent.gemini] sandbox = false"), "{ns}");
+    }
+
+    #[tokio::test]
+    async fn read_stderr_tail_survives_invalid_utf8_and_keeps_later_lines() {
+        let mut child = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf 'bad \\377 byte\\n' >&2; sleep 0.05; printf 'final error\\n' >&2; exit 2",
+            ])
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let tail = read_stderr_tail(stderr, None).await;
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.code(), Some(2));
+        assert!(tail.contains("final error"), "{tail:?}");
+        assert!(tail.contains("bad \u{FFFD} byte"), "{tail:?}");
     }
 }

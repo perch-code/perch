@@ -467,12 +467,17 @@ impl LineSpans {
             let mut start = span.start;
             while start < span.end && current_line < line_count {
                 let line_start = starts[current_line];
-                let line_end = starts
-                    .get(current_line + 1)
-                    .copied()
+                let next_start = starts.get(current_line + 1).copied();
+                let mut line_end = next_start
                     .unwrap_or(source.len() + 1)
                     .saturating_sub(1)
                     .min(source.len());
+                if next_start.is_some()
+                    && line_end > line_start
+                    && source.as_bytes()[line_end - 1] == b'\r'
+                {
+                    line_end -= 1;
+                }
 
                 let piece_end = span.end.min(line_end);
                 if piece_end > start {
@@ -719,6 +724,24 @@ mod tests {
     fn asking_beyond_the_last_line_is_empty_not_a_panic() {
         let by_line = LineSpans::new("fn f() {}\n", &highlight(Language::Rust, "fn f() {}\n"));
         assert!(by_line.line(999).is_empty());
+    }
+
+    #[test]
+    fn crlf_multiline_spans_stay_within_stripped_line_lengths() {
+        let src = "/* a\r\nb */\r\n// tail\r\nfn f() {}\r\n";
+        let spans = highlight(Language::Rust, src);
+        let by_line = LineSpans::new(src, &spans);
+        for (idx, line) in src.lines().enumerate() {
+            for s in by_line.line(idx) {
+                assert!(
+                    s.end <= line.len(),
+                    "line {idx} ({line:?}) span {s:?} exceeds line len {}",
+                    line.len()
+                );
+            }
+        }
+        assert!(!by_line.line(0).is_empty());
+        assert!(!by_line.line(1).is_empty());
     }
 
     #[test]

@@ -1225,12 +1225,12 @@ pub(crate) struct AcpClient {
     next_prompt: u64,
     /// Prompts sent and not yet answered.
     open_prompts: HashSet<u64>,
-    /// The reader's messages not yet sent, and those sent (`(wire, raw)`)
+    /// The reader's messages not yet sent, and those sent (`(wire, raw_batch)`)
     /// but not yet echoed back as read.
     queued: VecDeque<String>,
-    sent: VecDeque<(String, String)>,
-    /// Each steer's raw text by its request id.
-    steer_ids: HashMap<u64, String>,
+    sent: VecDeque<(String, Vec<String>)>,
+    /// Each steer's raw text(s) by its request id.
+    steer_ids: HashMap<u64, Vec<String>>,
     /// A `session/prompt` result held while an OpenCode `_session/steering`
     /// call is still in flight, in case it replies `promptRequired`.
     pending_end: Option<Value>,
@@ -1322,7 +1322,7 @@ impl AcpClient {
         if self.session.backend == crate::Backend::OpenCode {
             let id = self.next_id();
             let wire = self.wire_prompt(text);
-            self.steer_ids.insert(id, text.to_string());
+            self.steer_ids.insert(id, vec![text.to_string()]);
             vec![request(
                 id,
                 "_session/steering",
@@ -1334,8 +1334,8 @@ impl AcpClient {
         } else {
             let (id, line) = self.prompt(text);
             self.sent
-                .push_back((self.wire_prompt(text), text.to_string()));
-            self.steer_ids.insert(id, text.to_string());
+                .push_back((self.wire_prompt(text), vec![text.to_string()]));
+            self.steer_ids.insert(id, vec![text.to_string()]);
             vec![line]
         }
     }
@@ -1344,14 +1344,16 @@ impl AcpClient {
         if self.queued.is_empty() {
             return Reply::default();
         }
-        let text = self.queued.drain(..).collect::<Vec<_>>().join("\n\n");
+        let batch: Vec<String> = self.queued.drain(..).collect();
+        let text = batch.join("\n\n");
         let (id, write) = self.prompt(&text);
         let mut events = self.flush_text();
         if self.session.backend == crate::Backend::OpenCode {
-            events.push(RunEvent::Steered(text));
+            events.extend(batch.into_iter().map(RunEvent::Steered));
         } else {
-            self.sent.push_back((self.wire_prompt(&text), text.clone()));
-            self.steer_ids.insert(id, text);
+            self.sent
+                .push_back((self.wire_prompt(&text), batch.clone()));
+            self.steer_ids.insert(id, batch);
         }
         Reply {
             writes: vec![write],
@@ -1450,7 +1452,7 @@ impl AcpClient {
 
     fn response(&mut self, id: u64, v: &Value) -> Reply {
         if self.session.backend == crate::Backend::OpenCode && self.steer_ids.contains_key(&id) {
-            let raw_text = self.steer_ids.remove(&id).unwrap_or_default();
+            let raw_texts = self.steer_ids.remove(&id).unwrap_or_default();
             if v.get("error").is_some() {
                 let ready = self.open_prompts.is_empty() && self.steer_ids.is_empty();
                 return match ready.then(|| self.pending_end.take()).flatten() {
@@ -1460,7 +1462,7 @@ impl AcpClient {
             }
             return match v.pointer("/result/outcome").and_then(Value::as_str) {
                 Some("promptRequired") => {
-                    self.queued.push_back(raw_text);
+                    self.queued.extend(raw_texts);
                     if self.open_prompts.is_empty() {
                         self.pending_end = None;
                         self.send_queued()
@@ -1471,7 +1473,7 @@ impl AcpClient {
                 // "injected", or any other acknowledgement of the steer.
                 _ => {
                     let mut events = self.flush_text();
-                    events.push(RunEvent::Steered(raw_text));
+                    events.extend(raw_texts.into_iter().map(RunEvent::Steered));
                     let ready = self.open_prompts.is_empty() && self.steer_ids.is_empty();
                     match ready.then(|| self.pending_end.take()).flatten() {
                         Some(end) => self.turn_over(&end, events),
@@ -1486,8 +1488,8 @@ impl AcpClient {
         // A steer agy would not take is left unread, for Perch to send as
         // a follow-up, rather than failing the run it came into.
         if v.get("error").is_some() && self.steer_ids.contains_key(&id) {
-            let text = self.steer_ids.remove(&id).unwrap_or_default();
-            if let Some(at) = self.sent.iter().position(|(_, raw)| *raw == text) {
+            let texts = self.steer_ids.remove(&id).unwrap_or_default();
+            if let Some(at) = self.sent.iter().position(|(_, raw)| *raw == texts) {
                 self.sent.remove(at);
             }
             if !self.open_prompts.remove(&id) || !self.open_prompts.is_empty() {
@@ -1622,11 +1624,11 @@ impl AcpClient {
             }
             id if self.open_prompts.remove(&id) => {
                 let mut steered = Vec::new();
-                if let Some(text) = self.steer_ids.remove(&id) {
-                    if let Some(at) = self.sent.iter().position(|(_, raw)| *raw == text) {
+                if let Some(texts) = self.steer_ids.remove(&id) {
+                    if let Some(at) = self.sent.iter().position(|(_, raw)| *raw == texts) {
                         self.sent.remove(at);
                         steered = self.flush_text();
-                        steered.push(RunEvent::Steered(text));
+                        steered.extend(texts.into_iter().map(RunEvent::Steered));
                     }
                 }
                 if let Some(usage) = result.get("usage").filter(|u| u.is_object()) {
@@ -1655,10 +1657,6 @@ impl AcpClient {
     }
 
     fn turn_end(&mut self, result: &Value) -> Reply {
-        // A steer that came as the turn ended goes as the next.
-        if !self.queued.is_empty() {
-            return self.send_queued();
-        }
         if self.session.backend == crate::Backend::OpenCode {
             match result["stopReason"].as_str() {
                 Some("max_tokens" | "max_turn_requests") => {
@@ -1670,6 +1668,10 @@ impl AcpClient {
         }
         if result.get("stopReason").and_then(Value::as_str) == Some("refusal") {
             return self.fail("The model refused to go on".into());
+        }
+        // A steer that came as the turn ended goes as the next.
+        if !self.queued.is_empty() {
+            return self.send_queued();
         }
         if self.session.backend == crate::Backend::OpenCode && !self.steer_ids.is_empty() {
             self.pending_end = Some(result.clone());
@@ -1739,8 +1741,8 @@ impl AcpClient {
                 match (text, self.sent.front()) {
                     (Some(text), Some((wire, _))) if text == wire => {
                         let mut events = self.flush_text();
-                        if let Some((_, raw)) = self.sent.pop_front() {
-                            events.push(RunEvent::Steered(raw));
+                        if let Some((_, raws)) = self.sent.pop_front() {
+                            events.extend(raws.into_iter().map(RunEvent::Steered));
                         }
                         events
                     }
@@ -4099,5 +4101,79 @@ mod tests {
         }));
         assert!(inside.events.is_empty(), "{:?}", inside.events);
         assert_eq!(written(&inside)["result"]["outcome"]["optionId"], "allow");
+    }
+
+    #[test]
+    fn send_queued_emits_individual_steered_events_for_batched_steers() {
+        // OpenCode: two steers queued via promptRequired emit two distinct Steered events.
+        let mut oc = opencode_ready(Path::new("/wt/repo"), Vec::new());
+        oc.queued.push_back("first".into());
+        oc.queued.push_back("second".into());
+        let reply = oc.after_line(&json!({"id": 100, "result": {"stopReason": "end_turn"}}));
+        assert_eq!(
+            reply.events,
+            vec![
+                RunEvent::Steered("first".into()),
+                RunEvent::Steered("second".into()),
+            ]
+        );
+        assert!(!reply.close);
+
+        // Gemini: two steers queued before SET_MODE emit two distinct Steered events on echo.
+        let mut gem = AcpClient::new(AcpSession {
+            backend: crate::Backend::Gemini,
+            cwd: PathBuf::from("/wt/repo"),
+            model: "gemini-4-neon".into(),
+            effort: "high".into(),
+            prompt: "start".into(),
+            resume: None,
+            writable: Vec::new(),
+            read_only: Vec::new(),
+        });
+        gem.opening();
+        gem.steer("first");
+        gem.steer("second");
+        gem.after_line(&json!({"id": 1, "result": {}}));
+        gem.after_line(&json!({"id": 2, "result": {"sessionId": "s1"}}));
+        gem.after_line(&json!({"id": 3, "result": {}}));
+        gem.after_line(&json!({"id": 4, "result": {}}));
+        let start = gem.after_line(&json!({"id": 5, "result": {}}));
+        assert_eq!(start.writes.len(), 2);
+        let echoed = gem.after_line(&json!({
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "user_message_chunk",
+                    "content": {"type": "text", "text": "first\n\nsecond"}
+                }
+            }
+        }));
+        assert_eq!(
+            echoed.events,
+            vec![
+                RunEvent::Steered("first".into()),
+                RunEvent::Steered("second".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_end_honors_terminal_stop_reason_even_with_queued_steers() {
+        let mut oc = opencode_ready(Path::new("/wt/repo"), Vec::new());
+        oc.queued.push_back("follow up".into());
+        let reply = oc.after_line(&json!({"id": 100, "result": {"stopReason": "cancelled"}}));
+        assert!(reply.close);
+        assert!(reply.writes.is_empty());
+        assert_eq!(reply.events, vec![RunEvent::Stopped { forced: false }]);
+
+        let mut oc2 = opencode_ready(Path::new("/wt/repo"), Vec::new());
+        oc2.queued.push_back("follow up".into());
+        let reply2 = oc2.after_line(&json!({"id": 100, "result": {"stopReason": "refusal"}}));
+        assert!(reply2.close);
+        assert!(reply2.writes.is_empty());
+        assert!(matches!(
+            reply2.events.last(),
+            Some(RunEvent::Failed { message }) if message.contains("refused")
+        ));
     }
 }

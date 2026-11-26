@@ -121,6 +121,11 @@ pub struct Client {
     /// The class files jdtls named, by the URI without its query, which is
     /// how Perch knows them, to the URI jdtls gave.
     class_files: std::sync::Mutex<HashMap<String, String>>,
+    /// Cached source texts for `jdt://` class files fetched via
+    /// `class_file_contents`, used to convert UTF-16/UTF-32 columns.
+    class_file_texts: std::sync::Mutex<HashMap<String, Arc<str>>>,
+    /// Position encoding negotiated during `initialize` (defaults to UTF-16).
+    position_encoding: std::sync::OnceLock<PositionEncodingKind>,
     /// Why the server exited, from its error output, once it has.
     exited: std::sync::OnceLock<Option<String>>,
     /// Set once Perch asks the server to stop: its exit then is no failure.
@@ -210,6 +215,8 @@ impl Client {
             overlay_gate: Default::default(),
             documents: Default::default(),
             class_files: Default::default(),
+            class_file_texts: Default::default(),
+            position_encoding: Default::default(),
             exited: Default::default(),
             stopping: stopping.clone(),
             kill,
@@ -342,12 +349,11 @@ impl Client {
         let encoding = decode_result::<InitializeResult>(result)
             .and_then(|r| r.capabilities.position_encoding)
             .unwrap_or(PositionEncodingKind::UTF16);
+        let _ = self.position_encoding.set(encoding.clone());
         if encoding != PositionEncodingKind::UTF8 {
-            // Nothing here converts: a column on a line with a multi-byte
-            // character before it will be off by the difference.
-            tracing::warn!(
+            tracing::debug!(
                 encoding = encoding.as_str(),
-                "the language server counts positions in an encoding other than UTF-8"
+                "language server negotiated non-UTF-8 position encoding; converting columns"
             );
         }
         self.notify(
@@ -417,7 +423,16 @@ impl Client {
             )
             .await
             .ok()?;
-        decode_result::<String>(value).filter(|text| !text.is_empty())
+        let text = decode_result::<String>(value).filter(|text| !text.is_empty());
+        if let Some(ref content) = text {
+            if let Ok(mut cache) = self.class_file_texts.lock() {
+                let arc: Arc<str> = Arc::from(content.as_str());
+                let key = full.split('?').next().unwrap_or(&full).to_string();
+                cache.insert(full, arc.clone());
+                cache.insert(key, arc);
+            }
+        }
+        text
     }
 
     /// The server's process id, when the system gave one.
@@ -614,6 +629,11 @@ impl Client {
             text_document_position_params: self.position(path, line, character)?,
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let value = self
             .request(
                 "textDocument/hover",
@@ -622,7 +642,12 @@ impl Client {
             )
             .await
             .ok()?;
-        decode_result(value)
+        let mut hover: Hover = decode_result(value)?;
+        if let Some(range) = hover.range.as_mut() {
+            let mut cache = HashMap::new();
+            self.convert_range_from_server(uri.as_str(), range, &mut cache);
+        }
+        Some(hover)
     }
 
     pub async fn definition(
@@ -698,8 +723,11 @@ impl Client {
             partial_result_params: Default::default(),
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list(method, params, timeout, goto_locations)
-            .await
+        let mut locations = self
+            .ask_for_list(method, params, timeout, goto_locations)
+            .await?;
+        self.convert_locations_from_server(&mut locations);
+        Ok(locations)
     }
 
     /// Ask for a list, read from the reply by `read`. A reply that is an
@@ -762,13 +790,16 @@ impl Client {
             },
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list(
-            "textDocument/references",
-            params,
-            PANEL_TIMEOUT,
-            reference_locations,
-        )
-        .await
+        let mut locations = self
+            .ask_for_list(
+                "textDocument/references",
+                params,
+                PANEL_TIMEOUT,
+                reference_locations,
+            )
+            .await?;
+        self.convert_locations_from_server(&mut locations);
+        Ok(locations)
     }
 
     /// Every use of the symbol at a position in its own file, as ranges,
@@ -782,6 +813,7 @@ impl Client {
         let Some(position) = self.position(path, line, character) else {
             return Vec::new();
         };
+        let uri = position.text_document.uri.clone();
         let params = DocumentHighlightParams {
             text_document_position_params: position,
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -796,7 +828,14 @@ impl Client {
         else {
             return Vec::new();
         };
-        decode_result(value).unwrap_or_default()
+        let mut highlights: Vec<DocumentHighlight> = decode_result(value).unwrap_or_default();
+        if !self.is_utf8() && !highlights.is_empty() {
+            let mut cache = HashMap::new();
+            for highlight in &mut highlights {
+                self.convert_range_from_server(uri.as_str(), &mut highlight.range, &mut cache);
+            }
+        }
+        highlights
     }
 
     /// The blocks of a file, from the server's outline of it: each symbol
@@ -842,43 +881,83 @@ impl Client {
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list(
-            "textDocument/prepareCallHierarchy",
-            params,
-            PANEL_TIMEOUT,
-            list,
-        )
-        .await
+        let mut items: Vec<CallHierarchyItem> = self
+            .ask_for_list(
+                "textDocument/prepareCallHierarchy",
+                params,
+                PANEL_TIMEOUT,
+                list,
+            )
+            .await?;
+        if !self.is_utf8() && !items.is_empty() {
+            let mut cache = HashMap::new();
+            for item in &mut items {
+                self.convert_call_hierarchy_item_from_server(item, &mut cache);
+            }
+        }
+        Ok(items)
     }
 
     /// The callers of an item, each with where in the caller the call is.
     pub async fn incoming_calls(
         &self,
-        item: CallHierarchyItem,
+        mut item: CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyIncomingCall>, Error> {
+        if !self.is_utf8() {
+            let mut cache = HashMap::new();
+            self.convert_call_hierarchy_item_to_server(&mut item, &mut cache);
+        }
         let params = CallHierarchyIncomingCallsParams {
             item,
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: Default::default(),
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list("callHierarchy/incomingCalls", params, PANEL_TIMEOUT, list)
-            .await
+        let mut calls: Vec<CallHierarchyIncomingCall> = self
+            .ask_for_list("callHierarchy/incomingCalls", params, PANEL_TIMEOUT, list)
+            .await?;
+        if !self.is_utf8() && !calls.is_empty() {
+            let mut cache = HashMap::new();
+            for call in &mut calls {
+                self.convert_call_hierarchy_item_from_server(&mut call.from, &mut cache);
+                let uri = call.from.uri.as_str().to_string();
+                for range in &mut call.from_ranges {
+                    self.convert_range_from_server(&uri, range, &mut cache);
+                }
+            }
+        }
+        Ok(calls)
     }
 
     /// The functions an item calls, each with where in the item the call is.
     pub async fn outgoing_calls(
         &self,
-        item: CallHierarchyItem,
+        mut item: CallHierarchyItem,
     ) -> Result<Vec<CallHierarchyOutgoingCall>, Error> {
+        let origin_uri = item.uri.as_str().to_string();
+        if !self.is_utf8() {
+            let mut cache = HashMap::new();
+            self.convert_call_hierarchy_item_to_server(&mut item, &mut cache);
+        }
         let params = CallHierarchyOutgoingCallsParams {
             item,
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: Default::default(),
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list("callHierarchy/outgoingCalls", params, PANEL_TIMEOUT, list)
-            .await
+        let mut calls: Vec<CallHierarchyOutgoingCall> = self
+            .ask_for_list("callHierarchy/outgoingCalls", params, PANEL_TIMEOUT, list)
+            .await?;
+        if !self.is_utf8() && !calls.is_empty() {
+            let mut cache = HashMap::new();
+            for call in &mut calls {
+                self.convert_call_hierarchy_item_from_server(&mut call.to, &mut cache);
+                for range in &mut call.from_ranges {
+                    self.convert_range_from_server(&origin_uri, range, &mut cache);
+                }
+            }
+        }
+        Ok(calls)
     }
 
     /// The symbols in the workspace whose names match `query` as the server
@@ -900,7 +979,137 @@ impl Client {
         else {
             return Vec::new();
         };
-        workspace_symbols(value)
+        let mut symbols = workspace_symbols(value);
+        if !self.is_utf8() && !symbols.is_empty() {
+            let mut cache = HashMap::new();
+            for defined in &mut symbols {
+                let uri = defined.location.uri.as_str().to_string();
+                self.convert_range_from_server(&uri, &mut defined.location.range, &mut cache);
+            }
+        }
+        symbols
+    }
+
+    fn encoding(&self) -> PositionEncodingKind {
+        self.position_encoding
+            .get()
+            .cloned()
+            .unwrap_or(PositionEncodingKind::UTF16)
+    }
+
+    fn is_utf8(&self) -> bool {
+        self.encoding() == PositionEncodingKind::UTF8
+    }
+
+    fn text_for_uri(
+        &self,
+        uri: &str,
+        cache: &mut HashMap<String, Option<Arc<str>>>,
+    ) -> Option<Arc<str>> {
+        if let Some(cached) = cache.get(uri) {
+            return cached.clone();
+        }
+        let text = self
+            .documents
+            .lock()
+            .ok()
+            .and_then(|docs| docs.get(uri).map(|(_, text)| text.clone()))
+            .or_else(|| {
+                let key = uri.split('?').next().unwrap_or(uri);
+                self.class_file_texts
+                    .lock()
+                    .ok()
+                    .and_then(|files| files.get(uri).or_else(|| files.get(key)).cloned())
+            })
+            .or_else(|| {
+                let path = uri_to_path(uri)?;
+                std::fs::read_to_string(path).ok().map(Arc::from)
+            });
+        cache.insert(uri.to_string(), text.clone());
+        text
+    }
+
+    fn convert_position_to_server(
+        &self,
+        uri: &str,
+        pos: &mut Position,
+        cache: &mut HashMap<String, Option<Arc<str>>>,
+    ) {
+        if self.is_utf8() {
+            return;
+        }
+        if let Some(text) = self.text_for_uri(uri, cache) {
+            if let Some(line) = nth_line(&text, pos.line) {
+                pos.character = utf8_col_to_encoding(line, pos.character, &self.encoding());
+            }
+        }
+    }
+
+    fn convert_position_from_server(
+        &self,
+        uri: &str,
+        pos: &mut Position,
+        cache: &mut HashMap<String, Option<Arc<str>>>,
+    ) {
+        if self.is_utf8() {
+            return;
+        }
+        if let Some(text) = self.text_for_uri(uri, cache) {
+            if let Some(line) = nth_line(&text, pos.line) {
+                pos.character = encoding_col_to_utf8(line, pos.character, &self.encoding());
+            }
+        }
+    }
+
+    fn convert_range_to_server(
+        &self,
+        uri: &str,
+        range: &mut lsp_types::Range,
+        cache: &mut HashMap<String, Option<Arc<str>>>,
+    ) {
+        self.convert_position_to_server(uri, &mut range.start, cache);
+        self.convert_position_to_server(uri, &mut range.end, cache);
+    }
+
+    fn convert_range_from_server(
+        &self,
+        uri: &str,
+        range: &mut lsp_types::Range,
+        cache: &mut HashMap<String, Option<Arc<str>>>,
+    ) {
+        self.convert_position_from_server(uri, &mut range.start, cache);
+        self.convert_position_from_server(uri, &mut range.end, cache);
+    }
+
+    fn convert_locations_from_server(&self, locations: &mut [Location]) {
+        if self.is_utf8() || locations.is_empty() {
+            return;
+        }
+        let mut cache = HashMap::new();
+        for loc in locations {
+            let uri = loc.uri.as_str().to_string();
+            self.convert_range_from_server(&uri, &mut loc.range, &mut cache);
+        }
+    }
+
+    fn convert_call_hierarchy_item_from_server(
+        &self,
+        item: &mut CallHierarchyItem,
+        cache: &mut HashMap<String, Option<Arc<str>>>,
+    ) {
+        let uri = item.uri.as_str().to_string();
+        self.convert_range_from_server(&uri, &mut item.range, cache);
+        self.convert_range_from_server(&uri, &mut item.selection_range, cache);
+    }
+
+    fn convert_call_hierarchy_item_to_server(
+        &self,
+        item: &mut CallHierarchyItem,
+        cache: &mut HashMap<String, Option<Arc<str>>>,
+    ) {
+        let uri = item.uri.as_str().to_string();
+        self.convert_range_to_server(&uri, &mut item.range, cache);
+        self.convert_range_to_server(&uri, &mut item.selection_range, cache);
     }
 
     fn position(
@@ -909,11 +1118,15 @@ impl Client {
         line: u32,
         character: u32,
     ) -> Option<TextDocumentPositionParams> {
+        let uri = self.uri_for(path)?;
+        let mut position = Position { line, character };
+        if !self.is_utf8() {
+            let mut cache = HashMap::new();
+            self.convert_position_to_server(uri.as_str(), &mut position, &mut cache);
+        }
         Some(TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier {
-                uri: self.uri_for(path)?,
-            },
-            position: Position { line, character },
+            text_document: TextDocumentIdentifier { uri },
+            position,
         })
     }
 
@@ -1027,6 +1240,50 @@ fn spec_name(spec: &ServerSpec) -> String {
         .unwrap_or_default()
 }
 
+fn nth_line(text: &str, line: u32) -> Option<&str> {
+    text.split('\n')
+        .nth(line as usize)
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+}
+
+fn utf8_col_to_encoding(line: &str, byte_col: u32, encoding: &PositionEncodingKind) -> u32 {
+    if *encoding == PositionEncodingKind::UTF8 {
+        return byte_col;
+    }
+    let mut target = (byte_col as usize).min(line.len());
+    while target > 0 && !line.is_char_boundary(target) {
+        target -= 1;
+    }
+    let prefix = &line[..target];
+    if *encoding == PositionEncodingKind::UTF32 {
+        prefix.chars().count() as u32
+    } else {
+        prefix.encode_utf16().count() as u32
+    }
+}
+
+fn encoding_col_to_utf8(line: &str, col: u32, encoding: &PositionEncodingKind) -> u32 {
+    if *encoding == PositionEncodingKind::UTF8 {
+        return col;
+    }
+    let target = col as usize;
+    if *encoding == PositionEncodingKind::UTF32 {
+        line.char_indices()
+            .nth(target)
+            .map_or(line.len(), |(idx, _)| idx) as u32
+    } else {
+        let mut units = 0usize;
+        for (idx, ch) in line.char_indices() {
+            let next = units + ch.len_utf16();
+            if units >= target || target < next {
+                return idx as u32;
+            }
+            units = next;
+        }
+        line.len() as u32
+    }
+}
+
 /// How many lines of a server's error output are kept to say why it exited.
 const STDERR_TAIL: usize = 20;
 
@@ -1110,17 +1367,44 @@ async fn read_loop(
                 }
             }
             Incoming::Notification { method, params } => {
-                for event in handle_notification(&method, params, &mut reported) {
+                for mut event in handle_notification(&method, params, &mut reported) {
+                    if !client.is_utf8() {
+                        if let ServerEvent::Diagnostics { uri, diagnostics } = &mut event {
+                            let mut cache = HashMap::new();
+                            for diag in diagnostics {
+                                client.convert_range_from_server(uri, &mut diag.range, &mut cache);
+                                if let Some(related) = diag.related_information.as_mut() {
+                                    for info in related {
+                                        let rel_uri = info.location.uri.as_str().to_string();
+                                        client.convert_range_from_server(
+                                            &rel_uri,
+                                            &mut info.location.range,
+                                            &mut cache,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     client.tell(event);
                 }
             }
-            Incoming::Request { id, method } => {
+            Incoming::Request { id, method, params } => {
                 // rust-analyzer waits on these; an unanswered one stalls it.
                 let result = match method.as_str() {
-                    "workspace/configuration" => json!([{}]),
+                    "workspace/configuration" => {
+                        let count = params
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .map_or(1, Vec::len);
+                        Value::Array(vec![json!({}); count])
+                    }
                     _ => Value::Null,
                 };
-                client.reply(id, result).await;
+                let client = client.clone();
+                tokio::spawn(async move {
+                    client.reply(id, result).await;
+                });
             }
             Incoming::Other => {}
         }
@@ -2668,5 +2952,115 @@ while True:
         assert_eq!(client.given(&file).as_deref(), Some("head"));
 
         client.shutdown().await;
+    }
+
+    #[test]
+    fn position_encoding_conversions_handle_multibyte_and_surrogates() {
+        let line = "// café 🚀 target()";
+        let target_utf8 = line.find("target").unwrap() as u32;
+        let target_utf16 = line[..target_utf8 as usize].encode_utf16().count() as u32;
+        assert_ne!(target_utf8, target_utf16);
+        assert_eq!(
+            utf8_col_to_encoding(line, target_utf8, &PositionEncodingKind::UTF16),
+            target_utf16
+        );
+        assert_eq!(
+            encoding_col_to_utf8(line, target_utf16, &PositionEncodingKind::UTF16),
+            target_utf8
+        );
+        // Mid-surrogate UTF-16 offset snaps to the emoji's UTF-8 start boundary.
+        let rocket_utf8 = line.find('🚀').unwrap() as u32;
+        let rocket_utf16 = line[..rocket_utf8 as usize].encode_utf16().count() as u32;
+        assert_eq!(
+            encoding_col_to_utf8(line, rocket_utf16 + 1, &PositionEncodingKind::UTF16),
+            rocket_utf8
+        );
+    }
+
+    #[tokio::test]
+    async fn utf16_server_converts_positions_and_configuration_returns_item_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let script = root.join("utf16_server.py");
+        let log = root.join("log.json");
+        std::fs::write(
+            &script,
+            r#"
+import json, sys
+log_path = sys.argv[1]
+def send(msg):
+    body = json.dumps(msg).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+def recv():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        k, _, v = line.decode().partition(":")
+        if k.lower() == "content-length":
+            length = int(v)
+    return json.loads(sys.stdin.buffer.read(length))
+
+recorded = {}
+while True:
+    msg = recv()
+    if msg is None:
+        break
+    m = msg.get("method")
+    if m is None and msg.get("id") == 99:
+        recorded["config_reply"] = msg["result"]
+    elif m == "initialize":
+        # Default UTF-16 encoding (omitted positionEncoding)
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+    elif m == "initialized":
+        # Ask client for 3 configuration items
+        send({"jsonrpc": "2.0", "id": 99, "method": "workspace/configuration", "params": {"items": [{}, {}, {}]}})
+    elif m == "textDocument/definition":
+        pos = msg["params"]["position"]
+        recorded["def_pos"] = pos
+        uri = msg["params"]["textDocument"]["uri"]
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": [{
+            "uri": uri,
+            "range": {
+                "start": {"line": pos["line"], "character": pos["character"]},
+                "end": {"line": pos["line"], "character": pos["character"] + 6}
+            }
+        }]})
+    elif m == "shutdown":
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+    elif m == "exit":
+        break
+open(log_path, "w").write(json.dumps(recorded))
+"#,
+        )
+        .unwrap();
+        let spec = ServerSpec {
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string(), log.display().to_string()],
+            kind: ServerKind::RustAnalyzer,
+            options: Value::Null,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, &root, tx).await.unwrap();
+        let file = root.join("main.ts");
+        let line = "// café 🚀 target()";
+        let target_utf8 = line.find("target").unwrap() as u32;
+        let target_utf16 = line[..target_utf8 as usize].encode_utf16().count() as u32;
+        client.did_open(&file, line).await;
+
+        let locs = client.definition(&file, 0, target_utf8).await.unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].range.start.character, target_utf8);
+        assert_eq!(locs[0].range.end.character, target_utf8 + 6);
+
+        client.shutdown().await;
+        let recorded: Value =
+            serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+        assert_eq!(recorded["config_reply"], json!([{}, {}, {}]));
+        assert_eq!(recorded["def_pos"]["character"], json!(target_utf16));
     }
 }

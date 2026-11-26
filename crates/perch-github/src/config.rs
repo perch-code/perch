@@ -1092,9 +1092,8 @@ fn normalize(path: &Path) -> PathBuf {
 /// rewritten, so its comments and order stay as the reader left them. A
 /// root under the home directory is written with `~`.
 pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
-    use std::io::Write;
-
-    let _guard = crate::config_edit::config_write_guard();
+    let mut guard = crate::config_edit::config_write_guard(config)?;
+    guard.ensure_locked(config)?;
 
     let home = home_dir();
     let shown = match root.strip_prefix(&home) {
@@ -1108,22 +1107,15 @@ pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e),
     };
-    let mut add = String::new();
-    if !existing.is_empty() {
-        if !existing.ends_with('\n') {
-            add.push('\n');
+    let mut updated = existing;
+    if !updated.is_empty() {
+        if !updated.ends_with('\n') {
+            updated.push('\n');
         }
-        add.push('\n');
+        updated.push('\n');
     }
-    add.push_str(&format!("[[repo]]\nroot = {root}\n"));
-    if let Some(parent) = config.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(config)?
-        .write_all(add.as_bytes())
+    updated.push_str(&format!("[[repo]]\nroot = {root}\n"));
+    crate::config_edit::replace_file(config, &updated)
 }
 
 /// Take out the `[[repo]]` that reads as `entry`, with the `[repo.*]`
@@ -1133,7 +1125,7 @@ pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
 /// permissions and any symlink, and only once what is left still loads
 /// every other repository it loaded before.
 pub fn remove_repo(config: &Path, entry: &RepoConfig) -> std::io::Result<bool> {
-    let _guard = crate::config_edit::config_write_guard();
+    let _guard = crate::config_edit::config_write_guard(config)?;
 
     let text = std::fs::read_to_string(config)?;
     let Some(cut) = repo_table(&text, entry) else {

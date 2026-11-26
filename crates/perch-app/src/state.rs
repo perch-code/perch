@@ -2672,9 +2672,13 @@ impl AppState {
                 review.finish_highlights(token, ranges);
             }
             Event::LspDocumentSymbols { path, outline } => {
-                review.symbols.update(|symbols| {
-                    symbols.insert(path, outline);
-                });
+                if review.file(&path).is_none_or(|file| {
+                    crate::review::sticky::file_lines_hash(&file) == outline.lines
+                }) {
+                    review.symbols.update(|symbols| {
+                        symbols.insert(path, outline);
+                    });
+                }
             }
             Event::LspCallHierarchy {
                 token,
@@ -7647,6 +7651,101 @@ mod tests {
             review.discussion.get().unwrap().reviews[0].id,
             101,
             "the successful original attempt still enters the timeline"
+        );
+    }
+
+    #[test]
+    fn stale_submit_review_failure_after_navigation_does_not_pollute_fresh_form() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        review.ready.set(true);
+        review.review_open.set(true);
+        review.begin_submit_review(12);
+
+        // Navigate away and return: submit_review_pending is now None.
+        let item = review.item.get_untracked();
+        let pull_request = review.pull_request.get_untracked();
+        review.begin("Reopening");
+        review.item.set(item);
+        review.pull_request.set(pull_request);
+        review.ready.set(true);
+        review.review_open.set(true);
+        assert!(review.submit_review_pending.with(Option::is_none));
+
+        app.apply_with_review(
+            Event::PullRequestReviewFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 12,
+                message: "Stale error".into(),
+            },
+            review,
+        );
+        assert_eq!(review.submit_review_error.get(), None);
+    }
+
+    #[test]
+    fn stale_lsp_document_symbols_cannot_overwrite_matching_loaded_file_outline() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "src/lib.rs".into(),
+            "fn current() {\n    let x = 1;\n}\n".into(),
+            String::new(),
+            Some(perch_git::ChangeStatus::Added),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+        let good_hash = crate::review::sticky::file_lines_hash(&file);
+        review.files.update(|f| {
+            f.insert("src/lib.rs".into(), file);
+        });
+        let good_outline = Arc::new(crate::review::model::Outline {
+            lines: good_hash,
+            blocks: vec![(0, 2)],
+        });
+        let stale_outline = Arc::new(crate::review::model::Outline {
+            lines: good_hash.wrapping_add(1),
+            blocks: vec![(0, 9)],
+        });
+
+        // Stale outline arriving before good outline is rejected.
+        app.apply_with_review(
+            Event::LspDocumentSymbols {
+                path: "src/lib.rs".into(),
+                outline: stale_outline.clone(),
+            },
+            review,
+        );
+        assert!(review.symbols.with(|s| !s.contains_key("src/lib.rs")));
+
+        // Matching outline is accepted.
+        app.apply_with_review(
+            Event::LspDocumentSymbols {
+                path: "src/lib.rs".into(),
+                outline: good_outline.clone(),
+            },
+            review,
+        );
+        assert_eq!(
+            review.symbols.with(|s| s.get("src/lib.rs").cloned()),
+            Some(good_outline.clone())
+        );
+
+        // Stale outline arriving afterwards cannot overwrite the matching one.
+        app.apply_with_review(
+            Event::LspDocumentSymbols {
+                path: "src/lib.rs".into(),
+                outline: stale_outline,
+            },
+            review,
+        );
+        assert_eq!(
+            review.symbols.with(|s| s.get("src/lib.rs").cloned()),
+            Some(good_outline)
         );
     }
 

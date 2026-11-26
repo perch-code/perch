@@ -39,18 +39,25 @@ struct Kept {
 struct Shelf {
     /// Oldest first.
     kept: Vec<Kept>,
-    /// The roots whose checkout went, and when (see `stop_root`). The
-    /// clock is the one a server's age is told by, which tests don't pause.
-    gone: Vec<(PathBuf, std::time::Instant)>,
+    /// The roots (and optional server kind) whose checkout or trust went, and
+    /// when (see `stop_root` / `stop_kind_at`). The clock is the one a
+    /// server's age is told by, which tests don't pause.
+    gone: Vec<(PathBuf, Option<perch_lsp::ServerKind>, std::time::Instant)>,
+    /// Windows already closed (`WindowId`s are never reused), so a server that
+    /// finishes starting or closing documents after its window closed is shut
+    /// down instead of orphaned on the shelf.
+    closed_windows: std::collections::HashSet<WindowId>,
 }
 
 impl Shelf {
-    /// Whether `client` started before its root's checkout went: it
+    /// Whether `client` started before its root's checkout or trust went: it
     /// watches that checkout, not what came to the path after.
     fn went_from_under(&self, client: &perch_lsp::Client) -> bool {
-        self.gone
-            .iter()
-            .any(|(root, at)| root == client.root() && client.age() >= at.elapsed())
+        self.gone.iter().any(|(root, kind, at)| {
+            root == client.root()
+                && kind.is_none_or(|k| k == client.kind())
+                && client.age() >= at.elapsed()
+        })
     }
 }
 
@@ -91,10 +98,18 @@ impl KeptServers {
         // set-aside lands before the stop, which stops it, or after, which
         // sees the checkout went.
         let kept = self.0.lock().ok().and_then(|mut shelf| {
+            if shelf.closed_windows.contains(&window) {
+                tracing::info!(
+                    server = client.kind().name(),
+                    window,
+                    "language server stopped: its window closed"
+                );
+                return None;
+            }
             if shelf.went_from_under(&client) {
                 tracing::info!(
                     server = client.kind().name(),
-                    "language server stopped: its checkout went"
+                    "language server stopped: its checkout or trust went"
                 );
                 return None;
             }
@@ -185,8 +200,14 @@ impl KeptServers {
         })
     }
 
-    /// Stop every server `window` set aside.
+    /// Stop every server `window` set aside, and remember that `window` is
+    /// closed so any in-flight server start or set-aside for it is shut down.
     pub(super) async fn stop(&self, window: WindowId) {
+        if window != super::NO_WINDOW {
+            if let Ok(mut shelf) = self.0.lock() {
+                shelf.closed_windows.insert(window);
+            }
+        }
         self.stop_where(|k| k.window == window).await;
     }
 
@@ -198,10 +219,10 @@ impl KeptServers {
     pub(super) async fn stop_root(&self, root: &Path) {
         if let Ok(mut shelf) = self.0.lock() {
             // Long past anything still under way.
-            shelf.gone.retain(|(_, at)| at.elapsed() < KEEP_FOR);
+            shelf.gone.retain(|(_, _, at)| at.elapsed() < KEEP_FOR);
             shelf
                 .gone
-                .push((root.to_path_buf(), std::time::Instant::now()));
+                .push((root.to_path_buf(), None, std::time::Instant::now()));
         }
         self.stop_where(|k| k.client.root() == root).await;
     }
@@ -210,6 +231,12 @@ impl KeptServers {
     /// the code there isn't trusted now, and set aside it would go on
     /// loading it.
     pub(super) async fn stop_kind_at(&self, root: &Path, kind: perch_lsp::ServerKind) {
+        if let Ok(mut shelf) = self.0.lock() {
+            shelf.gone.retain(|(_, _, at)| at.elapsed() < KEEP_FOR);
+            shelf
+                .gone
+                .push((root.to_path_buf(), Some(kind), std::time::Instant::now()));
+        }
         self.stop_where(|k| k.client.root() == root && k.client.kind() == kind)
             .await;
     }
@@ -517,5 +544,37 @@ time.sleep(600)
         assert_eq!(left.len(), 1);
         assert!(Arc::ptr_eq(&left[0], &next), "the code that came next");
         next.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn closed_window_and_revoked_kind_stop_late_servers() {
+        use crate::backend::tests::named_server;
+        let tree = tempfile::tempdir().unwrap();
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let go = perch_lsp::ServerKind::Gopls;
+        let kept = KeptServers::default();
+
+        // Closing window 1 stops any late keep for window 1.
+        let late_win = named_server(tree.path(), rust, "-").await;
+        kept.stop(1).await;
+        kept.keep(1, late_win.clone()).await;
+        assert!(kept.clients().is_empty());
+        assert!(late_win.has_ended());
+
+        // Revoking trust for (tree, RustAnalyzer) stops late RustAnalyzer while
+        // keeping Gopls and a RustAnalyzer started after revocation.
+        let late_ra = named_server(tree.path(), rust, "-").await;
+        let late_go = named_server(tree.path(), go, "-").await;
+        kept.stop_kind_at(tree.path(), rust).await;
+        kept.keep(2, late_ra.clone()).await;
+        assert!(kept.clients().is_empty());
+        assert!(late_ra.has_ended());
+
+        kept.keep(2, late_go.clone()).await;
+        assert_eq!(kept.clients().len(), 1);
+        let fresh_ra = named_server(tree.path(), rust, "-").await;
+        kept.keep(2, fresh_ra.clone()).await;
+        assert_eq!(kept.clients().len(), 2);
+        kept.stop(2).await;
     }
 }

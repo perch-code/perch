@@ -201,8 +201,9 @@ async fn read_again(ctx: &Ctx, item_id: &str, pr: &PullRequest) -> bool {
     let result = github
         .fetch_pull_request_overview(&pr.repo_full_name, pr.number)
         .await;
-    if !ctx.status_requests.is_current(item_id, status_generation) || !ctx.is_open(item_id) {
-        return true;
+    if !ctx.status_requests.is_current(item_id, status_generation) || !ctx.is_open_anywhere(item_id)
+    {
+        return false;
     }
     match result {
         Ok(overview) if overview.head_sha == pr.head_sha => {
@@ -343,5 +344,22 @@ mod tests {
             vec![run(CheckRunState::Failure, Some(ago(now, 30)))],
         );
         assert!(may_move(&red, ago(now, 3600), now));
+    }
+
+    #[tokio::test]
+    async fn read_again_returns_false_when_closed_or_superseded() {
+        use crate::backend::tests::{ctx, nowhere, open_in_slot, store_pull};
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 51);
+        let pr = item.pull_request().unwrap().clone();
+
+        // Not open anywhere -> must return false so watch.tags is not advanced.
+        assert!(!read_again(&ctx, &item.id, &pr).await);
+
+        // Open, then superseded -> still returns false (network call fails or is superseded).
+        open_in_slot(&ctx, &item);
+        let _ = ctx.status_requests.begin(&item.id);
+        assert!(!read_again(&ctx, &item.id, &pr).await);
     }
 }

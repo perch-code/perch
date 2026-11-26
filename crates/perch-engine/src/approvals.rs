@@ -83,14 +83,30 @@ const GIT_WRITES: &[&str] = &["add", "commit", "tag"];
 /// Long options that run a program or read a file into the commit. Git
 /// takes any unambiguous prefix of a long option, so a prefix of one of
 /// these is refused too.
-const GIT_REFUSED_LONG: &[&str] = &["config", "gpg-sign", "local-user", "sign", "template"];
+const GIT_REFUSED_LONG: &[&str] = &[
+    "config",
+    "edit",
+    "file",
+    "gpg-sign",
+    "interactive",
+    "local-user",
+    "patch",
+    "pathspec-from-file",
+    "reedit-message",
+    "sign",
+    "template",
+    "verify",
+];
 
 /// The short options refused after `git <sub>`: `-c` everywhere, those
-/// that sign (running `gpg.program`), and `commit -t`, a template.
+/// that sign (running `gpg.program`), read arbitrary files (`-F`), launch
+/// an editor or interactive diff (`-e`, `-i`, `-p`), verify signatures
+/// (`-v`), or load a commit template (`-t`).
 fn git_refused_short(sub: &str) -> &'static str {
     match sub {
-        "commit" => "cSt",
-        "tag" => "csu",
+        "commit" => "cStFe",
+        "tag" => "csuFev",
+        "add" => "ceip",
         _ => "c",
     }
 }
@@ -383,6 +399,22 @@ mod tests {
             "git merge --strategy=x main",
             "git commit --template=./t",
             "git commit -t ./t",
+            // Reading arbitrary host files or launching editors / interactive programs.
+            "git commit --allow-empty -F /etc/passwd",
+            "git commit --allow-empty --file=/etc/passwd",
+            "git commit --reedit-message=HEAD",
+            "git commit -e -m x",
+            "git commit --edit -m x",
+            "git tag -a v1 -F /etc/passwd",
+            "git tag -a v1 --file=/etc/passwd",
+            "git tag -v v1",
+            "git tag --verify v1",
+            "git add --pathspec-from-file=/etc/passwd",
+            "git add -p",
+            "git add --patch",
+            "git add -i",
+            "git add --interactive",
+            "git add -e",
             "git checkout --recurse-submodules main",
             // What writes the worktree, from objects or a todo the run
             // could write.

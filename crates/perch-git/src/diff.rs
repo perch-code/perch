@@ -244,10 +244,10 @@ pub fn parse_name_status(raw: &str) -> Vec<(ChangeStatus, String, Option<String>
     let mut fields = raw.split('\0').filter(|f| !f.is_empty());
 
     while let Some(code) = fields.next() {
+        let Some(first) = fields.next() else { break };
         let Some(status) = code.chars().next().and_then(ChangeStatus::from_letter) else {
             continue;
         };
-        let Some(first) = fields.next() else { break };
 
         match status {
             ChangeStatus::Renamed | ChangeStatus::Copied => {
@@ -559,5 +559,15 @@ mod tests {
         let d = file_diff("a\nb", "a\nb\nc");
         assert_eq!(d.line_status.len(), 3);
         assert_eq!(d.line_status[2], LineStatus::Added);
+    }
+
+    #[test]
+    fn parse_name_status_consumes_path_of_unmerged_entries() {
+        let raw = "U\0README.md\0M\0src/lib.rs\0";
+        let parsed = parse_name_status(raw);
+        assert_eq!(
+            parsed,
+            vec![(ChangeStatus::Modified, "src/lib.rs".to_string(), None)]
+        );
     }
 }

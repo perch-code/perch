@@ -1922,6 +1922,7 @@ impl Event {
                 | Event::FileFailed { .. }
                 | Event::CommitsReady { .. }
                 | Event::ScopeReady { .. }
+                | Event::CommentThreads { .. }
                 | Event::NavigationCancelled { .. }
                 | Event::AgentReviewNavigationReady { .. }
                 | Event::AgentReviewNavigationFailed { .. }
@@ -6608,28 +6609,34 @@ async fn command_loop(ctx: Ctx, mut commands: UnboundedReceiver<connections::Inb
             Command::CloseReview { navigation_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    // No item lock: the navigation fence keeps an open that
-                    // finishes after this from taking the slot back.
-                    let closed = ctx
-                        .navigation_requests
-                        .with_current(navigation_id, || {
-                            if let Ok(mut guard) = ctx.slot.lock() {
-                                keep_context(&ctx.kept_contexts, guard.as_ref());
-                                *guard = None;
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false);
-                    if closed {
-                        let clients = std::mem::take(&mut *ctx.language_servers.lock().await);
-                        let (kept, window) = (ctx.kept_servers.clone(), ctx.window);
-                        tokio::spawn(async move { kept.keep_all(window, clients).await });
-                    }
+                    close_review_navigation(&ctx, navigation_id).await;
                 });
             }
         }
+    }
+}
+
+/// Close the window's active review under `navigation_id`, fencing both the
+/// review slot and `language_servers` atomically so a stale close cannot evict
+/// a language server installed by a newer navigation.
+async fn close_review_navigation(ctx: &Ctx, navigation_id: u64) {
+    let mut language_servers = ctx.language_servers.lock().await;
+    let clients = ctx
+        .navigation_requests
+        .with_current(navigation_id, || {
+            if let Ok(mut guard) = ctx.slot.lock() {
+                keep_context(&ctx.kept_contexts, guard.as_ref());
+                *guard = None;
+                Some(std::mem::take(&mut *language_servers))
+            } else {
+                None
+            }
+        })
+        .flatten();
+    drop(language_servers);
+    if let Some(clients) = clients.filter(|c| !c.is_empty()) {
+        let (kept, window) = (ctx.kept_servers.clone(), ctx.window);
+        tokio::spawn(async move { kept.keep_all(window, clients).await });
     }
 }
 
@@ -7543,11 +7550,17 @@ impl Ctx {
     }
 
     fn send_threads(&self, item_id: &str) {
-        // The threads are drawn against the window's open view of the item.
-        let view = self.view_for(item_id);
-        if view.window != self.window {
-            return view.send_threads(item_id);
+        let open = self.views_for(item_id);
+        if open.is_empty() {
+            self.send_threads_for_view(item_id);
+        } else {
+            for view in open {
+                view.send_threads_for_view(item_id);
+            }
         }
+    }
+
+    fn send_threads_for_view(&self, item_id: &str) {
         let view = self.slot.lock().ok().and_then(|slot| {
             slot.as_ref()
                 .filter(|open| open.item_id == item_id)
@@ -8517,6 +8530,14 @@ impl Ctx {
             Some(view) => self.in_view(&view),
             None => self.clone(),
         }
+    }
+
+    /// Every window currently showing `item_id`.
+    fn views_for(&self, item_id: &str) -> Vec<Ctx> {
+        self.views()
+            .into_iter()
+            .filter(|view| view.is_open(item_id))
+            .collect()
     }
 
     /// An item left a moment ago is opening again, and the window shows
@@ -10979,54 +11000,55 @@ async fn follow_last_run(ctx: &Ctx, run: &RunRecord) {
         RunOwner::Discussion { item_id, .. } | RunOwner::Review { item_id, .. } => item_id.clone(),
         RunOwner::Unavailable { .. } => return,
     };
-    let view = ctx.view_for(&item_id);
-    let ctx = &view;
     let live = |open: &ReviewContext| {
         open.item_id == item_id
             && open.review_snapshot_id.is_none()
             && open.review_group_id.is_none()
             && open.review_request_id.is_none()
     };
-    let Some((navigation_id, scope)) = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref()
-            .filter(|open| live(open))
-            .map(|open| (open.navigation_id, open.scope.clone()))
-    }) else {
-        return;
-    };
-    let now = last_run(ctx, &item_id, None).await;
-    if let Some(now) = now.scope().filter(|now| *now != scope) {
-        let before = last_run(ctx, &item_id, Some(&run.id)).await;
-        if before.scope().as_ref() == Some(&scope) {
-            let request_id = ctx.scope_requests.begin(&item_id);
-            set_scope(ctx, &item_id, now, request_id, navigation_id).await;
+    for view in ctx.views_for(&item_id) {
+        let ctx = &view;
+        let Some((navigation_id, scope)) = ctx.slot.lock().ok().and_then(|g| {
+            g.as_ref()
+                .filter(|open| live(open))
+                .map(|open| (open.navigation_id, open.scope.clone()))
+        }) else {
+            continue;
+        };
+        let now = last_run(ctx, &item_id, None).await;
+        if let Some(now) = now.scope().filter(|now| *now != scope) {
+            let before = last_run(ctx, &item_id, Some(&run.id)).await;
+            if before.scope().as_ref() == Some(&scope) {
+                let request_id = ctx.scope_requests.begin(&item_id);
+                set_scope(ctx, &item_id, now, request_id, navigation_id).await;
+            }
         }
+        // The run wrote to the worktree, so a scope that reads it is read
+        // again, not only the commits and the dirt.
+        if let Some(scope_revision) = ctx.scope_requests.stable_revision() {
+            refresh_scope(ctx, &item_id, navigation_id, scope_revision).await;
+            continue;
+        }
+        let Some((checkout, since, scope_gen)) = ctx.slot.lock().ok().and_then(|g| {
+            g.as_ref()
+                .filter(|open| live(open) && open.navigation_id == navigation_id)
+                .map(|open| (open.checkout.clone(), open.since.clone(), open.scope_gen))
+        }) else {
+            continue;
+        };
+        send_commits(
+            ctx,
+            &item_id,
+            &checkout.worktree,
+            &checkout.merge_base,
+            &checkout.head_sha,
+            since,
+            navigation_id,
+            scope_gen,
+            None,
+        )
+        .await;
     }
-    // The run wrote to the worktree, so a scope that reads it is read
-    // again, not only the commits and the dirt.
-    if let Some(scope_revision) = ctx.scope_requests.stable_revision() {
-        refresh_scope(ctx, &item_id, navigation_id, scope_revision).await;
-        return;
-    }
-    let Some((checkout, since, scope_gen)) = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref()
-            .filter(|open| live(open) && open.navigation_id == navigation_id)
-            .map(|open| (open.checkout.clone(), open.since.clone(), open.scope_gen))
-    }) else {
-        return;
-    };
-    send_commits(
-        ctx,
-        &item_id,
-        &checkout.worktree,
-        &checkout.merge_base,
-        &checkout.head_sha,
-        since,
-        navigation_id,
-        scope_gen,
-        None,
-    )
-    .await;
 }
 
 /// What the reader marked on an item's files: every (path, blob) viewed,
@@ -13601,8 +13623,6 @@ async fn close_issue(
 /// open view. The answer carries no reactions and does not say whether
 /// the reader may edit the body, so the issue keeps what it had of both.
 fn install_issue_snapshot(ctx: &Ctx, item_id: &str, mut fetched: perch_github::Issue) {
-    let view = ctx.view_for(item_id);
-    let ctx = &view;
     let Some(mut item) = ctx.item(item_id) else {
         return;
     };
@@ -13624,16 +13644,19 @@ fn install_issue_snapshot(ctx: &Ctx, item_id: &str, mut fetched: perch_github::I
     if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
         tracing::warn!(item = item_id, %error, "could not store the closed issue");
     }
-    if let Ok(mut guard) = ctx.slot.lock() {
-        if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
-            if let Some(kept) = open.issue.as_ref() {
-                open.issue = Some(Arc::new((fetched.clone(), kept.1.clone())));
+    let views = ctx.views_for(item_id);
+    for view in &views {
+        if let Ok(mut guard) = view.slot.lock() {
+            if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                if let Some(kept) = open.issue.as_ref() {
+                    open.issue = Some(Arc::new((fetched.clone(), kept.1.clone())));
+                }
             }
         }
     }
     ctx.send_items();
-    if ctx.is_open(item_id) {
-        let _ = ctx.events.send(Event::IssueUpdated {
+    if let Some(view) = views.first() {
+        let _ = view.events.send(Event::IssueUpdated {
             item_id: item_id.to_string(),
             item: Arc::new(item),
             issue: Arc::new(fetched),
@@ -14111,8 +14134,6 @@ fn install_pull_request_snapshot(
     fetched: PullRequest,
     merge_attempt_id: Option<u64>,
 ) -> Option<(Arc<Item>, Arc<PullRequest>)> {
-    let view = ctx.view_for(item_id);
-    let ctx = &view;
     let mut item = ctx.item(item_id)?;
     let current = item.pull_request()?;
     if current.repo_full_name != fetched.repo_full_name || current.number != fetched.number {
@@ -14143,22 +14164,28 @@ fn install_pull_request_snapshot(
     );
     let item = Arc::new(item);
     let pull_request = Arc::new(pull_request);
-    let installed = ctx.slot.lock().ok().is_some_and(|mut slot| {
-        let Some(open) = slot.as_mut().filter(|open| {
-            open.item_id == item_id
-                && open.pull_request.as_ref().is_some_and(|current| {
-                    current.repo_full_name == pull_request.repo_full_name
-                        && current.number == pull_request.number
-                })
-        }) else {
-            return false;
-        };
-        open.pull_request = Some(pull_request.clone());
-        true
-    });
+    let mut installed_view: Option<Ctx> = None;
+    for view in ctx.views_for(item_id) {
+        if view.slot.lock().ok().is_some_and(|mut slot| {
+            let Some(open) = slot.as_mut().filter(|open| {
+                open.item_id == item_id
+                    && open.pull_request.as_ref().is_some_and(|current| {
+                        current.repo_full_name == pull_request.repo_full_name
+                            && current.number == pull_request.number
+                    })
+            }) else {
+                return false;
+            };
+            open.pull_request = Some(pull_request.clone());
+            true
+        }) && installed_view.is_none()
+        {
+            installed_view = Some(view);
+        }
+    }
     ctx.send_items();
-    if installed {
-        let _ = ctx.events.send(Event::PullRequestUpdated {
+    if let Some(view) = installed_view {
+        let _ = view.events.send(Event::PullRequestUpdated {
             item_id: item_id.to_string(),
             item: item.clone(),
             pull_request: pull_request.clone(),
@@ -18603,24 +18630,23 @@ fn publish_discussion(
     discussion: perch_github::Discussion,
     fetched_at: Option<Timestamp>,
 ) {
-    let view = ctx.view_for(item_id);
-    let ctx = &view;
-    if ctx.is_open(item_id) {
-        ctx.send_threads(item_id);
-    }
-    if let Ok(mut guard) = ctx.slot.lock() {
-        if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
-            open.body = Some(discussion.body.clone());
+    let views = ctx.views_for(item_id);
+    for view in &views {
+        if let Ok(mut guard) = view.slot.lock() {
+            if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                open.body = Some(discussion.body.clone());
+            }
         }
     }
-    if ctx.is_open(item_id) {
-        ctx.want_avatars(discussion_avatars(&discussion));
-        let _ = ctx.events.send(Event::DiscussionReady {
+    if let Some(view) = views.first() {
+        ctx.send_threads(item_id);
+        view.want_avatars(discussion_avatars(&discussion));
+        let _ = view.events.send(Event::DiscussionReady {
             item_id: item_id.to_string(),
             discussion: Arc::new(discussion),
             fetched_at,
         });
-        description_rewrite::maybe_start(ctx, item_id);
+        description_rewrite::maybe_start(view, item_id);
     }
 }
 
@@ -21491,6 +21517,9 @@ async fn delete_comment_thread(ctx: &Ctx, id: &str) {
     if let Some(item_id) = item_id {
         ctx.send_threads(&item_id);
     }
+    if !runs.is_empty() {
+        send_agent_runs_from_cache(&ctx.cache, &ctx.events, 50, true);
+    }
 }
 
 /// Delete Perch's messages under a thread of GitHub's, and their runs,
@@ -21530,6 +21559,9 @@ async fn delete_private_messages(ctx: &Ctx, thread_id: &str) {
     drop_context_dirs(ctx, &context_before);
     drop(deletion);
     ctx.send_threads(&item_id);
+    if !runs.is_empty() {
+        send_agent_runs_from_cache(&ctx.cache, &ctx.events, 50, true);
+    }
 }
 
 /// Lines `picked` under a scope as GitHub reads a review comment's: base
@@ -22533,16 +22565,23 @@ async fn show_server(ctx: &Ctx, navigation_id: u64, worktree: &Path, spec: perch
     };
 
     let mut language_servers = slot.lock().await;
-    let current_context = navigation_requests
+    let current_item = navigation_requests
         .with_current(navigation_id, || {
-            checkout.lock().ok().is_some_and(|context| {
+            checkout.lock().ok().and_then(|context| {
                 context
                     .as_ref()
-                    .is_some_and(|context| context.navigation_id == navigation_id)
+                    .filter(|context| context.navigation_id == navigation_id)
+                    .map(|context| context.item_id.clone())
             })
         })
-        .unwrap_or(false);
-    if current_context {
+        .flatten();
+    if let Some(item_id) = current_item {
+        if kind.project_code().is_some() && !item_code_trusted(ctx, &item_id, kind) {
+            drop(language_servers);
+            client.shutdown().await;
+            hold_server(ctx, navigation_id, worktree, kind).await;
+            return;
+        }
         let previous = language_servers.insert(kind, client.clone());
         drop(language_servers);
         // What it said before it was on show went nowhere.
@@ -22552,6 +22591,19 @@ async fn show_server(ctx: &Ctx, navigation_id: u64, worktree: &Path, spec: perch
         }
     } else {
         drop(language_servers);
+        if kind.project_code().is_some() {
+            let trusted = ctx
+                .with_cache(|c| c.load_items())
+                .and_then(Result::ok)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|item| item.checkout.as_ref().is_some_and(|c| c.path == worktree))
+                .is_some_and(|item| code_trusted_now(ctx, &item, kind));
+            if !trusted {
+                client.shutdown().await;
+                return;
+            }
+        }
         ctx.kept_servers.keep(ctx.window, client).await;
     }
 }
@@ -22754,17 +22806,24 @@ async fn trust_server_in_repo(ctx: &Ctx, repo: &str, kind: perch_lsp::ServerKind
 /// unasked, as a push to the checkout does.
 async fn hold_untrusted_servers(ctx: &Ctx, kind: perch_lsp::ServerKind) {
     for view in ctx.views() {
-        let open = view
-            .slot
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|c| (c.navigation_id, c.item_id.clone())));
-        let Some((navigation_id, item_id)) = open else {
+        let open = view.slot.lock().ok().and_then(|g| {
+            g.as_ref().map(|c| {
+                (
+                    c.navigation_id,
+                    c.item_id.clone(),
+                    c.checkout.worktree.clone(),
+                )
+            })
+        });
+        let Some((navigation_id, item_id, worktree)) = open else {
             continue;
         };
-        let shown = view.language_servers.lock().await.contains_key(&kind);
-        if shown && !item_code_trusted(&view, &item_id, kind) {
-            start_server(&view, navigation_id, kind).await;
+        if !item_code_trusted(&view, &item_id, kind) {
+            ctx.kept_servers.stop_kind_at(&worktree, kind).await;
+            let shown = view.language_servers.lock().await.contains_key(&kind);
+            if shown {
+                start_server(&view, navigation_id, kind).await;
+            }
         }
     }
     let kept: Vec<_> = ctx
@@ -26005,7 +26064,7 @@ mod tests {
     }
 
     /// A durable row for `a/b#<number>`, as an on-demand open makes it.
-    fn store_pull(ctx: &Ctx, number: u64) -> Item {
+    pub(super) fn store_pull(ctx: &Ctx, number: u64) -> Item {
         let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
         item.subject = Some(ItemSubject::PullRequest(pull_request(number)));
         ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
@@ -27002,7 +27061,7 @@ mod tests {
 
     /// Make an item the open one, as a finished open does, so what
     /// happens to it is told to the window.
-    fn open_in_slot(ctx: &Ctx, item: &Item) {
+    pub(super) fn open_in_slot(ctx: &Ctx, item: &Item) {
         open_in_slot_at(ctx, item, "h");
     }
 
@@ -39571,5 +39630,124 @@ while True:
             "the one that ended is set aside"
         );
         shown.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stale_close_review_navigation_does_not_evict_newer_language_server() {
+        use perch_lsp::ServerKind;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        let item = store_pull(&ctx, 21);
+        open_in_slot(&ctx, &item);
+        let nav1 = ctx.navigation_requests.begin_current();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.navigation_id = nav1;
+        }
+        let server = named_server(&worktree, ServerKind::Gopls, "-").await;
+
+        // Hold language_servers lock while stale CloseReview(nav1) starts.
+        let mut guard = ctx.language_servers.lock().await;
+        let close_ctx = ctx.clone();
+        let closer = tokio::spawn(async move {
+            close_review_navigation(&close_ctx, nav1).await;
+        });
+        tokio::task::yield_now().await;
+
+        // A newer navigation advances the fence and installs its own server.
+        let nav2 = ctx.navigation_requests.begin_current();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.navigation_id = nav2;
+        }
+        guard.insert(ServerKind::Gopls, server.clone());
+        drop(guard);
+
+        closer.await.unwrap();
+        let kept = ctx
+            .language_servers
+            .lock()
+            .await
+            .get(&ServerKind::Gopls)
+            .cloned();
+        assert!(kept.is_some_and(|s| Arc::ptr_eq(&s, &server)));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn show_server_rechecks_trust_before_installing_project_code_server() {
+        use perch_lsp::ServerKind;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        let item = store_pull(&ctx, 22);
+        open_in_slot(&ctx, &item);
+        let nav = ctx.navigation_requests.begin_current();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout.worktree = worktree.clone();
+            open.navigation_id = nav;
+        }
+        let script = worktree.join("server.py");
+        std::fs::write(&script, ENDING_SERVER).unwrap();
+        let spec = perch_lsp::ServerSpec {
+            kind: ServerKind::RustAnalyzer,
+            binary: "python3".into(),
+            args: vec![script.display().to_string()],
+            options: serde_json::Value::Null,
+        };
+        // Item is NOT trusted: show_server must shut down the started client
+        // and hold it rather than installing it into language_servers.
+        show_server(&ctx, nav, &worktree, spec).await;
+        assert!(ctx.language_servers.lock().await.is_empty());
+        assert!(ctx.kept_servers.clients().is_empty());
+    }
+
+    #[tokio::test]
+    async fn install_pull_request_snapshot_updates_all_open_windows_and_comment_threads_is_per_window(
+    ) {
+        assert!(Event::CommentThreads {
+            item_id: "i".into(),
+            threads: Vec::new(),
+            review_group_id: None,
+            review_request_id: None,
+        }
+        .for_one_window());
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 23);
+
+        let view1 = View::new(1);
+        let view2 = View::new(2);
+        ctx.views.lock().unwrap().push(view1.clone());
+        ctx.views.lock().unwrap().push(view2.clone());
+
+        let ctx1 = ctx.in_view(&view1);
+        let ctx2 = ctx.in_view(&view2);
+        open_in_slot(&ctx1, &item);
+        open_in_slot(&ctx2, &item);
+
+        let mut updated_pr = item.pull_request().unwrap().clone();
+        updated_pr.head_sha = "newhead999".into();
+        updated_pr.draft = false;
+        install_pull_request_snapshot(&ctx1, &item.id, updated_pr, None);
+
+        let h1 = ctx1
+            .slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|o| o.pull_request.as_ref())
+            .map(|p| p.head_sha.clone());
+        let h2 = ctx2
+            .slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|o| o.pull_request.as_ref())
+            .map(|p| p.head_sha.clone());
+        assert_eq!(h1.as_deref(), Some("newhead999"));
+        assert_eq!(h2.as_deref(), Some("newhead999"));
     }
 }

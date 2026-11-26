@@ -152,7 +152,7 @@ impl Diff {
                     if starts_in_block && !blocks.is_empty() {
                         blocks.remove(0);
                     }
-                    taken_after[block] = blocks;
+                    taken_after[block].extend(blocks);
                 }
                 None => loose.push(run),
             }
@@ -368,6 +368,17 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0].1, Mark::Same);
         assert_eq!(got[1], ("footnotes".to_string(), Mark::Changed));
+    }
+
+    #[test]
+    fn multiple_deletion_runs_inside_one_block_keep_earlier_removed_blocks() {
+        let base = "- item one\n- removed one\n\nRemoved paragraph.\n\n- item two\n- removed two\n- item three\n";
+        let head = "- item one\n- item two\n- item three\n";
+        let got = marks(base, head);
+        assert!(
+            got.contains(&("Removed paragraph.".to_string(), Mark::Removed)),
+            "expected removed paragraph to survive second deletion run in same block: {got:?}"
+        );
     }
 
     mod window {

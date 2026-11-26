@@ -198,9 +198,6 @@ impl PerchStyling {
             }
             .to_vec()
         });
-        if piece.from == 0 && piece.indent == 0 {
-            return spans;
-        }
         spans
             .into_iter()
             .filter_map(|span| {
@@ -444,6 +441,23 @@ mod tests {
         styling.find.set(Arc::new(vec![m(0, 25, 40)]));
         assert!(styling.matches_for(0).is_empty());
         assert_eq!(styling.matches_for(1), vec![(4, 19, false)]);
+
+        // Syntax spans on wrapped row 0 must also clip to row 0's length.
+        let row0_len = styling.doc.with_untracked(|d| d.line(0).len());
+        let row1_len = styling.doc.with_untracked(|d| d.line(1).len());
+        assert!(!styling.spans_for(0).is_empty());
+        for span in styling.spans_for(0) {
+            assert!(
+                span.start < span.end && span.end <= row0_len,
+                "row 0 span {span:?} exceeds row len {row0_len}"
+            );
+        }
+        for span in styling.spans_for(1) {
+            assert!(
+                span.start < span.end && span.end <= row1_len,
+                "row 1 span {span:?} exceeds row len {row1_len}"
+            );
+        }
     }
 
     #[test]

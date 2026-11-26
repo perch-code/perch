@@ -1009,12 +1009,62 @@ fn item_head_sha_on(conn: &Connection, item_id: &str) -> Result<String, CacheErr
 ///
 /// `incoming` is what GitHub lists now. Runs inside the caller's
 /// transaction; nothing here is written on its own.
+/// Format a UTC timestamp with fixed-width 9-digit fractional seconds so SQLite
+/// `TEXT` comparisons match chronological order even within the same second.
+fn format_timestamp(ts: Timestamp) -> String {
+    let raw = ts.to_string();
+    let Some(stem) = raw.strip_suffix('Z') else {
+        return raw;
+    };
+    match stem.split_once('.') {
+        Some((sec, frac)) => {
+            if frac.len() >= 9 {
+                format!("{sec}.{}Z", &frac[..9])
+            } else {
+                format!("{sec}.{frac:0<9}Z")
+            }
+        }
+        None => format!("{stem}.000000000Z"),
+    }
+}
+
+/// SQLite expression normalizing variable-precision RFC 3339 UTC strings
+/// (`...14Z`, `...14.5Z`, `...14.51Z`) to fixed-width 9-digit nanoseconds so
+/// legacy and newly written rows order and compare chronologically.
+fn sql_ts_key(col: &str) -> String {
+    format!(
+        "(CASE WHEN instr({col}, '.') > 0 AND substr({col}, -1) = 'Z' \
+         THEN substr(substr({col}, 1, length({col}) - 1) || '000000000', 1, instr({col}, '.') + 9) || 'Z' \
+         WHEN substr({col}, -1) = 'Z' \
+         THEN substr({col}, 1, length({col}) - 1) || '.000000000Z' \
+         ELSE {col} END)"
+    )
+}
+
 pub(crate) fn ingest_review_threads(
     conn: &Connection,
     item_id: &str,
     incoming: &[CommentThread],
 ) -> Result<(), CacheError> {
     let roots: HashSet<u64> = incoming.iter().filter_map(|t| t.github_id).collect();
+    let existing_created = sql_ts_key("comment_threads.created_at");
+    let excluded_created = sql_ts_key("excluded.created_at");
+    let upsert_thread_sql = format!(
+        "INSERT INTO comment_threads
+         (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
+          outdated, resolved, created_at, node_id, can_resolve)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT(id) DO UPDATE SET
+            worktree_id=excluded.worktree_id, origin=excluded.origin,
+            github_id=excluded.github_id, path=excluded.path,
+            start_line=excluded.start_line, line=excluded.line, side=excluded.side,
+            commit_sha=excluded.commit_sha,
+            outdated=CASE WHEN excluded.node_id IS NOT NULL OR comment_threads.node_id IS NULL THEN excluded.outdated ELSE comment_threads.outdated END,
+            resolved=CASE WHEN excluded.node_id IS NOT NULL THEN excluded.resolved ELSE comment_threads.resolved END,
+            created_at=CASE WHEN {existing_created} <= {excluded_created} THEN comment_threads.created_at ELSE excluded.created_at END,
+            node_id=COALESCE(excluded.node_id, comment_threads.node_id),
+            can_resolve=CASE WHEN excluded.node_id IS NOT NULL THEN excluded.can_resolve ELSE comment_threads.can_resolve END"
+    );
     for thread in incoming {
         let anchor = thread.anchor.as_ref();
         let thread_id = match thread.github_id {
@@ -1023,18 +1073,7 @@ pub(crate) fn ingest_review_threads(
             None => thread.id.clone(),
         };
         conn.execute(
-            "INSERT INTO comment_threads
-             (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
-              outdated, resolved, created_at, node_id, can_resolve)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-             ON CONFLICT(id) DO UPDATE SET
-                worktree_id=excluded.worktree_id, origin=excluded.origin,
-                github_id=excluded.github_id, path=excluded.path,
-                start_line=excluded.start_line, line=excluded.line, side=excluded.side,
-                commit_sha=excluded.commit_sha, outdated=excluded.outdated,
-                resolved=excluded.resolved,
-                created_at=min(created_at, excluded.created_at),
-                node_id=excluded.node_id, can_resolve=excluded.can_resolve",
+            &upsert_thread_sql,
             params![
                 thread_id,
                 item_id,
@@ -1047,7 +1086,7 @@ pub(crate) fn ingest_review_threads(
                 anchor.map(|a| a.commit_sha.as_str()),
                 thread.outdated as i64,
                 thread.resolved as i64,
-                thread.created_at.to_string(),
+                format_timestamp(thread.created_at),
                 thread.node_id,
                 thread.can_resolve as i64,
             ],
@@ -2618,8 +2657,18 @@ fn mark_draft_posted_on(
     Ok(())
 }
 
-/// Whether a comment GitHub lists is at `anchor`: the same file, side and
-/// lines. GitHub names no start line for a comment on one line.
+/// Whether a comment GitHub lists is at `anchor` using its original line
+/// position (when it was posted), or its current line position.
+fn comment_at_original(comment: &crate::discussion::ReviewComment, anchor: &Anchor) -> bool {
+    let Some(line) = comment.original_line else {
+        return false;
+    };
+    comment.path == anchor.path
+        && comment.side == anchor.side
+        && line == u64::from(anchor.line)
+        && comment.original_start_line.unwrap_or(line) == u64::from(anchor.start_line)
+}
+
 fn comment_at(comment: &crate::discussion::ReviewComment, anchor: &Anchor) -> bool {
     let Some(line) = comment.line else {
         return false;
@@ -3218,11 +3267,13 @@ impl Cache {
         &self,
         worktree_id: &str,
     ) -> Result<Vec<CommentThread>, CacheError> {
-        let mut stmt = self.conn.prepare(
+        let created_key = sql_ts_key("created_at");
+        let sql = format!(
             "SELECT id, origin, path, start_line, line, side, commit_sha, outdated, resolved,
                     created_at, github_id, node_id, can_resolve
-             FROM comment_threads WHERE worktree_id = ?1 ORDER BY created_at",
-        )?;
+             FROM comment_threads WHERE worktree_id = ?1 ORDER BY {created_key}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![worktree_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -3290,11 +3341,13 @@ impl Cache {
     }
 
     fn load_messages(&self, thread_id: &str) -> Result<Vec<CommentMessage>, CacheError> {
-        let mut stmt = self.conn.prepare_cached(
+        let created_key = sql_ts_key("created_at");
+        let sql = format!(
             "SELECT id, origin, author_kind, author, author_model, body, run_id, created_at,
                     github_id, node_id, html_url, diff_hunk, reactions_json
-             FROM comment_messages WHERE thread_id = ?1 ORDER BY created_at, rowid",
-        )?;
+             FROM comment_messages WHERE thread_id = ?1 ORDER BY {created_key}, rowid"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![thread_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -3700,10 +3753,23 @@ impl Cache {
                 reconciled.unmatched.push(draft.message_id);
                 continue;
             };
-            let at_anchor: Vec<&&crate::discussion::ReviewComment> = candidates
+            let mut at_anchor: Vec<&&crate::discussion::ReviewComment> = candidates
                 .iter()
-                .filter(|c| !claimed.contains(&c.id) && comment_at(c, anchor))
+                .filter(|c| {
+                    !claimed.contains(&c.id)
+                        && if c.original_line.is_some() {
+                            comment_at_original(c, anchor)
+                        } else {
+                            comment_at(c, anchor)
+                        }
+                })
                 .collect();
+            if at_anchor.is_empty() {
+                at_anchor = candidates
+                    .iter()
+                    .filter(|c| !claimed.contains(&c.id) && comment_at(c, anchor))
+                    .collect();
+            }
             let found = if at_anchor.len() > 1 {
                 at_anchor
                     .iter()
@@ -3824,8 +3890,11 @@ impl Cache {
 
     /// Nonterminal runs, in scheduler order.
     pub fn active_runs(&self) -> Result<Vec<RunRecord>, CacheError> {
+        let queued_key = sql_ts_key("queued_at");
         self.load_runs_where(
-            "status IN ('queued','starting','running','stopping') ORDER BY queued_at, id",
+            &format!(
+                "status IN ('queued','starting','running','stopping') ORDER BY {queued_key}, id"
+            ),
             [],
         )
     }
@@ -3833,10 +3902,11 @@ impl Cache {
     /// Nonterminal scalar projections, in scheduler order. This query does
     /// not select final output and never touches `run_events`.
     pub fn active_run_summaries(&self) -> Result<Vec<RunSummary>, CacheError> {
+        let queued_key = sql_ts_key("queued_at");
         let sql = format!(
             "SELECT {RUN_SUMMARY_COLUMNS} FROM runs
              WHERE status IN ('queued','starting','running','stopping')
-             ORDER BY queued_at, id"
+             ORDER BY {queued_key}, id"
         );
         let rows = {
             let mut stmt = self.conn.prepare(&sql)?;
@@ -3856,16 +3926,17 @@ impl Cache {
         limit: usize,
     ) -> Result<RunHistoryPage, CacheError> {
         let limit = limit.clamp(1, 500);
-        let ended = cursor.map(|cursor| cursor.ended_at.to_string());
+        let ended = cursor.map(|cursor| format_timestamp(cursor.ended_at));
         let cursor_id = cursor.map(|cursor| cursor.id.as_str());
+        let ended_key = sql_ts_key("ended_at");
         let sql = format!(
             "SELECT {RUN_SUMMARY_COLUMNS} FROM runs
              WHERE status IN ('completed','failed','stopped','interrupted')
                AND (?1 IS NULL OR owner_item_id=?1)
                AND (?2 IS NULL OR backend=?2)
                AND (?3 IS NULL OR status=?3)
-               AND (?4 IS NULL OR ended_at < ?4 OR (ended_at = ?4 AND id < ?5))
-             ORDER BY ended_at DESC, id DESC LIMIT ?6"
+               AND (?4 IS NULL OR {ended_key} < ?4 OR ({ended_key} = ?4 AND id < ?5))
+             ORDER BY {ended_key} DESC, id DESC LIMIT ?6"
         );
         let rows = {
             let mut stmt = self.conn.prepare(&sql)?;
@@ -3913,16 +3984,17 @@ impl Cache {
         limit: usize,
     ) -> Result<Vec<RunRecord>, CacheError> {
         let limit = limit.clamp(1, 500) as i64;
-        let ended = cursor.map(|cursor| cursor.ended_at.to_string());
+        let ended = cursor.map(|cursor| format_timestamp(cursor.ended_at));
         let cursor_id = cursor.map(|cursor| cursor.id.as_str());
+        let ended_key = sql_ts_key("ended_at");
         let sql = format!(
             "SELECT {RUN_COLUMNS} FROM runs
              WHERE status IN ('completed','failed','stopped','interrupted')
                AND (?1 IS NULL OR owner_item_id=?1)
                AND (?2 IS NULL OR backend=?2)
                AND (?3 IS NULL OR status=?3)
-               AND (?4 IS NULL OR ended_at < ?4 OR (ended_at = ?4 AND id < ?5))
-             ORDER BY ended_at DESC, id DESC LIMIT ?6"
+               AND (?4 IS NULL OR {ended_key} < ?4 OR ({ended_key} = ?4 AND id < ?5))
+             ORDER BY {ended_key} DESC, id DESC LIMIT ?6"
         );
         let rows = {
             let mut stmt = self.conn.prepare(&sql)?;
@@ -4479,6 +4551,46 @@ impl Cache {
             )?;
             tx.execute(&format!("DELETE FROM {table} WHERE item_id=?1"), [from])?;
         }
+        // Preserve explicit LSP trust (conservatively keeping untrusted=0 if
+        // either row was marked untrusted), newer activity, and cached
+        // description rewrites before deleting `from` (which cascades deletes).
+        tx.execute(
+            "INSERT INTO item_lsp_trust (item_id, trusted)
+             SELECT ?2, trusted FROM item_lsp_trust WHERE item_id=?1
+             ON CONFLICT(item_id) DO UPDATE SET trusted = MIN(item_lsp_trust.trusted, excluded.trusted)",
+            params![from, to],
+        )?;
+        tx.execute("DELETE FROM item_lsp_trust WHERE item_id=?1", [from])?;
+        let from_activity: Option<String> = tx
+            .query_row(
+                "SELECT at FROM item_activity WHERE item_id=?1",
+                [from],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(from_at) = from_activity {
+            let to_activity: Option<String> = tx
+                .query_row(
+                    "SELECT at FROM item_activity WHERE item_id=?1",
+                    [to],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let take = match to_activity {
+                None => true,
+                Some(to_at) => from_at.parse::<Timestamp>().ok() > to_at.parse::<Timestamp>().ok(),
+            };
+            if take {
+                tx.execute(
+                    "UPDATE OR REPLACE item_activity SET item_id=?2 WHERE item_id=?1",
+                    params![from, to],
+                )?;
+            }
+        }
+        tx.execute(
+            "UPDATE OR REPLACE description_rewrites SET item_id=?2 WHERE item_id=?1",
+            params![from, to],
+        )?;
         // Children of either row keep their provenance. The branch
         // itself may have been cut from the subject being transferred.
         tx.execute(
@@ -4541,6 +4653,10 @@ impl Cache {
         tx.execute("DELETE FROM viewed WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM reveals WHERE item_id = ?1", params![id])?;
         tx.execute(
+            "DELETE FROM description_rewrites WHERE item_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
             "UPDATE items SET from_item_id = NULL WHERE from_item_id = ?1",
             params![id],
         )?;
@@ -4562,16 +4678,44 @@ impl Cache {
         discussion: &Discussion,
     ) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
+        // If a transient GraphQL error returned empty `review_threads` while
+        // REST still returned review comments, retain previously cached thread
+        // state (resolved/node_id/can_resolve) for threads still present.
+        let preserved: Option<Discussion> =
+            if !discussion.review_comments.is_empty() && discussion.review_threads.is_empty() {
+                tx.query_row(
+                    "SELECT json FROM discussions WHERE item_id = ?1",
+                    params![item_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|json| serde_json::from_str::<Discussion>(&json).ok())
+                .filter(|prev| !prev.review_threads.is_empty())
+                .map(|prev| {
+                    let comment_ids: HashSet<u64> =
+                        discussion.review_comments.iter().map(|c| c.id).collect();
+                    let mut merged = discussion.clone();
+                    merged.review_threads = prev
+                        .review_threads
+                        .into_iter()
+                        .filter(|t| comment_ids.contains(&t.root_comment_id))
+                        .collect();
+                    merged
+                })
+            } else {
+                None
+            };
+        let to_store = preserved.as_ref().unwrap_or(discussion);
         tx.execute(
             "INSERT OR REPLACE INTO discussions (item_id, fetched_at, json) VALUES (?1, ?2, ?3)",
             params![
                 item_id,
-                Timestamp::now().to_string(),
-                serde_json::to_string(discussion)?
+                format_timestamp(Timestamp::now()),
+                serde_json::to_string(to_store)?
             ],
         )?;
         let head_sha = item_head_sha_on(&tx, item_id)?;
-        let threads = comments::review_threads_of(discussion, item_id, &head_sha);
+        let threads = comments::review_threads_of(to_store, item_id, &head_sha);
         ingest_review_threads(&tx, item_id, &threads)?;
         tx.commit()?;
         Ok(())
@@ -9927,5 +10071,334 @@ mod tests {
     fn avatar_hash_is_stable_and_distinct() {
         assert_eq!(hash("https://a"), hash("https://a"));
         assert_ne!(hash("https://a"), hash("https://b"));
+    }
+
+    #[test]
+    fn take_item_history_transfers_lsp_trust_activity_and_description_rewrites() {
+        let c = Cache::open_in_memory().unwrap();
+        let now = Timestamp::now();
+        let older = now - jiff::SignedDuration::from_secs(60);
+
+        let subject = Item {
+            id: "sub-pr-1".into(),
+            repo_full_name: "acme/widgets".into(),
+            subject: Some(ItemSubject::PullRequest(pull_request(1))),
+            checkout: None,
+            from_item_id: None,
+            name: None,
+            worktree_title: None,
+            worktree_description: None,
+            pinned_at: None,
+            archived_at: None,
+            created_at: older,
+            last_opened_at: older,
+        };
+        let mut branch = subject.clone();
+        branch.id = "br-1".into();
+        branch.checkout = Some(crate::items::Checkout {
+            branch: "feature".into(),
+            base_ref: "main".into(),
+            head_sha: "abc123".into(),
+            path: std::path::PathBuf::from("/tmp/wt"),
+            owned: false,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            source: None,
+            divergence: None,
+        });
+        c.insert_item(&subject).unwrap();
+        let mut branch_before = branch.clone();
+        branch_before.subject = None;
+        c.insert_item(&branch_before).unwrap();
+
+        // Untrusted on subject (0) must beat trusted on branch (1).
+        c.conn
+            .execute(
+                "INSERT INTO item_lsp_trust (item_id, trusted) VALUES (?1, 0)",
+                params![&subject.id],
+            )
+            .unwrap();
+        c.trust_item_code(&branch.id).unwrap();
+        // Newer activity on subject transfers over older activity on branch.
+        c.record_item_activity(
+            &subject.id,
+            now,
+            &ActivityEvent::Run {
+                run_id: "new-run".into(),
+                backend: "claude".into(),
+                mode: RunMode::Ask,
+                outcome: crate::ActivityOutcome::Completed,
+                files: None,
+            },
+        )
+        .unwrap();
+        c.record_item_activity(
+            &branch.id,
+            older,
+            &ActivityEvent::Run {
+                run_id: "old-run".into(),
+                backend: "claude".into(),
+                mode: RunMode::Ask,
+                outcome: crate::ActivityOutcome::Completed,
+                files: None,
+            },
+        )
+        .unwrap();
+        c.conn
+            .execute(
+                "INSERT INTO description_rewrites (item_id, source_hash, model, effort, rewritten, updated_at)
+                 VALUES (?1, 'h1', 'opus', 'high', 'rewritten', ?2)",
+                params![&subject.id, now.to_string()],
+            )
+            .unwrap();
+
+        c.take_item_history(&subject.id, &branch).unwrap();
+
+        assert_eq!(c.item_code_trust(&branch.id).unwrap(), Some(false));
+        let event_json: String = c
+            .conn
+            .query_row(
+                "SELECT event_json FROM item_activity WHERE item_id=?1",
+                [&branch.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(event_json.contains("new-run"), "{event_json}");
+        let rewrite_body: String = c
+            .conn
+            .query_row(
+                "SELECT rewritten FROM description_rewrites WHERE item_id=?1",
+                [&branch.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rewrite_body, "rewritten");
+
+        c.delete_item(&branch.id).unwrap();
+        let remaining: i64 = c
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM description_rewrites WHERE item_id=?1",
+                [&branch.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn store_discussion_preserves_thread_state_when_graphql_review_threads_missing() {
+        let c = Cache::open_in_memory().unwrap();
+        let ts: Timestamp = "2026-01-01T10:00:00Z".parse().unwrap();
+        let comment = crate::discussion::ReviewComment {
+            id: 42,
+            node_id: "PRRC_42".into(),
+            pull_request_review_id: Some(7),
+            in_reply_to_id: None,
+            user: "bob".into(),
+            user_avatar_url: String::new(),
+            body: "nit".into(),
+            path: "src/lib.rs".into(),
+            line: Some(10),
+            original_line: Some(10),
+            start_line: None,
+            original_start_line: None,
+            diff_hunk: String::new(),
+            side: Side::Right,
+            start_side: None,
+            commit_id: "abc".into(),
+            original_commit_id: "abc".into(),
+            created_at: ts,
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+            viewer_can_update: false,
+            viewer_can_delete: false,
+        };
+        let with_threads = Discussion {
+            review_comments: vec![comment.clone()],
+            review_threads: vec![crate::discussion::ReviewThreadState {
+                node_id: "PRRT_42".into(),
+                root_comment_id: 42,
+                resolved: true,
+                outdated: false,
+                can_resolve: true,
+            }],
+            ..Default::default()
+        };
+        c.store_discussion("item-1", &with_threads).unwrap();
+
+        // Transient GraphQL failure: REST comments returned, review_threads empty.
+        let degraded = Discussion {
+            review_comments: vec![comment],
+            review_threads: Vec::new(),
+            ..Default::default()
+        };
+        c.store_discussion("item-1", &degraded).unwrap();
+
+        let threads = c.load_comment_threads("item-1").unwrap();
+        assert_eq!(threads.len(), 1);
+        assert!(threads[0].resolved);
+        assert!(threads[0].can_resolve);
+        assert_eq!(threads[0].node_id.as_deref(), Some("PRRT_42"));
+        let stored = c.load_discussion("item-1").unwrap().unwrap();
+        assert_eq!(stored.1.review_threads.len(), 1);
+        assert!(stored.1.review_threads[0].resolved);
+    }
+
+    #[test]
+    fn reconcile_review_drafts_matches_outdated_and_shifted_original_lines() {
+        let c = Cache::open_in_memory().unwrap();
+        let ts: Timestamp = "2026-01-01T10:00:00Z".parse().unwrap();
+        let make_draft = |tid: &str, mid: &str, start: u32, line: u32, body: &str| CommentThread {
+            id: tid.into(),
+            worktree_id: "item-1".into(),
+            origin: ThreadOrigin::GitHub,
+            github_id: None,
+            anchor: Some(Anchor {
+                path: "src/lib.rs".into(),
+                start_line: start,
+                line,
+                side: Side::Right,
+                commit_sha: "oldhead".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: ts,
+            messages: vec![CommentMessage {
+                id: mid.into(),
+                thread_id: tid.into(),
+                origin: ThreadOrigin::GitHub,
+                github_id: None,
+                author: Author::User,
+                body: body.into(),
+                run: None,
+                created_at: ts,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        };
+        c.insert_comment_thread(&make_draft("t1", "m1", 41, 58, "outdated"))
+            .unwrap();
+        c.insert_comment_thread(&make_draft("t2", "m2", 10, 10, "shifted"))
+            .unwrap();
+
+        let discussion = Discussion {
+            review_comments: vec![
+                crate::discussion::ReviewComment {
+                    id: 101,
+                    node_id: "PRRC_101".into(),
+                    pull_request_review_id: Some(9),
+                    in_reply_to_id: None,
+                    user: "alice".into(),
+                    user_avatar_url: String::new(),
+                    body: "outdated".into(),
+                    path: "src/lib.rs".into(),
+                    line: None,
+                    original_line: Some(58),
+                    start_line: None,
+                    original_start_line: Some(41),
+                    diff_hunk: String::new(),
+                    side: Side::Right,
+                    start_side: None,
+                    commit_id: "newhead".into(),
+                    original_commit_id: "oldhead".into(),
+                    created_at: ts,
+                    updated_at: None,
+                    html_url: String::new(),
+                    reactions: Default::default(),
+                    viewer_can_update: false,
+                    viewer_can_delete: false,
+                },
+                crate::discussion::ReviewComment {
+                    id: 102,
+                    node_id: "PRRC_102".into(),
+                    pull_request_review_id: Some(9),
+                    in_reply_to_id: None,
+                    user: "alice".into(),
+                    user_avatar_url: String::new(),
+                    body: "shifted".into(),
+                    path: "src/lib.rs".into(),
+                    line: Some(15),
+                    original_line: Some(10),
+                    start_line: None,
+                    original_start_line: None,
+                    diff_hunk: String::new(),
+                    side: Side::Right,
+                    start_side: None,
+                    commit_id: "newhead".into(),
+                    original_commit_id: "oldhead".into(),
+                    created_at: ts,
+                    updated_at: None,
+                    html_url: String::new(),
+                    reactions: Default::default(),
+                    viewer_can_update: false,
+                    viewer_can_delete: false,
+                },
+            ],
+            ..Default::default()
+        };
+        let rec = c
+            .reconcile_review_drafts("item-1", 9, &discussion, &["m1".into(), "m2".into()])
+            .unwrap();
+        assert_eq!(rec.matched, vec!["m1".to_string(), "m2".to_string()]);
+        assert!(rec.unmatched.is_empty());
+    }
+
+    #[test]
+    fn mixed_precision_same_second_timestamps_order_chronologically() {
+        let c = Cache::open_in_memory().unwrap();
+        let t0 = "2026-01-01T10:00:14Z";
+        let t1 = "2026-01-01T10:00:14.5Z";
+        let t2 = "2026-01-01T10:00:14.51Z";
+        let t3 = "2026-01-01T10:00:14.999999999Z";
+        c.conn
+            .execute(
+                "INSERT INTO comment_threads (id, worktree_id, origin, outdated, resolved, created_at, can_resolve)
+                 VALUES ('th', 'it', 'review', 0, 0, ?1, 0)",
+                [t0],
+            )
+            .unwrap();
+        for (id, ts) in [("m3", t3), ("m0", t0), ("m2", t2), ("m1", t1)] {
+            c.conn
+                .execute(
+                    "INSERT INTO comment_messages (id, thread_id, origin, author_kind, body, created_at)
+                     VALUES (?1, 'th', 'review', 'user', ?1, ?2)",
+                    params![id, ts],
+                )
+                .unwrap();
+        }
+        let msgs = c.load_messages("th").unwrap();
+        let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m0", "m1", "m2", "m3"]);
+
+        // Run history cursor pagination across same-second mixed-precision rows.
+        for (id, ts) in [("r0", t0), ("r1", t1), ("r2", t2), ("r3", t3)] {
+            let mut rec = run(id, "th", RunStatus::Completed);
+            rec.ended_at = Some(stamp(ts));
+            c.insert_run(&rec).unwrap();
+            c.conn
+                .execute(
+                    "UPDATE runs SET queued_at = ?2, ended_at = ?2 WHERE id = ?1",
+                    params![id, ts],
+                )
+                .unwrap();
+        }
+        let p1 = c
+            .run_history_page(&RunHistoryFilter::default(), None, 2)
+            .unwrap();
+        let p1_ids: Vec<&str> = p1.runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(p1_ids, vec!["r3", "r2"]);
+        let p2 = c
+            .run_history_page(&RunHistoryFilter::default(), p1.next_cursor.as_ref(), 2)
+            .unwrap();
+        let p2_ids: Vec<&str> = p2.runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(p2_ids, vec!["r1", "r0"]);
+        assert!(p2.next_cursor.is_none());
     }
 }

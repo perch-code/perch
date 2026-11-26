@@ -2635,11 +2635,7 @@ impl ReviewState {
     }
 
     pub fn fail_submit_review(&self, attempt_id: u64, message: String) -> bool {
-        if self
-            .submit_review_pending
-            .get_untracked()
-            .is_some_and(|current| current != attempt_id)
-        {
+        if self.submit_review_pending.get_untracked() != Some(attempt_id) {
             return false;
         }
         self.submit_review_pending.set(None);

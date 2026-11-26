@@ -43,7 +43,11 @@ pub enum Incoming {
     /// A notification from the server.
     Notification { method: String, params: Value },
     /// A request from the server, which must be answered.
-    Request { id: Value, method: String },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// Something we do not model. Ignored rather than fatal.
     Other,
 }
@@ -61,6 +65,7 @@ pub fn decode(body: &str) -> Incoming {
         (Some(method), Some(id)) => Incoming::Request {
             id: id.clone(),
             method: method.to_string(),
+            params: value.get("params").cloned().unwrap_or(Value::Null),
         },
         (Some(method), None) => Incoming::Notification {
             method: method.to_string(),
@@ -183,8 +188,13 @@ mod tests {
 
         // rust-analyzer asks the client for things; those carry an id and
         // must be answered or the server waits forever.
-        let r = decode(r#"{"jsonrpc":"2.0","id":1,"method":"window/workDoneProgress/create"}"#);
-        assert!(matches!(r, Incoming::Request { .. }));
+        let r = decode(
+            r#"{"jsonrpc":"2.0","id":1,"method":"workspace/configuration","params":{"items":[{},{}]}}"#,
+        );
+        assert!(matches!(
+            r,
+            Incoming::Request { ref params, .. } if params["items"].as_array().map(Vec::len) == Some(2)
+        ));
     }
 
     #[test]

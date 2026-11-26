@@ -964,6 +964,10 @@ async fn queue_attempt(
     attempt: NewReviewerAttempt,
     retry_of_run_id: Option<String>,
 ) {
+    if review_cancelled(ctx, &attempt.id, "") {
+        finish_cancelled_attempt(ctx, &attempt.id);
+        return;
+    }
     let run_id = perch_github::comments::new_id();
     let run = RunRecord {
         id: run_id.clone(),
@@ -1027,6 +1031,10 @@ async fn queue_attempt(
     let admission = match ctx.runs.admit(run.clone()) {
         Ok(admission) => admission,
         Err(message) => {
+            if review_cancelled(ctx, &attempt.id, "") {
+                finish_cancelled_attempt(ctx, &attempt.id);
+                return;
+            }
             fail_attempt(ctx, &attempt.id, &message);
             settle_group(
                 ctx,
@@ -1037,18 +1045,32 @@ async fn queue_attempt(
         }
     };
     super::record_run_context(ctx, &run_id, discussion_dir, None, None, &[]);
-    if let Err(message) = cache(ctx, |cache| cache.attach_reviewer_run(&attempt.id, &run_id)) {
-        ctx.runs.cancel(&run_id);
-        fail_attempt(ctx, &attempt.id, &message);
-        if let Some(group_id) = snapshot_group_id(ctx, &attempt.id) {
-            settle_group(ctx, &group_id);
-            send_group(ctx, &group_id);
+    match cache(ctx, |cache| cache.attach_reviewer_run(&attempt.id, &run_id)) {
+        Ok(attached) => {
+            if matches!(
+                attached.phase,
+                ReviewerPhase::Stopping | ReviewerPhase::Stopped | ReviewerPhase::Interrupted
+            ) {
+                ctx.runs.cancel(&run_id);
+            }
         }
-        ctx.notice(format!(
-            "Could not attach {} to its review: {message}",
-            attempt.backend
-        ));
-        return;
+        Err(message) => {
+            ctx.runs.cancel(&run_id);
+            if review_cancelled(ctx, &attempt.id, &run_id) {
+                finish_cancelled_attempt(ctx, &attempt.id);
+                return;
+            }
+            fail_attempt(ctx, &attempt.id, &message);
+            if let Some(group_id) = snapshot_group_id(ctx, &attempt.id) {
+                settle_group(ctx, &group_id);
+                send_group(ctx, &group_id);
+            }
+            ctx.notice(format!(
+                "Could not attach {} to its review: {message}",
+                attempt.backend
+            ));
+            return;
+        }
     }
 
     let ctx = ctx.clone();
@@ -1117,6 +1139,16 @@ async fn execute_attempt(
             return;
         }
     };
+    if review_cancelled(ctx, &attempt.id, &run.id) {
+        finish_stopped_attempt(
+            ctx,
+            &attempt,
+            run,
+            lease,
+            "Review stopped before preparation",
+        );
+        return;
+    }
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Preparing);
     send_group(ctx, &group_id);
 
@@ -1247,6 +1279,10 @@ async fn execute_attempt(
         sandbox: ctx.config().agent.sandbox_for(backend.name()),
     };
 
+    if review_cancelled(ctx, &attempt.id, &run.id) {
+        finish_stopped_attempt(ctx, &attempt, run, lease, "Review stopped before running");
+        return;
+    }
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Reviewing);
     send_group(ctx, &group_id);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4433,5 +4469,113 @@ mod tests {
             combine_review_instructions(Some("Focus on locks."), Some("Only src/a.rs.")),
             Some("Focus on locks.\n\nOnly src/a.rs.".into())
         );
+    }
+
+    #[tokio::test]
+    async fn queue_attempt_after_stop_group_stops_without_admitting_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::tests::ctx(dir.path(), &super::super::tests::nowhere(), &[]);
+        let item = super::super::tests::store_pull(&ctx, 77);
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let run_git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&wt)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run_git(&["init", "-q", "-b", "main"]);
+        run_git(&["config", "user.name", "Test"]);
+        run_git(&["config", "user.email", "t@example.com"]);
+        std::fs::write(wt.join("a.txt"), "one\n").unwrap();
+        run_git(&["add", "-A"]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        run_git(&["checkout", "-q", "-b", "feat"]);
+        std::fs::write(wt.join("a.txt"), "two\n").unwrap();
+        run_git(&["add", "-A"]);
+        run_git(&["commit", "-q", "-m", "feat"]);
+
+        let CaptureOutcome::Captured(captured) = ctx
+            .review_snapshots
+            .capture(SnapshotCapture {
+                snapshot_id: "snap-stop".into(),
+                source_checkout: wt,
+                source_repository: item.repo_full_name.clone(),
+                branch_label: "feat".into(),
+                requested_base: "main".into(),
+                base_rev: "main".into(),
+                include_worktree: false,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected captured snapshot");
+        };
+
+        let now = Timestamp::now();
+        let snap = ReviewSnapshot {
+            id: "snap-stop".into(),
+            item_id: item.id.clone(),
+            repository: item.repo_full_name.clone(),
+            branch_label: Some("feat".into()),
+            requested_base_ref: "main".into(),
+            base_tip_sha: captured.manifest.range.base_tip.clone(),
+            merge_base_sha: captured.manifest.range.merge_base.clone(),
+            head_sha: captured.manifest.range.head.clone(),
+            dirty_edits_excluded: false,
+            retention_key: "grp-stop-ret".into(),
+            retained_ref: None,
+            manifest_path: None,
+            diff_path: None,
+            created_at: now,
+            worktree_parent_sha: None,
+        };
+        let attempt = NewReviewerAttempt {
+            id: "att-stop".into(),
+            run_id: None,
+            backend: "claude".into(),
+            executable: None,
+            executable_version: None,
+            model: "opus".into(),
+            effort: "high".into(),
+            adapter_version: "1".into(),
+            output_format_version: "1".into(),
+            created_at: now,
+        };
+        ctx.with_cache(|c| {
+            c.admit_review_group(&ReviewAdmission {
+                group_id: "grp-stop".into(),
+                snapshot: snap.clone(),
+                attempts: vec![attempt.clone()],
+                admitted_at: now,
+                instructions: None,
+            })
+            .unwrap();
+        });
+
+        stop_group(&ctx, "grp-stop");
+
+        queue_attempt(&ctx, &item, &snap, &captured, None, None, attempt, None).await;
+
+        let loaded = ctx
+            .with_cache(|c| c.load_reviewer_attempt("att-stop").unwrap().unwrap())
+            .unwrap();
+        assert_eq!(loaded.phase, ReviewerPhase::Stopped);
+        let group = ctx
+            .with_cache(|c| c.load_review_group("grp-stop").unwrap().unwrap())
+            .unwrap();
+        assert_eq!(group.status, ReviewGroupStatus::Stopped);
+        assert!(ctx
+            .with_cache(|c| c.active_runs().unwrap())
+            .unwrap()
+            .is_empty());
     }
 }

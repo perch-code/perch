@@ -480,10 +480,10 @@ pub fn parse_raw(raw: &str) -> Vec<RawChange> {
         // 100644 and 100755 are files; 120000 is a symlink, 160000 a
         // submodule, and 000000 a deletion, which is regular enough.
         let regular = new_mode.starts_with("100") || new_mode == "000000";
+        let Some(first) = fields.next() else { break };
         let Some(status) = code.chars().next().and_then(ChangeStatus::from_letter) else {
             continue;
         };
-        let Some(first) = fields.next() else { break };
 
         let head_blob = (!new_sha.bytes().all(|b| b == b'0')).then(|| new_sha.to_string());
         match status {
@@ -1051,5 +1051,19 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
             );
             assert!(rows.iter().all(|r| r.0.is_some() || r.1.is_some()));
         }
+    }
+
+    #[test]
+    fn parse_raw_consumes_path_of_unmerged_entries() {
+        let raw = concat!(
+            ":000000 000000 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 U\0",
+            "docs/a b c d M.txt\0",
+            ":100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0",
+            "src/lib.rs\0",
+        );
+        let parsed = parse_raw(raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].status, ChangeStatus::Modified);
+        assert_eq!(parsed[0].path, "src/lib.rs");
     }
 }

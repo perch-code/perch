@@ -12,13 +12,19 @@ use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::{Anchor, Author, PullRequest, Side};
 use perch_knowledge::sanitize::{clean, one_line, strip_format_chars};
 
-thread_local! {
-    /// `RunStep` is a compatibility projection and does not retain tool IDs.
-    /// Keep the IDs beside the live UI copy so an interleaved result updates
-    /// the same step as the durable event projection does.
-    static LIVE_TOOL_STEPS: std::cell::RefCell<
-        std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+/// `RunStep` is a compatibility projection and does not retain tool IDs.
+/// Keep the IDs beside the live UI copy so an interleaved result updates
+/// the same step as the durable event projection does, even across Tokio
+/// multi-threaded runtime worker threads.
+fn live_tool_steps() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
+> {
+    static LIVE_TOOL_STEPS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
+        >,
+    > = std::sync::OnceLock::new();
+    LIVE_TOOL_STEPS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 /// Fold one event from the agent into the run record drawn by the live UI.
@@ -94,18 +100,19 @@ pub fn apply_run_event(
                     user: false,
                 },
             );
-            LIVE_TOOL_STEPS.with(|tools| {
-                tools
-                    .borrow_mut()
-                    .entry(run.id.clone())
-                    .or_default()
-                    .insert(id.clone(), index);
-            });
+            live_tool_steps()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(run.id.clone())
+                .or_default()
+                .insert(id.clone(), index);
             run.latest_activity = Some(summary);
         }
         RunEvent::ToolResult { id, ok, summary } => {
-            let index = LIVE_TOOL_STEPS.with(|tools| {
-                let mut tools = tools.borrow_mut();
+            let index = {
+                let mut tools = live_tool_steps()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let (index, empty) = match tools.get_mut(&run.id) {
                     Some(steps) => {
                         let index = steps.remove(id);
@@ -117,7 +124,7 @@ pub fn apply_run_event(
                     tools.remove(&run.id);
                 }
                 index
-            });
+            };
             if let Some(step) = index.and_then(|index| run.steps.get_mut(index)) {
                 step.ok = *ok;
                 step.pending = false;
@@ -192,9 +199,10 @@ pub fn apply_run_event(
         RunEvent::Report { .. } | RunEvent::Approval { .. } => {}
     }
     if run.status.is_terminal() {
-        LIVE_TOOL_STEPS.with(|tools| {
-            tools.borrow_mut().remove(&run.id);
-        });
+        live_tool_steps()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run.id);
     }
     None
 }
@@ -265,22 +273,19 @@ pub fn settle_model(agent: &mut perch_github::AgentConfig) {
     if agent.backend_of(&agent.model) != perch_github::CLAUDE_CODE {
         return;
     }
-    if agent.models.is_empty()
-        && !agent.codex.models.contains(&agent.model)
-        && agent
+    if agent.models.is_empty() && !agent.codex.models.contains(&agent.model) {
+        if agent
             .codex
             .models
             .iter()
             .any(|m| m == perch_github::CODEX_DEFAULT_MODEL)
-    {
-        agent.model = perch_github::CODEX_DEFAULT_MODEL.into();
-    }
-    // Only agy: start on its first model.
-    if agent.models.is_empty() && agent.codex.models.is_empty() {
-        if let Some(first) = agent
-            .gemini
+        {
+            agent.model = perch_github::CODEX_DEFAULT_MODEL.into();
+        } else if let Some(first) = agent
+            .codex
             .models
             .first()
+            .or(agent.gemini.models.first())
             .or(agent.opencode.models.first())
         {
             agent.model = first.clone();
@@ -499,13 +504,16 @@ pub async fn load_display(
     let git = preparer.git();
     let head = perch_git::read_side(git, &checkout.worktree, &head_rev, path)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("{path} is not there"))?;
+        .map_err(|e| e.to_string())?;
     let base = perch_git::read_side(git, &checkout.worktree, &base_rev, path)
         .await
         .ok()
-        .flatten()
-        .unwrap_or_default();
+        .flatten();
+    if head.is_none() && base.is_none() {
+        return Err(format!("{path} is not there"));
+    }
+    let head = head.unwrap_or_default();
+    let base = base.unwrap_or_default();
     Ok(if base.is_empty() {
         DisplayBuffer::plain(&head)
     } else {
@@ -2921,5 +2929,164 @@ This replaces what you were told about commits when the session began."
         omit_knowledge_framing(&mut framing, &dir);
         assert!(!framing.contains("/tmp/perch-knowledge"));
         assert!(framing.ends_with("Use bullet points."));
+    }
+
+    #[test]
+    fn live_tool_steps_update_and_cleanup_across_threads() {
+        let mut run = perch_github::RunRecord {
+            id: format!("cross-thread-{}", std::process::id()),
+            owner: perch_github::RunOwner::Review {
+                item_id: "i1".into(),
+                reviewer_run_id: "rr1".into(),
+            },
+            purpose: perch_github::RunPurpose::WorktreeReview,
+            backend: "claude".into(),
+            executable: None,
+            executable_version: None,
+            requested_model: "opus".into(),
+            model: "opus".into(),
+            requested_effort: "high".into(),
+            effort: "high".into(),
+            session_id: None,
+            original_request: "q".into(),
+            prompt_snapshot: None,
+            working_directory: None,
+            revision: perch_github::RevisionContext::Snapshot {
+                base_sha: "base".into(),
+                head_sha: "head".into(),
+            },
+            labels: perch_github::RunLabels::default(),
+            status: perch_github::RunStatus::Running,
+            terminal_reason: None,
+            cost_usd: None,
+            duration_ms: None,
+            usage: None,
+            retry_of: None,
+            steps: Vec::new(),
+            error: None,
+            queued_at: jiff::Timestamp::now(),
+            started_at: None,
+            ended_at: None,
+            final_result: None,
+            final_result_truncated: false,
+            latest_activity: None,
+            last_event_sequence: 0,
+            mode: perch_github::RunMode::Ask,
+            work_before: None,
+            work_after: None,
+            approvals: None,
+        };
+        let run = std::thread::spawn(move || {
+            apply_run_event(
+                &mut run,
+                &perch_agent::RunEvent::ToolCall {
+                    id: "call-1".into(),
+                    name: "Bash".into(),
+                    summary: "cargo test".into(),
+                    parent_id: None,
+                },
+            );
+            run
+        })
+        .join()
+        .unwrap();
+        let mut run = std::thread::spawn(move || {
+            let mut run = run;
+            apply_run_event(
+                &mut run,
+                &perch_agent::RunEvent::ToolResult {
+                    id: "call-1".into(),
+                    ok: false,
+                    summary: "exit 1".into(),
+                },
+            );
+            apply_run_event(
+                &mut run,
+                &perch_agent::RunEvent::Finished {
+                    session_id: "s".into(),
+                    cost_usd: None,
+                    duration_ms: 1,
+                },
+            );
+            run
+        })
+        .join()
+        .unwrap();
+        assert_eq!(run.steps.len(), 1);
+        assert!(!run.steps[0].pending);
+        assert!(!run.steps[0].ok);
+        assert!(
+            run.steps[0].summary.contains("exit 1"),
+            "{:?}",
+            run.steps[0]
+        );
+        assert!(!live_tool_steps().lock().unwrap().contains_key(&run.id));
+        let _ = &mut run;
+    }
+
+    #[test]
+    fn settle_model_picks_first_codex_model_when_claude_absent_and_default_missing() {
+        let mut agent = perch_github::AgentConfig::default();
+        agent.models.clear();
+        agent.codex.models = vec!["gpt-5-codex".into()];
+        settle_model(&mut agent);
+        assert_eq!(agent.model, "gpt-5-codex");
+    }
+
+    #[tokio::test]
+    async fn load_display_loads_deleted_file_from_base_rev() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let run_git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&wt)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run_git(&["init", "-q", "-b", "main"]);
+        run_git(&["config", "user.name", "Test"]);
+        run_git(&["config", "user.email", "t@example.com"]);
+        std::fs::write(wt.join("removed.rs"), "fn gone() {}\n").unwrap();
+        run_git(&["add", "-A"]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        let base_sha = run_git(&["rev-parse", "HEAD"]);
+        std::fs::remove_file(wt.join("removed.rs")).unwrap();
+        run_git(&["add", "-A"]);
+        run_git(&["commit", "-q", "-m", "delete"]);
+        let head_sha = run_git(&["rev-parse", "HEAD"]);
+
+        let prep = perch_git::Preparer::new(perch_git::Store::new(dir.path().join("store")), None);
+        let checkout = perch_git::Checkout {
+            worktree: wt.clone(),
+            bare: wt,
+            branch: "main".into(),
+            head_sha,
+            merge_base: base_sha,
+            stale: None,
+        };
+        let display = load_display(
+            &prep,
+            &checkout,
+            &perch_git::Scope::Branch,
+            "",
+            "removed.rs",
+        )
+        .await
+        .unwrap();
+        assert_eq!(display.text, "fn gone() {}\n");
+        assert!(matches!(
+            display.row(0),
+            Some(Row::Deleted { base_line: 0 })
+        ));
     }
 }

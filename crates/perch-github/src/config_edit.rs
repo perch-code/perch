@@ -16,12 +16,94 @@ use crate::config::{
 };
 
 /// Remote windows write app preferences on the UI thread while the local
-/// engine can edit the same file from its worker thread.
-pub(crate) fn config_write_guard() -> std::sync::MutexGuard<'static, ()> {
+/// engine or `perchd` can edit the same file from another thread or process.
+pub(crate) struct ConfigWriteGuard {
+    #[cfg(unix)]
+    lock_file: Option<std::fs::File>,
+    _mutex: std::sync::MutexGuard<'static, ()>,
+}
+
+impl ConfigWriteGuard {
+    /// Acquire the cross-process flock if the parent directory didn't exist
+    /// when the guard was first constructed. Returns `Ok(true)` if a new
+    /// cross-process lock was just acquired (so callers can re-read).
+    pub(crate) fn ensure_locked(&mut self, path: &Path) -> std::io::Result<bool> {
+        #[cfg(unix)]
+        {
+            if self.lock_file.is_some() {
+                return Ok(false);
+            }
+            let target = resolve_write_target(path)?;
+            if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            self.lock_file = Some(acquire_flock(&target)?);
+            Ok(true)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_flock(target: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+    let lock_path = match target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => parent.join(format!(".{name}.lock")),
+        None => std::path::PathBuf::from(format!(".{name}.lock")),
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)?;
+    loop {
+        // SAFETY: `file.as_raw_fd()` is an open file descriptor owned by `file`.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc == 0 {
+            return Ok(file);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+pub(crate) fn config_write_guard(path: &Path) -> std::io::Result<ConfigWriteGuard> {
     static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    WRITE
+    let mutex = WRITE
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(unix)]
+    let lock_file = {
+        let target = resolve_write_target(path)?;
+        let parent_exists = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .is_none_or(Path::exists);
+        if parent_exists {
+            Some(acquire_flock(&target)?)
+        } else {
+            None
+        }
+    };
+    Ok(ConfigWriteGuard {
+        #[cfg(unix)]
+        lock_file,
+        _mutex: mutex,
+    })
 }
 
 /// One of the coding agents, as far as its config table goes: Claude Code
@@ -209,16 +291,27 @@ pub fn write_settings(
     changes: &[Setting],
     known: &[RepoConfig],
 ) -> Result<Written, String> {
-    let _guard = config_write_guard();
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("Couldn't read {}: {e}", path.display())),
+    let mut guard =
+        config_write_guard(path).map_err(|e| format!("Couldn't lock {}: {e}", path.display()))?;
+    let read_current = || match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("Couldn't read {}: {e}", path.display())),
     };
-    let (edited, config) = edit_text(&text, changes, known)?;
+    let mut text = read_current()?;
+    let (mut edited, mut config) = edit_text(&text, changes, known)?;
     if edited != text {
-        replace_file(path, &edited)
-            .map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+        if guard
+            .ensure_locked(path)
+            .map_err(|e| format!("Couldn't lock {}: {e}", path.display()))?
+        {
+            text = read_current()?;
+            (edited, config) = edit_text(&text, changes, known)?;
+        }
+        if edited != text {
+            replace_file(path, &edited)
+                .map_err(|e| format!("Couldn't write {}: {e}", path.display()))?;
+        }
     }
     let warnings = config.warnings.clone();
     Ok(Written { config, warnings })
@@ -1096,31 +1189,72 @@ fn collect_key(key: &str, item: &Item, keys: &mut BTreeSet<String>) {
     }
 }
 
+/// Follow a symlink chain to its write target without failing when the
+/// final target does not exist yet (dangling symlink).
+fn resolve_write_target(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let link = std::fs::read_link(&current)?;
+                current = if link.is_absolute() {
+                    link
+                } else {
+                    match current.parent().filter(|p| !p.as_os_str().is_empty()) {
+                        Some(parent) => parent.join(link),
+                        None => link,
+                    }
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("too many levels of symbolic links"))
+}
+
 /// Write `text` beside the file, then rename it over the file, so a reader
 /// never sees half of it. The new file has the old one's permissions, or
-/// is the owner's alone when there was none. A symlinked config is written
-/// through to its target, so the link stays.
+/// is the owner's alone when there was none. A symlinked config (including a
+/// dangling symlink) is written through to its target, so the link stays.
 pub(crate) fn replace_file(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    let target = match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)?,
-        _ => path.to_path_buf(),
-    };
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let target = resolve_write_target(path)?;
     let old = std::fs::metadata(&target).ok().map(|m| m.permissions());
     if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = target.with_extension("toml.writing");
-    let written = (|| {
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+    let pid = std::process::id();
+    let (temp, mut file) = loop {
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let temp_name = format!(".{name}.{pid}.{seq}.writing");
+        let candidate = match target.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(parent) => parent.join(&temp_name),
+            None => std::path::PathBuf::from(&temp_name),
+        };
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temp)?;
+        match options.open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    let written = (|| {
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
@@ -2180,5 +2314,52 @@ mod tests {
         assert!(err.starts_with("line 1: "), "{err}");
         let path = write(&dir, "poll_interval_secs = 90\n");
         assert_eq!(Config::read(&path).unwrap().poll_interval_secs, 90);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_settings_writes_through_dangling_symlink_and_replace_file_is_race_free() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested/real-config.toml");
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let written = write_settings(&link, &[Setting::PollIntervalSecs(Some(45))], &[]).unwrap();
+        assert_eq!(written.config.poll_interval_secs, 45);
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(target.exists());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // Concurrent replace_file calls never collide on a shared temp file.
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let p = link.clone();
+                std::thread::spawn(move || {
+                    for j in 0..10 {
+                        let secs = 30 + (i * 10 + j) as u64;
+                        replace_file(&p, &format!("poll_interval_secs = {secs}\n")).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let parsed = Config::read(&link).unwrap();
+        assert!(parsed.poll_interval_secs >= 30);
+        let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".writing"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

@@ -478,21 +478,23 @@ async fn update_from_pull_inner(ctx: &Ctx, item_id: &str, rebase: bool) -> Resul
     }
     let mut caught_up = false;
     if moved {
-        let navigation_id = ctx.slot.lock().ok().and_then(|mut g| {
-            g.as_mut()
-                .filter(|open| open.item_id == item_id)
-                .map(|open| {
-                    // A review left at an older head because the worktree
-                    // couldn't move: it has moved now, with nothing of its own
-                    // lost, so the review follows it as for a commit.
-                    caught_up = open.checkout.stale.take().is_some();
-                    open.navigation_id
-                })
-        });
-        if let (Some(navigation_id), Some(scope_revision)) =
-            (navigation_id, ctx.scope_requests.stable_revision())
-        {
-            refresh_scope(ctx, item_id, navigation_id, scope_revision).await;
+        for view in ctx.views_for(item_id) {
+            let navigation_id = view.slot.lock().ok().and_then(|mut g| {
+                g.as_mut()
+                    .filter(|open| open.item_id == item_id)
+                    .map(|open| {
+                        // A review left at an older head because the worktree
+                        // couldn't move: it has moved now, with nothing of its own
+                        // lost, so the review follows it as for a commit.
+                        caught_up |= open.checkout.stale.take().is_some();
+                        open.navigation_id
+                    })
+            });
+            if let (Some(navigation_id), Some(scope_revision)) =
+                (navigation_id, view.scope_requests.stable_revision())
+            {
+                refresh_scope(&view, item_id, navigation_id, scope_revision).await;
+            }
         }
     }
     Ok(caught_up)
@@ -1108,13 +1110,18 @@ async fn attach(ctx: &Ctx, item_id: &str, pr: PullRequest) -> Result<(), String>
     let Some(pull_request) = item.pull_request().cloned() else {
         return Err("The pull request was not stored".into());
     };
-    let opened = ctx.slot.lock().ok().is_some_and(|mut slot| {
-        let Some(open) = slot.as_mut().filter(|open| open.item_id == item_id) else {
-            return false;
-        };
-        open.pull_request = Some(std::sync::Arc::new(pull_request));
-        true
-    });
+    let mut opened = false;
+    for view in ctx.views_for(item_id) {
+        if view.slot.lock().ok().is_some_and(|mut slot| {
+            let Some(open) = slot.as_mut().filter(|open| open.item_id == item_id) else {
+                return false;
+            };
+            open.pull_request = Some(std::sync::Arc::new(pull_request.clone()));
+            true
+        }) {
+            opened = true;
+        }
+    }
     ctx.send_items();
     if opened {
         let ctx = ctx.clone();

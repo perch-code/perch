@@ -165,11 +165,12 @@ pub fn parse_codex_catalog(json: &str) -> Vec<CodexModel> {
 /// Ask the binary for its catalog. Half a second on a warm cache, and
 /// bounded so a stuck CLI cannot hold the window's startup.
 pub async fn codex_catalog(binary: &Path) -> Result<Vec<CodexModel>, String> {
-    let run = tokio::process::Command::new(binary)
-        .args(["debug", "models"])
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.args(["debug", "models"])
         .stdin(std::process::Stdio::null())
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .kill_on_drop(true);
+    crate::scrub_env(&mut cmd);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
         .await
         .map_err(|_| "codex debug models took more than ten seconds".to_string())?
         .map_err(|e| format!("could not run codex debug models: {e}"))?;
@@ -249,11 +250,12 @@ pub fn parse_gemini_catalog(text: &str) -> Vec<CodexModel> {
 /// Ask agy for its models: `agy models`, which asks the account's
 /// service, so it is bounded like Codex's.
 pub async fn gemini_catalog(binary: &Path) -> Result<Vec<CodexModel>, String> {
-    let run = tokio::process::Command::new(binary)
-        .arg("models")
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.arg("models")
         .stdin(std::process::Stdio::null())
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .kill_on_drop(true);
+    crate::scrub_env(&mut cmd);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
         .await
         .map_err(|_| "agy models took more than ten seconds".to_string())?
         .map_err(|e| format!("could not run agy models: {e}"))?;
@@ -285,18 +287,13 @@ pub fn codex_default_model() -> Option<String> {
 
 pub fn codex_default_model_in(home: &Path) -> Option<String> {
     let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
-    // The one key, without taking on a TOML parser here: `model = "..."`
-    // at the top level, which is where Codex writes it.
-    text.lines()
+    let table = text.parse::<toml::Table>().ok()?;
+    table
+        .get("model")
+        .and_then(toml::Value::as_str)
         .map(str::trim)
-        .take_while(|l| !l.starts_with('['))
-        .find_map(|l| {
-            l.strip_prefix("model")
-                .map(str::trim_start)
-                .and_then(|r| r.strip_prefix('='))
-        })
-        .map(|v| v.trim().trim_matches('"').to_string())
         .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -483,6 +480,22 @@ gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
         )
         .unwrap();
         assert_eq!(codex_default_model_in(home.path()), None);
+
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model = \"gpt-5.4\" # preferred\n",
+        )
+        .unwrap();
+        assert_eq!(
+            codex_default_model_in(home.path()).as_deref(),
+            Some("gpt-5.4")
+        );
+
+        std::fs::write(home.path().join("config.toml"), "model = 'gpt-5.4-lit'\n").unwrap();
+        assert_eq!(
+            codex_default_model_in(home.path()).as_deref(),
+            Some("gpt-5.4-lit")
+        );
     }
 
     #[tokio::test]
@@ -508,5 +521,24 @@ gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
             .await
             .unwrap_err();
         assert!(err.contains("could not run"), "{err}");
+
+        // AG-3: catalog probes scrub secret env vars like GITHUB_TOKEN.
+        let env_check = dir.path().join("codex-env");
+        std::fs::write(
+            &env_check,
+            format!(
+                "#!/bin/sh\nif [ -n \"$GITHUB_TOKEN\" ]; then echo \"leaked=$GITHUB_TOKEN\" >&2; exit 1; fi\ncat <<'EOF'\n{CATALOG}\nEOF\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&env_check, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SAFETY: test checks scrub_env removes GITHUB_TOKEN in child process.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghp_secret_should_be_scrubbed") };
+        let res = codex_catalog(&env_check).await;
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+        assert!(res.is_ok(), "GITHUB_TOKEN was not scrubbed: {res:?}");
     }
 }

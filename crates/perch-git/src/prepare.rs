@@ -380,20 +380,7 @@ impl Preparer {
         }
         let base_local = format!("refs/perch/base/{number}");
 
-        let merge_base = self
-            .git
-            .run(
-                Some(&bare),
-                ["merge-base", &base_local, head_sha],
-                QUERY_TIMEOUT,
-            )
-            .await?
-            .trim()
-            .to_string();
-
-        if merge_base.is_empty() {
-            return Err(Error::NoMergeBase);
-        }
+        let mut merge_base = self.merge_base(&bare, &base_local, head_sha).await?;
 
         self.fill_blobs(&bare, head_sha, &mut on_step).await?;
         on_step(Step::CreatingWorktree);
@@ -468,6 +455,10 @@ impl Preparer {
             (head_sha.to_string(), None)
         };
 
+        if stale.is_some() {
+            merge_base = self.merge_base(&bare, &base_local, &head_sha).await?;
+        }
+
         Ok(Checkout {
             worktree,
             bare,
@@ -476,6 +467,22 @@ impl Preparer {
             merge_base,
             stale,
         })
+    }
+
+    async fn merge_base(&self, repo: &Path, base: &str, head: &str) -> Result<String, Error> {
+        let sha = match self
+            .git
+            .run(Some(repo), ["merge-base", base, head], QUERY_TIMEOUT)
+            .await
+        {
+            Ok(out) => out.trim().to_string(),
+            Err(Error::Git { status: 1, .. }) => return Err(Error::NoMergeBase),
+            Err(err) => return Err(err),
+        };
+        if sha.is_empty() {
+            return Err(Error::NoMergeBase);
+        }
+        Ok(sha)
     }
 
     /// In a partial clone, download the files `rev` has that are not here
@@ -2208,5 +2215,122 @@ mod tests {
     fn home_refs_sit_in_their_own_namespace() {
         assert_eq!(home_ref("main"), "refs/perch/home/main");
         assert!(!home_ref("main").starts_with("refs/heads/"));
+    }
+
+    #[tokio::test]
+    async fn stale_dirty_worktree_computes_merge_base_against_on_disk_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, clone) = clone_with_feature(dir.path());
+        let b1 = git(&clone, &["rev-parse", "origin/main"]);
+        let h1 = git(&clone, &["rev-parse", "HEAD"]);
+        git(
+            &clone,
+            &[
+                "push",
+                "-q",
+                remote.to_str().unwrap(),
+                "HEAD:refs/pull/7/head",
+            ],
+        );
+
+        let repo_id = RepoId::new("org", "repo");
+        let prep = preparer(dir.path());
+        let bare = prep.store.bare_path(&repo_id);
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                remote.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+
+        let first = prep
+            .prepare(&repo_id, 7, &h1, "main", "feature", |_| {})
+            .await
+            .unwrap();
+        assert_eq!(first.head_sha, h1);
+        assert_eq!(first.merge_base, b1);
+        assert_eq!(first.stale, None);
+
+        // Leave an uncommitted edit in the PR worktree.
+        std::fs::write(first.worktree.join("b.txt"), "dirty local edit\n").unwrap();
+
+        // Advance `main` to B2 and rebase the PR onto B2 as H2 on remote.
+        git(&clone, &["checkout", "-q", "main"]);
+        std::fs::write(clone.join("main2.txt"), "m2\n").unwrap();
+        git(&clone, &["add", "-A"]);
+        git(&clone, &["commit", "-q", "-m", "main advance"]);
+        let b2 = git(&clone, &["rev-parse", "HEAD"]);
+        git(&clone, &["push", "-q", remote.to_str().unwrap(), "main"]);
+
+        git(&clone, &["checkout", "-q", "feature"]);
+        git(&clone, &["rebase", "-q", "main"]);
+        let h2 = git(&clone, &["rev-parse", "HEAD"]);
+        assert_ne!(h1, h2);
+        assert_ne!(b1, b2);
+        git(
+            &clone,
+            &[
+                "push",
+                "-q",
+                "--force",
+                remote.to_str().unwrap(),
+                "HEAD:refs/pull/7/head",
+            ],
+        );
+
+        let second = prep
+            .prepare(&repo_id, 7, &h2, "main", "feature", |_| {})
+            .await
+            .unwrap();
+        assert_eq!(second.head_sha, h1);
+        assert_eq!(second.stale.as_deref(), Some(h2.as_str()));
+        assert_eq!(second.merge_base, b1);
+    }
+
+    #[tokio::test]
+    async fn unrelated_histories_return_no_merge_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, clone) = clone_with_feature(dir.path());
+        git(&clone, &["checkout", "-q", "--orphan", "unrelated"]);
+        git(&clone, &["rm", "-rfq", "."]);
+        std::fs::write(clone.join("u.txt"), "u\n").unwrap();
+        git(&clone, &["add", "-A"]);
+        git(&clone, &["commit", "-q", "-m", "orphan"]);
+        let orphan = git(&clone, &["rev-parse", "HEAD"]);
+        git(
+            &clone,
+            &[
+                "push",
+                "-q",
+                remote.to_str().unwrap(),
+                "HEAD:refs/pull/8/head",
+            ],
+        );
+
+        let repo_id = RepoId::new("org", "repo");
+        let prep = preparer(dir.path());
+        let bare = prep.store.bare_path(&repo_id);
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                remote.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+
+        let err = prep
+            .prepare(&repo_id, 8, &orphan, "main", "unrelated", |_| {})
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NoMergeBase), "got {err:?}");
     }
 }

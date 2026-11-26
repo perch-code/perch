@@ -465,7 +465,7 @@ pub(crate) struct ReviewPayload {
     #[serde(default)]
     pub user: Option<UserRef>,
     #[serde(default)]
-    pub body: String,
+    pub body: Option<String>,
     #[serde(default)]
     pub state: String,
     #[serde(default)]
@@ -486,7 +486,7 @@ impl From<ReviewPayload> for Review {
                 .map(|u| u.avatar_url.clone())
                 .unwrap_or_default(),
             user: login(p.user),
-            body: p.body,
+            body: p.body.unwrap_or_default(),
             state: p.state,
             submitted_at: p.submitted_at,
             html_url: p.html_url,
@@ -507,7 +507,7 @@ pub(crate) struct ReviewCommentPayload {
     #[serde(default)]
     pub user: Option<UserRef>,
     #[serde(default)]
-    pub body: String,
+    pub body: Option<String>,
     #[serde(default)]
     pub path: String,
     #[serde(default)]
@@ -548,7 +548,7 @@ impl From<ReviewCommentPayload> for ReviewComment {
             in_reply_to_id: p.in_reply_to_id,
             user,
             user_avatar_url,
-            body: p.body,
+            body: p.body.unwrap_or_default(),
             path: p.path,
             line: p.line,
             original_line: p.original_line,
@@ -1239,5 +1239,19 @@ mod tests {
         assert!(d.reviews[0].viewer_can_update);
         d.set_updatable("PRR_9", false);
         assert!(!d.reviews[0].viewer_can_update);
+    }
+
+    #[test]
+    fn review_and_review_comment_payloads_accept_null_body() {
+        let review: ReviewPayload =
+            serde_json::from_str(r#"{"id":1,"node_id":"PRR_1","body":null,"state":"APPROVED"}"#)
+                .unwrap();
+        assert_eq!(Review::from(review).body, "");
+
+        let comment: ReviewCommentPayload = serde_json::from_str(
+            r#"{"id":2,"node_id":"PRRC_2","body":null,"path":"src/lib.rs","created_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(ReviewComment::from(comment).body, "");
     }
 }

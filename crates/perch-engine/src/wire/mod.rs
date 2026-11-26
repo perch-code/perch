@@ -999,6 +999,7 @@ where
             async move {
                 let mut quiet = tokio::time::interval_at(Instant::now() + keepalive, keepalive);
                 quiet.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut write_failed = false;
                 loop {
                     let (window, command) = tokio::select! {
                         next = outgoing.recv() => match next {
@@ -1012,7 +1013,8 @@ where
                             };
                             if let Err(error) = said.await {
                                 tracing::info!(%error, "engine stopped reading");
-                                return;
+                                write_failed = true;
+                                break;
                             }
                             continue;
                         }
@@ -1025,11 +1027,14 @@ where
                         }
                         Err(error) => {
                             tracing::info!(%error, "engine stopped reading");
-                            return;
+                            write_failed = true;
+                            break;
                         }
                     }
                 }
-                let _ = write.shutdown().await;
+                if !write_failed {
+                    let _ = write.shutdown().await;
+                }
                 drop(write);
                 hung_up.notify_one();
             }
@@ -1450,5 +1455,66 @@ mod tests {
             Err(other) => panic!("{other:?}"),
             Ok(_) => panic!("welcomed"),
         }
+    }
+
+    #[tokio::test]
+    async fn writer_io_error_notifies_reader_and_ends_session_on_stalled_read() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct BrokenWriteStalledRead;
+        impl AsyncRead for BrokenWriteStalledRead {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Pending
+            }
+        }
+        impl AsyncWrite for BrokenWriteStalledRead {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "broken pipe",
+                )))
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let (read, write) = tokio::io::split(BrokenWriteStalledRead);
+        let session = Session {
+            read: BufReader::new(read),
+            write,
+            line: Vec::new(),
+            keepalive: Duration::from_millis(20),
+        };
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let ending = session.carry(
+            cmd_rx,
+            Arc::new(crate::backend::client::Navigations::default()),
+            events_tx,
+        );
+        // Trigger a write error on the 20ms keepalive tick while the read half
+        // stays Pending forever and `_cmd_tx` stays alive.
+        let _ = tokio::time::timeout(Duration::from_secs(2), ending)
+            .await
+            .expect("session ending must resolve after writer I/O error");
     }
 }
