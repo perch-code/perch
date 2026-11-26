@@ -81,6 +81,30 @@ pub enum DescriptionRewrite {
 static IN_FLIGHT: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Whether `flight_key` is still the rewrite wanted for `item_id`. A newer
+/// key, or a cached rewrite served since, supersedes it.
+fn is_current(item_id: &str, flight_key: &str) -> bool {
+    IN_FLIGHT
+        .lock()
+        .is_ok_and(|flights| flights.get(item_id).is_some_and(|k| k == flight_key))
+}
+
+/// End the rewrite `flight_key` for `item_id`, in one step with the check,
+/// and say whether it was still current. A superseded run's result must be
+/// neither saved nor shown: the cache holds one rewrite per item, and the
+/// UI shows whichever state came last.
+fn finish_flight(item_id: &str, flight_key: &str) -> bool {
+    let Ok(mut flights) = IN_FLIGHT.lock() else {
+        return false;
+    };
+    if flights.get(item_id).is_some_and(|k| k == flight_key) {
+        flights.remove(item_id);
+        true
+    } else {
+        false
+    }
+}
+
 /// Default model preference order for automatic description rewrites:
 /// Neon Medium, then Opus 5.5 Medium, then Astra 6.2 Medium.
 pub fn resolve_summary_model(
@@ -215,6 +239,10 @@ pub(super) fn maybe_start(ctx: &Ctx, item_id: &str) {
         .flatten()
     {
         if cached.source_hash == hash && cached.model == model && cached.effort == effort_name {
+            // An older run still going is now superseded by what is shown.
+            if let Ok(mut flights) = IN_FLIGHT.lock() {
+                flights.remove(item_id);
+            }
             let _ = ctx.events.send(Event::DescriptionRewrite {
                 item_id: item_id.to_string(),
                 state: DescriptionRewrite::Ready {
@@ -250,11 +278,20 @@ pub(super) fn maybe_start(ctx: &Ctx, item_id: &str) {
     let ctx = ctx.clone();
     let item_id = item_id.to_string();
     tokio::spawn(async move {
-        let outcome = run_rewrite(&ctx, target, system_prompt, backend, &model, effort).await;
-        if let Ok(mut flights) = IN_FLIGHT.lock() {
-            if flights.get(&item_id).is_some_and(|k| k == &flight_key) {
-                flights.remove(&item_id);
-            }
+        let superseded = || !is_current(&item_id, &flight_key);
+        let outcome = run_rewrite(
+            &ctx,
+            target,
+            system_prompt,
+            backend,
+            &model,
+            effort,
+            superseded,
+        )
+        .await;
+        if !finish_flight(&item_id, &flight_key) {
+            // Superseded by a newer rewrite for this item.
+            return;
         }
         match outcome {
             Ok(body) => {
@@ -294,6 +331,7 @@ async fn run_rewrite(
     backend: perch_agent::Backend,
     model: &str,
     effort: perch_agent::Effort,
+    superseded: impl Fn() -> bool,
 ) -> Result<String, String> {
     let (title, workdir, prompt) = match target {
         Target::Pull {
@@ -355,6 +393,17 @@ async fn run_rewrite(
         None,
         perch_agent::Mode::Ask,
     );
+    // Keep to the backend's run limit for as long as the process lives,
+    // waiting behind queued runs, and start nothing if a newer rewrite came
+    // in meanwhile.
+    let _slot = ctx
+        .runs
+        .background_slot(backend.name())
+        .await
+        .ok_or("Perch is shutting down")?;
+    if superseded() {
+        return Err("Superseded".into());
+    }
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let run = perch_agent::Run::spawn(spec, events)
         .map_err(|e| crate::ask::spawn_failure(&e, backend))?;
@@ -662,6 +711,26 @@ mod tests {
 
         agent.summary_model = Some("off".into());
         assert_eq!(resolve_summary_model(&agent), None);
+    }
+
+    #[test]
+    fn only_the_current_flight_finishes_and_a_superseded_one_is_dropped() {
+        let item = "test-item-superseded-rewrite";
+        IN_FLIGHT.lock().unwrap().insert(item.into(), "old".into());
+        assert!(is_current(item, "old"));
+
+        // A newer key replaces the old one while the old run is going.
+        IN_FLIGHT.lock().unwrap().insert(item.into(), "new".into());
+        assert!(!is_current(item, "old"));
+        assert!(
+            !finish_flight(item, "old"),
+            "a superseded run must be dropped"
+        );
+        assert!(is_current(item, "new"), "dropping it leaves the newer run");
+
+        assert!(finish_flight(item, "new"));
+        assert!(!is_current(item, "new"));
+        assert!(!finish_flight(item, "new"), "a flight finishes once");
     }
 
     #[test]

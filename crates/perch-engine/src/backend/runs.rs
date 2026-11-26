@@ -198,6 +198,12 @@ impl Drop for Slot {
     }
 }
 
+/// One permit from a backend's pool for an agent process Perch starts
+/// without a durable run, held for as long as that process lives.
+pub(crate) struct BackgroundSlot {
+    _slot: Slot,
+}
+
 /// Prevents a new run for an owner while its durable records are being
 /// deleted. The count makes duplicate delete commands safe.
 pub(crate) struct OwnerDeletion {
@@ -276,6 +282,21 @@ impl RunManager {
         self.inner
             .other_work
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Wait in FIFO order, behind queued runs, for a slot from `backend`'s
+    /// pool for an auxiliary process that has no durable record, so it
+    /// keeps to the same per-backend limit. `None` once Perch is shutting
+    /// down.
+    pub(crate) async fn background_slot(&self, backend: &str) -> Option<BackgroundSlot> {
+        let pool = self.pool(backend);
+        let permit = pool.limit.clone().acquire_owned().await.ok()?;
+        Some(BackgroundSlot {
+            _slot: Slot {
+                permit: Some(permit),
+                target: pool.target.clone(),
+            },
+        })
     }
 
     /// How many runs for `backend` could start now.
@@ -1685,5 +1706,67 @@ mod tests {
             );
             manager.finish(lease);
         }
+    }
+
+    #[tokio::test]
+    async fn a_background_slot_keeps_to_its_backends_limit() {
+        let manager = manager(2);
+        let gemini = |id: &str| RunRecord {
+            backend: perch_github::GEMINI.into(),
+            ..run(id, &format!("thread-{id}"), &format!("request-{id}"))
+        };
+
+        // A background process waits for the Gemini run holding the only slot.
+        let first = manager.start(admit(&manager, gemini("g1"))).await.unwrap();
+        let background = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.background_slot(perch_github::GEMINI).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !background.is_finished(),
+            "a background Gemini process must wait for the running Gemini run"
+        );
+        manager.transition(
+            "g1",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        manager.finish(first);
+        let slot = tokio::time::timeout(Duration::from_secs(1), background)
+            .await
+            .expect("the background slot did not wake when the run finished")
+            .unwrap()
+            .expect("the pool is open");
+        assert_eq!(manager.free_slots_for(perch_github::GEMINI), 0);
+
+        // And a Gemini run waits for the background process in turn.
+        let second = admit(&manager, gemini("g2"));
+        let waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.start(second).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        drop(slot);
+        let second = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("the Gemini run did not wake when the background slot ended")
+            .unwrap()
+            .unwrap();
+        manager.transition(
+            "g2",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        manager.finish(second);
+
+        manager.shutdown().await;
+        assert!(manager
+            .background_slot(perch_github::GEMINI)
+            .await
+            .is_none());
     }
 }
