@@ -974,23 +974,22 @@ impl Preparer {
 
     /// Fetch one branch of `remote` into its remote-tracking ref in one of
     /// the reader's clones, with the reader's own credentials and none of
-    /// Perch's. Nothing can prompt: SSH runs in batch mode on top of any
-    /// `core.sshCommand` the clone has, so a key that wants a passphrase
+    /// Perch's. Nothing can prompt: SSH runs in batch mode on top of
+    /// whatever SSH the reader has set, so a key that wants a passphrase
     /// or a host not yet known fails the fetch instead of waiting.
     pub async fn fetch_branch(&self, repo: &Path, remote: &str, branch: &str) -> Result<(), Error> {
         let plain = Git::plain();
         let ssh = batch_ssh(&plain, repo).await;
         plain
-            .run(
+            .run_env(
                 Some(repo),
                 [
-                    "-c".to_string(),
-                    ssh,
                     "fetch".to_string(),
                     "--no-tags".to_string(),
                     remote.to_string(),
                     format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}"),
                 ],
+                &[("GIT_SSH_COMMAND", std::ffi::OsStr::new(&ssh))],
                 FETCH_TIMEOUT,
             )
             .await?;
@@ -1018,9 +1017,10 @@ impl Preparer {
             let plain = Git::plain();
             let ssh = batch_ssh(&plain, worktree).await;
             plain
-                .run(
+                .run_env(
                     Some(worktree),
-                    ["-c", &ssh, "push", "--set-upstream", remote, &refspec],
+                    ["push", "--set-upstream", remote, &refspec],
+                    &[("GIT_SSH_COMMAND", std::ffi::OsStr::new(&ssh))],
                     FETCH_TIMEOUT,
                 )
                 .await
@@ -1691,16 +1691,15 @@ impl Preparer {
     }
 }
 
-/// `core.sshCommand=…` for a command in one of the reader's clones: the
-/// SSH they have set, in `GIT_SSH_COMMAND` or the clone's config, in batch
-/// mode, so a key that wants a passphrase or a host not yet known fails the
-/// command instead of waiting on a prompt nobody can see.
+/// `GIT_SSH_COMMAND` for a command in one of the reader's clones: the SSH
+/// they have set, in batch mode, so a key that wants a passphrase or a host
+/// not yet known fails the command instead of waiting on a prompt nobody
+/// can see. It goes in the environment because there it outranks every
+/// other way of setting SSH, as a `-c core.sshCommand` would not.
 async fn batch_ssh(plain: &Git, repo: &Path) -> String {
-    let ssh = std::env::var("GIT_SSH_COMMAND")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let ssh = match ssh {
-        Some(ssh) => ssh,
+    let var = |name| std::env::var(name).ok().filter(|s| !s.is_empty());
+    let command = match var("GIT_SSH_COMMAND") {
+        Some(command) => Some(command),
         None => plain
             .run(
                 Some(repo),
@@ -1710,10 +1709,33 @@ async fn batch_ssh(plain: &Git, repo: &Path) -> String {
             .await
             .map(|s| s.trim().to_string())
             .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "ssh".to_string()),
+            .filter(|s| !s.is_empty()),
     };
-    format!("core.sshCommand={ssh} -o BatchMode=yes")
+    batch_ssh_command(command, var("GIT_SSH"))
+}
+
+/// The SSH git would pick, in its own order: a command, from
+/// `GIT_SSH_COMMAND` or `core.sshCommand`, then a `GIT_SSH` program, then
+/// `ssh`, with batch mode added. A `GIT_SSH` program is run as it is, with
+/// no shell, so it is quoted as one word; one that is not OpenSSH's
+/// `ssh`, such as PuTTY's `plink` or a wrapper, may not take `-o`, and is
+/// left as it is: git's prompt is off and its stdin empty either way.
+fn batch_ssh_command(command: Option<String>, program: Option<String>) -> String {
+    if let Some(command) = command {
+        return format!("{command} -o BatchMode=yes");
+    }
+    let Some(program) = program else {
+        return "ssh -o BatchMode=yes".to_string();
+    };
+    let quoted = format!("'{}'", program.replace('\'', r"'\''"));
+    let name = Path::new(&program)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase());
+    if name.as_deref() == Some("ssh") {
+        format!("{quoted} -o BatchMode=yes")
+    } else {
+        quoted
+    }
 }
 
 /// Why a push did not go.
@@ -2065,6 +2087,61 @@ mod tests {
 
         assert!(matches!(pushed, Err(PushError::Rejected)), "{pushed:?}");
         assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature"]), theirs);
+    }
+
+    #[test]
+    fn batch_mode_goes_on_the_ssh_git_would_pick() {
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(batch_ssh_command(None, None), "ssh -o BatchMode=yes");
+        assert_eq!(
+            batch_ssh_command(some("ssh -i ~/.ssh/work"), some("/usr/bin/other")),
+            "ssh -i ~/.ssh/work -o BatchMode=yes"
+        );
+        // A `GIT_SSH` program is kept, not swapped for plain `ssh`.
+        assert_eq!(
+            batch_ssh_command(None, some("/opt/it's/ssh")),
+            r"'/opt/it'\''s/ssh' -o BatchMode=yes"
+        );
+        assert_eq!(
+            batch_ssh_command(None, some(r"C:\PuTTY\plink.exe")),
+            r"'C:\PuTTY\plink.exe'"
+        );
+    }
+
+    /// The batch-mode SSH reaches git through `GIT_SSH_COMMAND`, which
+    /// outranks a `GIT_SSH_COMMAND` of the reader's own.
+    #[tokio::test]
+    async fn a_fetch_from_a_clone_runs_its_ssh_in_batch_mode() {
+        if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (_remote, clone) = clone_with_feature(dir.path());
+        let said = dir.path().join("ssh-args");
+        let ssh = dir.path().join("fake-ssh");
+        std::fs::write(
+            &ssh,
+            format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 1\n", said.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        git(
+            &clone,
+            &["remote", "add", "far", "ssh://perch.invalid/repo.git"],
+        );
+        git(
+            &clone,
+            &["config", "core.sshCommand", ssh.to_str().unwrap()],
+        );
+
+        let fetched = preparer(dir.path())
+            .fetch_branch(&clone, "far", "main")
+            .await;
+
+        assert!(fetched.is_err());
+        let said = std::fs::read_to_string(&said).unwrap();
+        assert!(said.starts_with("-o BatchMode=yes"), "{said}");
     }
 
     #[test]

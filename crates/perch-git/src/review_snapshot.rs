@@ -113,6 +113,9 @@ pub enum CaptureOutcome {
     Empty(ResolvedReviewRange),
 }
 
+/// The mode Git records a submodule's commit under in a tree.
+const GITLINK_MODE: &str = "160000";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotFile {
     /// Path on the head side, or the base path for a deletion.
@@ -144,6 +147,16 @@ impl SnapshotFile {
             DiffSide::Left => self.base_blob.as_deref(),
             DiffSide::Right => self.head_blob.as_deref(),
         }
+    }
+
+    /// A submodule on `side`: its "blob" is the submodule's commit, which
+    /// is not in this repository's objects and has no content to read.
+    pub fn is_gitlink(&self, side: DiffSide) -> bool {
+        let mode = match side {
+            DiffSide::Left => &self.base_mode,
+            DiffSide::Right => &self.head_mode,
+        };
+        mode == GITLINK_MODE
     }
 }
 
@@ -188,7 +201,8 @@ impl ReviewSnapshot {
 
     /// Read the exact retained blob for one changed-file side. Paths which
     /// are not in the captured diff return `None` rather than being resolved
-    /// against an unrelated tree entry.
+    /// against an unrelated tree entry, as does a submodule, which has no
+    /// blob.
     pub async fn read_file(
         &self,
         side: DiffSide,
@@ -196,7 +210,7 @@ impl ReviewSnapshot {
     ) -> Result<Option<Vec<u8>>, SnapshotError> {
         validate_repository_path(path)?;
         let blob = self.manifest.files.iter().find_map(|file| {
-            (file.path_on(side) == Some(path))
+            (file.path_on(side) == Some(path) && !file.is_gitlink(side))
                 .then(|| file.blob_on(side))
                 .flatten()
         });
@@ -217,7 +231,7 @@ impl ReviewSnapshot {
     /// draws them. These are the lines of a pull request's diff, which
     /// GitHub takes a review comment on and outside which it refuses one.
     /// An added file is one hunk. Empty for a path with no head side, a
-    /// binary file, or one whose content did not change.
+    /// binary file, a submodule, or one whose content did not change.
     pub async fn head_hunks(&self, path: &str) -> Result<Vec<RangeInclusive<u32>>, SnapshotError> {
         validate_repository_path(path)?;
         let Some(file) = self
@@ -237,8 +251,9 @@ impl ReviewSnapshot {
         .await
     }
 
-    /// Load text/blob inputs for the pure mapper. Binary files retain their
-    /// identity but deliberately have no text for context mapping.
+    /// Load text/blob inputs for the pure mapper. Binary files and
+    /// submodules retain their identity but deliberately have no text for
+    /// context mapping.
     pub async fn mapping_snapshot(&self) -> Result<MappingSnapshot, SnapshotError> {
         let git = Git::new(None);
         let repo = self.retained_repo();
@@ -252,12 +267,14 @@ impl ReviewSnapshot {
                 if !seen.insert((side, path.to_string(), blob.to_string())) {
                     continue;
                 }
-                let bytes = git
-                    .run_bytes(Some(&repo), ["cat-file", "blob", blob], QUERY_TIMEOUT)
-                    .await?;
-                let text = (!file.binary)
-                    .then(|| String::from_utf8(bytes).ok())
-                    .flatten();
+                let text = if file.binary || file.is_gitlink(side) {
+                    None
+                } else {
+                    let bytes = git
+                        .run_bytes(Some(&repo), ["cat-file", "blob", blob], QUERY_TIMEOUT)
+                        .await?;
+                    String::from_utf8(bytes).ok()
+                };
                 let counterpart_path = match side {
                     DiffSide::Left => file.head_blob.as_ref().map(|_| file.path.clone()),
                     DiffSide::Right => file
@@ -736,8 +753,10 @@ impl ReviewSnapshotStore {
     /// the history took seconds, costs no disk until the source repacks,
     /// and the links keep the objects after the source prunes or goes. A
     /// source that borrows objects through alternates would pass the
-    /// borrow on, so it, and a clone that fails, gets the range's history
-    /// packed instead.
+    /// borrow on, and Git clones a shallow one over its transport instead,
+    /// taking only what its branches and tags reach and so not the commit
+    /// of uncommitted work, so they, and a clone that fails, get the
+    /// range's history packed instead.
     async fn retain_objects(
         &self,
         source: &Path,
@@ -777,6 +796,12 @@ impl ReviewSnapshotStore {
         if std::fs::metadata(&alternates).is_ok_and(|metadata| metadata.len() > 0) {
             return Err(SnapshotError::Io(format!(
                 "{} borrows objects through alternates",
+                common.display()
+            )));
+        }
+        if common.join("shallow").exists() {
+            return Err(SnapshotError::Io(format!(
+                "{} is a shallow repository",
                 common.display()
             )));
         }
@@ -1200,8 +1225,9 @@ async fn range_files(
 /// The lines on `side` of a changed file that its hunks show, one range
 /// to a hunk: the changed lines and three either side, as a unified diff
 /// draws them. An added file is all one hunk on the head, as a deleted
-/// file is on the base. Empty for a file with nothing on that side, a
-/// binary one, or one whose content did not change.
+/// file is on the base, and so is a file a submodule replaced or that
+/// replaced one. Empty for a file with nothing on that side, a binary
+/// one, a submodule, or one whose content did not change.
 ///
 /// Git is given the context, the joining of hunks and the algorithm
 /// rather than the reader's config, which can make the hunks wider than
@@ -1212,13 +1238,21 @@ async fn file_hunks(
     file: &SnapshotFile,
     side: DiffSide,
 ) -> Result<Vec<RangeInclusive<u32>>, SnapshotError> {
-    let Some(blob) = file.blob_on(side).filter(|_| !file.binary) else {
+    let Some(blob) = file
+        .blob_on(side)
+        .filter(|_| !file.binary && !file.is_gitlink(side))
+    else {
         return Ok(Vec::new());
     };
-    let other = match side {
-        DiffSide::Left => file.head_blob.as_deref(),
-        DiffSide::Right => file.base_blob.as_deref(),
+    let other_side = match side {
+        DiffSide::Left => DiffSide::Right,
+        DiffSide::Right => DiffSide::Left,
     };
+    // A submodule's commit is not a blob to diff against: the file is all
+    // added or removed, as a diff draws a change of type.
+    let other = file
+        .blob_on(other_side)
+        .filter(|_| !file.is_gitlink(other_side));
     let Some(other) = other else {
         let text = git
             .run_bytes(Some(repo), ["cat-file", "blob", blob], QUERY_TIMEOUT)
@@ -2199,6 +2233,133 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A submodule's "blob" is its commit, which this repository does not
+    /// have: a bump, or a file a submodule replaced, keeps its identity
+    /// but has no content to read, map or diff.
+    #[tokio::test]
+    async fn a_submodule_change_has_no_content_to_read() {
+        let repo = repository();
+        let gitlink = |sha: &str, path: &str| {
+            std::fs::create_dir_all(repo.path().join(path)).unwrap();
+            git(
+                repo.path(),
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("160000,{sha},{path}"),
+                ],
+            );
+        };
+        std::fs::write(repo.path().join("code.rs"), "base\n").unwrap();
+        std::fs::write(repo.path().join("vendor"), "one\ntwo\n").unwrap();
+        git(repo.path(), &["add", "code.rs", "vendor"]);
+        gitlink(&"1".repeat(40), "lib");
+        git(repo.path(), &["commit", "-q", "-m", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.path().join("code.rs"), "base\nfeature\n").unwrap();
+        git(repo.path(), &["add", "code.rs"]);
+        gitlink(&"2".repeat(40), "lib");
+        git(repo.path(), &["rm", "-q", "--cached", "vendor"]);
+        std::fs::remove_file(repo.path().join("vendor")).unwrap();
+        gitlink(&"3".repeat(40), "vendor");
+        git(repo.path(), &["commit", "-q", "-m", "bump"]);
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        let storage = tempfile::tempdir().unwrap();
+        let store = ReviewSnapshotStore::new(storage.path());
+        let snapshot = captured(
+            store
+                .capture(request("gitlink", repo.path()))
+                .await
+                .unwrap(),
+        );
+
+        let mapping = snapshot.mapping_snapshot().await.unwrap();
+        let text = |path: &str, side: DiffSide| {
+            mapping
+                .documents
+                .iter()
+                .find(|document| document.path == path && document.side == side)
+                .unwrap_or_else(|| panic!("missing {side:?} document {path}"))
+                .text
+                .clone()
+        };
+        assert_eq!(text("lib", DiffSide::Left), None);
+        assert_eq!(text("lib", DiffSide::Right), None);
+        assert_eq!(
+            text("vendor", DiffSide::Left).as_deref(),
+            Some("one\ntwo\n")
+        );
+        assert_eq!(text("vendor", DiffSide::Right), None);
+        assert_eq!(
+            text("code.rs", DiffSide::Right).as_deref(),
+            Some("base\nfeature\n")
+        );
+        assert!(snapshot.head_hunks("lib").await.unwrap().is_empty());
+        assert!(snapshot.head_hunks("vendor").await.unwrap().is_empty());
+        assert_eq!(snapshot.head_hunks("code.rs").await.unwrap(), vec![1..=2]);
+        assert_eq!(
+            snapshot.read_file(DiffSide::Right, "lib").await.unwrap(),
+            None
+        );
+
+        let range = RangeDiff::read(repo.path(), &base, &head).await.unwrap();
+        assert!(range.hunks("lib", DiffSide::Left).await.unwrap().is_empty());
+        assert_eq!(
+            range.hunks("vendor", DiffSide::Left).await.unwrap(),
+            vec![1..=2]
+        );
+    }
+
+    /// A shallow clone is cloned over Git's transport even when asked for
+    /// a local clone, which leaves out the commit of uncommitted work: its
+    /// range is packed instead.
+    #[tokio::test]
+    async fn a_shallow_root_reviews_its_uncommitted_work() {
+        let origin = repository();
+        for n in 1..=3 {
+            std::fs::write(origin.path().join("code.rs"), format!("line {n}\n")).unwrap();
+            commit_all(origin.path(), &format!("commit {n}"));
+        }
+        let parent = tempfile::tempdir().unwrap();
+        let repo = parent.path().join("shallow");
+        git(
+            parent.path(),
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                "2",
+                &format!("file://{}", origin.path().display()),
+                repo.to_str().unwrap(),
+            ],
+        );
+        assert!(repo.join(".git/shallow").exists());
+        git(&repo, &["config", "user.name", "Perch Test"]);
+        git(&repo, &["config", "user.email", "perch@example.com"]);
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("code.rs"), "line 3\nlocal edit\n").unwrap();
+
+        let storage = tempfile::tempdir().unwrap();
+        let store = ReviewSnapshotStore::new(storage.path());
+        let mut with_work = request("shallow", &repo);
+        with_work.include_worktree = true;
+        let snapshot = captured(store.capture(with_work).await.unwrap());
+
+        let retained = snapshot
+            .read_file(DiffSide::Right, "code.rs")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf8(retained).unwrap(), "line 3\nlocal edit\n");
+        assert_eq!(
+            std::fs::read_to_string(snapshot.checkout().join("code.rs")).unwrap(),
+            "line 3\nlocal edit\n"
+        );
     }
 
     /// A pull request's diff read from its clone, with no snapshot taken:
