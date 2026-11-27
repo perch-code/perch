@@ -50,11 +50,12 @@ pub use comments::{
 };
 pub use commits::Unreadable;
 pub use config::{
-    append_repo, is_local, remove_repo, AgentConfig, Approvals, ApprovalsTable, CodexConfig,
-    Config, DeclaredRepo, GeminiConfig, OpenCodeConfig, PromptKind, PromptsConfig, RemoteConfig,
-    RepoConfig, RepoLsp, RepoWork, WorkDefaults, CLAUDE_CODE, CODEX, CODEX_DEFAULT_MODEL,
-    DEFAULT_ISSUE_DRAFT_PROMPT, DEFAULT_ISSUE_SUMMARY_PROMPT, DEFAULT_PR_DESCRIPTION_PROMPT,
-    DEFAULT_PR_SUMMARY_PROMPT, GEMINI, LOCAL_OWNER, OPENCODE,
+    append_repo, is_local, remove_repo, split_model_speed, with_requested_speed, AgentConfig,
+    Approvals, ApprovalsTable, CodexConfig, Config, DeclaredRepo, GeminiConfig, OpenCodeConfig,
+    PromptKind, PromptsConfig, RemoteConfig, RepoConfig, RepoLsp, RepoWork, WorkDefaults,
+    CLAUDE_CODE, CODEX, CODEX_DEFAULT_MODEL, DEFAULT_ISSUE_DRAFT_PROMPT,
+    DEFAULT_ISSUE_SUMMARY_PROMPT, DEFAULT_PR_DESCRIPTION_PROMPT, DEFAULT_PR_SUMMARY_PROMPT, GEMINI,
+    LOCAL_OWNER, OPENCODE,
 };
 pub use config_edit::{
     is_client_key, present_keys, write_settings, AgentBackend, KnowledgeSetting, RepoSetting,

@@ -30,7 +30,7 @@ pub const REVIEW_OUTPUT_FORMAT_VERSION: u32 = 1;
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
 const MIN_CODEX_VERSION: CliVersion = CliVersion::new(0, 155, 1);
-const MIN_CLAUDE_VERSION: CliVersion = CliVersion::new(2, 1, 223);
+pub const MIN_CLAUDE_VERSION: CliVersion = CliVersion::new(2, 1, 223);
 /// The first agy Perch's settings, schema and steering were tried with.
 const MIN_GEMINI_VERSION: CliVersion = CliVersion::new(1, 5, 5);
 
@@ -767,6 +767,13 @@ fn codex_isolation_args(
         "--disable".into(),
         "plugins".into(),
     ];
+    let (model, speed) = crate::ModelSpeed::split(model);
+    if let Some(speed) = speed {
+        args.extend([
+            "--config".into(),
+            format!("service_tier={}", toml_string(speed.codex_tier())),
+        ]);
+    }
     if let Some(base) = base {
         args.push("--base".into());
         args.push(base.to_string());
@@ -822,6 +829,7 @@ fn claude_isolation_args(
     extra_tools: &[&str],
     prompt: String,
 ) -> Vec<String> {
+    let (model, speed) = crate::ModelSpeed::split(model);
     let mut args = vec![
         "--print".into(),
         // Safe mode disables CLAUDE.md, skills, plugins, hooks, MCP,
@@ -838,23 +846,26 @@ fn claude_isolation_args(
         "--strict-mcp-config".into(),
         "--no-session-persistence".into(),
         "--settings".into(),
-        if sandbox {
-            claude_settings_with_dirs(cwd, dirs)
-        } else {
-            // The user's own `Bash` rules would run unsandboxed and
-            // unasked; as `ask` rules they are refused, as `dontAsk`
-            // refuses what it would ask about.
-            claude_unsandboxed_settings_for(
-                &crate::claude_user_settings_file()
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                &READ_ONLY_BASH_RULES
-                    .iter()
-                    .chain(extra_tools)
-                    .copied()
-                    .collect::<Vec<_>>(),
-            )
-        },
+        crate::claude_speed_settings(
+            if sandbox {
+                claude_settings_with_dirs(cwd, dirs)
+            } else {
+                // The user's own `Bash` rules would run unsandboxed and
+                // unasked; as `ask` rules they are refused, as `dontAsk`
+                // refuses what it would ask about.
+                claude_unsandboxed_settings_for(
+                    &crate::claude_user_settings_file()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                    &READ_ONLY_BASH_RULES
+                        .iter()
+                        .chain(extra_tools)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                )
+            },
+            speed,
+        ),
     ];
     // `--add-dir` takes every value up to the next option, so an option
     // follows it.
@@ -2538,6 +2549,41 @@ mod tests {
                 &claude_help.replace(required, ""),
             );
             assert!(!capability.available, "missing {required} must fail closed");
+        }
+    }
+
+    #[test]
+    fn review_and_verification_pass_the_selected_service_tier() {
+        let mut review = review_spec(Backend::Codex, "/tmp".into());
+        let mut verifier = verification_spec(Backend::Codex);
+        for model in [&mut review.model, &mut verifier.model] {
+            *model = crate::ModelSpeed::Ultrafast.selection("review-model");
+        }
+        for args in [review.args(), verifier.args()] {
+            assert!(args.windows(2).any(|p| p == ["--model", "review-model"]));
+            assert!(args
+                .windows(2)
+                .any(|p| p == ["--config", r#"service_tier="ultrafast""#]));
+        }
+    }
+
+    #[test]
+    fn claude_review_and_verification_pass_fast_mode_and_base_model() {
+        for sandbox in [true, false] {
+            let mut review = review_spec(Backend::ClaudeCode, "/tmp".into());
+            let mut verifier = verification_spec(Backend::ClaudeCode);
+            review.sandbox = sandbox;
+            verifier.sandbox = sandbox;
+            for model in [&mut review.model, &mut verifier.model] {
+                *model = crate::ModelSpeed::Fast.selection("opus");
+            }
+            for args in [review.args(), verifier.args()] {
+                assert!(args.windows(2).any(|p| p == ["--model", "opus"]));
+                let settings = args.windows(2).find(|p| p[0] == "--settings").unwrap();
+                let settings: serde_json::Value = serde_json::from_str(&settings[1]).unwrap();
+                assert_eq!(settings["fastMode"], true);
+                assert_eq!(settings["sandbox"]["enabled"], sandbox);
+            }
         }
     }
 

@@ -12,6 +12,9 @@ pub fn model_label(model: &str) -> String {
     if model.contains('/') {
         return model.to_string();
     }
+    if let (base, Some(speed)) = perch_agent::ModelSpeed::split(model) {
+        return speed.selection(&model_label(base));
+    }
     // Claude Code can report the context window on the end: `[1m]`.
     let model = model.split('[').next().unwrap_or_default().trim();
     let mut words = Vec::new();
@@ -120,6 +123,12 @@ mod tests {
         assert_eq!(model_label("claude-sonnet-5"), "Sonnet 5");
         assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(model_label("claude-opus-5-5[1m]"), "Opus 5.5");
+        assert_eq!(model_label("claude-opus-5-5[1m] (Fast)"), "Opus 5.5 (Fast)");
+        assert_eq!(model_label("opus (Fast)"), "Opus (Fast)");
+        assert_eq!(
+            model_label("gpt-6.2-sol (Ultrafast)"),
+            "Sol 6.2 (Ultrafast)"
+        );
         assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
         assert_eq!(model_label("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
         assert_eq!(model_label("gpt-6.1-sol"), "Sol 6.1");
@@ -139,6 +148,14 @@ mod tests {
         assert_eq!(
             agent_name("codex", "gpt-6.1-sol", "xhigh"),
             "Codex Sol 6.1 (xhigh)"
+        );
+        assert_eq!(
+            agent_name("codex", "gpt-6.1-sol (Ultrafast)", "xhigh"),
+            "Codex Sol 6.1 (Ultrafast) (xhigh)"
+        );
+        assert_eq!(
+            agent_name("claude-code", "claude-opus-5-5 (Fast)", "high"),
+            "Claude Opus 5.5 (Fast) (high)"
         );
         assert_eq!(
             agent_name("claude-code", "opus", "High"),

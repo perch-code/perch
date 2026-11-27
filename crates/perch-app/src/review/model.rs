@@ -629,14 +629,28 @@ pub fn default_destination(
             (Author::GitHubUser(_), _) => Destination::GitHub,
             (Author::User, ThreadOrigin::GitHub) => Destination::GitHub,
             (Author::Agent { backend, model }, _) => {
-                let offered = agent
-                    .models
-                    .iter()
-                    .chain(agent.codex_models())
-                    .chain(agent.gemini_models())
-                    .chain(&agent.opencode.models)
-                    .any(|m| m == model);
-                let Some(backend) = perch_agent::Backend::parse(backend).filter(|_| offered) else {
+                let is_offered = |candidate: &str| {
+                    agent
+                        .models
+                        .iter()
+                        .chain(agent.codex_models())
+                        .chain(agent.gemini_models())
+                        .chain(&agent.opencode.models)
+                        .any(|m| m == candidate)
+                };
+                let chosen_model = if is_offered(model) {
+                    Some(model.clone())
+                } else {
+                    message
+                        .run
+                        .as_ref()
+                        .map(|r| r.requested_model.as_str())
+                        .filter(|requested| !requested.is_empty() && is_offered(requested))
+                        .map(str::to_string)
+                };
+                let (Some(backend), Some(chosen_model)) =
+                    (perch_agent::Backend::parse(backend), chosen_model)
+                else {
                     return last_agent();
                 };
                 let effort = message
@@ -646,8 +660,8 @@ pub fn default_destination(
                     .unwrap_or(defaults.2);
                 Destination::Agent {
                     backend,
-                    model: model.clone(),
-                    effort: crate::review::threads::nearest_effort(agent, model, effort),
+                    effort: crate::review::threads::nearest_effort(agent, &chosen_model, effort),
+                    model: chosen_model,
                 }
             }
             (Author::User, ThreadOrigin::Local) => last_agent(),
@@ -8112,6 +8126,69 @@ mod tests {
                 effort: perch_agent::Effort::High,
             },
             "the nearest effort the model takes"
+        );
+
+        // A follow-up under a fast/ultrafast run keeps its speed, including
+        // when Claude reports a resolved model ID instead of the alias.
+        let mut fast_agent = perch_github::AgentConfig::default();
+        fast_agent.models.push("opus (Fast)".into());
+        fast_agent.codex.models = vec!["gpt-6.2-sol".into(), "gpt-6.2-sol (Ultrafast)".into()];
+
+        let mut claude_run = agent_run("claude-opus-5-5 (Fast)", "high");
+        claude_run.requested_model = "opus (Fast)".into();
+        let claude_thread = thread_ending_in(
+            Author::Agent {
+                backend: "claude-code".into(),
+                model: "claude-opus-5-5 (Fast)".into(),
+            },
+            ThreadOrigin::Local,
+            None,
+            Some(claude_run),
+        );
+        assert_eq!(
+            default_destination(
+                Some(&claude_thread),
+                claude_thread.anchor.as_ref(),
+                None,
+                None,
+                sonnet_medium(),
+                false,
+                &fast_agent,
+            ),
+            Destination::Agent {
+                backend: perch_agent::Backend::ClaudeCode,
+                model: "opus (Fast)".into(),
+                effort: perch_agent::Effort::High,
+            }
+        );
+
+        let mut codex_run = agent_run("gpt-6.2-sol (Ultrafast)", "high");
+        codex_run.backend = "codex".into();
+        codex_run.requested_model = "gpt-6.2-sol (Ultrafast)".into();
+        let codex_thread = thread_ending_in(
+            Author::Agent {
+                backend: "codex".into(),
+                model: "gpt-6.2-sol (Ultrafast)".into(),
+            },
+            ThreadOrigin::Local,
+            None,
+            Some(codex_run),
+        );
+        assert_eq!(
+            default_destination(
+                Some(&codex_thread),
+                codex_thread.anchor.as_ref(),
+                None,
+                None,
+                sonnet_medium(),
+                false,
+                &fast_agent,
+            ),
+            Destination::Agent {
+                backend: perch_agent::Backend::Codex,
+                model: "gpt-6.2-sol (Ultrafast)".into(),
+                effort: perch_agent::Effort::High,
+            }
         );
 
         // A model config no longer lists at all: the last agent used.

@@ -789,6 +789,11 @@ force-pushes.
 Click `+` beside a line, choose a model, and ask your question. Pick a different
 model for a follow-up or start another thread on the same line.
 
+When the model supports faster responses, open **Speed** in the model picker
+and choose **Fast** or **Ultrafast**. **Default** uses the provider's usual speed.
+Speed and reasoning effort can be set independently. Faster tiers can cost more.
+The settings and reviewer model lists show the speed in parentheses.
+
 ![Line comment with the model picker open to the Claude submenu](../website/img/ask-light.png)
 
 **Ask** reads the code. On removed lines it reads the old version. On your own

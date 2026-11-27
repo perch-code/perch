@@ -358,16 +358,54 @@ impl Default for CodexConfig {
     }
 }
 
+/// Split a Perch speed suffix (`" (Fast)"` or `" (Ultrafast)"`) from a model
+/// selection string. Matches `perch_agent::ModelSpeed::split` without adding a
+/// crate dependency on `perch-agent`.
+pub fn split_model_speed(model: &str) -> (&str, Option<&'static str>) {
+    if let Some(base) = model.strip_suffix(" (Fast)") {
+        (base, Some("Fast"))
+    } else if let Some(base) = model.strip_suffix(" (Ultrafast)") {
+        (base, Some("Ultrafast"))
+    } else {
+        (model, None)
+    }
+}
+
+/// Keep the requested speed suffix when a CLI reports its resolved model name
+/// (e.g. `claude-opus-5-5` for `opus (Fast)`, or `gpt-6.2-sol` for
+/// `gpt-6.2-sol (Ultrafast)`).
+pub fn with_requested_speed(reported: &str, requested: &str) -> String {
+    if split_model_speed(reported).1.is_some() {
+        return reported.to_string();
+    }
+    match split_model_speed(requested).1 {
+        Some(speed) => format!("{reported} ({speed})"),
+        None => reported.to_string(),
+    }
+}
+
 impl AgentConfig {
     /// Which backend runs a model. Codex or Gemini only when the name is
     /// listed under it alone, so a name in two lists, or one nobody
-    /// lists, goes where it always went.
+    /// lists, goes where it always went. Falls back to the base model when
+    /// a speed-suffixed model is not listed directly (for example after a
+    /// catalog fallback).
     pub fn backend_of(&self, model: &str) -> &'static str {
-        let claude = self.models.iter().any(|m| m == model);
-        let codex = self.codex.models.iter().any(|m| m == model);
-        let gemini = self.gemini.models.iter().any(|m| m == model);
-        let opencode = self.opencode.models.iter().any(|m| m == model);
-        match (claude, codex, gemini, opencode) {
+        let lookup = |candidate: &str| {
+            let claude = self.models.iter().any(|m| m == candidate);
+            let codex = self.codex.models.iter().any(|m| m == candidate);
+            let gemini = self.gemini.models.iter().any(|m| m == candidate);
+            let opencode = self.opencode.models.iter().any(|m| m == candidate);
+            (claude, codex, gemini, opencode)
+        };
+        let found = match lookup(model) {
+            (false, false, false, false) => match split_model_speed(model) {
+                (base, Some(_)) => lookup(base),
+                _ => (false, false, false, false),
+            },
+            found => found,
+        };
+        match found {
             (false, true, false, false) => CODEX,
             (false, false, true, false) => GEMINI,
             (false, false, false, true) => OPENCODE,
@@ -456,7 +494,11 @@ impl AgentConfig {
         let listed = match self.backend_of(model) {
             GEMINI => self.gemini.efforts.get(model),
             OPENCODE => None, // ACP advertises variants after the model is selected.
-            _ => self.codex.efforts.get(model),
+            _ => self
+                .codex
+                .efforts
+                .get(model)
+                .or_else(|| self.codex.efforts.get(split_model_speed(model).0)),
         };
         match listed {
             Some(levels) => levels.iter().any(|l| l == effort),
@@ -2273,21 +2315,42 @@ network = ["index.crates.io"]
         assert_eq!(c.agent.codex.binary, "/opt/codex");
         assert_eq!(c.agent.codex_models(), ["gpt-5.6-sol".to_string()]);
         assert_eq!(c.agent.backend_of("gpt-5.6-sol"), CODEX);
+        assert_eq!(c.agent.backend_of("gpt-5.6-sol (Fast)"), CODEX);
+        assert_eq!(c.agent.backend_of("gpt-5.6-sol (Ultrafast)"), CODEX);
         assert_eq!(c.agent.backend_of("sonnet"), CLAUDE_CODE);
         assert_eq!(c.agent.backend_of("nobody-lists-this"), CLAUDE_CODE);
         assert_eq!(c.agent.binary_for(CODEX), "/opt/codex");
         assert_eq!(c.agent.binary_for(CLAUDE_CODE), "claude");
         assert_eq!(c.agent.binary_for("something-else"), "claude");
+        assert_eq!(
+            with_requested_speed("claude-opus-5-5", "opus (Fast)"),
+            "claude-opus-5-5 (Fast)"
+        );
+        assert_eq!(
+            with_requested_speed("gpt-6.2-sol", "gpt-6.2-sol (Ultrafast)"),
+            "gpt-6.2-sol (Ultrafast)"
+        );
+        assert_eq!(
+            with_requested_speed("gpt-6.2-sol (Fast)", "gpt-6.2-sol (Fast)"),
+            "gpt-6.2-sol (Fast)"
+        );
+        assert_eq!(
+            with_requested_speed("claude-opus-5-5", "opus"),
+            "claude-opus-5-5"
+        );
     }
 
     #[test]
     fn the_catalog_says_which_efforts_a_model_takes_and_silence_means_all() {
         let mut c = AgentConfig::default();
+        c.codex.models = vec!["gpt-5.5".into()];
         c.codex
             .efforts
             .insert("gpt-5.5".into(), vec!["low".into(), "high".into()]);
         assert!(c.effort_supported("gpt-5.5", "high"));
         assert!(!c.effort_supported("gpt-5.5", "ultra"));
+        assert!(c.effort_supported("gpt-5.5 (Fast)", "high"));
+        assert!(!c.effort_supported("gpt-5.5 (Fast)", "ultra"));
         assert!(
             c.effort_supported("gpt-6-astra", "ultra"),
             "not in the catalog, so not doubted"

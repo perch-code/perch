@@ -30,8 +30,9 @@ use tokio::sync::Notify;
 
 pub use codex::CodexParser;
 pub use discover::{
-    codex_catalog, codex_default_model, find_binary, gemini_catalog, install_dirs,
-    parse_codex_catalog, parse_gemini_catalog, path_with_install_dirs, CodexModel,
+    claude_fast_models, codex_catalog, codex_default_model, find_binary, gemini_catalog,
+    install_dirs, parse_codex_catalog, parse_gemini_catalog, path_with_install_dirs, CodexModel,
+    ModelSpeed,
 };
 pub use gemini::{
     read_only_settings as gemini_read_only_settings, GeminiParser,
@@ -46,7 +47,7 @@ pub use review::{
     review_output_schema, review_verification_schema, CliVersion, EvidenceSpan, ReviewCapability,
     ReviewEffort, ReviewExtraction, ReviewFinding, ReviewLocation, ReviewManifest,
     ReviewManifestEntry, ReviewSeverity, ReviewSide, ReviewSpec, ReviewVerificationSpec,
-    REPORT_DELIMITER, REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
+    MIN_CLAUDE_VERSION, REPORT_DELIMITER, REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -818,6 +819,16 @@ fn trusted_args_with(cwd: &std::path::Path, settings: String) -> Vec<String> {
     ]
 }
 
+fn claude_speed_settings(settings: String, speed: Option<ModelSpeed>) -> String {
+    if speed != Some(ModelSpeed::Fast) {
+        return settings;
+    }
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&settings).expect("generated Claude settings");
+    settings["fastMode"] = true.into();
+    settings.to_string()
+}
+
 /// [`claude_isolation_args`] with the sandbox a mode needs.
 fn isolation_args_with(settings: String) -> Vec<String> {
     vec![
@@ -1126,6 +1137,7 @@ impl RunSpec {
     /// The prompt goes last, after `--`, so a question that begins with a
     /// dash is not read as an option. Both CLIs reject one otherwise.
     fn claude_args(&self) -> Vec<String> {
+        let (model, speed) = ModelSpeed::split(&self.model);
         let work = matches!(self.mode, Mode::Work(_));
         let mut args = vec![
             "-p".to_string(),
@@ -1147,7 +1159,7 @@ impl RunSpec {
         }
         args.extend([
             "--model".into(),
-            self.model.clone(),
+            model.into(),
             "--effort".into(),
             self.effort.claude_name().into(),
             "--permission-mode".into(),
@@ -1158,14 +1170,15 @@ impl RunSpec {
         ]);
         let (allowed, denied): (Vec<String>, Vec<String>) = match &self.mode {
             Mode::Ask => {
-                args.extend(isolation_args_with(if self.sandbox {
+                let settings = if self.sandbox {
                     claude_settings_with_dirs(&self.cwd, &self.read_dirs)
                 } else {
                     claude_unsandboxed_settings_for(
                         &claude_settings_files(&self.cwd, false),
                         READ_ONLY_BASH_RULES,
                     )
-                }));
+                };
+                args.extend(isolation_args_with(claude_speed_settings(settings, speed)));
                 (
                     READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
                     read_only_denied(self.sandbox).collect(),
@@ -1185,6 +1198,7 @@ impl RunSpec {
                         &[],
                     )
                 };
+                let settings = claude_speed_settings(settings, speed);
                 if grant.trust {
                     args.extend(trusted_args_with(&self.cwd, settings));
                 } else {
@@ -1325,6 +1339,8 @@ impl RunSpec {
             "model_reasoning_effort": self.effort.name(),
             "mcp_servers": mcp,
         });
+        let (model, speed) = ModelSpeed::split(&self.model);
+        config["service_tier"] = serde_json::json!(speed.map_or("default", ModelSpeed::codex_tier));
         if self.sandbox {
             if let Some(grant) = grant {
                 let filesystem: serde_json::Map<String, serde_json::Value> =
@@ -1350,7 +1366,7 @@ impl RunSpec {
         };
         CodexThread {
             cwd: self.cwd.to_string_lossy().into_owned(),
-            model: self.model.clone(),
+            model: model.into(),
             effort: self.effort.name().to_string(),
             prompt: self.prompt.clone(),
             developer_instructions: self.system.clone(),
@@ -3904,6 +3920,44 @@ mod tests {
             resume: resume.map(str::to_string),
             mode: Mode::Ask,
         }
+    }
+
+    #[test]
+    fn speed_selection_reaches_each_provider_with_the_base_model() {
+        for (speed, tier) in [
+            (ModelSpeed::Fast, "priority"),
+            (ModelSpeed::Ultrafast, "ultrafast"),
+        ] {
+            let mut spec = codex(None);
+            spec.model = speed.selection("gpt-6.2-sol");
+            let thread = spec.codex_thread();
+            assert_eq!(thread.model, "gpt-6.2-sol");
+            assert_eq!(thread.config["service_tier"], tier);
+        }
+        assert_eq!(codex(None).codex_thread().config["service_tier"], "default");
+        let mut spec = claude(Effort::High);
+        spec.model = ModelSpeed::Fast.selection("opus");
+        let args = spec.args();
+        assert!(args.windows(2).any(|pair| pair == ["--model", "opus"]));
+        let settings = args
+            .windows(2)
+            .find(|pair| pair[0] == "--settings")
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&settings[1]).unwrap();
+        assert_eq!(settings["fastMode"], true);
+        assert!(settings.get("sandbox").is_some());
+
+        let mut work_spec = work(Backend::ClaudeCode, WorkGrant::default(), None);
+        work_spec.model = ModelSpeed::Fast.selection("opus");
+        let work_args = work_spec.args();
+        assert!(work_args.windows(2).any(|pair| pair == ["--model", "opus"]));
+        let work_settings = work_args
+            .windows(2)
+            .find(|pair| pair[0] == "--settings")
+            .unwrap();
+        let work_settings: serde_json::Value = serde_json::from_str(&work_settings[1]).unwrap();
+        assert_eq!(work_settings["fastMode"], true);
+        assert!(work_settings.get("sandbox").is_some());
     }
 
     #[test]

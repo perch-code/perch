@@ -1622,9 +1622,16 @@ pub(crate) fn model_sections(
         .into_iter()
         .map(|backend| (backend, agent.models_for(backend.name())))
         .filter(|(_, models)| !models.is_empty())
-        .map(|(maker, models)| {
+        .filter_map(|(maker, models)| {
             let mut families: Vec<ModelFamily> = Vec::new();
             for model in models {
+                if matches!(maker, Backend::ClaudeCode | Backend::Codex) {
+                    if let (base, Some(_)) = perch_agent::ModelSpeed::split(model) {
+                        if models.iter().any(|candidate| candidate == base) {
+                            continue;
+                        }
+                    }
+                }
                 let name = model_family(model).0;
                 let entry = (crate::ask::backend_for(agent, model), model.clone());
                 match families.iter_mut().find(|f| f.name == name) {
@@ -1634,6 +1641,9 @@ pub(crate) fn model_sections(
                         versions: vec![entry],
                     }),
                 }
+            }
+            if families.is_empty() {
+                return None;
             }
             for family in &mut families {
                 // Newest first; an alias, with no version, is the newest.
@@ -1646,7 +1656,7 @@ pub(crate) fn model_sections(
                     std::cmp::Reverse((version.is_empty(), parts))
                 });
             }
-            (maker.label(), families)
+            Some((maker.label(), families))
         })
         .collect()
 }
@@ -1669,14 +1679,33 @@ pub(crate) fn agent_menu(
 ) -> crate::ui::menu::Menu {
     use crate::ui::menu::Menu;
 
+    let selected_base = selected.map(|model| {
+        let backend = crate::ask::backend_for(agent, model);
+        if matches!(
+            backend,
+            perch_agent::Backend::ClaudeCode | perch_agent::Backend::Codex
+        ) {
+            let (base, _) = perch_agent::ModelSpeed::split(model);
+            if agent.models_for(backend.name()).iter().any(|m| m == base) {
+                return base;
+            }
+        }
+        model
+    });
     let model_row = |menu: Menu, backend: perch_agent::Backend, model: &str| {
-        let checked = selected == Some(model);
-        let effort = nearest_effort(agent, model, effort);
+        let checked = selected_base == Some(model);
+        let chosen_model = if checked {
+            selected.unwrap_or(model)
+        } else {
+            model
+        };
+        let effort = nearest_effort(agent, chosen_model, effort);
         let pick = pick.clone();
-        let model = model.to_string();
-        menu.item(model_label(&model), move |item| {
+        let label = model_label(model);
+        let chosen_model = chosen_model.to_string();
+        menu.item(label, move |item| {
             item.checked(checked)
-                .action(move || pick(backend, model.clone(), effort))
+                .action(move || pick(backend, chosen_model.clone(), effort))
         })
     };
     let sections = model_sections(agent);
@@ -1697,24 +1726,59 @@ pub(crate) fn agent_menu(
             let chosen = families
                 .iter()
                 .flat_map(|f| &f.versions)
-                .find(|(_, model)| selected == Some(model.as_str()));
+                .find(|(_, model)| selected_base == Some(model.as_str()));
             if let Some((_, model)) = chosen {
                 sub = sub.detail(model_label(model));
             }
             sub.enabled(models_enabled)
         });
     }
-    let chosen = selected.and_then(|model| {
-        sections
-            .iter()
-            .flat_map(|(_, families)| families)
-            .flat_map(|family| &family.versions)
-            .find(|(_, m)| m == model)
-            .cloned()
-    });
-    if let Some((backend, model)) = chosen {
+    if let Some(model) = selected {
+        let backend = crate::ask::backend_for(agent, model);
+        let offered = agent.models_for(backend.name());
+        if !offered.iter().any(|choice| choice == model) {
+            return menu;
+        }
+        menu = menu.separator();
+        if matches!(
+            backend,
+            perch_agent::Backend::Codex | perch_agent::Backend::ClaudeCode
+        ) {
+            let (base, current) = perch_agent::ModelSpeed::split(model);
+            let mut choices: Vec<Option<perch_agent::ModelSpeed>> = Vec::new();
+            if offered.iter().any(|choice| choice == base) {
+                choices.push(None);
+            }
+            for speed in [
+                perch_agent::ModelSpeed::Fast,
+                perch_agent::ModelSpeed::Ultrafast,
+            ] {
+                if offered
+                    .iter()
+                    .any(|choice| *choice == speed.selection(base))
+                {
+                    choices.push(Some(speed));
+                }
+            }
+            if choices.len() > 1 {
+                menu = menu.submenu("Speed", |mut sub| {
+                    for speed in choices {
+                        let label = speed.map_or("Default", |s| s.label());
+                        let choice = speed.map_or_else(|| base.to_owned(), |s| s.selection(base));
+                        let pick = pick.clone();
+                        sub = sub.item(label, move |item| {
+                            item.checked(speed == current)
+                                .action(move || pick(backend, choice.clone(), effort))
+                        });
+                    }
+                    sub.detail(current.map_or("Default", |s| s.label()))
+                        .enabled(models_enabled)
+                });
+            }
+        }
+        let model = model.to_owned();
         let pick = pick.clone();
-        menu = menu.separator().submenu("Effort", move |mut sub| {
+        menu = menu.submenu("Effort", move |mut sub| {
             for level in perch_agent::Effort::ALL {
                 let takes = agent.effort_supported(&model, level.name());
                 let pick = pick.clone();
@@ -6269,6 +6333,62 @@ mod tests {
         assert_eq!(
             menu.submenu_named("Effort").unwrap().outline()[2..4],
             ["(High)", "(XHigh)"]
+        );
+
+        agent.codex.models.push("gpt-6-luna (Fast)".into());
+        agent.codex.models.push("gpt-6-luna (Ultrafast)".into());
+        let menu = agent_menu(
+            &agent,
+            Some("gpt-6-luna (Fast)"),
+            Effort::High,
+            true,
+            pick.clone(),
+        );
+        assert_eq!(
+            menu.outline(),
+            ["Claude ▸", "Codex ▸", "—", "Speed ▸", "Effort ▸"]
+        );
+        let speed = menu.submenu_named("Speed").unwrap();
+        assert_eq!(speed.outline(), ["Default", "✓ Fast", "Ultrafast"]);
+        speed.choose("Ultrafast");
+        assert_eq!(
+            picked.borrow().last().unwrap(),
+            "codex gpt-6-luna (Ultrafast) high"
+        );
+        speed.choose("Default");
+        assert_eq!(picked.borrow().last().unwrap(), "codex gpt-6-luna high");
+        // Re-selecting the checked base model keeps its active speed.
+        menu.submenu_named("Codex").unwrap().choose("Luna 6");
+        assert_eq!(
+            picked.borrow().last().unwrap(),
+            "codex gpt-6-luna (Fast) high"
+        );
+        // Switching to a different model starts on its default speed.
+        menu.submenu_named("Codex").unwrap().choose("Sol 6.1");
+        assert_eq!(picked.borrow().last().unwrap(), "codex gpt-6.1-sol high");
+
+        // A model without advertised speed tiers omits the Speed submenu.
+        let no_speed = agent_menu(&agent, Some("opus"), Effort::High, true, pick.clone());
+        assert_eq!(no_speed.outline(), ["Claude ▸", "Codex ▸", "—", "Effort ▸"]);
+
+        // Pinning only a speed-suffixed model without its base still shows it
+        // in the maker submenu and omits a broken Default option.
+        let mut pinned_fast_only = perch_github::AgentConfig {
+            models: vec!["opus (Fast)".into()],
+            ..perch_github::AgentConfig::default()
+        };
+        pinned_fast_only.codex.models.clear();
+        let pinned_menu = agent_menu(
+            &pinned_fast_only,
+            Some("opus (Fast)"),
+            Effort::High,
+            true,
+            pick.clone(),
+        );
+        assert_eq!(pinned_menu.outline(), ["Claude ▸", "—", "Effort ▸"]);
+        assert_eq!(
+            pinned_menu.submenu_named("Claude").unwrap().outline(),
+            ["✓ Opus (Fast)"]
         );
 
         // For GitHub there is no effort; a draft being edited greys every

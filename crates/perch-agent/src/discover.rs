@@ -104,6 +104,44 @@ pub fn find_binary_in(
         .find(|candidate| candidate.is_file())
 }
 
+/// Perch keeps a speed choice with the model selection in saved runs and
+/// defaults. Only the base model name goes to the provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelSpeed {
+    Fast,
+    Ultrafast,
+}
+
+impl ModelSpeed {
+    pub fn selection(self, model: &str) -> String {
+        format!("{model} ({})", self.label())
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Ultrafast => "Ultrafast",
+        }
+    }
+
+    pub(crate) fn codex_tier(self) -> &'static str {
+        match self {
+            Self::Fast => "priority",
+            Self::Ultrafast => "ultrafast",
+        }
+    }
+
+    pub fn split(selection: &str) -> (&str, Option<Self>) {
+        if let Some(model) = selection.strip_suffix(" (Fast)") {
+            (model, Some(Self::Fast))
+        } else if let Some(model) = selection.strip_suffix(" (Ultrafast)") {
+            (model, Some(Self::Ultrafast))
+        } else {
+            (selection, None)
+        }
+    }
+}
+
 /// One model Codex offers, from its catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexModel {
@@ -113,6 +151,7 @@ pub struct CodexModel {
     /// silently runs a level it lacks at the nearest one it has, so the
     /// picker uses this to say so.
     pub efforts: Vec<String>,
+    pub speeds: Vec<ModelSpeed>,
 }
 
 /// The models Codex lists, in its order. Hidden ones, internal models
@@ -153,13 +192,93 @@ pub fn parse_codex_catalog(json: &str) -> Vec<CodexModel> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let speeds = [ModelSpeed::Fast, ModelSpeed::Ultrafast]
+                .into_iter()
+                .filter(
+                    |speed| match m.get("service_tiers").and_then(Value::as_array) {
+                        Some(tiers) if !tiers.is_empty() => tiers
+                            .iter()
+                            .any(|t| t["id"].as_str() == Some(speed.codex_tier())),
+                        _ => m["additional_speed_tiers"].as_array().is_some_and(|tiers| {
+                            tiers.iter().any(|t| {
+                                t.as_str()
+                                    .is_some_and(|name| name.eq_ignore_ascii_case(speed.label()))
+                            })
+                        }),
+                    },
+                )
+                .collect();
             Some(CodexModel {
+                speeds,
                 slug,
                 display_name,
                 efforts,
             })
         })
         .collect()
+}
+
+/// Ask Claude Code for its model capabilities without sending a user turn.
+/// Selecting the Fable alias makes the catalog identify its resolved model too.
+pub async fn claude_fast_models(binary: &Path) -> Vec<String> {
+    use tokio::io::AsyncWriteExt;
+    let probe = async {
+        let mut command = tokio::process::Command::new(binary);
+        command
+            .args([
+                "--safe-mode",
+                "--setting-sources",
+                "user",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+                "--model",
+                "fable",
+                "-p",
+                "--verbose",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+            ])
+            .current_dir(std::env::temp_dir())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        crate::scrub_env(&mut command);
+        let mut child = command.spawn().ok()?;
+        let initialize =
+            br#"{"type":"control_request","request_id":"models","request":{"subtype":"initialize"}}
+"#;
+        child.stdin.take()?.write_all(initialize).await.ok()?;
+        let output = child.wait_with_output().await.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout)
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let event: Value = serde_json::from_str(line).ok()?;
+                let models = event.pointer("/response/response/models")?.as_array()?;
+                Some(
+                    models
+                        .iter()
+                        .filter(|m| m["supportsFastMode"] == true)
+                        .flat_map(|m| {
+                            ["value", "resolvedModel"]
+                                .into_iter()
+                                .filter_map(|key| m[key].as_str().map(str::to_owned))
+                        })
+                        .collect(),
+                )
+            })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), probe)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// Ask the binary for its catalog. Half a second on a warm cache, and
@@ -229,6 +348,7 @@ pub fn parse_gemini_catalog(text: &str) -> Vec<CodexModel> {
                     slug: slug.to_string(),
                     display_name,
                     efforts: Vec::new(),
+                    speeds: Vec::new(),
                 });
                 models.len() - 1
             }
@@ -306,6 +426,55 @@ mod tests {
       {"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]},
       {"display_name":"no slug","visibility":"list"}
     ]}"#;
+
+    #[test]
+    fn speeds_follow_catalog_capabilities() {
+        let models = parse_codex_catalog(
+            r#"[{"slug":"a","service_tiers":[{"id":"priority"},{"id":"ultrafast"},{"id":"other"}]},
+            {"slug":"b","additional_speed_tiers":["fast"]},
+            {"slug":"c","service_tiers":[],"additional_speed_tiers":["fast","ultrafast"]},
+            {"slug":"d"}]"#,
+        );
+        assert_eq!(models[0].speeds, [ModelSpeed::Fast, ModelSpeed::Ultrafast]);
+        assert_eq!(models[1].speeds, [ModelSpeed::Fast]);
+        assert_eq!(models[2].speeds, [ModelSpeed::Fast, ModelSpeed::Ultrafast]);
+        assert!(models[3].speeds.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claude_fast_models_reads_supported_aliases_and_scrubs_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("claude-good");
+        std::fs::write(
+            &good,
+            r#"#!/bin/sh
+if [ -n "$GITHUB_TOKEN" ]; then exit 2; fi
+read -r req
+echo '{"type":"control_response","response":{"response":{"models":[{"value":"opus","resolvedModel":"claude-opus-5-5","supportsFastMode":true},{"value":"fable","resolvedModel":"claude-fable-5-2","supportsFastMode":true},{"value":"sonnet","resolvedModel":"claude-sonnet-5-5","supportsFastMode":false},{"value":"haiku"}]}}}'
+"#,
+        )
+        .unwrap();
+        let bad = dir.path().join("claude-bad");
+        std::fs::write(&bad, "#!/bin/sh\nexit 1\n").unwrap();
+        for b in [&good, &bad] {
+            std::fs::set_permissions(b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // SAFETY: test checks scrub_env removes GITHUB_TOKEN in child process.
+        unsafe { std::env::set_var("GITHUB_TOKEN", "ghp_secret_should_be_scrubbed") };
+        let fast = claude_fast_models(&good).await;
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+        assert_eq!(
+            fast,
+            ["opus", "claude-opus-5-5", "fable", "claude-fable-5-2"]
+        );
+        assert!(claude_fast_models(&bad).await.is_empty());
+        assert!(claude_fast_models(&dir.path().join("missing"))
+            .await
+            .is_empty());
+    }
 
     #[test]
     fn the_catalog_lists_visible_models_in_order_with_their_efforts() {

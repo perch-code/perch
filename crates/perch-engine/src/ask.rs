@@ -44,7 +44,7 @@ pub fn apply_run_event(
         RunEvent::Started { session_id, model } => {
             run.session_id = Some(session_id.clone());
             if !model.is_empty() {
-                run.model = model.clone();
+                run.model = perch_github::with_requested_speed(model, &run.requested_model);
             }
             // Cancellation can win the race with the CLI's first event. Keep
             // that request visible while still retaining the metadata the CLI
@@ -253,7 +253,7 @@ pub fn backend_for(agent: &perch_github::AgentConfig, model: &str) -> perch_agen
 /// so a spawn works even where `PATH` would not have found it. An agent
 /// whose binary is missing loses its models: the picker then offers only
 /// what can run. Codex's and Gemini's models come from their CLIs' own
-/// catalogs unless the file pinned a list, and if Codex's cannot be read
+/// catalogs, limited to any list pinned in the file. If Codex's cannot be read,
 /// the one model Codex itself is set to run stands in. With Claude Code missing, a Claude
 /// model the picker would start on gives way to GPT-6.1-Sol when Codex
 /// offers it, and with only agy, agy's first model. Returns what went
@@ -323,6 +323,29 @@ async fn find_agents(agent: &mut perch_github::AgentConfig) -> Vec<String> {
         Some(path) => {
             agent.binary = path.to_string_lossy().into_owned();
             agent.binary_version = executable_version(&agent.binary).await;
+            if agent
+                .binary_version
+                .as_deref()
+                .and_then(perch_agent::CliVersion::parse)
+                >= Some(perch_agent::MIN_CLAUDE_VERSION)
+            {
+                let supported = perch_agent::claude_fast_models(&path).await;
+                let existing = std::mem::take(&mut agent.models);
+                for model in existing {
+                    let supports_fast = supported
+                        .iter()
+                        .any(|id| id == model.trim_end_matches("[1m]"));
+                    if !agent.models.contains(&model) {
+                        agent.models.push(model.clone());
+                    }
+                    if supports_fast {
+                        let choice = perch_agent::ModelSpeed::Fast.selection(&model);
+                        if !agent.models.contains(&choice) {
+                            agent.models.push(choice);
+                        }
+                    }
+                }
+            }
         }
         None => {
             problems.push(format!("Claude Code not found as {}", agent.binary));
@@ -336,14 +359,36 @@ async fn find_agents(agent: &mut perch_github::AgentConfig) -> Vec<String> {
     };
     agent.codex.binary = codex.to_string_lossy().into_owned();
     agent.codex.binary_version = executable_version(&agent.codex.binary).await;
-    if !agent.codex.models.is_empty() {
-        return problems;
-    }
+    let pinned = !agent.codex.models.is_empty();
     match perch_agent::codex_catalog(&codex).await {
         Ok(models) => {
-            agent.codex.models = models.iter().map(|m| m.slug.clone()).collect();
-            agent.codex.efforts = models.into_iter().map(|m| (m.slug, m.efforts)).collect();
+            let base_models: Vec<String> = if pinned {
+                std::mem::take(&mut agent.codex.models)
+            } else {
+                models.iter().map(|m| m.slug.clone()).collect()
+            };
+            agent.codex.models.clear();
+            for slug in base_models {
+                if !agent.codex.models.contains(&slug) {
+                    agent.codex.models.push(slug.clone());
+                }
+                if let Some(catalog) = models.iter().find(|m| m.slug == slug) {
+                    for &speed in &catalog.speeds {
+                        let choice = speed.selection(&slug);
+                        if !agent.codex.models.contains(&choice) {
+                            agent.codex.models.push(choice.clone());
+                        }
+                        if !pinned {
+                            agent.codex.efforts.insert(choice, catalog.efforts.clone());
+                        }
+                    }
+                    if !pinned {
+                        agent.codex.efforts.insert(slug, catalog.efforts.clone());
+                    }
+                }
+            }
         }
+        Err(_) if pinned => {}
         Err(e) => {
             problems.push(e);
             agent.codex.models = perch_agent::codex_default_model().into_iter().collect();
@@ -1749,6 +1794,22 @@ This replaces what you were told about commits when the session began."
         assert_eq!(run.model, "gpt-6-astra");
         assert_eq!(run.session_id.as_deref(), Some("session"));
         assert_eq!(run.status, RunStatus::Running);
+
+        let mut fast = RunRecord {
+            id: "started-fast-model".into(),
+            requested_model: "opus (Fast)".into(),
+            model: "opus (Fast)".into(),
+            status: RunStatus::Starting,
+            ..RunRecord::default()
+        };
+        apply_run_event(
+            &mut fast,
+            &RunEvent::Started {
+                session_id: "session-fast".into(),
+                model: "claude-opus-5-5".into(),
+            },
+        );
+        assert_eq!(fast.model, "claude-opus-5-5 (Fast)");
     }
 
     fn agent_config() -> perch_github::AgentConfig {
@@ -1819,12 +1880,19 @@ This replaces what you were told about commits when the session began."
         path.to_string_lossy().into_owned()
     }
 
-    const CATALOG: &str = r#"{"models":[{"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},{"slug":"gpt-5.5","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]}"#;
+    const CATALOG: &str = r#"{"models":[{"slug":"gpt-6-astra","service_tiers":[{"id":"priority"}],"display_name":"GPT-6-Astra","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},{"slug":"gpt-5.5","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]}"#;
 
     #[tokio::test]
     async fn discovery_asks_codex_for_its_models_and_keeps_a_pinned_list() {
         let dir = tempfile::tempdir().unwrap();
-        let claude = fake(dir.path(), "claude", "exit 0");
+        let claude = fake(
+            dir.path(),
+            "claude",
+            r#"if [ "$1" = "--version" ]; then echo '2.1.332'; else
+read -r request
+echo '{"type":"control_response","response":{"response":{"models":[{"value":"opus","resolvedModel":"claude-opus-5-5","supportsFastMode":true},{"value":"haiku"}]}}}'
+fi"#,
+        );
         let codex = fake(dir.path(), "codex", &format!("cat <<'EOF'\n{CATALOG}\nEOF"));
         let no_agy = dir.path().join("no-agy").to_string_lossy().into_owned();
 
@@ -1841,29 +1909,58 @@ This replaces what you were told about commits when the session began."
         agent.gemini.binary = no_agy.clone();
         assert!(discover(&mut agent).await.is_empty());
         assert_eq!(agent.binary, claude, "a path found is kept as a path");
-        assert_eq!(agent.codex.models, ["gpt-6-astra", "gpt-5.5"]);
+        assert_eq!(
+            agent.models,
+            ["fable", "opus", "opus (Fast)", "sonnet", "haiku"]
+        );
+        assert_eq!(
+            agent.codex.models,
+            ["gpt-6-astra", "gpt-6-astra (Fast)", "gpt-5.5"]
+        );
+        assert!(agent.effort_supported("gpt-6-astra (Fast)", "ultra"));
+        assert!(!agent.effort_supported("gpt-6-astra (Fast)", "medium"));
         assert!(agent.effort_supported("gpt-6-astra", "ultra"));
         assert!(!agent.effort_supported("gpt-5.5", "ultra"));
         assert_eq!(agent.backend_of("gpt-6-astra"), perch_github::CODEX);
 
         let mut pinned = perch_github::AgentConfig {
-            binary: claude,
+            binary: claude.clone(),
             ..Default::default()
         };
-        pinned.codex.binary = codex;
+        pinned.codex.binary = codex.clone();
         pinned.codex.models = vec!["mine".into()];
         pinned.opencode.binary = dir
             .path()
             .join("no-opencode")
             .to_string_lossy()
             .into_owned();
-        pinned.gemini.binary = no_agy;
+        pinned.gemini.binary = no_agy.clone();
         assert!(discover(&mut pinned).await.is_empty());
         assert_eq!(pinned.codex.models, ["mine"], "the file's list wins");
         assert!(
             pinned.codex.efforts.is_empty(),
             "and nothing is doubted about it"
         );
+
+        let mut pinned_catalog = perch_github::AgentConfig {
+            binary: claude,
+            ..Default::default()
+        };
+        pinned_catalog.codex.binary = codex;
+        pinned_catalog.codex.models = vec!["gpt-6-astra".into()];
+        pinned_catalog.opencode.binary = dir
+            .path()
+            .join("no-opencode")
+            .to_string_lossy()
+            .into_owned();
+        pinned_catalog.gemini.binary = no_agy;
+        assert!(discover(&mut pinned_catalog).await.is_empty());
+        assert_eq!(
+            pinned_catalog.codex.models,
+            ["gpt-6-astra", "gpt-6-astra (Fast)"],
+            "a pinned catalog model still picks up its advertised speeds"
+        );
+        assert!(pinned_catalog.codex.efforts.is_empty());
     }
 
     #[tokio::test]

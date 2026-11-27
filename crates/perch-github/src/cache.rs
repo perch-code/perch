@@ -2263,7 +2263,7 @@ fn apply_event_to_run(
             }
             run.session_id = Some(session_id.clone());
             if let Some(model) = model.as_ref().filter(|model| !model.is_empty()) {
-                run.model = model.clone();
+                run.model = crate::with_requested_speed(model, &run.requested_model);
             }
             run.latest_activity = Some("Started".into());
         }
@@ -5821,6 +5821,45 @@ mod tests {
 
         assert_eq!(c.load_run("new-r1").unwrap().unwrap().steps.len(), 1);
         assert_eq!(c.load_run("old-r1").unwrap().unwrap().steps, old.steps);
+    }
+
+    #[test]
+    fn started_preserves_requested_speed_on_reported_model() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut queued = run("speed-start", "thread", RunStatus::Queued);
+        queued.requested_model = "opus (Fast)".into();
+        queued.model = "opus (Fast)".into();
+        queued.steps.clear();
+        queued.started_at = None;
+        queued.ended_at = None;
+        queued.terminal_reason = None;
+        c.insert_run(&queued).unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "starting",
+                "2026-09-18T10:00:00Z",
+                RunEvent::State {
+                    status: RunStatus::Starting,
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "started",
+                "2026-09-18T10:00:01Z",
+                RunEvent::Started {
+                    session_id: "session-fast".into(),
+                    model: Some("claude-opus-5-5".into()),
+                },
+            ),
+        )
+        .unwrap();
+        let loaded = c.load_run(&queued.id).unwrap().unwrap();
+        assert_eq!(loaded.model, "claude-opus-5-5 (Fast)");
+        assert_eq!(loaded.requested_model, "opus (Fast)");
     }
 
     #[test]
