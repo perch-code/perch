@@ -37,10 +37,7 @@ use model::{AgentRetryTarget, AgentRunStatus, AgentRunSummary};
 /// and its item are here. Once, from the window.
 pub fn wire(state: AppState, review: ReviewState, backend: Rc<Backend>) {
     Effect::new(move |_| {
-        let active = state
-            .agent_runs
-            .with(|runs| runs.iter().any(|run| run.status.is_active()));
-        if active && !state.agents_clock_armed.get_untracked() {
+        if has_active_work(state) && !state.agents_clock_armed.get_untracked() {
             arm_clock(state);
         }
     });
@@ -262,7 +259,7 @@ pub(super) fn status_color(status: AgentRunStatus) -> fn() -> Color {
 /// clock stops.
 pub(super) fn live_dot(app: AppState, size: f64) -> impl IntoView {
     floem::views::Empty::new().style(move |s| {
-        let faded = app.agents_clock_armed.get() && app.now.get().as_second() % 2 != 0;
+        let faded = app.agents_clock_armed.get() && app.agent_now.get().as_second() % 2 != 0;
         let color = theme::running();
         s.size(size, size)
             .border_radius(size / 2.0)
@@ -289,6 +286,31 @@ pub(super) fn queue_position(state: AppState, id: &str) -> Option<usize> {
     })
 }
 
+fn has_active_work(state: AppState) -> bool {
+    state
+        .agent_runs
+        .with(|runs| runs.iter().any(|run| run.status.is_active()))
+        || state.review_groups.with(|all| {
+            all.values()
+                .any(|groups| groups.iter().any(|g| g.group.status.is_active()))
+        })
+}
+
+/// Whether any run or review group is active, or `None` once the window's
+/// signals have been disposed.
+fn has_active_work_untracked(state: AppState) -> Option<bool> {
+    let runs = state.agent_runs.try_with_untracked(|runs| {
+        runs.map(|runs| runs.iter().any(|run| run.status.is_active()))
+    })?;
+    let groups = state.review_groups.try_with_untracked(|all| {
+        all.map(|all| {
+            all.values()
+                .any(|groups| groups.iter().any(|g| g.group.status.is_active()))
+        })
+    })?;
+    Some(runs || groups)
+}
+
 fn arm_clock(state: AppState) {
     if state.agents_clock_armed.get_untracked() {
         return;
@@ -297,18 +319,26 @@ fn arm_clock(state: AppState) {
     tick_clock(state);
 }
 
-fn tick_clock(state: AppState) {
-    floem::action::exec_after(Duration::from_secs(1), move |_| {
-        let active = state.agent_runs.try_with_untracked(|runs| {
-            runs.is_some_and(|runs| runs.iter().any(|run| run.status.is_active()))
-        });
-        if active {
-            state.now.set(jiff::Timestamp::now());
-            tick_clock(state);
-        } else {
-            state.agents_clock_armed.set(false);
+/// Advance the agents clock once while work is active, or disarm it once all
+/// active runs and reviews have finished. Returns whether another tick is due.
+fn step_clock(state: AppState) -> bool {
+    match has_active_work_untracked(state) {
+        Some(true) => {
+            state.agent_now.set(jiff::Timestamp::now());
+            true
         }
-    });
+        Some(false) => {
+            state.agents_clock_armed.set(false);
+            false
+        }
+        None => false,
+    }
+}
+
+fn tick_clock(state: AppState) {
+    if step_clock(state) {
+        floem::action::exec_after(Duration::from_secs(1), move |_| tick_clock(state));
+    }
 }
 
 /// A terminal transition stays lightweight in the popup: enough context to
@@ -411,6 +441,133 @@ mod tests {
         app.merge_agent_runs([perch_github::RunSummary::from(&running_record())]);
         harness.rebuild();
         assert!(app.agents_clock_armed.get());
+    }
+
+    #[test]
+    fn background_run_progress_does_not_request_a_window_paint() {
+        let (mut harness, app, review, _commands) = test_support::window();
+        let mut run = running_record();
+        app.update_agent_run(&run);
+        test_support::settle(&mut harness);
+        harness.clear_paint_request();
+
+        let polled = app.now.get_untracked();
+        assert!(step_clock(app));
+        run.last_event_sequence += 1;
+        run.latest_activity = Some("Reading the next file".into());
+        app.apply_with_review(crate::backend::Event::AgentRunUpdated { run }, review);
+        harness.rebuild();
+        assert_eq!(app.now.get_untracked(), polled);
+        assert!(!harness.paint_requested());
+    }
+
+    #[test]
+    fn the_clock_arms_and_ticks_for_active_reviews_without_runs() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        let backend = Rc::new(Backend::detached());
+        let view = crate::ui::app_view(app, review, backend);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 900.0, 700.0);
+        harness.rebuild();
+        assert!(!app.agents_clock_armed.get());
+
+        let mut preparing = test_support::review(1, &[]);
+        preparing.group.status = perch_github::ReviewGroupStatus::Preparing;
+        test_support::set_reviews(app, vec![preparing.clone()]);
+        harness.rebuild();
+        assert!(app.agents_clock_armed.get());
+        assert!(step_clock(app));
+
+        let mut reconciling = preparing.clone();
+        reconciling.group.status = perch_github::ReviewGroupStatus::Reconciling;
+        test_support::set_reviews(app, vec![reconciling]);
+        harness.rebuild();
+        assert!(step_clock(app));
+        assert!(app.agents_clock_armed.get());
+
+        let mut done = preparing;
+        done.group.status = perch_github::ReviewGroupStatus::Completed;
+        test_support::set_reviews(app, vec![done]);
+        harness.rebuild();
+        assert!(!step_clock(app));
+        assert!(!app.agents_clock_armed.get());
+    }
+
+    #[test]
+    fn review_group_updates_do_not_repaint_unchanged_header_or_finding_controls() {
+        let (mut harness, app, review, _commands) = test_support::window();
+        let done_group = test_support::review(1, &["a1"]);
+        let mut active_group = test_support::review(2, &["a2", "a3"]);
+        active_group.group.status = perch_github::ReviewGroupStatus::Reviewing;
+        active_group.attempts[0].phase = perch_github::ReviewerPhase::Queued;
+        active_group.attempts[1].phase = perch_github::ReviewerPhase::Reviewing;
+
+        let thread = test_support::thread("t-finding", "Null dereference", 12);
+        let when = test_support::at("2026-09-19T10:00:00Z");
+        let finding = crate::review::model::ReviewFindingSummary {
+            finding: perch_github::Finding {
+                id: "f-1".into(),
+                item_id: "pr".into(),
+                stable_key: "f-1".into(),
+                thread_id: "t-finding".into(),
+                created_group_id: Some("group-1".into()),
+                disposition: perch_github::FindingDisposition::Open,
+                verification: perch_github::FindingVerification::Present,
+                dismissal_reason: None,
+                possible_duplicate_of: None,
+                duplicate_of: None,
+                last_verified_snapshot_id: None,
+                last_verified_head_sha: None,
+                last_checked_snapshot_id: None,
+                last_checked_head_sha: None,
+                created_at: when,
+                updated_at: when,
+            },
+            severity: perch_github::FindingSeverity::High,
+            attributions: Vec::new(),
+            seen_in_reviews: vec![1],
+            backend: Some("claude-code".into()),
+            model: Some("sonnet".into()),
+            original_review_number: Some(1),
+            title: "Null dereference".into(),
+        };
+        test_support::set_reviews(app, vec![active_group.clone(), done_group]);
+        app.update_review_finding("pr".into(), finding);
+        review.set_comment_threads(std::sync::Arc::new(vec![thread]));
+        test_support::settle(&mut harness);
+        let dismiss_before = test_support::named(harness.root_id(), "\"Dismiss\"")
+            .expect("finding controls rendered");
+        harness.clear_paint_request();
+
+        // Update on another item leaves the open PR untouched.
+        let mut other = test_support::review(1, &["o1"]);
+        other.group.id = "other-group".into();
+        other.group.item_id = "other-pr".into();
+        other.group.status = perch_github::ReviewGroupStatus::Reviewing;
+        app.apply_with_review(
+            crate::backend::Event::ReviewGroupUpdated {
+                item_id: "other-pr".into(),
+                summary: other,
+            },
+            review,
+        );
+        // Update on the open PR whose button text (`0 of 2 complete`) and
+        // original finding group (`group-1`) did not change.
+        active_group.attempts[0].phase = perch_github::ReviewerPhase::Reviewing;
+        app.apply_with_review(
+            crate::backend::Event::ReviewGroupUpdated {
+                item_id: "pr".into(),
+                summary: active_group,
+            },
+            review,
+        );
+        harness.rebuild();
+
+        assert!(!harness.paint_requested());
+        let dismiss_after = test_support::named(harness.root_id(), "\"Dismiss\"")
+            .expect("finding controls still present");
+        assert_eq!(dismiss_before, dismiss_after);
     }
 }
 

@@ -54,10 +54,11 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         open
     });
 
-    // Memos, so the threads changing under the button do not restyle it.
+    // Memos, so the threads and reviews changing under the button do not
+    // restyle or relayout it when its label is unchanged.
     let prominent = Memo::new(move |_| submit_review::is_shown(state));
     let count = Memo::new(move |_| state.drafts().len());
-    let label = move || {
+    let label = Memo::new(move |_| {
         if state.submit_review_pending.with(Option::is_some) {
             return "Submitting…".to_string();
         }
@@ -71,7 +72,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             0 => "Review".to_string(),
             n => format!("Review \u{b7} {n}"),
         }
-    };
+    });
     let ink = move || {
         if prominent.get() {
             theme::canvas()
@@ -80,7 +81,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         }
     };
     let inner = Stack::horizontal((
-        Label::derived(label).style(move |s| {
+        Label::derived(move || label.get()).style(move |s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_emphasis())
                 .color(ink())

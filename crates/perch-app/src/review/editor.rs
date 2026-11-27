@@ -1291,6 +1291,21 @@ impl CardItem {
     }
 }
 
+/// A card paired with its `dyn_stack` key, compared by key alone so streaming
+/// thread updates whose keys are unchanged do not wake the stack (Floem's
+/// `DynStack` requests layout and paint even on an empty diff).
+#[derive(Clone)]
+struct KeyedCardItem {
+    key: String,
+    item: CardItem,
+}
+
+impl PartialEq for KeyedCardItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
 /// The cards of the open file, drawn over the rows the document reserves
 /// for them: the threads anchored in it, the reader's own and GitHub's,
 /// and the composer when it is open on lines of it, as the document has
@@ -1319,11 +1334,15 @@ fn card_layer(
     left: f64,
     max_width: Option<f64>,
 ) -> impl IntoView {
-    let cards = move || {
+    let cards = Memo::new(move |_| {
         // The document says which cards have rows: a thread whose line is
-        // not shown has no card. The threads and the composer are read
-        // tracked so a card's key follows them.
+        // not shown has no card. With none in the document, skip reading
+        // `comment_threads` altogether so streaming runs elsewhere do not
+        // wake this layer.
         let ids: Vec<CardId> = doc.with(|d| d.cards().iter().map(|(id, _)| id.clone()).collect());
+        if ids.is_empty() {
+            return Vec::new();
+        }
         let composer = state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| {
@@ -1344,24 +1363,32 @@ fn card_layer(
                     CardId::Composer => composer.clone().map(CardItem::Composer),
                     CardId::Entry(_) => None,
                 })
+                .map(|item| KeyedCardItem {
+                    key: item.key(),
+                    item,
+                })
                 .collect::<Vec<_>>()
         })
-    };
-    let stack = dyn_stack(cards, CardItem::key, move |item| {
-        inline_card(
-            app,
-            state,
-            backend.clone(),
-            doc,
-            viewport,
-            scroll_delta,
-            across,
-            scroll_to,
-            item,
-            left,
-            max_width,
-        )
-    })
+    });
+    let stack = dyn_stack(
+        move || cards.get(),
+        |entry| entry.key.clone(),
+        move |entry| {
+            inline_card(
+                app,
+                state,
+                backend.clone(),
+                doc,
+                viewport,
+                scroll_delta,
+                across,
+                scroll_to,
+                entry.item,
+                left,
+                max_width,
+            )
+        },
+    )
     .style(|s| s.size_full());
 
     Container::new(stack)
@@ -1449,12 +1476,14 @@ fn inline_card(
             }
         },
     );
+    let collapsed_id = card_id.clone();
+    let collapsed = Memo::new(move |_| state.is_collapsed(&collapsed_id));
     passes_wheel(view, viewport, scroll_delta, across).style(move |s| {
         // Read live, as the gutter reads its offset: the card outlives
         // a scroll and an edit above it, and a position captured when
         // it was built would not.
         let row = doc.with(|d| d.first_spacer_row(&card_id)).unwrap_or(0);
-        let inset = if state.is_collapsed(&card_id) {
+        let inset = if collapsed.get() {
             theme::COLLAPSED_CARD_INSET
         } else {
             theme::CARD_INSET
@@ -6959,5 +6988,39 @@ mod window {
             9.0 * line_height + crate::theme::CARD_INSET
         );
         assert!(!state.card_rows.get().contains_key(&CardId::Composer));
+    }
+
+    #[test]
+    fn streaming_agent_step_elsewhere_does_not_repaint_open_code_file() {
+        let (mut harness, state) = harness();
+        let inline = thread_with("t1", 5, 7, &["why?"]);
+        let mut elsewhere = thread_with("t-conv", 5, 7, &["explain"]);
+        elsewhere.anchor = None;
+        elsewhere.messages[0].run = Some(perch_github::RunRecord {
+            id: "run-conv".into(),
+            status: perch_github::RunStatus::Running,
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "high".into(),
+            queued_at: "2026-09-19T10:00:00Z".parse().unwrap(),
+            started_at: Some("2026-09-19T10:00:01Z".parse().unwrap()),
+            ..perch_github::RunRecord::default()
+        });
+        state.set_comment_threads(Arc::new(vec![inline, elsewhere]));
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+        let card_before = find(harness.root_id(), "inline-card:t1").expect("inline card");
+        harness.clear_paint_request();
+
+        state.apply_run_event(
+            "run-conv",
+            &perch_agent::RunEvent::Text("Streaming elsewhere".into()),
+        );
+        harness.rebuild();
+
+        assert!(!harness.paint_requested());
+        assert_eq!(find(harness.root_id(), "inline-card:t1"), Some(card_before));
     }
 }

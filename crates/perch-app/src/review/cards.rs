@@ -226,8 +226,8 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
     // A verdict's words take its glyph's colour, so Changes requested
     // reads as red as its mark does; a comment's are muted.
     let verb_color = glyph.map(|(_, color)| color);
-    // `now` ticks each second while an agent runs; a memo only tells the
-    // label when the words change.
+    // `now` ticks forward on refresh; a memo only tells the label when the
+    // words change.
     let ago = Memo::new(move |_| {
         when.map(|at| timefmt::relative(at, app.now.get()))
             .unwrap_or_default()
@@ -3186,36 +3186,39 @@ pub(crate) fn finding_controls(
     thread_id: String,
     inset: f64,
 ) -> impl IntoView {
-    dyn_container(
-        move || {
-            let item_id = state
-                .item
-                .with(|item| item.as_ref().map(|item| item.id.clone()))?;
-            let summary = finding_of(app, state, &thread_id)?;
-            let original_group = summary
-                .finding
-                .created_group_id
-                .as_deref()
-                .and_then(|group_id| {
-                    app.review_groups_for(&item_id)
-                        .iter()
-                        .find(|group| group.group.id == group_id)
-                        .cloned()
-                });
-            // The checkout's head too, so a push redraws whether the
-            // code has moved past where the finding was looked at.
-            let head = state.item.with(|item| {
-                item.as_ref()
-                    .and_then(|item| item.checkout.as_ref())
-                    .map(|checkout| checkout.head_sha.clone())
+    // Memoized so updates to unrelated review groups or findings do not
+    // rebuild this thread's controls.
+    let controls = Memo::new(move |_| {
+        let item_id = state
+            .item
+            .with(|item| item.as_ref().map(|item| item.id.clone()))?;
+        let summary = finding_of(app, state, &thread_id)?;
+        let original_group = summary
+            .finding
+            .created_group_id
+            .as_deref()
+            .and_then(|group_id| {
+                app.review_groups_for(&item_id)
+                    .iter()
+                    .find(|group| group.group.id == group_id)
+                    .cloned()
             });
-            Some((
-                summary,
-                state.historical_review.with(Option::is_some),
-                original_group,
-                head,
-            ))
-        },
+        // The checkout's head too, so a push redraws whether the
+        // code has moved past where the finding was looked at.
+        let head = state.item.with(|item| {
+            item.as_ref()
+                .and_then(|item| item.checkout.as_ref())
+                .map(|checkout| checkout.head_sha.clone())
+        });
+        Some((
+            summary,
+            state.historical_review.with(Option::is_some),
+            original_group,
+            head,
+        ))
+    });
+    dyn_container(
+        move || controls.get(),
         move |summary| match summary {
             Some((summary, historical, original_group, head)) => {
                 let finding = &summary.finding;

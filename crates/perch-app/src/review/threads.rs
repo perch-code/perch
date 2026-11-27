@@ -2726,34 +2726,79 @@ pub fn messages_view(
                 .and_then(|c| c.editing.clone().map(|id| (id, c.opening)))
         })
     });
+    type MessageKey = (
+        String,
+        &'static str,
+        Option<u64>,
+        u64,
+        Option<(&'static str, Option<String>)>,
+        Option<u64>,
+        Lane,
+        Place,
+    );
+
+    #[derive(Clone)]
+    struct KeyedMessage {
+        key: MessageKey,
+        message: CommentMessage,
+        editing: Option<u64>,
+        lane: Lane,
+        place: Place,
+    }
+
+    impl PartialEq for KeyedMessage {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key
+        }
+    }
+
+    // Memoized by row key so streaming steps in this or any other thread do
+    // not wake the `dyn_stack` on an empty diff.
+    let rows = Memo::new(move |_| {
+        let editing = editing.get();
+        state.comment_threads.with(|t| {
+            t.iter()
+                .find(|t| t.id == list_id)
+                .map(|t| {
+                    let count = t.messages.len();
+                    t.messages
+                        .iter()
+                        .zip(Lane::of(t))
+                        .enumerate()
+                        .map(|(i, (m, lane))| {
+                            let opening = editing
+                                .as_ref()
+                                .filter(|(id, _)| *id == m.id)
+                                .map(|(_, opening)| *opening);
+                            let place = Place {
+                                first: i == 0,
+                                last: i + 1 == count,
+                            };
+                            let key = (
+                                m.id.clone(),
+                                m.origin.name(),
+                                m.github_id,
+                                cards::body_hash(&m.body),
+                                m.run.as_ref().map(|r| (r.status.name(), r.error.clone())),
+                                opening,
+                                lane,
+                                place,
+                            );
+                            KeyedMessage {
+                                key,
+                                message: m.clone(),
+                                editing: opening,
+                                lane,
+                                place,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    });
     dyn_stack(
-        move || {
-            let editing = editing.get();
-            state.comment_threads.with(|t| {
-                t.iter()
-                    .find(|t| t.id == list_id)
-                    .map(|t| {
-                        let count = t.messages.len();
-                        t.messages
-                            .iter()
-                            .zip(Lane::of(t))
-                            .enumerate()
-                            .map(|(i, (m, lane))| {
-                                let opening = editing
-                                    .as_ref()
-                                    .filter(|(id, _)| *id == m.id)
-                                    .map(|(_, opening)| *opening);
-                                let place = Place {
-                                    first: i == 0,
-                                    last: i + 1 == count,
-                                };
-                                (m.clone(), opening, lane, place)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            })
-        },
+        move || rows.get(),
         // The key follows what the row shows: an edit on GitHub changes
         // the body, a draft posted gains its id, a draft being edited is
         // the composer, a draft added to a thread that was wholly private
@@ -2762,19 +2807,14 @@ pub fn messages_view(
         // A run's status and error, but not its steps or words: the run
         // block reads those live, and a row built again for each would
         // throw the whole message away and draw it again.
-        |(m, editing, lane, place)| {
-            (
-                m.id.clone(),
-                m.origin.name(),
-                m.github_id,
-                cards::body_hash(&m.body),
-                m.run.as_ref().map(|r| (r.status.name(), r.error.clone())),
-                *editing,
-                *lane,
-                *place,
-            )
-        },
-        move |(m, editing, lane, place)| {
+        |row| row.key.clone(),
+        move |KeyedMessage {
+                  message: m,
+                  editing,
+                  lane,
+                  place,
+                  ..
+              }| {
             let thread = state
                 .comment_threads
                 .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
@@ -3249,8 +3289,8 @@ fn when_label(
     face: ThreadFace,
     name: &'static str,
 ) -> impl IntoView {
-    // `now` ticks each second while an agent runs; a memo only tells the
-    // label when the words change.
+    // `now` ticks forward on refresh; a memo only tells the label when the
+    // words change.
     let ago = Memo::new(move |_| crate::timefmt::relative(at, app.now.get()));
     Label::derived(move || ago.get())
         .debug_name(name)

@@ -576,19 +576,20 @@ pub fn duration_label(seconds: u64) -> String {
     }
 }
 
-pub fn elapsed_seconds(run: &AgentRunSummary, now: Timestamp) -> u64 {
-    let start = run.started_at.unwrap_or(run.queued_at);
-    seconds_between(start, run.ended_at.unwrap_or(now))
-}
-
-pub fn elapsed_label(run: &AgentRunSummary, now: Timestamp) -> String {
+pub fn elapsed_label(run: &AgentRunSummary, now: impl FnOnce() -> Timestamp) -> String {
+    let end = match run.ended_at {
+        Some(end) => end,
+        None if run.status.is_active() => now(),
+        None => run.started_at.unwrap_or(run.queued_at),
+    };
     if run.status == AgentRunStatus::Queued {
         return format!(
             "Queued {}",
-            duration_label(seconds_between(run.queued_at, run.ended_at.unwrap_or(now)))
+            duration_label(seconds_between(run.queued_at, end))
         );
     }
-    let execution = duration_label(elapsed_seconds(run, now));
+    let start = run.started_at.unwrap_or(run.queued_at);
+    let execution = duration_label(seconds_between(start, end));
     let Some(started_at) = run.started_at else {
         return execution;
     };
@@ -803,17 +804,34 @@ pub(crate) mod tests {
         let mut queued = run("a", "one", AgentRunStatus::Queued, "2026-09-19T10:00:00Z");
         queued.started_at = None;
         assert_eq!(
-            elapsed_label(&queued, at("2026-09-19T10:01:05Z")),
+            elapsed_label(&queued, || at("2026-09-19T10:01:05Z")),
             "Queued 1m 05s"
         );
         let running = run("a", "one", AgentRunStatus::Running, "2026-09-19T10:00:00Z");
-        assert_eq!(elapsed_label(&running, at("2026-09-19T10:00:42Z")), "42s");
+        assert_eq!(
+            elapsed_label(&running, || at("2026-09-19T10:00:42Z")),
+            "42s"
+        );
 
         let mut waited = running;
         waited.queued_at = at("2026-09-19T09:58:55Z");
         assert_eq!(
-            elapsed_label(&waited, at("2026-09-19T10:00:42Z")),
+            elapsed_label(&waited, || at("2026-09-19T10:00:42Z")),
             "42s · queued 1m 05s"
+        );
+
+        let mut interrupted = run(
+            "b",
+            "one",
+            AgentRunStatus::Interrupted,
+            "2026-09-19T10:00:00Z",
+        );
+        interrupted.ended_at = None;
+        assert_eq!(
+            elapsed_label(&interrupted, || {
+                panic!("terminal run without ended_at must not read the live clock")
+            }),
+            "0s"
         );
     }
 

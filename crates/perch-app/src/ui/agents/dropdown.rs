@@ -47,10 +47,10 @@ pub const RECENT_RUNS: usize = 15;
 
 /// The button, and the dropdown under it while it is open.
 pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let count = move || {
+    let count = Memo::new(move |_| {
         let (running, queued) = app.active_agent_counts();
         running + queued
-    };
+    });
     let waiting = move || review.approvals.with(|pending| !pending.is_empty());
     // The glyph alone, as the gauge beside it, with the count and the dot
     // pinned to its corners.
@@ -62,7 +62,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
             theme::fg_muted,
         )
         .style(|s| s.pointer_events_none()),
-        Label::derived(move || count().to_string())
+        Label::derived(move || count.get().to_string())
             .debug_name("agents count")
             .style(move |s| {
                 s.position(Position::Absolute)
@@ -82,7 +82,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                     .justify_center()
                     .selectable(false)
                     .pointer_events_none()
-                    .apply_if(count() == 0, |s| s.hide())
+                    .apply_if(count.get() == 0, |s| s.hide())
             }),
         Empty::new().debug_name("agents waiting").style(move |s| {
             s.position(Position::Absolute)
@@ -246,8 +246,43 @@ pub fn go_to_run(app: AppState, review: ReviewState, backend: &Backend, run: &Ag
     app.begin_review(review, "Reading the discussion");
 }
 
+/// Compare runs on the fields a dropdown row displays or acts on, ignoring
+/// streaming progress (`latest_activity`, `last_event_sequence`, `steps`,
+/// `response`, usage) so live output does not rebuild the whole dropdown.
+fn run_row_eq(a: &AgentRunSummary, b: &AgentRunSummary) -> bool {
+    a.id == b.id
+        && a.item_id == b.item_id
+        && a.thread_id == b.thread_id
+        && a.review_attempt_id == b.review_attempt_id
+        && a.repository == b.repository
+        && a.worktree == b.worktree
+        && a.purpose == b.purpose
+        && a.request == b.request
+        && a.backend == b.backend
+        && a.mode == b.mode
+        && a.status == b.status
+        && a.queue_position == b.queue_position
+        && a.queued_at == b.queued_at
+        && a.started_at == b.started_at
+        && a.ended_at == b.ended_at
+        && a.source_available == b.source_available
+}
+
+fn entry_eq(a: &AgentRunEntry, b: &AgentRunEntry) -> bool {
+    match (a, b) {
+        (AgentRunEntry::Run(a), AgentRunEntry::Run(b)) => run_row_eq(a, b),
+        (AgentRunEntry::ReviewGroup(a), AgentRunEntry::ReviewGroup(b)) => {
+            a.key == b.key
+                && a.summary == b.summary
+                && a.runs.len() == b.runs.len()
+                && a.runs.iter().zip(&b.runs).all(|(x, y)| run_row_eq(x, y))
+        }
+        _ => false,
+    }
+}
+
 /// The open item's runs.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct ThisItem {
     id: String,
     entries: Vec<AgentRunEntry>,
@@ -256,13 +291,44 @@ struct ThisItem {
     page: Option<(bool, bool)>,
 }
 
+impl PartialEq for ThisItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.page == other.page
+            && self.entries.len() == other.entries.len()
+            && self
+                .entries
+                .iter()
+                .zip(&other.entries)
+                .all(|(a, b)| entry_eq(a, b))
+    }
+}
+
 /// What the dropdown lists: the open item's runs, what is working on
 /// the other items, and the runs that finished last on them.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct Listing {
     this: Option<ThisItem>,
     working: Vec<AgentRunSummary>,
     finished: Vec<AgentRunSummary>,
+}
+
+impl PartialEq for Listing {
+    fn eq(&self, other: &Self) -> bool {
+        self.this == other.this
+            && self.working.len() == other.working.len()
+            && self
+                .working
+                .iter()
+                .zip(&other.working)
+                .all(|(a, b)| run_row_eq(a, b))
+            && self.finished.len() == other.finished.len()
+            && self
+                .finished
+                .iter()
+                .zip(&other.finished)
+                .all(|(a, b)| run_row_eq(a, b))
+    }
 }
 
 fn listing(app: AppState, review: ReviewState) -> Listing {
@@ -620,7 +686,7 @@ fn row(
             return if waiting {
                 format!("{item} · Waiting on you")
             } else if status.is_active() {
-                format!("{item} · {}", elapsed_label(&timed, app.now.get()))
+                format!("{item} · {}", elapsed_label(&timed, || app.agent_now.get()))
             } else {
                 format!("{item} · {}", status.label())
             };
@@ -628,7 +694,7 @@ fn row(
         if waiting {
             return format!("{who} · Waiting on you");
         }
-        let elapsed = elapsed_label(&timed, app.now.get());
+        let elapsed = elapsed_label(&timed, || app.agent_now.get());
         match (status, queue) {
             (AgentRunStatus::Queued, Some(position)) => {
                 let queued_for = elapsed.strip_prefix("Queued ").unwrap_or(&elapsed);
@@ -681,7 +747,7 @@ fn review_row(
     .collect::<Vec<_>>()
     .join(" \u{b7} ");
     let detail_group = group.clone();
-    let detail = move || reviews::how_label(&detail_group, app.now.get());
+    let detail = move || reviews::how_label(&detail_group, || app.agent_now.get());
     let retry = reviews::retryable_attempts(&group);
     let stop = reviews::stoppable(&group);
     let actions = move |hovered: RwSignal<bool>| -> floem::AnyView {
@@ -1293,5 +1359,30 @@ mod tests {
             "the click went somewhere"
         );
         assert_eq!(app.open_item.get().as_deref(), Some("pr"));
+    }
+
+    /// Streaming steps on a running agent do not tear down and rebuild the
+    /// rows of an open dropdown.
+    #[test]
+    fn streaming_progress_keeps_open_dropdown_rows_in_place() {
+        let (mut harness, app, _review, _) = window();
+        open(&mut harness);
+        let row_c = named(harness.root_id(), "agents-dropdown-run:c").expect("run c");
+        let row_a = named(harness.root_id(), "agents-dropdown-run:a").expect("run a");
+
+        let mut updated = record("c", "pr", RunStatus::Running, 2);
+        updated.last_event_sequence = 7;
+        updated.latest_activity = Some("Reading src/main.rs".into());
+        app.update_agent_run(&updated);
+        harness.rebuild();
+
+        assert_eq!(
+            named(harness.root_id(), "agents-dropdown-run:c"),
+            Some(row_c)
+        );
+        assert_eq!(
+            named(harness.root_id(), "agents-dropdown-run:a"),
+            Some(row_a)
+        );
     }
 }

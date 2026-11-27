@@ -205,7 +205,10 @@ fn found_label(summary: &ReviewGroupSummary) -> String {
 /// A review's line: `Review #2 · Gemini · 3 new · 1 still present`, or,
 /// while it runs, how long it has; once it failed or stopped, that.
 /// The dropdown's row for a review says the same after its title.
-pub(crate) fn line_text(group: &AgentReviewRunGroup, now: jiff::Timestamp) -> String {
+pub(crate) fn line_text(
+    group: &AgentReviewRunGroup,
+    now: impl FnOnce() -> jiff::Timestamp,
+) -> String {
     let number = group
         .summary
         .as_ref()
@@ -220,10 +223,13 @@ pub(crate) fn line_text(group: &AgentReviewRunGroup, now: jiff::Timestamp) -> St
 }
 
 /// How a review stands, after who ran it.
-pub(crate) fn how_label(group: &AgentReviewRunGroup, now: jiff::Timestamp) -> String {
+pub(crate) fn how_label(
+    group: &AgentReviewRunGroup,
+    now: impl FnOnce() -> jiff::Timestamp,
+) -> String {
     use perch_github::ReviewGroupStatus as G;
     let running = || match group.ran_at() {
-        Some(at) => format!("running {}", duration_label(seconds_between(at, now))),
+        Some(at) => format!("running {}", duration_label(seconds_between(at, now()))),
         None => "starting".to_string(),
     };
     match &group.summary {
@@ -276,6 +282,20 @@ pub(crate) fn stoppable(group: &AgentReviewRunGroup) -> Option<String> {
         .map(|summary| summary.group.id.clone())
 }
 
+/// A review group paired with its `dyn_stack` key, compared by key alone so
+/// streaming reviewer output does not wake the review list on an empty diff.
+#[derive(Clone)]
+struct KeyedReviewGroup {
+    key: String,
+    group: AgentReviewRunGroup,
+}
+
+impl PartialEq for KeyedReviewGroup {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
 /// The item's reviews: the latest, the rest behind a count. Absent while
 /// the item has had none.
 pub(crate) fn history(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
@@ -290,16 +310,23 @@ pub(crate) fn history(app: AppState, review: ReviewState, backend: Rc<Backend>) 
             review.review_older_shown.set(true);
         }
     });
-    let shown = move || {
+    let shown = Memo::new(move |_| {
         let mut all = all.get();
         if !review.review_older_shown.get() {
             all.truncate(1);
         }
-        all
-    };
-    let lines = dyn_stack(shown, entry_key, move |group| {
-        line(app, review, backend.clone(), group)
-    })
+        all.into_iter()
+            .map(|group| KeyedReviewGroup {
+                key: entry_key(&group),
+                group,
+            })
+            .collect::<Vec<_>>()
+    });
+    let lines = dyn_stack(
+        move || shown.get(),
+        |entry| entry.key.clone(),
+        move |entry| line(app, review, backend.clone(), entry.group),
+    )
     .debug_name("agent-reviews-lines")
     .style(|s| s.flex_col().width_full());
     let older = Label::derived(move || {
@@ -454,7 +481,7 @@ fn line(
     let press_key = key.clone();
     let head = Stack::horizontal((
         mark,
-        Label::derived(move || line_text(&text_group, app.now.get()))
+        Label::derived(move || line_text(&text_group, || app.agent_now.get()))
             .debug_name("agent-review-text")
             .style(move |s| {
                 s.font_size(theme::TEXT_META)
@@ -912,8 +939,9 @@ fn reviewer(
         let id = id.clone();
         Memo::new(move |_| app.agent_run(&id).unwrap_or_else(|| initial.clone()))
     };
+    let status = Memo::new(move |_| run.with(|run| run.status));
     let dot = dyn_container(
-        move || run.with(|run| run.status),
+        move || status.get(),
         move |status| {
             if matches!(status, AgentRunStatus::Starting | AgentRunStatus::Running) {
                 live_dot(app, 6.0).into_any()
@@ -959,7 +987,10 @@ fn reviewer(
                     } else {
                         run.status.label()
                     };
-                    format!("{label} \u{b7} {}", elapsed_label(&run, app.now.get()))
+                    format!(
+                        "{label} \u{b7} {}",
+                        elapsed_label(&run, || app.agent_now.get())
+                    )
                 }
             }
         })
@@ -1344,7 +1375,7 @@ mod tests {
         running.group.status = perch_github::ReviewGroupStatus::Reviewing;
         running.attempts[0].phase = perch_github::ReviewerPhase::Reviewing;
         set_reviews(app, vec![running]);
-        app.now.set(at("2026-09-19T11:04:00Z"));
+        app.agent_now.set(at("2026-09-19T11:04:00Z"));
         settle(&mut harness);
         click(&mut harness, "review-control");
         assert!(state.review_open.get());

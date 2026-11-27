@@ -370,6 +370,8 @@ pub struct AppState {
     /// The main pane's left and right edges in the window, from its last
     /// layout, for Cmd-P's palette to centre itself over.
     pub main_pane: RwSignal<(f64, f64)>,
+    /// Current time for live run durations and activity indicators.
+    pub agent_now: RwSignal<Timestamp>,
     /// Guards the one shared elapsed-time ticker; rows never make timers of
     /// their own.
     pub agents_clock_armed: RwSignal<bool>,
@@ -578,6 +580,7 @@ impl AppState {
             window_width: RwSignal::new(0.0),
             window_height: RwSignal::new(0.0),
             main_pane: RwSignal::new((0.0, 0.0)),
+            agent_now: RwSignal::new(Timestamp::now()),
             agents_clock_armed: RwSignal::new(false),
             drawer_opener: RwSignal::new(None),
             item_runs: RwSignal::new(HashMap::new()),

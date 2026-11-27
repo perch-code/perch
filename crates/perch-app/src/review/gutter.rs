@@ -43,7 +43,7 @@ use floem::event::PointerScrollEventExt;
 use floem::kurbo::{Rect, Size, Vec2};
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
 use floem::views::{dyn_container, dyn_stack, ClipExt, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
@@ -667,26 +667,30 @@ fn anchor_slot(
     let marker_file = file.clone();
     let plus_file = file;
 
-    dyn_container(
-        move || {
-            let thread = match anchor {
-                AnchorRow::Stacked(display) => state.thread_ending_at(&marker_file, display),
-                AnchorRow::Base { base, .. } => {
-                    state.thread_ending_on(&marker_file, AnchorSide::Left, base)
-                }
-                AnchorRow::Head { head, .. } => {
-                    state.thread_ending_on(&marker_file, AnchorSide::Right, head)
-                }
+    // Memoized so streaming `comment_threads` updates or pointer moves on
+    // other lines do not rebuild every visible gutter slot.
+    let shown = Memo::new(move |_| {
+        let thread = match anchor {
+            AnchorRow::Stacked(display) => state.thread_ending_at(&marker_file, display),
+            AnchorRow::Base { base, .. } => {
+                state.thread_ending_on(&marker_file, AnchorSide::Left, base)
             }
-            .map(|t| {
-                let draft = t.messages.iter().any(|m| m.is_draft());
-                (t.id, t.origin, t.outdated, draft)
-            });
-            let hovered = offers_plus
-                && state.hovered_line.get() == Some(key)
-                && state.hovered_base.get() == base_row;
-            (thread, hovered)
-        },
+            AnchorRow::Head { head, .. } => {
+                state.thread_ending_on(&marker_file, AnchorSide::Right, head)
+            }
+        }
+        .map(|t| {
+            let draft = t.messages.iter().any(|m| m.is_draft());
+            (t.id, t.origin, t.outdated, draft)
+        });
+        let hovered = offers_plus
+            && state.hovered_line.get() == Some(key)
+            && state.hovered_base.get() == base_row;
+        (thread, hovered)
+    });
+
+    dyn_container(
+        move || shown.get(),
         move |(thread, hovered)| match (thread, hovered) {
             // A thread on this line and the pointer elsewhere, or on a row
             // that offers no `+`: solid in GitHub's blue when it holds a

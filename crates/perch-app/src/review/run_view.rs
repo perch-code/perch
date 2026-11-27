@@ -425,20 +425,21 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
             }
         },
     );
+    let elapsed_text = Memo::new(move |_| {
+        let now = app.agent_now.get();
+        format!("\u{00b7} {}", live.with(|run| elapsed(run, now)))
+    });
     let row = Stack::horizontal((
         doing_row(doing),
-        Label::derived(move || {
-            let now = app.now.get();
-            format!("\u{00b7} {}", live.with(|run| elapsed(run, now)))
-        })
-        .debug_name("run-elapsed")
-        .style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::fg_subtle())
-                .margin_left(6.0)
-                .selectable(false)
-                .flex_shrink(0.0_f32)
-        }),
+        Label::derived(move || elapsed_text.get())
+            .debug_name("run-elapsed")
+            .style(|s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::fg_subtle())
+                    .margin_left(6.0)
+                    .selectable(false)
+                    .flex_shrink(0.0_f32)
+            }),
         Label::derived(move || format!("\u{00b7} {}", usage.get().unwrap_or_default())).style(
             move |s| {
                 s.font_size(theme::TEXT_BADGE)

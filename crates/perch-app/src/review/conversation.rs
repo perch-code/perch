@@ -401,6 +401,21 @@ fn sections(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     })
 }
 
+/// A card paired with its `dyn_stack` key, compared by key alone so a
+/// streaming run mutating a thread's steps in place does not wake the stack
+/// on an empty diff.
+#[derive(Clone)]
+struct KeyedCard {
+    key: String,
+    card: Card,
+}
+
+impl PartialEq for KeyedCard {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
 /// One scrolling column, centred, on the page grey, with the find bar
 /// hung over its top right.
 pub fn view(
@@ -420,28 +435,36 @@ pub fn view(
     let held = Memo::new(move |_| Held::of(state));
     unfold_when_asked(state, all, held, unfolded);
     let gaps = Memo::new(move |_| all.with(|cards| gaps(cards)));
-    let description = move || {
+    let description = Memo::new(move |_| {
         all.with(|cards| {
             cards
                 .iter()
                 .filter(|card| matches!(card, Card::Description { .. }))
-                .cloned()
+                .map(|card| KeyedCard {
+                    key: cards::key(card),
+                    card: card.clone(),
+                })
                 .collect::<Vec<_>>()
         })
-    };
+    });
     // How far down the timeline is built is worked out here, from the
     // cards, the composer and the depth as they are now, rather than in a
     // memo of its own or left to the effect that keeps a held card
     // built: run after this, either would have it drop a card at the
     // bottom for a moment and build it again.
-    let rows = move || {
+    let rows = Memo::new(move |_| {
         let (left, newest) = (unfolded.left.get(), unfolded.newest.get());
         let held = held.get();
         all.with(|cards| {
             let built = built(cards, left, newest, held.as_ref());
-            built_cards(cards, built).cloned().collect::<Vec<_>>()
+            built_cards(cards, built)
+                .map(|card| KeyedCard {
+                    key: cards::key(card),
+                    card: card.clone(),
+                })
+                .collect::<Vec<_>>()
         })
-    };
+    });
     // Once the reader scrolls, the cards built so far are theirs as much
     // as any they scroll down to later: a card landing at the top no
     // longer takes the oldest of them away.
@@ -475,7 +498,7 @@ pub fn view(
             }
         });
     };
-    let empty = move || {
+    let empty = Memo::new(move |_| {
         // Only a bare branch has nothing: a pull request or an issue has a
         // description whatever else it has.
         state.comment_threads.with(|t| t.is_empty())
@@ -486,21 +509,25 @@ pub fn view(
                 .item
                 .with(|item| item.as_ref().map(|item| item.id.clone()))
                 .is_none_or(|item_id| app.review_groups_for(&item_id).is_empty())
-    };
+    });
 
-    let timeline = dyn_stack(rows, cards::key, move |card| {
-        let key = cards::key(&card);
-        let gap = move || gaps.with(|gaps| gaps.get(&key).copied().unwrap_or(0.0));
-        card_view(
-            app,
-            state,
-            card_backend.clone(),
-            open_file.clone(),
-            card,
-            gap,
-            unfolded,
-        )
-    })
+    let timeline = dyn_stack(
+        move || rows.get(),
+        |entry| entry.key.clone(),
+        move |entry| {
+            let key = entry.key;
+            let gap = move || gaps.with(|gaps| gaps.get(&key).copied().unwrap_or(0.0));
+            card_view(
+                app,
+                state,
+                card_backend.clone(),
+                open_file.clone(),
+                entry.card,
+                gap,
+                unfolded,
+            )
+        },
+    )
     .debug_name("timeline")
     .style(|s| s.flex_col().width_full());
     let timeline_id = timeline.id();
@@ -510,17 +537,21 @@ pub fn view(
         sections(app, state, backend.clone()),
         // The description first whatever else there is: it says what
         // the item is, and the timeline under it is what came of it.
-        dyn_stack(description, cards::key, move |card| {
-            card_view(
-                app,
-                state,
-                description_backend.clone(),
-                description_file.clone(),
-                card,
-                || 0.0,
-                unfolded,
-            )
-        })
+        dyn_stack(
+            move || description.get(),
+            |entry| entry.key.clone(),
+            move |entry| {
+                card_view(
+                    app,
+                    state,
+                    description_backend.clone(),
+                    description_file.clone(),
+                    entry.card,
+                    || 0.0,
+                    unfolded,
+                )
+            },
+        )
         .style(|s| s.flex_col().width_full()),
         composer(app, state, composer_backend).style(|s| {
             s.width_full()
@@ -538,7 +569,7 @@ pub fn view(
                     .text_align(floem::text::Alignment::Center)
                     .padding_vert(28.0)
                     .selectable(false)
-                    .apply_if(!empty(), |s| s.hide())
+                    .apply_if(!empty.get(), |s| s.hide())
             },
         ),
     ))
@@ -4914,5 +4945,86 @@ mod tests {
             card_shown(&harness, "card:comment", true),
             "the new comment is not in view"
         );
+    }
+
+    /// A streaming step in a collapsed thread does not wake the timeline,
+    /// description, empty-state style, or another thread's message list.
+    #[test]
+    fn streaming_agent_step_in_collapsed_thread_does_not_repaint_conversation() {
+        let (mut harness, _app, state) = app_harness();
+        let when = at("2026-09-18T10:00:00Z");
+        let idle = CommentThread {
+            id: "t-idle".into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: when,
+            messages: vec![CommentMessage {
+                id: "m-idle".into(),
+                thread_id: "t-idle".into(),
+                origin: ThreadOrigin::Local,
+                author: Author::User,
+                body: "Idle question".into(),
+                created_at: when,
+                run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        };
+        let live = CommentThread {
+            id: "t-live".into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: at("2026-09-18T10:01:00Z"),
+            messages: vec![CommentMessage {
+                id: "m-live".into(),
+                thread_id: "t-live".into(),
+                origin: ThreadOrigin::Local,
+                author: Author::User,
+                body: "Streaming question".into(),
+                created_at: at("2026-09-18T10:01:00Z"),
+                run: Some(RunRecord {
+                    id: "run-live".into(),
+                    status: RunStatus::Running,
+                    backend: "claude-code".into(),
+                    model: "sonnet".into(),
+                    effort: "high".into(),
+                    queued_at: at("2026-09-18T10:01:00Z"),
+                    started_at: Some(at("2026-09-18T10:01:01Z")),
+                    ..RunRecord::default()
+                }),
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        };
+        state.toggle_fold("t-live");
+        state.set_comment_threads(Arc::new(vec![idle, live]));
+        settle(&mut harness);
+        harness.clear_paint_request();
+
+        state.apply_run_event(
+            "run-live",
+            &perch_agent::RunEvent::Text("Still thinking".into()),
+        );
+        harness.rebuild();
+
+        assert!(!harness.paint_requested());
     }
 }

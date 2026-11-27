@@ -346,11 +346,14 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
             }
         });
     }
-    let pending = move || state.pull_step.with(Option::is_some) || state.describing.get();
+    let pending =
+        Memo::new(move |_| state.pull_step.with(Option::is_some) || state.describing.get());
+    let can_submit =
+        Memo::new(move |_| !pending.get() && refusal(app, state, &title.get()).is_none());
     let submit: Rc<dyn Fn()> = {
         let (backend, item_id) = (backend.clone(), item_id.clone());
         Rc::new(move || {
-            if pending() || refusal(app, state, &title.get_untracked()).is_some() {
+            if pending.get_untracked() || refusal(app, state, &title.get_untracked()).is_some() {
                 return;
             }
             let Some(base) = base_of(app, state, &item_id) else {
@@ -384,7 +387,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
                 .border_color(theme::border())
                 .border_radius(theme::RADIUS)
                 .focus(|s| s.border_color(theme::accent()))
-                .set_disabled(pending())
+                .set_disabled(pending.get())
         });
 
     let body = body_editor(app, state, backend.clone(), item_id.clone(), submit.clone());
@@ -401,7 +404,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
                 || "Cancel".to_string(),
                 "open-pull-request-cancel",
                 false,
-                move || !pending(),
+                move || !pending.get(),
                 move || fold(app, &cancel_id),
             ),
             action_button(
@@ -414,7 +417,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
                 },
                 "open-pull-request-submit",
                 true,
-                move || !pending() && refusal(app, state, &title.get()).is_none(),
+                move || can_submit.get(),
                 move || submit(),
             ),
         ))
@@ -444,7 +447,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
         resize_cursor_sheet(pull_body_grip(state)),
     ))
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Escape && key.modifiers.is_empty() && !pending() {
+        if key.code == Code::Escape && key.modifiers.is_empty() && !pending.get_untracked() {
             fold(app, &escape_id);
             EventPropagation::Stop
         } else {
@@ -789,7 +792,7 @@ fn notes(
     title: RwSignal<String>,
     item_id: String,
 ) -> impl IntoView {
-    let dirty = move || {
+    let dirty = Memo::new(move |_| {
         ready(state)
             .filter(|r| r.dirty_files > 0 && !commits_dirt(app, &item_id, r))
             .map(|r| match r.dirty_files {
@@ -798,28 +801,27 @@ fn notes(
                     "{n} files have uncommitted changes. They won't be in the pull request."
                 ),
             })
-    };
-    let refused = move || {
+    });
+    let refused = Memo::new(move |_| {
         if state.pull_step.with(Option::is_some) {
             return None;
         }
         refusal(app, state, &title.get())
-    };
-    let hide_dirty = dirty.clone();
+    });
     Stack::vertical((
-        Label::derived(move || dirty().unwrap_or_default())
+        Label::derived(move || dirty.get().unwrap_or_default())
             .debug_name("open-pull-request-dirty")
             .style(move |s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::draft_yellow())
-                    .apply_if(hide_dirty().is_none(), |s| s.hide())
+                    .apply_if(dirty.with(Option::is_none), |s| s.hide())
             }),
-        Label::derived(move || refused().unwrap_or_default())
+        Label::derived(move || refused.get().unwrap_or_default())
             .debug_name("open-pull-request-refusal")
             .style(move |s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::fg_subtle())
-                    .apply_if(refused().is_none(), |s| s.hide())
+                    .apply_if(refused.with(Option::is_none), |s| s.hide())
             }),
     ))
     .style(|s| s.flex_col().gap(4.0))
@@ -1396,5 +1398,41 @@ mod tests {
             Some("main".into()),
             "an unknown default makes every base a pick"
         );
+    }
+
+    #[test]
+    fn unrelated_agent_progress_does_not_repaint_unfolded_form() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on(branch());
+        let (backend, _commands) = Backend::recording();
+        let view = surface(app, state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 700.0);
+        state.pull_readiness.set(Some(Ok(readiness(2))));
+        settle(&mut harness);
+        click(&mut harness, "open-pull-request-unfold");
+        harness.clear_paint_request();
+
+        let run = perch_github::RunRecord {
+            id: "other-run".into(),
+            owner: perch_github::RunOwner::Discussion {
+                item_id: "other-item".into(),
+                thread_id: "t-other".into(),
+                request_id: "r-other".into(),
+            },
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "high".into(),
+            original_request: "Explain".into(),
+            status: perch_github::RunStatus::Running,
+            queued_at: "2026-09-20T09:00:00Z".parse().unwrap(),
+            started_at: Some("2026-09-20T09:00:01Z".parse().unwrap()),
+            latest_activity: Some("Reading".into()),
+            last_event_sequence: 1,
+            ..perch_github::RunRecord::default()
+        };
+        app.update_agent_run(&run);
+        harness.rebuild();
+        assert!(!harness.paint_requested());
     }
 }
