@@ -511,8 +511,9 @@ when you’re writing a comment.
 Settings flags shortcuts that compete in the same place. Some can share a key.
 For example, `super+g` adds a suggestion while composing a line comment and
 finds the next match in the editor. Window actions such as **New Work**,
-**Close**, **Go to File**, and **Toggle Files** also work inside a message box
-and take priority there.
+**Close**, **Go to File**, and **Toggle Files**, and the **Item** shortcuts
+such as **Show Conversation** (`super+1`) and **Show Code** (`super+2`), also
+work inside a message box or any other text field and take priority there.
 
 Menus and tooltips show the first shortcut assigned to an action. On macOS, the
 application menu displays the first shortcut for **New Window**, **Open…**, and

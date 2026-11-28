@@ -278,13 +278,22 @@ impl Action {
                 | Action::PreviousItem
                 | Action::MarkDone
                 | Action::MarkUnread
+                | Action::ShowConversation
+                | Action::ShowCode
+                | Action::NextTab
+                | Action::PreviousTab
+                | Action::Refresh
                 | Action::OpenOnGithub
+                | Action::CopyLink
+                | Action::CopyBranchName
+                | Action::StartWork
                 | Action::ToggleReview
                 | Action::ToggleMerge
                 | Action::PageUp
                 | Action::PageDown
                 | Action::GoToFile
                 | Action::ToggleFiles
+                | Action::ToggleWrap
         )
     }
 
@@ -901,6 +910,12 @@ mod tests {
         assert_eq!(keymap.conflicts(Action::ToggleFiles), vec![Action::Bold]);
         assert_eq!(keymap.conflicts(Action::Italic), vec![]);
         assert_eq!(keymap.conflicts(Action::Find), vec![]);
+        // The item's keys run from a composer, Cmd-1 among them.
+        let keymap = with_bindings("bold = \"super+1\"");
+        assert_eq!(
+            keymap.conflicts(Action::Bold),
+            vec![Action::ShowConversation]
+        );
         let keymap = with_bindings("toggle_files = \"super+b\"");
         assert_eq!(keymap.conflicts(Action::Bold), vec![Action::ToggleFiles]);
         // A key that types is the composer's text, whatever it runs.

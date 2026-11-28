@@ -565,9 +565,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // every key once it has focus, and these are pressed right after
         // clicking in it, so they are caught on the way down to it rather
         // than on the way back up. Target as well, for when nothing has focus
-        // and floem hands the key straight to whoever listens. Nothing here
-        // runs while a text box has the keyboard. Which keys are which
-        // action's is the keymap's to say.
+        // and floem hands the key straight to whoever listens. While a text
+        // box has the keyboard, only the keys that don't type and that
+        // `Action::heard_in_composer` names run here; the rest are the
+        // box's. Which keys are which action's is the keymap's to say.
         .on_event_with_config(
             el::KeyDown,
             floem::context::EventCallbackConfig {
@@ -874,6 +875,63 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     feedback::toggle(state, review, opener);
                     return EventPropagation::Stop;
                 }
+                // The item's keys, from anywhere in it, a composer or any
+                // other text box too: none of them types or edits text, and
+                // a key that would type is the box's by `in_box`. Not under
+                // new work, which hides the item and whose message box has
+                // the keyboard.
+                if bar_shown {
+                    // Cmd-1 shows Conversation and Cmd-2 Code, as the switch
+                    // in the bar does.
+                    if pressed(Action::ShowConversation) {
+                        review.show_tab(crate::review::model::ItemTab::Conversation);
+                        return EventPropagation::Stop;
+                    }
+                    if pressed(Action::ShowCode) {
+                        if review.has_files() {
+                            review.show_tab(crate::review::model::ItemTab::Code);
+                        }
+                        return EventPropagation::Stop;
+                    }
+                    // Cmd-} and Cmd-{ step through the tabs, wrapping at the
+                    // ends, as in Safari and Xcode. Cmd-[ stays the way back
+                    // to the sidebar.
+                    let next_tab = pressed(Action::NextTab);
+                    if (next_tab || pressed(Action::PreviousTab))
+                        && crate::review::tabs::step_tab(review, key_backend, next_tab)
+                    {
+                        return EventPropagation::Stop;
+                    }
+                    // As the news pill, the bar's menu and the view menu
+                    // have them.
+                    if pressed(Action::Refresh)
+                        && crate::review::refresh(state, review, key_backend)
+                    {
+                        return EventPropagation::Stop;
+                    }
+                    if pressed(Action::CopyLink) {
+                        if let Some(url) = crate::review::header::page(review) {
+                            widgets::copy_to_clipboard(url);
+                            return EventPropagation::Stop;
+                        }
+                    }
+                    if pressed(Action::CopyBranchName) {
+                        if let Some(branch) = crate::review::header::open_branch_name(review) {
+                            widgets::copy_to_clipboard(branch);
+                            return EventPropagation::Stop;
+                        }
+                    }
+                    if pressed(Action::StartWork)
+                        && crate::review::header::start_work(state, review)
+                    {
+                        return EventPropagation::Stop;
+                    }
+                    if pressed(Action::ToggleWrap)
+                        && crate::review::tabs::toggle_wrap(state, review)
+                    {
+                        return EventPropagation::Stop;
+                    }
+                }
                 // Any box that takes typing keeps the keys below: `a` typed
                 // in the close-as-issue title is an `a`, not a composer.
                 let typing = typing || review.find_focused.get() || text_box_focused(cx, root_id);
@@ -883,52 +941,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         return EventPropagation::Stop;
                     }
                     return EventPropagation::Continue;
-                }
-                // Cmd-Shift-1 shows Conversation and Cmd-Shift-2 Code, as the
-                // switch in the bar does. Here rather than with the other Cmd
-                // keys because they are pressed from the code as often as
-                // from anywhere.
-                if keymap::pressed(Action::ShowConversation, key, in_box) {
-                    review.show_tab(crate::review::model::ItemTab::Conversation);
-                    return EventPropagation::Stop;
-                }
-                if keymap::pressed(Action::ShowCode, key, in_box) {
-                    if review.has_files() {
-                        review.show_tab(crate::review::model::ItemTab::Code);
-                    }
-                    return EventPropagation::Stop;
-                }
-                // Cmd-} and Cmd-{ step through the tabs, wrapping at the
-                // ends, as in Safari and Xcode. Cmd-[ stays the way back
-                // to the sidebar.
-                let next_tab = keymap::pressed(Action::NextTab, key, in_box);
-                if (next_tab || keymap::pressed(Action::PreviousTab, key, in_box))
-                    && crate::review::tabs::step_tab(review, key_backend, next_tab)
-                {
-                    return EventPropagation::Stop;
-                }
-                // The item's keys, as the news pill, the bar's menu and the
-                // view menu have them.
-                if pressed(Action::Refresh) && crate::review::refresh(state, review, key_backend) {
-                    return EventPropagation::Stop;
-                }
-                if pressed(Action::CopyLink) {
-                    if let Some(url) = crate::review::header::page(review) {
-                        widgets::copy_to_clipboard(url);
-                        return EventPropagation::Stop;
-                    }
-                }
-                if pressed(Action::CopyBranchName) {
-                    if let Some(branch) = crate::review::header::open_branch_name(review) {
-                        widgets::copy_to_clipboard(branch);
-                        return EventPropagation::Stop;
-                    }
-                }
-                if pressed(Action::StartWork) && crate::review::header::start_work(state, review) {
-                    return EventPropagation::Stop;
-                }
-                if pressed(Action::ToggleWrap) && crate::review::tabs::toggle_wrap(state, review) {
-                    return EventPropagation::Stop;
                 }
                 // The navigation keys, VS Code's: F12 goes to the definition
                 // of the caret's symbol, Cmd-F12 to its implementations,
@@ -2671,6 +2683,78 @@ mod tests {
             named(harness.root_id(), "\"No changes\"").is_some(),
             "the pane does not say there are no changes"
         );
+    }
+
+    /// The item's keys work with a text box being typed in, as none of
+    /// them types: Cmd-1 and Cmd-2 from the sidebar's search or a
+    /// composer, Cmd-} through the tabs and a key copying the branch name.
+    /// A key that types stays the box's.
+    #[test]
+    fn the_item_keys_work_from_a_text_box() {
+        use crate::review::model::ItemTab;
+        let (mut harness, state, review) = window_and_state_with_a_file_open();
+        assert_eq!(review.tab.get(), ItemTab::Code);
+
+        let search = state.search_box.get().expect("no sidebar search");
+        search.request_focus();
+        harness.rebuild();
+        harness.paint();
+        assert!(state.search_focused.get(), "the search has the keyboard");
+        press(&mut harness, Code::KeyQ, "q", Modifiers::empty());
+        assert_eq!(state.item_query.get(), "q", "`q` was not typed");
+
+        press(&mut harness, Code::Digit1, "1", OS_MOD);
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
+        press(&mut harness, Code::Digit2, "2", OS_MOD);
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        assert_eq!(state.item_query.get(), "q", "the keys typed in the box");
+
+        // A key that types is the box's, whatever it is bound to.
+        let _keymap =
+            crate::keymap::install(crate::keymap::with_bindings("show_conversation = 'x'"));
+        press(&mut harness, Code::KeyX, "x", Modifiers::empty());
+        assert_eq!(review.tab.get(), ItemTab::Code, "`x` switched the tab");
+        assert_eq!(state.item_query.get(), "qx");
+        drop(_keymap);
+
+        // Not under new work, which hides the item.
+        state.new_work.open.set(true);
+        harness.rebuild();
+        press(&mut harness, Code::Digit1, "1", OS_MOD);
+        assert_eq!(review.tab.get(), ItemTab::Code, "the hidden item switched");
+        state.new_work.open.set(false);
+        harness.rebuild();
+        harness.paint();
+
+        // From a composer.
+        state.search_focused.set(false);
+        review.composer_focused.set(true);
+        press(&mut harness, Code::Digit1, "1", OS_MOD);
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
+        press(&mut harness, Code::Digit2, "2", OS_MOD);
+        assert_eq!(review.tab.get(), ItemTab::Code);
+
+        review.open_tab("src/y.rs");
+        review.open_tab("src/x.rs");
+        harness.rebuild();
+        press(
+            &mut harness,
+            Code::BracketRight,
+            "}",
+            OS_MOD | Modifiers::SHIFT,
+        );
+        assert_eq!(review.active.get().as_deref(), Some("src/y.rs"));
+
+        let _keymap = crate::keymap::install(crate::keymap::with_bindings(
+            "copy_branch_name = 'super+alt+b'",
+        ));
+        crate::ui::widgets::copied();
+        press(&mut harness, Code::KeyB, "b", OS_MOD | Modifiers::ALT);
+        assert_eq!(
+            crate::ui::widgets::copied(),
+            vec!["perch/pr-812".to_string()]
+        );
+        review.composer_focused.set(false);
     }
 
     /// With nothing focused the key's target is the root, whose handlers
