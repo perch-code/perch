@@ -484,6 +484,7 @@ fn stacked_view(
         ),
     );
     let live = LiveDoc::of(&editor, doc);
+    let clear_handle = live.handle.clone();
     state.docs.set(Some(LiveDocs {
         epoch,
         layout: LiveLayout::Stacked(live.clone()),
@@ -594,7 +595,22 @@ fn stacked_view(
         // Over the gutter and the code both, and over the cards.
         sticky,
     ))
+    .on_cleanup(move || clear_docs(state, &clear_handle))
     .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
+}
+
+/// Drop `state.docs` when the editor that registered it is torn down, such
+/// as when switching from Code to Conversation. Checks the document handle
+/// so an older editor cleaning up after its replacement does not clear the
+/// new one.
+fn clear_docs(state: ReviewState, handle: &Rc<dyn floem::views::editor::text::Document>) {
+    let ours = state.docs.try_with_untracked(|docs| {
+        docs.and_then(Option::as_ref)
+            .is_some_and(|d| Rc::ptr_eq(&d.layout.head().handle, handle))
+    });
+    if ours {
+        state.docs.try_update(|docs| *docs = None);
+    }
 }
 
 /// Whether a file has two sides to split: a base to put on the left, and
@@ -1595,6 +1611,7 @@ fn split_view(
     );
     let left_live = LiveDoc::of(&left, left_doc);
     let right_live = LiveDoc::of(&right, right_doc);
+    let clear_handle = right_live.handle.clone();
     state.docs.set(Some(LiveDocs {
         epoch,
         layout: LiveLayout::Split {
@@ -1898,6 +1915,7 @@ fn split_view(
         cards,
         sticky,
     ))
+    .on_cleanup(move || clear_docs(state, &clear_handle))
     .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
 }
 

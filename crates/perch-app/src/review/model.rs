@@ -937,6 +937,10 @@ pub struct LiveDocs {
 }
 
 /// Which editors are open: the stacked one, or a split's two.
+///
+/// Like [`LiveDoc`]'s signals, a split's `active` signal lives with the
+/// editor's view and is disposed when the editor is torn down, so readers
+/// outside the editor use the `try_` variants.
 #[derive(Clone)]
 pub enum LiveLayout {
     Stacked(LiveDoc),
@@ -950,7 +954,6 @@ pub enum LiveLayout {
 impl LiveLayout {
     /// The document the folds are counted from: the stacked one, or the
     /// head side of a split, whose dividers the base side mirrors.
-    #[cfg(test)]
     pub fn head(&self) -> &LiveDoc {
         match self {
             LiveLayout::Stacked(live) => live,
@@ -958,17 +961,18 @@ impl LiveLayout {
         }
     }
 
-    /// The document whose cursor is currently the pane's.
-    pub fn active(&self) -> &LiveDoc {
+    /// The document whose cursor is currently the pane's, or `None` once
+    /// the split editor's scope has been disposed.
+    pub fn active(&self) -> Option<&LiveDoc> {
         match self {
-            LiveLayout::Stacked(live) => live,
+            LiveLayout::Stacked(live) => Some(live),
             LiveLayout::Split {
                 left,
                 right,
                 active,
-            } => match active.get_untracked() {
-                crate::review::editor::Side::Base => left,
-                crate::review::editor::Side::Head => right,
+            } => match active.try_get_untracked()? {
+                crate::review::editor::Side::Base => Some(left),
+                crate::review::editor::Side::Head => Some(right),
             },
         }
     }

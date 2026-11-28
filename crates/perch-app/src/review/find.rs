@@ -509,7 +509,7 @@ fn live_layout(state: ReviewState) -> Option<LiveLayout> {
 
 /// The editor whose cursor is currently the pane's.
 fn active_live(state: ReviewState) -> Option<LiveDoc> {
-    Some(live_layout(state)?.active().clone())
+    Some(live_layout(state)?.active()?.clone())
 }
 
 /// The editor's selection as byte offsets in its text, the two the same
@@ -537,7 +537,7 @@ fn caret(state: ReviewState, end: bool) -> Option<(usize, usize)> {
             left,
             right,
             active,
-        } => match active.get_untracked() {
+        } => match active.try_get_untracked()? {
             Side::Head => caret_in_head(&right, end),
             Side::Base => {
                 let file = Effect::untrack(|| state.active_file())?;
@@ -633,8 +633,11 @@ fn go_to(state: ReviewState, m: Match) {
                 else {
                     return;
                 };
-                if active.get_untracked() != Side::Base {
-                    active.set(Side::Base);
+                let Some(current) = active.try_get_untracked() else {
+                    return;
+                };
+                if current != Side::Base {
+                    active.try_update(|side| *side = Side::Base);
                 }
                 (left, row)
             }
@@ -646,8 +649,11 @@ fn go_to(state: ReviewState, m: Match) {
                     row = right.doc.try_with_untracked(row_of);
                 }
                 let Some(row) = row else { return };
-                if active.get_untracked() != Side::Head {
-                    active.set(Side::Head);
+                let Some(current) = active.try_get_untracked() else {
+                    return;
+                };
+                if current != Side::Head {
+                    active.try_update(|side| *side = Side::Head);
                 }
                 (right, row)
             }
@@ -2042,5 +2048,72 @@ mod window {
         harness.dispatch_event(cmd(Code::KeyF, "f"));
         harness.rebuild();
         assert!(!state.find_open.get());
+    }
+
+    #[test]
+    fn back_from_conversation_in_a_split_rebuilds_cleanly() {
+        let (mut harness, state) = harness();
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.docs.get().is_some());
+
+        harness.dispatch_event(cmd(Code::KeyF, "f"));
+        harness.rebuild();
+        typed(&mut harness, "path");
+        assert_eq!(state.find_matches.with(|m| m.len()), 4);
+
+        // Leaving Code tears down the split editor and clears its live docs.
+        state.show_tab(ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            state.docs.get().is_none(),
+            "the split editor went with the pane"
+        );
+
+        // Returning to Code runs `find::wire` before the new split editor is
+        // built, and must not touch the disposed split's `active` signal.
+        state.show_tab(ItemTab::Code);
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            state.docs.get().is_some(),
+            "the new split editor registered"
+        );
+        assert!(state.find_open.get());
+        assert_eq!(state.find_matches.with(|m| m.len()), 4);
+    }
+
+    #[test]
+    fn a_disposed_split_active_signal_does_not_panic_find() {
+        let (mut harness, state) = harness();
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+
+        let crate::review::model::LiveLayout::Split { left, right, .. } =
+            state.docs.get().unwrap().layout
+        else {
+            panic!("split layout");
+        };
+        let scope = floem::reactive::Scope::new();
+        let active =
+            scope.enter(|| floem::reactive::RwSignal::new(crate::review::editor::Side::Head));
+        let epoch = state.editor_epoch.get();
+        state.docs.set(Some(crate::review::model::LiveDocs {
+            epoch,
+            layout: crate::review::model::LiveLayout::Split {
+                left,
+                right,
+                active,
+            },
+        }));
+        scope.dispose();
+
+        assert_eq!(super::caret(state, false), None);
+        assert!(super::active_live(state).is_none());
+        super::go_to(state, m(0, 4, 8));
+        super::go_to(state, m(1, 8, 12));
     }
 }
