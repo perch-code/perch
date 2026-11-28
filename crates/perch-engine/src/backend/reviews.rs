@@ -1202,16 +1202,21 @@ async fn execute_attempt(
         );
         return;
     };
-    let Some(effort) = perch_agent::ReviewEffort::parse(&attempt.effort) else {
-        finish_failed_attempt(
-            ctx,
-            &attempt,
-            run,
-            lease,
-            TerminalReason::UnavailableConfiguration,
-            "The saved review effort is unsupported",
-        );
-        return;
+    let effort = if ctx.config().agent.has_efforts(&attempt.model) {
+        let Some(effort) = perch_agent::ReviewEffort::parse(&attempt.effort) else {
+            finish_failed_attempt(
+                ctx,
+                &attempt,
+                run,
+                lease,
+                TerminalReason::UnavailableConfiguration,
+                "The saved review effort is unsupported",
+            );
+            return;
+        };
+        Some(effort)
+    } else {
+        None
     };
     let schema = if backend == AgentBackend::Codex {
         let path = captured.root().join(format!("{}.schema.json", attempt.id));
@@ -1791,13 +1796,6 @@ fn validate_launch(ctx: &Ctx, request: &ReviewLaunchRequest) -> Result<(), Strin
                 format!("{} native review is unavailable", reviewer.backend.name())
             }));
         }
-        if !capability.efforts.contains(&reviewer.effort) {
-            return Err(format!(
-                "{} does not support {} review effort",
-                reviewer.backend.name(),
-                reviewer.effort
-            ));
-        }
         let config = ctx.config();
         let models = config.agent.models_for(reviewer.backend.name());
         if reviewer.model.trim().is_empty() || !models.iter().any(|model| model == &reviewer.model)
@@ -1808,14 +1806,30 @@ fn validate_launch(ctx: &Ctx, request: &ReviewLaunchRequest) -> Result<(), Strin
                 reviewer.backend.name()
             ));
         }
-        if !ctx
-            .config()
-            .agent
-            .effort_supported(&reviewer.model, reviewer.effort.name())
-        {
+        if config.agent.has_efforts(&reviewer.model) {
+            let Some(effort) = reviewer.effort else {
+                return Err(format!("{} requires an effort", reviewer.model));
+            };
+            if !capability.efforts.contains(&effort) {
+                return Err(format!(
+                    "{} does not support {} review effort",
+                    reviewer.backend.name(),
+                    effort
+                ));
+            }
+            if !config
+                .agent
+                .effort_supported(&reviewer.model, effort.name())
+            {
+                return Err(format!(
+                    "{} does not support {} effort",
+                    reviewer.model, effort
+                ));
+            }
+        } else if let Some(effort) = reviewer.effort {
             return Err(format!(
                 "{} does not support {} effort",
-                reviewer.model, reviewer.effort
+                reviewer.model, effort
             ));
         }
     }
@@ -1871,7 +1885,9 @@ fn new_attempt(
             .and_then(|capability| capability.version)
             .map(|version| version.to_string()),
         model: choice.model.clone(),
-        effort: choice.effort.name().to_string(),
+        effort: choice
+            .effort
+            .map_or_else(String::new, |effort| effort.name().to_string()),
         adapter_version: perch_agent::REVIEW_ADAPTER_VERSION.to_string(),
         output_format_version: perch_agent::REVIEW_OUTPUT_FORMAT_VERSION.to_string(),
         created_at,
@@ -2179,18 +2195,23 @@ async fn run_verification(
             usage: None,
         };
     };
-    let Some(effort) = perch_agent::ReviewEffort::parse(&attempt.effort) else {
-        diagnostics.push("saved effort is unavailable for verification".into());
-        return VerificationStage::Completed {
-            run: Box::new(run),
-            raw: String::new(),
-            results: HashMap::new(),
-            complete: false,
-            diagnostics,
-            cost_usd: None,
-            duration_ms: 0,
-            usage: None,
+    let effort = if ctx.config().agent.has_efforts(&attempt.model) {
+        let Some(effort) = perch_agent::ReviewEffort::parse(&attempt.effort) else {
+            diagnostics.push("saved effort is unavailable for verification".into());
+            return VerificationStage::Completed {
+                run: Box::new(run),
+                raw: String::new(),
+                results: HashMap::new(),
+                complete: false,
+                diagnostics,
+                cost_usd: None,
+                duration_ms: 0,
+                usage: None,
+            };
         };
+        Some(effort)
+    } else {
+        None
     };
     let spec = perch_agent::ReviewVerificationSpec {
         backend,
@@ -4577,5 +4598,54 @@ mod tests {
             .with_cache(|c| c.active_runs().unwrap())
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn validate_launch_accepts_no_effort_gemini_model_with_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::tests::ctx(dir.path(), &super::super::tests::nowhere(), &[]);
+        let mut config = (*ctx.config()).clone();
+        config.agent.gemini.models = vec!["gemini-pro-orchestrator".into()];
+        config
+            .agent
+            .gemini
+            .efforts
+            .insert("gemini-pro-orchestrator".into(), Vec::new());
+        ctx.replace_config(config);
+        ctx.set_review_capabilities(vec![perch_agent::ReviewCapability {
+            backend: AgentBackend::Gemini,
+            version: Some(perch_agent::CliVersion::new(1, 5, 18)),
+            available: true,
+            efforts: perch_agent::ReviewEffort::ALL.to_vec(),
+            reason: None,
+            adapter_version: perch_agent::REVIEW_ADAPTER_VERSION,
+        }]);
+        let item = super::super::tests::store_pull(&ctx, 88);
+        let ok = ReviewLaunchRequest {
+            item_id: item.id.clone(),
+            base_ref: "main".into(),
+            reviewers: vec![ReviewLaunchChoice {
+                backend: AgentBackend::Gemini,
+                model: "gemini-pro-orchestrator".into(),
+                effort: None,
+            }],
+            instructions: None,
+            include_uncommitted: false,
+        };
+        assert_eq!(validate_launch(&ctx, &ok), Ok(()));
+        let attempt = new_attempt(&ctx, &ok.reviewers[0], None, Timestamp::now());
+        assert_eq!(attempt.effort, "");
+
+        let bad = ReviewLaunchRequest {
+            reviewers: vec![ReviewLaunchChoice {
+                backend: AgentBackend::Gemini,
+                model: "gemini-pro-orchestrator".into(),
+                effort: Some(perch_agent::ReviewEffort::Medium),
+            }],
+            ..ok
+        };
+        assert!(validate_launch(&ctx, &bad)
+            .unwrap_err()
+            .contains("does not support medium effort"));
     }
 }

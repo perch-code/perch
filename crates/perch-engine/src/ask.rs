@@ -379,11 +379,15 @@ async fn find_agents(agent: &mut perch_github::AgentConfig) -> Vec<String> {
                             agent.codex.models.push(choice.clone());
                         }
                         if !pinned {
-                            agent.codex.efforts.insert(choice, catalog.efforts.clone());
+                            if let Some(efforts) = &catalog.efforts {
+                                agent.codex.efforts.insert(choice, efforts.clone());
+                            }
                         }
                     }
                     if !pinned {
-                        agent.codex.efforts.insert(slug, catalog.efforts.clone());
+                        if let Some(efforts) = &catalog.efforts {
+                            agent.codex.efforts.insert(slug, efforts.clone());
+                        }
                     }
                 }
             }
@@ -414,7 +418,10 @@ async fn find_gemini(agent: &mut perch_github::AgentConfig) -> Vec<String> {
     match perch_agent::gemini_catalog(&agy).await {
         Ok(models) => {
             agent.gemini.models = models.iter().map(|m| m.slug.clone()).collect();
-            agent.gemini.efforts = models.into_iter().map(|m| (m.slug, m.efforts)).collect();
+            agent.gemini.efforts = models
+                .into_iter()
+                .filter_map(|m| m.efforts.map(|efforts| (m.slug, efforts)))
+                .collect();
             Vec::new()
         }
         Err(e) => vec![e],
@@ -513,7 +520,7 @@ pub fn run_spec(
         backend,
         binary: agent.binary_for(backend.name()).into(),
         model: model.to_string(),
-        effort,
+        effort: agent.has_efforts(model).then_some(effort),
         cwd,
         prompt: prompt.user.clone(),
         system: prompt.system.clone(),
@@ -1869,7 +1876,7 @@ This replaces what you were told about commits when the session began."
         );
         assert_eq!(codex.args()[0], "app-server");
         assert_eq!(codex.resume.as_deref(), Some("t-1"));
-        assert_eq!(codex.effort, perch_agent::Effort::Ultra);
+        assert_eq!(codex.effort, Some(perch_agent::Effort::Ultra));
     }
 
     fn fake(dir: &std::path::Path, name: &str, script: &str) -> String {
@@ -2066,6 +2073,67 @@ fi"#,
             ("gemini-4-carbon", "high"),
             "with only agy, its first model"
         );
+    }
+
+    #[tokio::test]
+    async fn no_effort_models_from_catalog_omit_effort_from_run_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_claude = dir.path().join("no-claude").to_string_lossy().into_owned();
+        let codex = fake(
+            dir.path(),
+            "codex",
+            r#"cat <<'EOF'
+{"models":[{"slug":"gpt-unlisted-levels","visibility":"list"}]}
+EOF"#,
+        );
+        let agy = fake(
+            dir.path(),
+            "agy",
+            "printf 'gemini-pro-orchestrator-neon\\tOrchestrator (Neon)\\ngemini-4-neon-high\\tGemini 4 Neon (High)\\n'",
+        );
+        let mut agent = perch_github::AgentConfig {
+            binary: no_claude,
+            ..Default::default()
+        };
+        agent.codex.binary = codex;
+        agent.opencode.binary = dir
+            .path()
+            .join("no-opencode")
+            .to_string_lossy()
+            .into_owned();
+        agent.gemini.binary = agy;
+        discover(&mut agent).await;
+
+        assert!(agent.has_efforts("gpt-unlisted-levels"));
+        assert!(agent.has_efforts("gemini-4-neon"));
+        assert!(!agent.has_efforts("gemini-pro-orchestrator-neon"));
+
+        let prompt = first_prompt(&input(None, None, "why?"));
+        let orch = run_spec(
+            &agent,
+            perch_agent::Backend::Gemini,
+            "gemini-pro-orchestrator-neon",
+            perch_agent::Effort::Medium,
+            "/tmp".into(),
+            &prompt,
+            None,
+            perch_agent::Mode::Ask,
+        );
+        assert_eq!(orch.effort, None);
+        assert!(!orch.args().iter().any(|arg| arg == "--effort"));
+
+        let neon = run_spec(
+            &agent,
+            perch_agent::Backend::Gemini,
+            "gemini-4-neon",
+            perch_agent::Effort::High,
+            "/tmp".into(),
+            &prompt,
+            None,
+            perch_agent::Mode::Ask,
+        );
+        assert_eq!(neon.effort, Some(perch_agent::Effort::High));
+        assert!(neon.args().windows(2).any(|w| w == ["--effort", "high"]));
     }
 
     #[test]

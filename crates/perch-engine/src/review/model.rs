@@ -612,7 +612,7 @@ pub type AgentChoice = (perch_agent::Backend, String, perch_agent::Effort);
 pub struct ReviewLaunchChoice {
     pub backend: perch_agent::Backend,
     pub model: String,
-    pub effort: perch_agent::ReviewEffort,
+    pub effort: Option<perch_agent::ReviewEffort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

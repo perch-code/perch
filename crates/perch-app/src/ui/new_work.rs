@@ -312,7 +312,11 @@ fn agent_chips(state: AppState) -> impl IntoView {
     menu_button(
         move || {
             let (_, model, effort) = chosen_agent(state);
-            format!("{} \u{b7} {}", threads::model_label(&model), effort.label())
+            if state.agent.with(|agent| agent.has_efforts(&model)) {
+                format!("{} \u{b7} {}", threads::model_label(&model), effort.label())
+            } else {
+                threads::model_label(&model)
+            }
         },
         move || {
             let (_, model, effort) = floem::reactive::Effect::untrack(|| chosen_agent(state));

@@ -1492,6 +1492,7 @@ fn agent_picker(app: AppState, state: ReviewState) -> impl IntoView {
     };
     let effort = move || {
         choice()
+            .filter(|(_, model, _)| app.agent.with(|agent| agent.has_efforts(model)))
             .map(|(_, _, effort)| effort.label().to_string())
             .unwrap_or_default()
     };
@@ -1542,9 +1543,14 @@ pub(crate) fn agent_face(
             .selectable(false)
             .pointer_events_none()
     };
+    let effort = Memo::new(move |_| effort());
     Stack::horizontal((
         Label::derived(name).style(move |s| face(s).color(theme::fg())),
-        Label::derived(effort).style(move |s| face(s).color(theme::fg_subtle())),
+        Label::derived(move || effort.get()).style(move |s| {
+            face(s)
+                .color(theme::fg_subtle())
+                .apply_if(effort.with(String::is_empty), |s| s.hide())
+        }),
     ))
     .style(|s| s.items_center().gap(5.0))
 }
@@ -1739,8 +1745,8 @@ pub(crate) fn agent_menu(
         if !offered.iter().any(|choice| choice == model) {
             return menu;
         }
-        menu = menu.separator();
-        if matches!(
+        let show_effort = agent.has_efforts(model);
+        let (base, current, speed_choices) = if matches!(
             backend,
             perch_agent::Backend::Codex | perch_agent::Backend::ClaudeCode
         ) {
@@ -1760,37 +1766,45 @@ pub(crate) fn agent_menu(
                     choices.push(Some(speed));
                 }
             }
-            if choices.len() > 1 {
-                menu = menu.submenu("Speed", |mut sub| {
-                    for speed in choices {
-                        let label = speed.map_or("Default", |s| s.label());
-                        let choice = speed.map_or_else(|| base.to_owned(), |s| s.selection(base));
-                        let pick = pick.clone();
-                        sub = sub.item(label, move |item| {
-                            item.checked(speed == current)
-                                .action(move || pick(backend, choice.clone(), effort))
-                        });
-                    }
-                    sub.detail(current.map_or("Default", |s| s.label()))
-                        .enabled(models_enabled)
-                });
-            }
+            (base, current, choices)
+        } else {
+            (model, None, Vec::new())
+        };
+        if speed_choices.len() > 1 || show_effort {
+            menu = menu.separator();
         }
-        let model = model.to_owned();
-        let pick = pick.clone();
-        menu = menu.submenu("Effort", move |mut sub| {
-            for level in perch_agent::Effort::ALL {
-                let takes = agent.effort_supported(&model, level.name());
-                let pick = pick.clone();
-                let model = model.clone();
-                sub = sub.item(level.label(), move |item| {
-                    item.checked(level == effort)
-                        .enabled(takes)
-                        .action(move || pick(backend, model.clone(), level))
-                });
-            }
-            sub.detail(effort.label())
-        });
+        if speed_choices.len() > 1 {
+            menu = menu.submenu("Speed", |mut sub| {
+                for speed in speed_choices {
+                    let label = speed.map_or("Default", |s| s.label());
+                    let choice = speed.map_or_else(|| base.to_owned(), |s| s.selection(base));
+                    let pick = pick.clone();
+                    sub = sub.item(label, move |item| {
+                        item.checked(speed == current)
+                            .action(move || pick(backend, choice.clone(), effort))
+                    });
+                }
+                sub.detail(current.map_or("Default", |s| s.label()))
+                    .enabled(models_enabled)
+            });
+        }
+        if show_effort {
+            let model = model.to_owned();
+            let pick = pick.clone();
+            menu = menu.submenu("Effort", move |mut sub| {
+                for level in perch_agent::Effort::ALL {
+                    let takes = agent.effort_supported(&model, level.name());
+                    let pick = pick.clone();
+                    let model = model.clone();
+                    sub = sub.item(level.label(), move |item| {
+                        item.checked(level == effort)
+                            .enabled(takes)
+                            .action(move || pick(backend, model.clone(), level))
+                    });
+                }
+                sub.detail(effort.label())
+            });
+        }
     }
     menu
 }
@@ -6393,8 +6407,35 @@ mod tests {
 
         // For GitHub there is no effort; a draft being edited greys every
         // maker.
-        let github = agent_menu(&agent, None, Effort::High, false, pick);
+        let github = agent_menu(&agent, None, Effort::High, false, pick.clone());
         assert_eq!(github.outline(), ["(Claude ▸)", "(Codex ▸)"]);
+
+        // A model with no configurable efforts (e.g. Pro Orchestrator) omits Effort.
+        agent.gemini.models = vec![
+            "gemini-pro-orchestrator-neon".into(),
+            "gemini-4-neon".into(),
+        ];
+        agent
+            .gemini
+            .efforts
+            .insert("gemini-pro-orchestrator-neon".into(), Vec::new());
+        agent.gemini.efforts.insert(
+            "gemini-4-neon".into(),
+            ["low", "medium", "high"].map(String::from).to_vec(),
+        );
+        let orch_menu = agent_menu(
+            &agent,
+            Some("gemini-pro-orchestrator-neon"),
+            Effort::Medium,
+            true,
+            pick.clone(),
+        );
+        assert_eq!(orch_menu.outline(), ["Claude ▸", "Codex ▸", "Gemini ▸"]);
+        let neon_menu = agent_menu(&agent, Some("gemini-4-neon"), Effort::High, true, pick);
+        assert_eq!(
+            neon_menu.outline(),
+            ["Claude ▸", "Codex ▸", "Gemini ▸", "—", "Effort ▸"]
+        );
     }
 
     /// One button holds the model and the effort, the effort in grey,
@@ -6457,6 +6498,26 @@ mod tests {
         // The footer is built again after a pick.
         let button = find(harness.root_id(), "composer-destination").unwrap();
         assert!(find(button, "Label: \"High\"").is_some());
+
+        // Switching to a model with no effort levels hides the effort label on the face.
+        let mut agent = versioned_agent();
+        agent.gemini.models = vec!["gemini-pro-orchestrator-neon".into()];
+        agent
+            .gemini
+            .efforts
+            .insert("gemini-pro-orchestrator-neon".into(), Vec::new());
+        app.agent.set(agent);
+        state.set_destination(Destination::Agent {
+            backend: perch_agent::Backend::Gemini,
+            model: "gemini-pro-orchestrator-neon".into(),
+            effort: perch_agent::Effort::Medium,
+        });
+        harness.rebuild();
+        harness.paint();
+        let button = find(harness.root_id(), "composer-destination").unwrap();
+        assert!(find(button, "Label: \"Pro Orchestrator Neon\"").is_some());
+        let effort_label = find(button, "Label: \"\"").unwrap();
+        assert!(effort_label.is_hidden());
     }
 
     fn sonnet_medium() -> AgentChoice {

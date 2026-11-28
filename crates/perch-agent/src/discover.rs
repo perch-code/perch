@@ -142,15 +142,17 @@ impl ModelSpeed {
     }
 }
 
-/// One model Codex offers, from its catalog.
+/// One model Codex or Gemini offers, from its catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexModel {
     pub slug: String,
     pub display_name: String,
-    /// The effort names it takes, as the catalog spells them. Codex
-    /// silently runs a level it lacks at the nearest one it has, so the
-    /// picker uses this to say so.
-    pub efforts: Vec<String>,
+    /// The effort names it takes, as the catalog spells them. `None` when
+    /// the catalog did not advertise effort levels; `Some([])` when the
+    /// model offers no configurable effort. Codex silently runs a level
+    /// it lacks at the nearest one it has, so the picker uses this to
+    /// say so.
+    pub efforts: Option<Vec<String>>,
     pub speeds: Vec<ModelSpeed>,
 }
 
@@ -190,8 +192,7 @@ pub fn parse_codex_catalog(json: &str) -> Vec<CodexModel> {
                         .filter_map(|l| l.get("effort").and_then(Value::as_str))
                         .map(str::to_string)
                         .collect()
-                })
-                .unwrap_or_default();
+                });
             let speeds = [ModelSpeed::Fast, ModelSpeed::Ultrafast]
                 .into_iter()
                 .filter(
@@ -347,22 +348,23 @@ pub fn parse_gemini_catalog(text: &str) -> Vec<CodexModel> {
                 models.push(CodexModel {
                     slug: slug.to_string(),
                     display_name,
-                    efforts: Vec::new(),
+                    efforts: Some(Vec::new()),
                     speeds: Vec::new(),
                 });
                 models.len() - 1
             }
         };
         if let Some(effort) = effort {
-            if !models[at].efforts.iter().any(|e| e == effort) {
-                models[at].efforts.push(effort.to_string());
+            let efforts = models[at].efforts.get_or_insert_with(Vec::new);
+            if !efforts.iter().any(|e| e == effort) {
+                efforts.push(effort.to_string());
             }
         }
     }
     for model in &mut models {
-        model
-            .efforts
-            .sort_by_key(|e| GEMINI_EFFORTS.iter().position(|g| g == e));
+        if let Some(efforts) = &mut model.efforts {
+            efforts.sort_by_key(|e| GEMINI_EFFORTS.iter().position(|g| g == e));
+        }
     }
     models
 }
@@ -484,8 +486,20 @@ echo '{"type":"control_response","response":{"response":{"models":[{"value":"opu
             ["gpt-6-astra", "gpt-5.5"]
         );
         assert_eq!(models[0].display_name, "GPT-6-Astra");
-        assert!(models[0].efforts.iter().any(|e| e == "ultra"));
-        assert!(!models[1].efforts.iter().any(|e| e == "ultra"));
+        assert!(models[0]
+            .efforts
+            .as_ref()
+            .is_some_and(|e| e.iter().any(|l| l == "ultra")));
+        assert!(!models[1]
+            .efforts
+            .as_ref()
+            .is_some_and(|e| e.iter().any(|l| l == "ultra")));
+
+        let no_levels = parse_codex_catalog(
+            r#"[{"slug":"unlisted-levels"},{"slug":"no-levels","supported_reasoning_levels":[]}]"#,
+        );
+        assert_eq!(no_levels[0].efforts, None);
+        assert_eq!(no_levels[1].efforts, Some(Vec::new()));
     }
 
     #[test]
@@ -494,17 +508,34 @@ echo '{"type":"control_response","response":{"response":{"models":[{"value":"opu
 gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n\
 gemini-4-carbon-high\tGemini 4 Carbon (High)\n\
 gemini-4-carbon-low\tGemini 4 Carbon (Low)\n\
+gemini-pro-orchestrator-neon\tOrchestrator (Neon)\n\
+gemini-pro-orchestrator\tOrchestrator (Carbon)\n\
 gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n\
 claude-opus-5-5-low\tClaude Opus 5.5 (Low)\n\
 gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
         let models = parse_gemini_catalog(listed);
         assert_eq!(
             models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
-            ["gemini-4-carbon", "gemini-3.8-flash"]
+            [
+                "gemini-4-carbon",
+                "gemini-pro-orchestrator-neon",
+                "gemini-pro-orchestrator",
+                "gemini-3.8-flash"
+            ]
         );
         assert_eq!(models[0].display_name, "Gemini 4 Carbon");
-        assert_eq!(models[0].efforts, ["low", "medium", "high"]);
-        assert_eq!(models[1].efforts, ["high"]);
+        assert_eq!(
+            models[0].efforts.as_deref(),
+            Some(["low", "medium", "high"].map(String::from).as_slice())
+        );
+        assert_eq!(models[1].display_name, "Orchestrator (Neon)");
+        assert_eq!(models[1].efforts.as_deref(), Some([].as_slice()));
+        assert_eq!(models[2].display_name, "Orchestrator (Carbon)");
+        assert_eq!(models[2].efforts.as_deref(), Some([].as_slice()));
+        assert_eq!(
+            models[3].efforts.as_deref(),
+            Some(["high".to_string()].as_slice())
+        );
         assert!(parse_gemini_catalog("").is_empty());
     }
 

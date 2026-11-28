@@ -232,7 +232,11 @@ pub(super) fn maybe_start(ctx: &Ctx, item_id: &str) {
             source_hash("issue", &system_prompt, &issue.title, &issue.body, None)
         }
     };
-    let effort_name = effort.name().to_string();
+    let effort_name = if agent.has_efforts(&model) {
+        effort.name().to_string()
+    } else {
+        String::new()
+    };
 
     if let Some(cached) = ctx
         .with_cache(|c| c.load_description_rewrite(item_id).ok().flatten())

@@ -19281,6 +19281,11 @@ async fn ask_as(
         None => (thread.anchor.as_ref(), thread.outdated, None),
     };
 
+    let recorded_effort = if ctx.config().agent.has_efforts(&model) {
+        effort.name().to_string()
+    } else {
+        String::new()
+    };
     let request_id = perch_github::comments::new_id();
     let mut run = RunRecord {
         id: perch_github::comments::new_id(),
@@ -19303,8 +19308,8 @@ async fn ask_as(
             .map(str::to_string),
         requested_model: model.clone(),
         model: model.clone(),
-        requested_effort: effort.name().into(),
-        effort: effort.name().into(),
+        requested_effort: recorded_effort.clone(),
+        effort: recorded_effort,
         session_id: None,
         original_request: question.clone(),
         prompt_snapshot: None,
@@ -21061,12 +21066,18 @@ fn follow_up_run(ctx: &Ctx, run: &RunRecord, text: String) {
     else {
         return;
     };
-    let (Some(backend), Some(effort)) = (
-        perch_agent::Backend::parse(&run.backend),
-        perch_agent::Effort::parse(&run.requested_effort),
-    ) else {
+    let Some(backend) = perch_agent::Backend::parse(&run.backend) else {
         ctx.notice("The agent finished before reading that, and it cannot be asked again");
         return;
+    };
+    let effort = if ctx.config().agent.has_efforts(&run.requested_model) {
+        let Some(effort) = perch_agent::Effort::parse(&run.requested_effort) else {
+            ctx.notice("The agent finished before reading that, and it cannot be asked again");
+            return;
+        };
+        effort
+    } else {
+        perch_agent::Effort::default()
     };
     let (ctx, model, mode) = (ctx.clone(), run.requested_model.clone(), run.mode);
     tokio::spawn(async move {
@@ -21235,20 +21246,26 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         ));
         return;
     }
-    let Some(effort) = perch_agent::Effort::parse(&old.requested_effort) else {
-        ctx.notice(format!(
-            "{} is no longer a supported effort",
-            old.requested_effort
-        ));
-        return;
+    let has_efforts = ctx.config().agent.has_efforts(&model);
+    let effort = if has_efforts {
+        let Some(effort) = perch_agent::Effort::parse(&old.requested_effort) else {
+            ctx.notice(format!(
+                "{} is no longer a supported effort",
+                old.requested_effort
+            ));
+            return;
+        };
+        if !ctx.config().agent.effort_supported(&model, effort.name()) {
+            ctx.notice(format!(
+                "{model} does not support {} effort",
+                effort.label()
+            ));
+            return;
+        }
+        effort
+    } else {
+        perch_agent::Effort::default()
     };
-    if !ctx.config().agent.effort_supported(&model, effort.name()) {
-        ctx.notice(format!(
-            "{model} does not support {} effort",
-            effort.label()
-        ));
-        return;
-    }
     let Some(directory) = old.working_directory.as_deref().map(Path::new) else {
         ctx.notice("The original checkout is unavailable");
         return;
@@ -21391,6 +21408,11 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
     let forget_archive = knowledge_dir.is_none() && spec.resume.is_none();
     read_dirs.extend(external_knowledge_dirs.iter().cloned());
     spec.read_dirs = read_dirs;
+    let recorded_effort = if has_efforts {
+        effort.name().to_string()
+    } else {
+        String::new()
+    };
     let now = Timestamp::now();
     let run = RunRecord {
         id: perch_github::comments::new_id(),
@@ -21409,8 +21431,8 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
             .map(str::to_string),
         requested_model: model.clone(),
         model,
-        requested_effort: effort.name().into(),
-        effort: effort.name().into(),
+        requested_effort: recorded_effort.clone(),
+        effort: recorded_effort,
         session_id: None,
         original_request: old.original_request.clone(),
         prompt_snapshot: Some(prompt.user.clone()),
@@ -39749,5 +39771,162 @@ while True:
             .map(|p| p.head_sha.clone());
         assert_eq!(h1.as_deref(), Some("newhead999"));
         assert_eq!(h2.as_deref(), Some("newhead999"));
+    }
+
+    #[tokio::test]
+    async fn retry_and_follow_up_work_for_no_effort_gemini_models() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _events) = ctx(dir.path(), &nowhere(), &[]);
+        let agy = dir.path().join("agy");
+        std::fs::write(
+            &agy,
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "n=$(ls {dir}/agy-args-* 2>/dev/null | wc -l | tr -d ' ')\n",
+                    "printf '%s\\n' \"$@\" > {dir}/agy-args-$((n + 1))\n",
+                    "read -r _line\n",
+                    "echo '{{\"event\":\"init\",\"conversation_id\":\"c-orch\",\"init\":{{\"model\":\"gemini-pro-orchestrator\"}}}}'\n",
+                    "echo '{{\"event\":\"step_update\",\"step_update\":{{\"step_index\":1,\"step_type\":\"agent_response\",\"state\":\"DONE\",\"text_delta\":\"Done.\"}}}}'\n",
+                    "echo '{{\"event\":\"result\",\"result\":{{\"conversation_id\":\"c-orch\",\"status\":\"SUCCESS\",\"response\":\"Done.\",\"duration_seconds\":0.1}}}}'\n",
+                ),
+                dir = dir.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut config = Config::default();
+        config.agent.gemini.binary = agy.to_string_lossy().into_owned();
+        config.agent.gemini.models = vec!["gemini-pro-orchestrator".into()];
+        config
+            .agent
+            .gemini
+            .efforts
+            .insert("gemini-pro-orchestrator".into(), Vec::new());
+        config.agent.gemini.sandbox = false;
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+
+        let item = store_pull(&ctx, 91);
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        open_in_slot_at(&ctx, &item, "h91");
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+
+        // Simulate a pre-fix failed run with stale requested_effort = "medium".
+        let thread = CommentThread {
+            id: "t-orch".into(),
+            worktree_id: item.id.clone(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: Timestamp::now(),
+            messages: vec![CommentMessage {
+                id: "q-orch".into(),
+                thread_id: "t-orch".into(),
+                origin: ThreadOrigin::Local,
+                author: Author::User,
+                body: "why?".into(),
+                created_at: Timestamp::now(),
+                run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        };
+        let failed = RunRecord {
+            id: "run-failed-orch".into(),
+            owner: RunOwner::Discussion {
+                item_id: item.id.clone(),
+                thread_id: thread.id.clone(),
+                request_id: "q-orch".into(),
+            },
+            purpose: RunPurpose::Question,
+            backend: "gemini".into(),
+            executable: Some(agy.to_string_lossy().into_owned()),
+            executable_version: None,
+            requested_model: "gemini-pro-orchestrator".into(),
+            model: "gemini-pro-orchestrator".into(),
+            requested_effort: "medium".into(),
+            effort: "medium".into(),
+            session_id: None,
+            original_request: "why?".into(),
+            prompt_snapshot: Some("why?".into()),
+            working_directory: Some(worktree.to_string_lossy().into_owned()),
+            revision: RevisionContext::LiveCheckout {
+                head_sha: Some("h91".into()),
+                base_ref: Some("main".into()),
+                dirty: None,
+            },
+            labels: run_labels(&item),
+            status: RunStatus::Failed,
+            terminal_reason: Some(TerminalReason::Other),
+            cost_usd: None,
+            duration_ms: None,
+            usage: None,
+            retry_of: None,
+            steps: Vec::new(),
+            error: Some("Thinking level \"medium\" is not offered".into()),
+            queued_at: Timestamp::now(),
+            started_at: None,
+            ended_at: Some(Timestamp::now()),
+            final_result: None,
+            final_result_truncated: false,
+            latest_activity: None,
+            last_event_sequence: 0,
+            mode: RunMode::Ask,
+            work_before: None,
+            work_after: None,
+            approvals: None,
+        };
+        ctx.with_cache(|c| {
+            c.insert_comment_thread(&thread)?;
+            c.insert_run(&failed)
+        })
+        .unwrap()
+        .unwrap();
+
+        retry_run(&ctx, "run-failed-orch").await;
+        let retry_args = std::fs::read_to_string(dir.path().join("agy-args-1")).unwrap();
+        assert!(!retry_args.contains("--effort"), "{retry_args}");
+
+        let runs = ctx
+            .with_cache(|c| c.runs_for_discussion("t-orch").unwrap())
+            .unwrap();
+        let retried = runs.iter().find(|r| r.id != "run-failed-orch").unwrap();
+        assert_eq!(retried.status, RunStatus::Completed);
+        assert_eq!(retried.requested_effort, "");
+        assert_eq!(retried.effort, "");
+
+        // Follow-up queued after completion also succeeds with empty requested_effort.
+        follow_up_run(&ctx, retried, "and next?".into());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if dir.path().join("agy-args-2").exists() {
+                    let count = ctx
+                        .with_cache(|c| c.runs_for_discussion("t-orch").unwrap())
+                        .unwrap()
+                        .into_iter()
+                        .filter(|r| r.status == RunStatus::Completed)
+                        .count();
+                    if count == 2 {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("follow-up run completed");
+        let follow_args = std::fs::read_to_string(dir.path().join("agy-args-2")).unwrap();
+        assert!(!follow_args.contains("--effort"), "{follow_args}");
     }
 }

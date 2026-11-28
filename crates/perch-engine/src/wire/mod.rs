@@ -49,8 +49,9 @@ use crate::backend::{Backend, CheckConfig, Command, Engine, Event, Lifetime, Win
 /// 10: the per-repository GitHub history setting. 11: the `[agent] sandbox`
 /// setting. 12: `FileLoaded` sends raw head/base text and the client builds
 /// `LoadedFile` locally. 13: per-agent effort, run limit, and sandbox settings.
-/// 14: edit the local summary of an issue-linked worktree.
-pub const PROTOCOL: u32 = 14;
+/// 14: edit the local summary of an issue-linked worktree. 15: optional review
+/// effort for models without configurable effort.
+pub const PROTOCOL: u32 = 15;
 
 /// The version of Perch this is, as each side names itself.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

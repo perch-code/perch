@@ -511,13 +511,38 @@ pub(crate) fn effort_name(effort: crate::Effort) -> &'static str {
     }
 }
 
-/// ACP's thinking level, which has only `low`, `medium` and `high`.
+/// ACP's thinking level, which has only `low`, `medium` and `high` when a
+/// server doesn't advertise `configOptions`.
 fn thought_level(effort: &str) -> &'static str {
     match effort {
         "low" => "low",
         "medium" => "medium",
         _ => "high",
     }
+}
+
+/// Pick the best ACP `thought_level` value from `offered` for `requested`.
+/// Prefers an exact match, otherwise steps down from `requested` along
+/// `["low", "medium", "high", "xhigh", "max"]`, and falls back to the first
+/// offered value when none at or below `requested` matches.
+fn select_thought_level<'a>(requested: &str, offered: &[&'a str]) -> Option<&'a str> {
+    if offered.is_empty() {
+        return None;
+    }
+    if let Some(&exact) = offered.iter().find(|&&v| v == requested) {
+        return Some(exact);
+    }
+    const ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+    let start = ORDER
+        .iter()
+        .position(|&v| v == requested)
+        .unwrap_or(ORDER.len());
+    for &candidate in ORDER[..start].iter().rev() {
+        if let Some(&found) = offered.iter().find(|&&v| v == candidate) {
+            return Some(found);
+        }
+    }
+    offered.first().copied()
 }
 
 /// The `--settings` a sandboxed print-mode run starts with. They outrank the
@@ -646,7 +671,7 @@ pub(crate) fn print_args(
     dirs: &[PathBuf],
     sandbox: bool,
     model: &str,
-    effort: &str,
+    effort: Option<&str>,
 ) -> Vec<String> {
     let dirs = print_dirs(cwd, dirs);
     let settings = if sandbox {
@@ -662,9 +687,11 @@ pub(crate) fn print_args(
         settings,
         "--model".into(),
         model.to_string(),
-        "--effort".into(),
-        effort.to_string(),
     ];
+    if let Some(effort) = effort {
+        args.push("--effort".into());
+        args.push(effort.to_string());
+    }
     for dir in &dirs {
         args.push("--add-dir".into());
         args.push(crate::real_path(dir).to_string_lossy().into_owned());
@@ -1189,7 +1216,8 @@ pub(crate) struct AcpSession {
     pub cwd: PathBuf,
     pub model: String,
     /// agy's name for the effort; ACP takes it as a thinking level.
-    pub effort: String,
+    /// `None` for models that do not offer configurable thinking levels.
+    pub effort: Option<String>,
     pub prompt: String,
     /// The session to resume, for a follow-up.
     pub resume: Option<String>,
@@ -1403,6 +1431,14 @@ impl AcpClient {
         )
     }
 
+    fn set_default_mode(&self) -> String {
+        request(
+            SET_MODE,
+            "session/set_mode",
+            json!({"sessionId": self.session_id, "modeId": "default"}),
+        )
+    }
+
     /// What the agent said since its last step, as one message.
     fn flush_text(&mut self) -> Vec<RunEvent> {
         let text = std::mem::take(&mut self.text);
@@ -1554,9 +1590,8 @@ impl AcpClient {
                 let effort = result["configOptions"]
                     .as_array()
                     .and_then(|options| options.iter().find(|o| o["id"] == "effort"));
-                let requested = self.session.effort.as_str();
-                let write = match effort {
-                    Some(option) => {
+                let write = match (self.session.effort.as_deref(), effort) {
+                    (Some(requested), Some(option)) => {
                         let offered = option["options"]
                             .as_array()
                             .is_some_and(|opts| opts.iter().any(|v| v["value"] == requested));
@@ -1566,7 +1601,7 @@ impl AcpClient {
                             if offered { requested } else { "default" },
                         )
                     }
-                    None => self.set_option(
+                    _ => self.set_option(
                         SET_MODE,
                         "mode",
                         crate::opencode::mode(self.opencode_work()),
@@ -1585,20 +1620,36 @@ impl AcpClient {
                 )],
                 ..Reply::default()
             },
-            SET_MODEL => Reply {
-                writes: vec![self.set_option(
-                    SET_THOUGHT,
-                    "thought_level",
-                    thought_level(&self.session.effort),
-                )],
-                ..Reply::default()
-            },
+            SET_MODEL => {
+                let write = match self.session.effort.as_deref() {
+                    None => self.set_default_mode(),
+                    Some(requested) => {
+                        if let Some(options) = result.get("configOptions").and_then(Value::as_array)
+                        {
+                            let offered: Vec<&str> = options
+                                .iter()
+                                .find(|o| o["id"] == "thought_level")
+                                .and_then(|o| o["options"].as_array())
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|v| v["value"].as_str())
+                                .collect();
+                            match select_thought_level(requested, &offered) {
+                                Some(level) => self.set_option(SET_THOUGHT, "thought_level", level),
+                                None => self.set_default_mode(),
+                            }
+                        } else {
+                            self.set_option(SET_THOUGHT, "thought_level", thought_level(requested))
+                        }
+                    }
+                };
+                Reply {
+                    writes: vec![write],
+                    ..Reply::default()
+                }
+            }
             SET_THOUGHT => Reply {
-                writes: vec![request(
-                    SET_MODE,
-                    "session/set_mode",
-                    json!({"sessionId": self.session_id, "modeId": "default"}),
-                )],
+                writes: vec![self.set_default_mode()],
                 ..Reply::default()
             },
             SET_MODE => {
@@ -2993,7 +3044,7 @@ mod tests {
             cwd: dir.to_path_buf(),
             backend: crate::Backend::Gemini,
             model: "gemini-4-carbon".into(),
-            effort: "max".into(),
+            effort: Some("max".into()),
             prompt: "Fix it".into(),
             resume: None,
             writable: vec![crate::real_path(dir)],
@@ -3313,7 +3364,7 @@ mod tests {
         let wt = root.join("wt");
         git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
 
-        let args = print_args(&wt, &[], true, "m", "low");
+        let args = print_args(&wt, &[], true, "m", Some("low"));
         let added: Vec<&String> = args
             .windows(2)
             .filter(|w| w[0] == "--add-dir")
@@ -3347,7 +3398,7 @@ mod tests {
         )
         .unwrap();
 
-        let args = print_args(&root.join("checkout"), &[], true, "m", "low");
+        let args = print_args(&root.join("checkout"), &[], true, "m", Some("low"));
         let added: Vec<&String> = args
             .windows(2)
             .filter(|w| w[0] == "--add-dir")
@@ -3839,7 +3890,7 @@ mod tests {
             backend: crate::Backend::OpenCode,
             cwd: cwd.to_path_buf(),
             model: "provider/model".into(),
-            effort: "high".into(),
+            effort: Some("high".into()),
             prompt: "Fix it".into(),
             resume: None,
             writable,
@@ -4124,7 +4175,7 @@ mod tests {
             backend: crate::Backend::Gemini,
             cwd: PathBuf::from("/wt/repo"),
             model: "gemini-4-neon".into(),
-            effort: "high".into(),
+            effort: Some("high".into()),
             prompt: "start".into(),
             resume: None,
             writable: Vec::new(),
@@ -4175,5 +4226,123 @@ mod tests {
             reply2.events.last(),
             Some(RunEvent::Failed { message }) if message.contains("refused")
         ));
+    }
+
+    #[test]
+    fn acp_skips_thought_level_when_model_offers_none_or_effort_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // Server returns configOptions without thought_level (e.g. orchestrator models),
+        // even if session.effort was still set.
+        let mut acp = AcpClient::new(AcpSession {
+            model: "gemini-pro-orchestrator".into(),
+            effort: Some("medium".into()),
+            ..session(dir.path())
+        });
+        acp.opening();
+        acp.after_line(&line(r#"{"id":1,"result":{}}"#));
+        acp.after_line(&line(r#"{"id":2,"result":{"sessionId":"s-orch"}}"#));
+        let after_model = acp.after_line(&json!({
+            "id": 3,
+            "result": {
+                "configOptions": [
+                    {"id": "model", "currentValue": "gemini-pro-orchestrator", "options": []},
+                    {"id": "mode", "currentValue": "default", "options": []}
+                ]
+            }
+        }));
+        let mode = written(&after_model);
+        assert_eq!(mode["id"], 5);
+        assert_eq!(mode["method"], "session/set_mode");
+        assert_eq!(mode["params"]["modeId"], "default");
+        let prompt = written(&acp.after_line(&line(r#"{"id":5,"result":{}}"#)));
+        assert_eq!(prompt["method"], "session/prompt");
+
+        // Explicit effort: None also skips SET_THOUGHT immediately.
+        let mut no_effort = AcpClient::new(AcpSession {
+            model: "gemini-pro-orchestrator-neon".into(),
+            effort: None,
+            ..session(dir.path())
+        });
+        no_effort.opening();
+        no_effort.after_line(&line(r#"{"id":1,"result":{}}"#));
+        no_effort.after_line(&line(r#"{"id":2,"result":{"sessionId":"s-neon"}}"#));
+        let mode = written(&no_effort.after_line(&line(r#"{"id":3,"result":{}}"#)));
+        assert_eq!(mode["id"], 5);
+        assert_eq!(mode["method"], "session/set_mode");
+    }
+
+    #[test]
+    fn acp_picks_offered_thought_level_including_xhigh_and_clamps_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let neon_options = json!({
+            "id": 3,
+            "result": {
+                "configOptions": [
+                    {
+                        "id": "thought_level",
+                        "options": [
+                            {"value": "low"},
+                            {"value": "medium"},
+                            {"value": "high"},
+                            {"value": "xhigh"}
+                        ]
+                    }
+                ]
+            }
+        });
+        let mut neon = AcpClient::new(AcpSession {
+            model: "gemini-4-neon".into(),
+            effort: Some("xhigh".into()),
+            ..session(dir.path())
+        });
+        neon.opening();
+        neon.after_line(&line(r#"{"id":1,"result":{}}"#));
+        neon.after_line(&line(r#"{"id":2,"result":{"sessionId":"s-1"}}"#));
+        let thought = written(&neon.after_line(&neon_options));
+        assert_eq!(thought["params"]["configId"], "thought_level");
+        assert_eq!(thought["params"]["value"], "xhigh");
+
+        // "max" steps down to "xhigh" when xhigh is offered, and to "high" when not.
+        let mut neon_max = AcpClient::new(AcpSession {
+            model: "gemini-4-neon".into(),
+            effort: Some("max".into()),
+            ..session(dir.path())
+        });
+        neon_max.opening();
+        neon_max.after_line(&line(r#"{"id":1,"result":{}}"#));
+        neon_max.after_line(&line(r#"{"id":2,"result":{"sessionId":"s-2"}}"#));
+        assert_eq!(
+            written(&neon_max.after_line(&neon_options))["params"]["value"],
+            "xhigh"
+        );
+
+        let mut carbon_max = AcpClient::new(AcpSession {
+            model: "gemini-4-carbon".into(),
+            effort: Some("max".into()),
+            ..session(dir.path())
+        });
+        carbon_max.opening();
+        carbon_max.after_line(&line(r#"{"id":1,"result":{}}"#));
+        carbon_max.after_line(&line(r#"{"id":2,"result":{"sessionId":"s-3"}}"#));
+        let thought = written(&carbon_max.after_line(&json!({
+            "id": 3,
+            "result": {
+                "configOptions": [{
+                    "id": "thought_level",
+                    "options": [{"value": "low"}, {"value": "medium"}, {"value": "high"}]
+                }]
+            }
+        })));
+        assert_eq!(thought["params"]["value"], "high");
+    }
+
+    #[test]
+    fn print_args_omits_effort_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = print_args(dir.path(), &[], true, "gemini-pro-orchestrator", None);
+        assert!(!args.iter().any(|a| a == "--effort"), "{args:?}");
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--model", "gemini-pro-orchestrator"]));
     }
 }

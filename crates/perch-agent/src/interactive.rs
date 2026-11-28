@@ -341,7 +341,7 @@ fn claude_request(request: &Value) -> ApprovalRequest {
 pub(crate) struct CodexThread {
     pub cwd: String,
     pub model: String,
-    pub effort: String,
+    pub effort: Option<String>,
     pub prompt: String,
     pub developer_instructions: Option<String>,
     /// The thread to resume, for a follow-up.
@@ -459,15 +459,14 @@ impl CodexServer {
     }
 
     fn start_turn(&mut self, id: u64, text: &str) -> String {
-        request(
-            id,
-            "turn/start",
-            json!({
-                "threadId": self.thread_id,
-                "input": [{"type": "text", "text": text}],
-                "effort": self.thread.effort,
-            }),
-        )
+        let mut params = json!({
+            "threadId": self.thread_id,
+            "input": [{"type": "text", "text": text}],
+        });
+        if let Some(effort) = &self.thread.effort {
+            params["effort"] = json!(effort);
+        }
+        request(id, "turn/start", params)
     }
 
     fn finish(&mut self) -> Reply {
@@ -1095,7 +1094,7 @@ mod tests {
         CodexThread {
             cwd: "/wt".into(),
             model: "gpt".into(),
-            effort: "high".into(),
+            effort: Some("high".into()),
             prompt: "Do it".into(),
             developer_instructions: Some("Work here.".into()),
             resume: resume.map(str::to_string),

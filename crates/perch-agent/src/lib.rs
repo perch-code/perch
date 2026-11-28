@@ -1053,7 +1053,7 @@ pub struct RunSpec {
     pub binary: PathBuf,
     /// `sonnet`, `opus`, or a full model id.
     pub model: String,
-    pub effort: Effort,
+    pub effort: Option<Effort>,
     pub cwd: PathBuf,
     pub prompt: String,
     /// Appended to the agent's system prompt. First run of a thread only.
@@ -1092,7 +1092,7 @@ impl RunSpec {
                     &self.read_dirs,
                     self.sandbox,
                     &self.model,
-                    gemini::effort_name(self.effort),
+                    self.effort.map(gemini::effort_name),
                 );
                 args.extend(["--input-format".into(), "stream-json".into()]);
                 if let Some(id) = &self.resume {
@@ -1157,11 +1157,11 @@ impl RunSpec {
         if work {
             args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
         }
+        args.extend(["--model".into(), model.into()]);
+        if let Some(effort) = self.effort {
+            args.extend(["--effort".into(), effort.claude_name().into()]);
+        }
         args.extend([
-            "--model".into(),
-            model.into(),
-            "--effort".into(),
-            self.effort.claude_name().into(),
             "--permission-mode".into(),
             match &self.mode {
                 Mode::Work(grant) if grant.auto_review => "auto".into(),
@@ -1244,7 +1244,7 @@ impl RunSpec {
         }
         args.push("--allowedTools".into());
         args.extend(allowed);
-        if self.effort == Effort::Ultra {
+        if self.effort == Some(Effort::Ultra) {
             args.extend(ORCHESTRATION_TOOLS.iter().map(|t| t.to_string()));
         }
         args.push("--disallowedTools".into());
@@ -1267,7 +1267,7 @@ impl RunSpec {
                 opencode::conversation(
                     &self.cwd,
                     &self.model,
-                    self.effort.name(),
+                    self.effort.map(Effort::name),
                     self.framed_prompt(),
                     self.resume.clone(),
                     writable,
@@ -1296,7 +1296,7 @@ impl RunSpec {
                         backend: Backend::Gemini,
                         cwd: real_path(&self.cwd),
                         model: self.model.clone(),
-                        effort: gemini::effort_name(self.effort).to_string(),
+                        effort: self.effort.map(|e| gemini::effort_name(e).to_string()),
                         prompt: self.framed_prompt(),
                         resume: self.resume.clone(),
                         writable,
@@ -1336,9 +1336,11 @@ impl RunSpec {
             .collect();
         let mut config = serde_json::json!({
             "projects": projects,
-            "model_reasoning_effort": self.effort.name(),
             "mcp_servers": mcp,
         });
+        if let Some(effort) = self.effort {
+            config["model_reasoning_effort"] = serde_json::json!(effort.name());
+        }
         let (model, speed) = ModelSpeed::split(&self.model);
         config["service_tier"] = serde_json::json!(speed.map_or("default", ModelSpeed::codex_tier));
         if self.sandbox {
@@ -1367,7 +1369,7 @@ impl RunSpec {
         CodexThread {
             cwd: self.cwd.to_string_lossy().into_owned(),
             model: model.into(),
-            effort: self.effort.name().to_string(),
+            effort: self.effort.map(|e| e.name().to_string()),
             prompt: self.prompt.clone(),
             developer_instructions: self.system.clone(),
             resume: self.resume.clone(),
@@ -2120,7 +2122,7 @@ impl Run {
             opencode::conversation(
                 &spec.cwd,
                 &spec.model,
-                spec.effort.name(),
+                spec.effort.map(ReviewEffort::name),
                 spec.opencode_prompt(),
                 None,
                 Vec::new(),
@@ -2160,7 +2162,7 @@ impl Run {
             opencode::conversation(
                 &spec.cwd,
                 &spec.model,
-                spec.effort.name(),
+                spec.effort.map(ReviewEffort::name),
                 spec.opencode_prompt(),
                 None,
                 Vec::new(),
@@ -2811,7 +2813,7 @@ mod tests {
             model: "sonnet".into(),
             read_dirs: Vec::new(),
             sandbox: true,
-            effort: Effort::High,
+            effort: Some(Effort::High),
             cwd: "/tmp".into(),
             prompt: "why?".into(),
             system: Some("be brief".into()),
@@ -2866,7 +2868,7 @@ mod tests {
             model: "sonnet".into(),
             read_dirs: Vec::new(),
             sandbox: true,
-            effort: Effort::Medium,
+            effort: Some(Effort::Medium),
             cwd: "/tmp".into(),
             prompt: "and?".into(),
             system: None,
@@ -2935,7 +2937,7 @@ mod tests {
             model: "m".into(),
             read_dirs: Vec::new(),
             sandbox: true,
-            effort: Effort::High,
+            effort: Some(Effort::High),
             cwd: "/tmp".into(),
             prompt: "do it".into(),
             system: None,
@@ -3862,7 +3864,7 @@ mod tests {
             model: "opus".into(),
             read_dirs: Vec::new(),
             sandbox: true,
-            effort,
+            effort: Some(effort),
             cwd: "/tmp".into(),
             prompt: "why?".into(),
             system: None,
@@ -3913,7 +3915,7 @@ mod tests {
             model: "gpt-5.6-sol".into(),
             read_dirs: Vec::new(),
             sandbox: true,
-            effort: Effort::High,
+            effort: Some(Effort::High),
             cwd: "/tmp/w t".into(),
             prompt: "why?".into(),
             system: Some("be \"brief\"\nplease".into()),
@@ -3963,12 +3965,12 @@ mod tests {
     #[test]
     fn codex_efforts_pass_by_their_own_name() {
         let mut spec = codex(None);
-        spec.effort = Effort::Ultra;
+        spec.effort = Some(Effort::Ultra);
         let Conversation::Codex(server) = spec.conversation() else {
             unreachable!()
         };
         let thread = server_thread(&server);
-        assert_eq!(thread.effort, "ultra");
+        assert_eq!(thread.effort.as_deref(), Some("ultra"));
         assert_eq!(thread.config["model_reasoning_effort"], "ultra");
         assert!(!spec.args().iter().any(|a| a.contains("ultracode")));
     }
@@ -4055,7 +4057,7 @@ mod tests {
             model: "gemini-4-carbon".into(),
             read_dirs: Vec::new(),
             sandbox: true,
-            effort: Effort::Ultra,
+            effort: Some(Effort::Ultra),
             cwd: cwd.to_path_buf(),
             prompt: "Why?".into(),
             system: Some("You are in Perch.".into()),
@@ -4156,6 +4158,17 @@ mod tests {
             .args()
             .windows(2)
             .any(|w| w == ["--conversation", "c-1"]));
+
+        let no_effort = RunSpec {
+            model: "gemini-pro-orchestrator-neon".into(),
+            effort: None,
+            ..gemini(Mode::Ask, dir.path())
+        };
+        let args = no_effort.args();
+        assert!(!args.iter().any(|a| a == "--effort"), "{args:?}");
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--model", "gemini-pro-orchestrator-neon"]));
     }
 
     #[test]
@@ -4237,7 +4250,7 @@ mod tests {
             model: "provider/model".into(),
             read_dirs: Vec::new(),
             sandbox: true,
-            effort: Effort::High,
+            effort: Some(Effort::High),
             cwd: dir.path().to_path_buf(),
             prompt: "Why?".into(),
             system: None,

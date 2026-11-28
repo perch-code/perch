@@ -331,7 +331,7 @@ fn reviewers_summary(app: AppState, state: ReviewState) -> String {
                         crate::review::threads::agent_name(
                             choice.backend.name(),
                             &choice.model,
-                            choice.effort.name(),
+                            choice.effort.map_or("", perch_agent::ReviewEffort::name),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -438,10 +438,14 @@ fn reviewer_row(
             {
                 choice.model = models.first().cloned();
             }
-            choice.effort = choice
-                .model
-                .as_deref()
-                .and_then(|model| nearest_effort(app, reviewer, model, choice.effort));
+            choice.effort = choice.model.as_deref().and_then(|model| {
+                let wanted = choice.effort.or_else(|| {
+                    perch_agent::ReviewEffort::parse(
+                        app.agent.get_untracked().effort_for(reviewer.name()),
+                    )
+                });
+                nearest_effort(app, reviewer, model, wanted)
+            });
             choice.enabled = true;
         });
         if let Some(choice) = updated {
@@ -451,11 +455,29 @@ fn reviewer_row(
     let name_toggle = toggle.clone();
 
     let pickers = if usable {
+        let has_effort = Memo::new(move |_| {
+            choice_for(state, reviewer)
+                .and_then(|choice| choice.model)
+                .is_none_or(|model| app.agent.with(|agent| agent.has_efforts(&model)))
+        });
+        let effort_backend = backend.clone();
         Stack::horizontal((
-            model_selector(app, state, backend.clone(), reviewer)
+            model_selector(app, state, backend, reviewer)
                 .style(|s| s.min_width(PICKER_MODEL_WIDTH)),
-            effort_selector(app, state, backend, reviewer)
-                .style(|s| s.min_width(PICKER_EFFORT_WIDTH)),
+            dyn_container(
+                move || has_effort.get(),
+                move |show| {
+                    if show {
+                        effort_selector(app, state, effort_backend.clone(), reviewer)
+                            .style(|s| s.min_width(PICKER_EFFORT_WIDTH))
+                            .into_any()
+                    } else {
+                        Empty::new()
+                            .style(|s| s.min_width(PICKER_EFFORT_WIDTH))
+                            .into_any()
+                    }
+                },
+            ),
         ))
         .style(|s| s.items_center().gap(6.0).flex_shrink(0.0_f32))
         .into_any()
@@ -591,7 +613,13 @@ fn model_selector(
                 menu = menu.item(crate::review::threads::model_label(&model), move |item| {
                     let pick = pick.clone();
                     item.checked(checked).action(move || {
-                        let wanted = choice_for(state, reviewer).and_then(|choice| choice.effort);
+                        let wanted = choice_for(state, reviewer)
+                            .and_then(|choice| choice.effort)
+                            .or_else(|| {
+                                perch_agent::ReviewEffort::parse(
+                                    app.agent.get_untracked().effort_for(reviewer.name()),
+                                )
+                            });
                         let effort = nearest_effort(app, reviewer, &pick, wanted);
                         if let Some(choice) = update_choice(state, reviewer, |choice| {
                             choice.model = Some(pick.clone());
@@ -1074,8 +1102,16 @@ fn effective_choice(app: AppState, choice: &ReviewPreferenceChoice) -> Option<Re
         return None;
     }
     let model = choice.model.clone()?;
-    if !models_for(&app.agent.get_untracked(), choice.backend).contains(&model) {
+    let agent = app.agent.get_untracked();
+    if !models_for(&agent, choice.backend).contains(&model) {
         return None;
+    }
+    if !agent.has_efforts(&model) {
+        return Some(ReviewLaunchChoice {
+            backend: choice.backend,
+            model,
+            effort: None,
+        });
     }
     let effort = choice.effort?;
     supported_efforts(app, choice.backend, Some(&model))
@@ -1083,7 +1119,7 @@ fn effective_choice(app: AppState, choice: &ReviewPreferenceChoice) -> Option<Re
         .then_some(ReviewLaunchChoice {
             backend: choice.backend,
             model,
-            effort,
+            effort: Some(effort),
         })
 }
 
@@ -1102,7 +1138,7 @@ fn effective_unavailable_reason(
                 .unwrap_or_else(|| "Native review is unavailable".into()),
         );
     }
-    let models = models_for(&app.agent.get_untracked(), backend);
+    let models = app.agent.with(|agent| models_for(agent, backend));
     if models.is_empty() {
         return Some(format!(
             "No models are configured for {}",
@@ -1117,6 +1153,7 @@ fn effective_unavailable_reason(
             ));
         }
         if choice.enabled
+            && app.agent.with(|agent| agent.has_efforts(model))
             && choice.effort.is_none_or(|effort| {
                 !supported_efforts(app, backend, Some(model)).contains(&effort)
             })
@@ -1360,7 +1397,7 @@ mod tests {
     use jiff::Timestamp;
 
     fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
-        if id.debug_name().split_whitespace().any(|part| part == name) {
+        if id.debug_name().contains(name) {
             return Some(id);
         }
         id.children()
@@ -1969,5 +2006,79 @@ mod tests {
         state.review_open.set(false);
         state.review_open.set(true);
         assert_eq!(base().as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn no_effort_gemini_reviewer_hides_effort_picker_and_launches_with_none() {
+        let (app, state) = item_state();
+        app.review_capabilities.set(std::sync::Arc::new(vec![
+            available(perch_agent::Backend::ClaudeCode),
+            available(perch_agent::Backend::Codex),
+            available(perch_agent::Backend::Gemini),
+        ]));
+        app.agent.update(|agent| {
+            agent.gemini.models = vec!["gemini-pro-orchestrator".into(), "gemini-4-neon".into()];
+            agent
+                .gemini
+                .efforts
+                .insert("gemini-pro-orchestrator".into(), Vec::new());
+            agent.gemini.efforts.insert(
+                "gemini-4-neon".into(),
+                ["low", "medium", "high"].map(String::from).to_vec(),
+            );
+        });
+        let root = TestRoot::new();
+        let view = crate::review::review_menu::control(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 800.0);
+        let settle = |harness: &mut HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+        let click = |harness: &mut HeadlessHarness, name: &str| {
+            let at = named(harness.root_id(), name)
+                .unwrap_or_else(|| panic!("no view named {name}"))
+                .get_visual_rect_no_clip()
+                .center();
+            harness.click(at.x, at.y);
+            harness.rebuild();
+            harness.paint();
+        };
+        crate::review::review_menu::open(state, None);
+        settle(&mut harness);
+        app.review_dashboard_loading
+            .update(|loading| loading.clear());
+        settle(&mut harness);
+
+        assert!(named(harness.root_id(), "review-model:gemini").is_some());
+        assert!(named(harness.root_id(), "review-effort:gemini").is_none());
+        let gemini_row = named(harness.root_id(), "reviewer-row:gemini").unwrap();
+        assert!(named(gemini_row, "reviewer-unavailable").is_none());
+
+        click(&mut harness, "review-take:gemini");
+        let req = launch_validation(app, state).request.unwrap();
+        let gemini = req
+            .reviewers
+            .iter()
+            .find(|choice| choice.backend == perch_agent::Backend::Gemini)
+            .unwrap();
+        assert_eq!(gemini.model, "gemini-pro-orchestrator");
+        assert_eq!(gemini.effort, None);
+        assert_eq!(
+            reviewers_summary(app, state),
+            "Claude Opus (high), Gemini Pro Orchestrator"
+        );
+
+        // Switching back to a model that supports effort restores default effort and shows picker.
+        click(&mut harness, "review-model:gemini");
+        click(&mut harness, "menu-row:Neon 4");
+        assert!(named(harness.root_id(), "review-effort:gemini").is_some());
+        let req = launch_validation(app, state).request.unwrap();
+        let gemini = req
+            .reviewers
+            .iter()
+            .find(|choice| choice.backend == perch_agent::Backend::Gemini)
+            .unwrap();
+        assert_eq!(gemini.model, "gemini-4-neon");
+        assert_eq!(gemini.effort, Some(perch_agent::ReviewEffort::High));
     }
 }

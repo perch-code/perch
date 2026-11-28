@@ -24,7 +24,7 @@ struct Finding {
 pub(crate) fn conversation(
     cwd: &Path,
     model: &str,
-    effort: &str,
+    effort: Option<&str>,
     prompt: String,
     resume: Option<String>,
     writable: Vec<PathBuf>,
@@ -34,7 +34,7 @@ pub(crate) fn conversation(
         backend: Backend::OpenCode,
         cwd: real_path(cwd),
         model: model.into(),
-        effort: effort.into(),
+        effort: effort.map(str::to_string),
         prompt,
         resume,
         writable,
@@ -455,7 +455,7 @@ mod tests {
         let mut client = conversation(
             Path::new("/"),
             "provider/model",
-            "high",
+            Some("high"),
             "Follow up".into(),
             Some("s1".into()),
             vec![],
@@ -485,7 +485,7 @@ mod tests {
         let mut client = conversation(
             Path::new("/"),
             "provider/model",
-            "low",
+            Some("low"),
             "Edit".into(),
             None,
             vec![PathBuf::from("/work")],

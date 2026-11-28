@@ -485,22 +485,33 @@ impl AgentConfig {
         }
     }
 
-    /// Whether a model takes an effort level. Only Codex's catalog says,
-    /// and only for the models it listed; any other model is taken to
-    /// take them all. Codex runs a level a model lacks at the nearest one
-    /// it has, so this is what lets the picker say so rather than let it
-    /// happen.
-    pub fn effort_supported(&self, model: &str, effort: &str) -> bool {
-        let listed = match self.backend_of(model) {
-            GEMINI => self.gemini.efforts.get(model),
+    fn listed_efforts(&self, model: &str) -> Option<&[String]> {
+        match self.backend_of(model) {
+            GEMINI => self.gemini.efforts.get(model).map(Vec::as_slice),
             OPENCODE => None, // ACP advertises variants after the model is selected.
             _ => self
                 .codex
                 .efforts
                 .get(model)
-                .or_else(|| self.codex.efforts.get(split_model_speed(model).0)),
-        };
-        match listed {
+                .or_else(|| self.codex.efforts.get(split_model_speed(model).0))
+                .map(Vec::as_slice),
+        }
+    }
+
+    /// Whether a model offers configurable effort levels. A model cataloged
+    /// with an empty list takes no effort parameter; any unlisted or non-empty
+    /// model offers efforts.
+    pub fn has_efforts(&self, model: &str) -> bool {
+        !matches!(self.listed_efforts(model), Some([]))
+    }
+
+    /// Whether a model takes an effort level. Only Codex's and Gemini's
+    /// catalogs say, and only for the models they listed; any other model
+    /// is taken to take them all. Codex runs a level a model lacks at the
+    /// nearest one it has, so this is what lets the picker say so rather
+    /// than let it happen.
+    pub fn effort_supported(&self, model: &str, effort: &str) -> bool {
+        match self.listed_efforts(model) {
             Some(levels) => levels.iter().any(|l| l == effort),
             None => true,
         }
@@ -2280,12 +2291,20 @@ network = ["index.crates.io"]
         assert_eq!(c.agent.models_for(GEMINI), ["gemini-4-carbon".to_string()]);
         assert_eq!(c.agent.backend_of("opus"), CLAUDE_CODE);
         let mut agent = c.agent.clone();
+        agent.gemini.models.push("gemini-pro-orchestrator".into());
         agent
             .gemini
             .efforts
             .insert("gemini-4-carbon".into(), vec!["low".into(), "high".into()]);
+        agent
+            .gemini
+            .efforts
+            .insert("gemini-pro-orchestrator".into(), Vec::new());
+        assert!(agent.has_efforts("gemini-4-carbon"));
+        assert!(!agent.has_efforts("gemini-pro-orchestrator"));
         assert!(agent.effort_supported("gemini-4-carbon", "high"));
         assert!(!agent.effort_supported("gemini-4-carbon", "max"));
+        assert!(!agent.effort_supported("gemini-pro-orchestrator", "medium"));
         assert_eq!(AgentConfig::default().gemini.binary, "agy");
     }
 
@@ -2347,18 +2366,23 @@ network = ["index.crates.io"]
         c.codex
             .efforts
             .insert("gpt-5.5".into(), vec!["low".into(), "high".into()]);
+        assert!(c.has_efforts("gpt-5.5"));
         assert!(c.effort_supported("gpt-5.5", "high"));
         assert!(!c.effort_supported("gpt-5.5", "ultra"));
         assert!(c.effort_supported("gpt-5.5 (Fast)", "high"));
         assert!(!c.effort_supported("gpt-5.5 (Fast)", "ultra"));
         assert!(
-            c.effort_supported("gpt-6-astra", "ultra"),
+            c.has_efforts("gpt-6-astra") && c.effort_supported("gpt-6-astra", "ultra"),
             "not in the catalog, so not doubted"
         );
         assert!(
-            c.effort_supported("sonnet", "ultra"),
+            c.has_efforts("sonnet") && c.effort_supported("sonnet", "ultra"),
             "Claude Code has no catalog"
         );
+        c.codex.models.push("gpt-no-effort".into());
+        c.codex.efforts.insert("gpt-no-effort".into(), Vec::new());
+        assert!(!c.has_efforts("gpt-no-effort"));
+        assert!(c.has_efforts("provider/model"));
         let parsed: Config = toml::from_str("[agent.codex]\nmodels = [\"x\"]").unwrap();
         assert!(
             parsed.agent.codex.efforts.is_empty(),

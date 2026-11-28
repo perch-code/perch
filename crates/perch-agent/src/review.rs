@@ -334,7 +334,7 @@ pub struct ReviewSpec {
     pub backend: Backend,
     pub binary: PathBuf,
     pub model: String,
-    pub effort: ReviewEffort,
+    pub effort: Option<ReviewEffort>,
     pub cwd: PathBuf,
     /// Private ref resolving to the captured merge base.
     pub merge_base_ref: String,
@@ -495,7 +495,7 @@ impl ReviewSpec {
             &dirs,
             self.sandbox,
             &self.model,
-            self.effort.name(),
+            self.effort.map(ReviewEffort::name),
         );
         args.extend([
             "--json-schema".into(),
@@ -510,7 +510,7 @@ impl ReviewSpec {
     fn codex_args(&self) -> Vec<String> {
         let deep = matches!(
             self.effort,
-            ReviewEffort::High | ReviewEffort::XHigh | ReviewEffort::Max
+            Some(ReviewEffort::High | ReviewEffort::XHigh | ReviewEffort::Max)
         );
         let depth = deep.then(|| CODEX_REVIEW_DEPTH.to_string());
         let developer_instructions = [
@@ -573,7 +573,10 @@ impl ReviewSpec {
 
     fn claude_args(&self) -> Vec<String> {
         let target = format!("{}...{}", self.merge_base_sha, self.head_sha);
-        let mut prompt = format!("/code-review {} {target}", self.effort.name());
+        let mut prompt = match self.effort {
+            Some(effort) => format!("/code-review {} {target}", effort.name()),
+            None => format!("/code-review {target}"),
+        };
         if let Some(instructions) = self.supplied_instructions() {
             prompt.push_str("\n\n");
             prompt.push_str(&instructions);
@@ -603,7 +606,7 @@ pub struct ReviewVerificationSpec {
     pub backend: Backend,
     pub binary: PathBuf,
     pub model: String,
-    pub effort: ReviewEffort,
+    pub effort: Option<ReviewEffort>,
     pub cwd: PathBuf,
     /// The immutable captured patch for the reviewed range, required when
     /// verifying with OpenCode (where shell commands are disabled).
@@ -698,7 +701,7 @@ impl ReviewVerificationSpec {
             &[],
             self.sandbox,
             &self.model,
-            self.effort.name(),
+            self.effort.map(ReviewEffort::name),
         );
         let prompt = [
             Some(CODEX_VERIFIER_DATA_BOUNDARY),
@@ -751,7 +754,7 @@ impl ReviewVerificationSpec {
 fn codex_isolation_args(
     base: Option<&str>,
     model: &str,
-    effort: ReviewEffort,
+    effort: Option<ReviewEffort>,
     sandbox: bool,
     developer_instructions: &str,
 ) -> Vec<String> {
@@ -790,8 +793,12 @@ fn codex_isolation_args(
         sandbox_mode.into(),
         "--config".into(),
         "approval_policy=\"never\"".into(),
-        "--config".into(),
-        format!("model_reasoning_effort={}", effort.name()),
+    ]);
+    if let Some(effort) = effort {
+        args.push("--config".into());
+        args.push(format!("model_reasoning_effort={}", effort.name()));
+    }
+    args.extend([
         // Suppress repository instruction/config discovery. MCP entries
         // are process-spawning customizations, so an empty command-line
         // table takes precedence over any project configuration.
@@ -825,7 +832,7 @@ fn claude_isolation_args(
     dirs: &[PathBuf],
     sandbox: bool,
     model: &str,
-    effort: ReviewEffort,
+    effort: Option<ReviewEffort>,
     extra_tools: &[&str],
     prompt: String,
 ) -> Vec<String> {
@@ -879,8 +886,12 @@ fn claude_isolation_args(
         "--verbose".into(),
         "--model".into(),
         model.to_string(),
-        "--effort".into(),
-        effort.name().into(),
+    ]);
+    if let Some(effort) = effort {
+        args.push("--effort".into());
+        args.push(effort.name().into());
+    }
+    args.extend([
         "--permission-mode".into(),
         "dontAsk".into(),
         "--permission-prompts".into(),
@@ -2280,7 +2291,7 @@ mod tests {
                 Backend::OpenCode => "opencode".into(),
             },
             model: "review-model".into(),
-            effort: ReviewEffort::High,
+            effort: Some(ReviewEffort::High),
             cwd,
             diff_path: Default::default(),
             merge_base_ref: "refs/perch/merge-base".into(),
@@ -2306,7 +2317,7 @@ mod tests {
                 Backend::OpenCode => "opencode".into(),
             },
             model: "review-model".into(),
-            effort: ReviewEffort::High,
+            effort: Some(ReviewEffort::High),
             cwd: "/private/review".into(),
             diff_path: None,
             prompt: "--structured verifier prompt".into(),
@@ -2349,6 +2360,20 @@ mod tests {
         codex_schema.merge_base_sha = "1".repeat(40);
         codex_schema.head_sha = "2".repeat(40);
         assert!(codex_schema.validate().unwrap_err().contains("Gemini"));
+
+        let mut no_effort = review_spec(Backend::Gemini, dir.path().into());
+        no_effort.output_schema = None;
+        no_effort.model = "gemini-pro-orchestrator".into();
+        no_effort.effort = None;
+        no_effort.merge_base_sha = "1".repeat(40);
+        no_effort.head_sha = "2".repeat(40);
+        no_effort.validate().unwrap();
+        assert!(!no_effort.args().iter().any(|arg| arg == "--effort"));
+
+        let mut verify_no_effort = verification_spec(Backend::Gemini);
+        verify_no_effort.model = "gemini-pro-orchestrator".into();
+        verify_no_effort.effort = None;
+        assert!(!verify_no_effort.args().iter().any(|arg| arg == "--effort"));
     }
 
     #[test]
@@ -2971,7 +2996,7 @@ mod tests {
         let mut spec = review_spec(Backend::Codex, dir.path().into());
         spec.instructions = Some("Only rfc.md".into());
         for effort in [ReviewEffort::High, ReviewEffort::XHigh, ReviewEffort::Max] {
-            spec.effort = effort;
+            spec.effort = Some(effort);
             let text = developer(&spec);
             let boundary = text.find("untrusted review data").unwrap();
             let depth = text
@@ -2981,7 +3006,7 @@ mod tests {
             assert!(boundary < depth && depth < requester);
         }
         for effort in [ReviewEffort::Low, ReviewEffort::Medium] {
-            spec.effort = effort;
+            spec.effort = Some(effort);
             assert!(!developer(&spec).contains("not a merge gate"));
         }
     }
